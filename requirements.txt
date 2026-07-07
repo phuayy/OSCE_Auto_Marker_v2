@@ -1,0 +1,51 @@
+# Canonical Python runtime for the FastAPI/Hatchet backend and AI pipeline.
+# Reviewed on 2026-06-11 against PyPI/project metadata.
+#
+# Supported target: Python 3.10-3.13.
+# - Python 3.12 is the tested local development runtime.
+# - Python 3.14 is intentionally excluded for now because WhisperX 3.8.6
+#   declares Python <3.14 support.
+# - NumPy uses environment markers so Python 3.10 receives the latest
+#   Python-3.10-compatible line while Python 3.11+ gets the current fastest line.
+
+# FastAPI application server and request parsing.
+fastapi==0.136.3
+uvicorn[standard]==0.49.0
+python-multipart==0.0.32
+pydantic==2.13.4
+
+# Authentication and API tests.
+bcrypt==5.0.0
+pytest==9.0.3
+httpx==0.28.1
+
+# Durable queue support. Local development can use SQLite plus in-process
+# workers; production uses Hatchet backed by PostgreSQL.
+SQLAlchemy==2.0.50
+aiosqlite==0.22.0
+hatchet-sdk==1.33.7
+psycopg[binary]==3.3.4
+
+# OpenAI-compatible client used by NVIDIA/OpenRouter scoring scripts.
+openai==2.41.1
+
+# Rubric parsing and audio/bell-analysis pipeline scripts.
+pypdf==6.13.2
+numpy==2.2.6; python_version == "3.10"
+numpy==2.4.6; python_version >= "3.11" and python_version < "3.14"
+librosa==0.11.0
+soundfile==0.14.0
+opensmile==2.6.0
+
+# WhisperX CLI used by WHISPERX_BIN for transcription/diarization.
+# If this conflicts with your CUDA/PyTorch stack, install WhisperX separately
+# in the same environment using your GPU-specific PyTorch/WhisperX instructions.
+whisperx==3.8.6
+
+# WhisperX-compatible ML stack constraints. These prevent slow resolver
+# backtracking and keep ASR/diarization installs reproducible.
+torch==2.8.0
+torchaudio==2.8.0
+torchvision==0.23.0
+transformers==4.57.6
+tokenizers==0.22.2

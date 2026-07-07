@@ -1,0 +1,85 @@
+{
+  "session_id": "3d19b1f1-959e-4950-8766-014e0964e4c7",
+  "transcript_file": "storage/output/whisperx/3d19b1f1-959e-4950-8766-014e0964e4c7/3d19b1f1-959e-4950-8766-014e0964e4c7.srt",
+  "case_study_file": "storage/input/case_studies/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-2024-PHR1012-OSCE-Case-9-Tinea.pdf",
+  "rubric_file": "embedded_in_case_study_pdf",
+  "criteria": [
+    {
+      "label": "Elicits that area around the patienAND other symptoms of tinea (there is cracking, redness and peeling of skin between toes) (i.e. when asked to describe symptoms)",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:03:48",
+      "reason": "The student asked the patient to explain more about symptoms, and the patient responded with flaking and itchiness between the toes, which the student acknowledged."
+    },
+    {
+      "label": "Elicits that symptoms started three weeks ago after working on the farm wearing boots all day (i.e. when asked when it started)",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:04:04",
+      "reason": "The student asked how long symptoms have been present, and the patient stated it has been present for almost three weeks."
+    },
+    {
+      "label": "Elicits the patient has not had the symptoms before AND has not tried anything for symptoms yet AND has no signs of infection (no pus, swelling etc.)",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:04:11",
+      "reason": "The student asked if the patient had tried anything to relieve symptoms, and the patient said no; earlier, the patient denied fever or swelling when asked about unusual symptoms."
+    },
+    {
+      "label": "Advises patient has tinea OR fungal infection on the skin OR cause of itchiness due to wearing boots whole day (hot and humid)",
+      "is_critical": true,
+      "value": "Yes",
+      "timestamp": "00:05:09",
+      "reason": "The student advised the patient has tinea (referred to as 'tinium heritage') and linked it to wearing boots causing a humid environment for fungus growth."
+    },
+    {
+      "label": "Recommends any of ONE the following topical therapy: Terbinafine, OR Miconazole/ clotrimazole/ econazole/ bifonazole/ ketoconazole, OR Combination hydrocortisone/antifungal",
+      "is_critical": true,
+      "value": "Yes",
+      "timestamp": "00:05:28",
+      "reason": "The student recommended 1% terbinafine cream, which is one of the specified topical therapies."
+    },
+    {
+      "label": "Counsels on how to use chosen product in Point 5: - Terbinafine: Apply a thin layer once daily for 1 week - Miconazole: Apply a thin layer twice daily; continue for 2 weeks after symptoms resolve - Clotrimazole/Econazole: Apply a thin layer 2 or 3 times a day; continue for 2 weeks after symptoms resolve - Bifonazole: Apply a thin layer once daily; continue for 2 weeks after symptoms resolve - Ketoconazole: Apply a thin layer 1 or 2 times daily; continue for 2 weeks after symptoms resolve - Combination hydrocortisone/antifungal (available combinations are clotrimazole + hydrocortisone OR miconazole + hydrocortisone): Apply a thin layer 2 times a day for one week then continue with antifungal only",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:05:36",
+      "reason": "The student instructed to apply terbinafine cream once daily for 7 days onto the affected area, matching the counselling criteria for terbinafine."
+    },
+    {
+      "label": "Recommends at least ONE of the following future preventive action: maintain good foot hygiene; keep feet clean and dry especially after working at the farm; avoid sharing towels/footwear; use antifungal (or non-medicated) powder in shoes to reduce moisture; wear open-toed footwear; use cotton (non-synthetic) socks; wear shoes that have breathable material (such as leather); place shoes in the sun to dry if it get damp; discard old shoes that may have a high density of fungal spores",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:06:03",
+      "reason": "The student suggested wearing non-occlusive footwear for air circulation, drying the affected area with a separate towel, and not sharing towels with others, which aligns with preventive actions like keeping feet dry and avoiding towel sharing."
+    },
+    {
+      "label": "Advises the patient to see their doctor /pharmacist if their symptoms do not improve or worsens",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:06:43",
+      "reason": "The student advised the patient to visit the doctor immediately if symptoms worsen or do not resolve after one week of treatment."
+    }
+  ],
+  "keep_start_stop": {
+    "keep": "Continue initiating the consultation professionally and asking open-ended questions to gather relevant history, as this builds rapport and ensures comprehensive information collection.",
+    "start": "Begin using the patient's name during the consultation to personalise the interaction and enhance patient-centred communication, which was not consistently observed.",
+    "stop": "Avoid using unclear or non-standard medical terms like 'tinium heritage' when explaining diagnoses; instead, use correct terminology such as 'tinea' or 'fungal infection' to prevent patient confusion and maintain professionalism."
+  },
+  "overall_summary": "The student demonstrated strong history-taking skills, effectively eliciting key symptoms, duration, lack of prior treatment, and potential causes. They correctly identified tinea, recommended an appropriate antifungal (terbinafine), provided accurate usage instructions, gave relevant preventive advice, and included appropriate follow-up guidance. Minor improvements in terminology use and personalisation would further enhance the consultation.",
+  "rubric_source": "storage/input/case_studies/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-2024-PHR1012-OSCE-Case-9-Tinea.pdf#rubric-section",
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "scoring_summary": {
+    "total_criteria": 8,
+    "yes_count": 8,
+    "no_count": 0,
+    "critical_total": 2,
+    "critical_yes": 2,
+    "critical_no": 0,
+    "pass_fail": "Pass",
+    "decision_reason": "Pass: all critical criteria are Yes and at least half of all criteria are Yes."
+  },
+  "path_checks": {
+    "transcript_folder_matches_file_stem": true
+  }
+}

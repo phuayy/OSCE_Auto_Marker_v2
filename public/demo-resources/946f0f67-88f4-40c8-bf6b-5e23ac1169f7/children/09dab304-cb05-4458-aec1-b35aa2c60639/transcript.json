@@ -1,0 +1,504 @@
+{
+  "schema": "whisperx-segments-v1",
+  "source": "whisperx-local",
+  "generatedAt": "2026-05-18T12:12:33.898Z",
+  "language": "en",
+  "segmentCount": 55,
+  "segments": [
+    {
+      "id": 1,
+      "speaker": "SPEAKER_01",
+      "start": 72.282,
+      "end": 86.749,
+      "startLabel": "1:12",
+      "endLabel": "1:26",
+      "text": "This is the beginning of us."
+    },
+    {
+      "id": 2,
+      "speaker": "SPEAKER_00",
+      "start": 90.091,
+      "end": 90.811,
+      "startLabel": "1:30",
+      "endLabel": "1:30",
+      "text": "Can we show him 3359135?"
+    },
+    {
+      "id": 3,
+      "speaker": "SPEAKER_01",
+      "start": 95.557,
+      "end": 100.676,
+      "startLabel": "1:35",
+      "endLabel": "1:40",
+      "text": "It is a case in that you read it once you are ready, we can show you."
+    },
+    {
+      "id": 4,
+      "speaker": "SPEAKER_01",
+      "start": 107.419,
+      "end": 109.22,
+      "startLabel": "1:47",
+      "endLabel": "1:49",
+      "text": "My feet are driving me crazy."
+    },
+    {
+      "id": 5,
+      "speaker": "SPEAKER_01",
+      "start": 109.76,
+      "end": 111.841,
+      "startLabel": "1:49",
+      "endLabel": "1:51",
+      "text": "Can you give me something to fix it quickly?"
+    },
+    {
+      "id": 6,
+      "speaker": "SPEAKER_00",
+      "start": 111.861,
+      "end": 113.281,
+      "startLabel": "1:51",
+      "endLabel": "1:53",
+      "text": "My name is Naga."
+    },
+    {
+      "id": 7,
+      "speaker": "SPEAKER_00",
+      "start": 113.321,
+      "end": 116.222,
+      "startLabel": "1:53",
+      "endLabel": "1:56",
+      "text": "My medical number is 234567."
+    },
+    {
+      "id": 8,
+      "speaker": "SPEAKER_00",
+      "start": 116.262,
+      "end": 118.083,
+      "startLabel": "1:56",
+      "endLabel": "1:58",
+      "text": "My age is 50 years."
+    },
+    {
+      "id": 9,
+      "speaker": "SPEAKER_00",
+      "start": 126.942,
+      "end": 129.643,
+      "startLabel": "2:06",
+      "endLabel": "2:09",
+      "text": "Before I recommend anything, could you please answer a few questions?"
+    },
+    {
+      "id": 10,
+      "speaker": "SPEAKER_00",
+      "start": 129.683,
+      "end": 130.664,
+      "startLabel": "2:09",
+      "endLabel": "2:10",
+      "text": "Sure."
+    },
+    {
+      "id": 11,
+      "speaker": "SPEAKER_00",
+      "start": 131.224,
+      "end": 133.785,
+      "startLabel": "2:11",
+      "endLabel": "2:13",
+      "text": "Can you describe more about all the sentences that you have?"
+    },
+    {
+      "id": 12,
+      "speaker": "SPEAKER_01",
+      "start": 134.685,
+      "end": 137.186,
+      "startLabel": "2:14",
+      "endLabel": "2:17",
+      "text": "I have flaking and itchiness between the toes."
+    },
+    {
+      "id": 13,
+      "speaker": "SPEAKER_00",
+      "start": 137.426,
+      "end": 137.986,
+      "startLabel": "2:17",
+      "endLabel": "2:17",
+      "text": "Okay."
+    },
+    {
+      "id": 14,
+      "speaker": "SPEAKER_00",
+      "start": 139.267,
+      "end": 141.968,
+      "startLabel": "2:19",
+      "endLabel": "2:21",
+      "text": "What do you think might have caused the sentence and how would have the sentence been?"
+    },
+    {
+      "id": 15,
+      "speaker": "SPEAKER_01",
+      "start": 142.328,
+      "end": 147.43,
+      "startLabel": "2:22",
+      "endLabel": "2:27",
+      "text": "I'm not very sure, maybe because of working a long day in the arts and in the farm."
+    },
+    {
+      "id": 16,
+      "speaker": "SPEAKER_00",
+      "start": 147.65,
+      "end": 148.23,
+      "startLabel": "2:27",
+      "endLabel": "2:28",
+      "text": "Okay."
+    },
+    {
+      "id": 17,
+      "speaker": "SPEAKER_00",
+      "start": 149.65,
+      "end": 152.511,
+      "startLabel": "2:29",
+      "endLabel": "2:32",
+      "text": "Do you have experience fever, swollen glands?"
+    },
+    {
+      "id": 18,
+      "speaker": "SPEAKER_00",
+      "start": 153.032,
+      "end": 153.832,
+      "startLabel": "2:33",
+      "endLabel": "2:33",
+      "text": "No, okay."
+    },
+    {
+      "id": 19,
+      "speaker": "SPEAKER_00",
+      "start": 155.552,
+      "end": 157.093,
+      "startLabel": "2:35",
+      "endLabel": "2:37",
+      "text": "Is your first time having these symptoms?"
+    },
+    {
+      "id": 20,
+      "speaker": "SPEAKER_00",
+      "start": 157.413,
+      "end": 158.233,
+      "startLabel": "2:37",
+      "endLabel": "2:38",
+      "text": "Yeah."
+    },
+    {
+      "id": 21,
+      "speaker": "SPEAKER_00",
+      "start": 158.513,
+      "end": 158.874,
+      "startLabel": "2:38",
+      "endLabel": "2:38",
+      "text": "Okay."
+    },
+    {
+      "id": 22,
+      "speaker": "SPEAKER_00",
+      "start": 159.494,
+      "end": 162.355,
+      "startLabel": "2:39",
+      "endLabel": "2:42",
+      "text": "Have you tried any medication so far?"
+    },
+    {
+      "id": 23,
+      "speaker": "SPEAKER_01",
+      "start": 162.595,
+      "end": 162.795,
+      "startLabel": "2:42",
+      "endLabel": "2:42",
+      "text": "No."
+    },
+    {
+      "id": 24,
+      "speaker": "SPEAKER_00",
+      "start": 163.075,
+      "end": 163.875,
+      "startLabel": "2:43",
+      "endLabel": "2:43",
+      "text": "No, right?"
+    },
+    {
+      "id": 25,
+      "speaker": "SPEAKER_00",
+      "start": 165.276,
+      "end": 167.777,
+      "startLabel": "2:45",
+      "endLabel": "2:47",
+      "text": "Do you have any medical conditions or allergies?"
+    },
+    {
+      "id": 26,
+      "speaker": "SPEAKER_01",
+      "start": 168.617,
+      "end": 170.057,
+      "startLabel": "2:48",
+      "endLabel": "2:50",
+      "text": "I am allergic to peanuts."
+    },
+    {
+      "id": 27,
+      "speaker": "SPEAKER_00",
+      "start": 170.418,
+      "end": 174.359,
+      "startLabel": "2:50",
+      "endLabel": "2:54",
+      "text": "Peanut is okay."
+    },
+    {
+      "id": 28,
+      "speaker": "SPEAKER_00",
+      "start": 174.419,
+      "end": 177.92,
+      "startLabel": "2:54",
+      "endLabel": "2:57",
+      "text": "Are you currently taking any over-the-counter medication?"
+    },
+    {
+      "id": 29,
+      "speaker": "SPEAKER_00",
+      "start": 178.7,
+      "end": 181.601,
+      "startLabel": "2:58",
+      "endLabel": "3:01",
+      "text": "What about supplements, vitamins or herb products?"
+    },
+    {
+      "id": 30,
+      "speaker": "SPEAKER_00",
+      "start": 181.661,
+      "end": 181.901,
+      "startLabel": "3:01",
+      "endLabel": "3:01",
+      "text": "No."
+    },
+    {
+      "id": 31,
+      "speaker": "SPEAKER_00",
+      "start": 182.242,
+      "end": 183.062,
+      "startLabel": "3:02",
+      "endLabel": "3:03",
+      "text": "No, alright."
+    },
+    {
+      "id": 32,
+      "speaker": "SPEAKER_00",
+      "start": 184.54,
+      "end": 186.964,
+      "startLabel": "3:04",
+      "endLabel": "3:06",
+      "text": "So just the richness of your faith."
+    },
+    {
+      "id": 33,
+      "speaker": "SPEAKER_00",
+      "start": 187.445,
+      "end": 196.199,
+      "startLabel": "3:07",
+      "endLabel": "3:16",
+      "text": "Okay, it seems to me that based on your information, it seems to me that you're having a hypochymia and we do have topical cream."
+    },
+    {
+      "id": 34,
+      "speaker": "SPEAKER_00",
+      "start": 196.82,
+      "end": 198.704,
+      "startLabel": "3:16",
+      "endLabel": "3:18",
+      "text": "Is there anything else that you need?"
+    },
+    {
+      "id": 35,
+      "speaker": "SPEAKER_00",
+      "start": 199.997,
+      "end": 203.539,
+      "startLabel": "3:19",
+      "endLabel": "3:23",
+      "text": "No, and I recommend the Contrerasol 1% cream."
+    },
+    {
+      "id": 36,
+      "speaker": "SPEAKER_00",
+      "start": 204.12,
+      "end": 208.763,
+      "startLabel": "3:24",
+      "endLabel": "3:28",
+      "text": "And you have to apply the cream two times a day to your affected area."
+    },
+    {
+      "id": 37,
+      "speaker": "SPEAKER_00",
+      "start": 209.303,
+      "end": 215.667,
+      "startLabel": "3:29",
+      "endLabel": "3:35",
+      "text": "And do remember to continue to use the cream 14 days after your symptoms have disappeared."
+    },
+    {
+      "id": 38,
+      "speaker": "SPEAKER_00",
+      "start": 215.787,
+      "end": 217.468,
+      "startLabel": "3:35",
+      "endLabel": "3:37",
+      "text": "And the purpose is to prevent recurrence."
+    },
+    {
+      "id": 39,
+      "speaker": "SPEAKER_00",
+      "start": 218.009,
+      "end": 222.732,
+      "startLabel": "3:38",
+      "endLabel": "3:42",
+      "text": "And some of the common side effects include the mild burning sensation and redness of the skin."
+    },
+    {
+      "id": 40,
+      "speaker": "SPEAKER_00",
+      "start": 223.032,
+      "end": 224.613,
+      "startLabel": "3:43",
+      "endLabel": "3:44",
+      "text": "They're usually quite well tolerated."
+    },
+    {
+      "id": 41,
+      "speaker": "SPEAKER_00",
+      "start": 225.033,
+      "end": 228.896,
+      "startLabel": "3:45",
+      "endLabel": "3:48",
+      "text": "So don't worry, but if your side fit are very severe, do consult a doctor immediately."
+    },
+    {
+      "id": 42,
+      "speaker": "SPEAKER_00",
+      "start": 229.277,
+      "end": 230.638,
+      "startLabel": "3:49",
+      "endLabel": "3:50",
+      "text": "Is my explanation clear for you?"
+    },
+    {
+      "id": 43,
+      "speaker": "SPEAKER_00",
+      "start": 230.858,
+      "end": 234.982,
+      "startLabel": "3:50",
+      "endLabel": "3:54",
+      "text": "Okay, do you have any other questions for me?"
+    },
+    {
+      "id": 44,
+      "speaker": "SPEAKER_00",
+      "start": 236.412,
+      "end": 238.053,
+      "startLabel": "3:56",
+      "endLabel": "3:58",
+      "text": "Would you mind to repeat what I said just now?"
+    },
+    {
+      "id": 45,
+      "speaker": "SPEAKER_01",
+      "start": 238.413,
+      "end": 240.374,
+      "startLabel": "3:58",
+      "endLabel": "4:00",
+      "text": "He understood all the information."
+    },
+    {
+      "id": 46,
+      "speaker": "SPEAKER_01",
+      "start": 240.434,
+      "end": 240.874,
+      "startLabel": "4:00",
+      "endLabel": "4:00",
+      "text": "Okay."
+    },
+    {
+      "id": 47,
+      "speaker": "SPEAKER_00",
+      "start": 241.835,
+      "end": 250.499,
+      "startLabel": "4:01",
+      "endLabel": "4:10",
+      "text": "Other than taking medication, I would also advise you to wear breathable clothing and especially breathable shoes and to prevent the recurrence in the future."
+    },
+    {
+      "id": 48,
+      "speaker": "SPEAKER_00",
+      "start": 250.899,
+      "end": 257.642,
+      "startLabel": "4:10",
+      "endLabel": "4:17",
+      "text": "And you should also avoid going to the swimming pool area barefoot."
+    },
+    {
+      "id": 49,
+      "speaker": "SPEAKER_00",
+      "start": 258.662,
+      "end": 261.423,
+      "startLabel": "4:18",
+      "endLabel": "4:21",
+      "text": "Is it all right for you?"
+    },
+    {
+      "id": 50,
+      "speaker": "SPEAKER_00",
+      "start": 261.483,
+      "end": 265.383,
+      "startLabel": "4:21",
+      "endLabel": "4:25",
+      "text": "Here's a recent information about the management in Kenya."
+    },
+    {
+      "id": 51,
+      "speaker": "SPEAKER_00",
+      "start": 265.823,
+      "end": 272.985,
+      "startLabel": "4:25",
+      "endLabel": "4:32",
+      "text": "Do remember to come back to me or see a doctor if your condition still doesn't improve after one week of using this cold cream, 1% cream."
+    },
+    {
+      "id": 52,
+      "speaker": "SPEAKER_00",
+      "start": 273.605,
+      "end": 276.165,
+      "startLabel": "4:33",
+      "endLabel": "4:36",
+      "text": "Do you have any other questions for me?"
+    },
+    {
+      "id": 53,
+      "speaker": "SPEAKER_00",
+      "start": 276.665,
+      "end": 285.827,
+      "startLabel": "4:36",
+      "endLabel": "4:45",
+      "text": "Then here's your medication and I hope you'll recover soon and do feel free to contact us or contact us if you have any other concerns."
+    },
+    {
+      "id": 54,
+      "speaker": "SPEAKER_UNKNOWN",
+      "start": 318.409,
+      "end": 318.53,
+      "startLabel": "5:18",
+      "endLabel": "5:18",
+      "text": "You"
+    },
+    {
+      "id": 55,
+      "speaker": "SPEAKER_UNKNOWN",
+      "start": 402.588,
+      "end": 403.21,
+      "startLabel": "6:42",
+      "endLabel": "6:43",
+      "text": "you"
+    }
+  ]
+}

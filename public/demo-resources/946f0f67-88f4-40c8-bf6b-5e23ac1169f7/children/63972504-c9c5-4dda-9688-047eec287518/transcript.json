@@ -1,0 +1,657 @@
+{
+  "schema": "whisperx-segments-v1",
+  "source": "whisperx-local",
+  "generatedAt": "2026-05-19T06:20:39.583Z",
+  "language": "en",
+  "segmentCount": 72,
+  "segments": [
+    {
+      "id": 1,
+      "speaker": "SPEAKER_UNKNOWN",
+      "start": 0.093,
+      "end": 0.36,
+      "startLabel": "0:00",
+      "endLabel": "0:00",
+      "text": "Thank you."
+    },
+    {
+      "id": 2,
+      "speaker": "SPEAKER_00",
+      "start": 145.758,
+      "end": 147.841,
+      "startLabel": "2:25",
+      "endLabel": "2:27",
+      "text": "No, it's a 9-2-3-5-9-0-8-8-5."
+    },
+    {
+      "id": 3,
+      "speaker": "SPEAKER_01",
+      "start": 158.693,
+      "end": 159.954,
+      "startLabel": "2:38",
+      "endLabel": "2:39",
+      "text": "Hi, my name is Srinath."
+    },
+    {
+      "id": 4,
+      "speaker": "SPEAKER_01",
+      "start": 159.974,
+      "end": 161.215,
+      "startLabel": "2:39",
+      "endLabel": "2:41",
+      "text": "Pharmacy is on duty point today."
+    },
+    {
+      "id": 5,
+      "speaker": "SPEAKER_01",
+      "start": 161.275,
+      "end": 162.476,
+      "startLabel": "2:41",
+      "endLabel": "2:42",
+      "text": "How may I help you?"
+    },
+    {
+      "id": 6,
+      "speaker": "SPEAKER_00",
+      "start": 162.897,
+      "end": 163.117,
+      "startLabel": "2:42",
+      "endLabel": "2:43",
+      "text": "Hi."
+    },
+    {
+      "id": 7,
+      "speaker": "SPEAKER_00",
+      "start": 163.137,
+      "end": 164.878,
+      "startLabel": "2:43",
+      "endLabel": "2:44",
+      "text": "My feet are driving me crazy."
+    },
+    {
+      "id": 8,
+      "speaker": "SPEAKER_00",
+      "start": 165.138,
+      "end": 167.36,
+      "startLabel": "2:45",
+      "endLabel": "2:47",
+      "text": "Can you give me something to fix it quickly?"
+    },
+    {
+      "id": 9,
+      "speaker": "SPEAKER_01",
+      "start": 167.4,
+      "end": 168.301,
+      "startLabel": "2:47",
+      "endLabel": "2:48",
+      "text": "Alright."
+    },
+    {
+      "id": 10,
+      "speaker": "SPEAKER_01",
+      "start": 168.441,
+      "end": 172.484,
+      "startLabel": "2:48",
+      "endLabel": "2:52",
+      "text": "Okay, so before I provide you with any medications, it's alright if I ask you a few questions."
+    },
+    {
+      "id": 11,
+      "speaker": "SPEAKER_00",
+      "start": 172.765,
+      "end": 173.125,
+      "startLabel": "2:52",
+      "endLabel": "2:53",
+      "text": "Okay."
+    },
+    {
+      "id": 12,
+      "speaker": "SPEAKER_01",
+      "start": 173.325,
+      "end": 174.286,
+      "startLabel": "2:53",
+      "endLabel": "2:54",
+      "text": "Okay."
+    },
+    {
+      "id": 13,
+      "speaker": "SPEAKER_01",
+      "start": 174.346,
+      "end": 176.167,
+      "startLabel": "2:54",
+      "endLabel": "2:56",
+      "text": "Just to confirm, is this medications for you?"
+    },
+    {
+      "id": 14,
+      "speaker": "SPEAKER_01",
+      "start": 176.268,
+      "end": 176.508,
+      "startLabel": "2:56",
+      "endLabel": "2:56",
+      "text": "Yeah."
+    },
+    {
+      "id": 15,
+      "speaker": "SPEAKER_01",
+      "start": 176.788,
+      "end": 177.028,
+      "startLabel": "2:56",
+      "endLabel": "2:57",
+      "text": "Alright."
+    },
+    {
+      "id": 16,
+      "speaker": "SPEAKER_01",
+      "start": 177.248,
+      "end": 180.431,
+      "startLabel": "2:57",
+      "endLabel": "3:00",
+      "text": "Do you mind telling me your name, your age and also medical number?"
+    },
+    {
+      "id": 17,
+      "speaker": "SPEAKER_00",
+      "start": 180.651,
+      "end": 182.533,
+      "startLabel": "3:00",
+      "endLabel": "3:02",
+      "text": "My name is Naka."
+    },
+    {
+      "id": 18,
+      "speaker": "SPEAKER_00",
+      "start": 182.653,
+      "end": 183.874,
+      "startLabel": "3:02",
+      "endLabel": "3:03",
+      "text": "I am 50 years old."
+    },
+    {
+      "id": 19,
+      "speaker": "SPEAKER_00",
+      "start": 183.954,
+      "end": 185.715,
+      "startLabel": "3:03",
+      "endLabel": "3:05",
+      "text": "Medical number is URN 234567."
+    },
+    {
+      "id": 20,
+      "speaker": "SPEAKER_00",
+      "start": 185.735,
+      "end": 186.216,
+      "startLabel": "3:05",
+      "endLabel": "3:06",
+      "text": "Alright."
+    },
+    {
+      "id": 21,
+      "speaker": "SPEAKER_01",
+      "start": 188.74,
+      "end": 190.525,
+      "startLabel": "3:08",
+      "endLabel": "3:10",
+      "text": "Can you describe more about your symptoms?"
+    },
+    {
+      "id": 22,
+      "speaker": "SPEAKER_00",
+      "start": 191.288,
+      "end": 192.552,
+      "startLabel": "3:11",
+      "endLabel": "3:12",
+      "text": "Actually I would like to"
+    },
+    {
+      "id": 23,
+      "speaker": "SPEAKER_00",
+      "start": 196.104,
+      "end": 199.105,
+      "startLabel": "3:16",
+      "endLabel": "3:19",
+      "text": "I would like to have some medication to fix my symptoms."
+    },
+    {
+      "id": 24,
+      "speaker": "SPEAKER_00",
+      "start": 199.805,
+      "end": 205.187,
+      "startLabel": "3:19",
+      "endLabel": "3:25",
+      "text": "Actually the skin is red and with cracking and peeling between the two toes."
+    },
+    {
+      "id": 25,
+      "speaker": "SPEAKER_01",
+      "start": 205.387,
+      "end": 209.749,
+      "startLabel": "3:25",
+      "endLabel": "3:29",
+      "text": "Alright, so did you notice any swelling or bleeding at the affected area?"
+    },
+    {
+      "id": 26,
+      "speaker": "SPEAKER_00",
+      "start": 209.789,
+      "end": 210.009,
+      "startLabel": "3:29",
+      "endLabel": "3:30",
+      "text": "No."
+    },
+    {
+      "id": 27,
+      "speaker": "SPEAKER_00",
+      "start": 210.309,
+      "end": 211.869,
+      "startLabel": "3:30",
+      "endLabel": "3:31",
+      "text": "Okay, no swelling."
+    },
+    {
+      "id": 28,
+      "speaker": "SPEAKER_01",
+      "start": 211.909,
+      "end": 214.11,
+      "startLabel": "3:31",
+      "endLabel": "3:34",
+      "text": "May I know how long have the symptoms started already?"
+    },
+    {
+      "id": 29,
+      "speaker": "SPEAKER_01",
+      "start": 214.21,
+      "end": 215.511,
+      "startLabel": "3:34",
+      "endLabel": "3:35",
+      "text": "I think around 3 weeks."
+    },
+    {
+      "id": 30,
+      "speaker": "SPEAKER_01",
+      "start": 215.891,
+      "end": 216.831,
+      "startLabel": "3:35",
+      "endLabel": "3:36",
+      "text": "3 weeks already."
+    },
+    {
+      "id": 31,
+      "speaker": "SPEAKER_01",
+      "start": 217.291,
+      "end": 218.892,
+      "startLabel": "3:37",
+      "endLabel": "3:38",
+      "text": "Okay, so may I know?"
+    },
+    {
+      "id": 32,
+      "speaker": "SPEAKER_01",
+      "start": 219.832,
+      "end": 222.093,
+      "startLabel": "3:39",
+      "endLabel": "3:42",
+      "text": "Have you tried anything to relieve your symptoms?"
+    },
+    {
+      "id": 33,
+      "speaker": "SPEAKER_01",
+      "start": 222.433,
+      "end": 222.693,
+      "startLabel": "3:42",
+      "endLabel": "3:42",
+      "text": "No."
+    },
+    {
+      "id": 34,
+      "speaker": "SPEAKER_01",
+      "start": 223.093,
+      "end": 223.613,
+      "startLabel": "3:43",
+      "endLabel": "3:43",
+      "text": "Okay."
+    },
+    {
+      "id": 35,
+      "speaker": "SPEAKER_01",
+      "start": 224.914,
+      "end": 227.054,
+      "startLabel": "3:44",
+      "endLabel": "3:47",
+      "text": "May I know what might trigger the cause of your symptoms?"
+    },
+    {
+      "id": 36,
+      "speaker": "SPEAKER_00",
+      "start": 227.354,
+      "end": 228.415,
+      "startLabel": "3:47",
+      "endLabel": "3:48",
+      "text": "I'm not very sure."
+    },
+    {
+      "id": 37,
+      "speaker": "SPEAKER_00",
+      "start": 228.515,
+      "end": 231.916,
+      "startLabel": "3:48",
+      "endLabel": "3:51",
+      "text": "Maybe because of the long working day in the arts."
+    },
+    {
+      "id": 38,
+      "speaker": "SPEAKER_01",
+      "start": 232.116,
+      "end": 232.676,
+      "startLabel": "3:52",
+      "endLabel": "3:52",
+      "text": "Alright."
+    },
+    {
+      "id": 39,
+      "speaker": "SPEAKER_01",
+      "start": 232.756,
+      "end": 235.937,
+      "startLabel": "3:52",
+      "endLabel": "3:55",
+      "text": "So, may I know are you kindly having any allergies?"
+    },
+    {
+      "id": 40,
+      "speaker": "SPEAKER_00",
+      "start": 236.737,
+      "end": 238.418,
+      "startLabel": "3:56",
+      "endLabel": "3:58",
+      "text": "I am allergic to peanuts."
+    },
+    {
+      "id": 41,
+      "speaker": "SPEAKER_00",
+      "start": 238.438,
+      "end": 239.118,
+      "startLabel": "3:58",
+      "endLabel": "3:59",
+      "text": "That's okay."
+    },
+    {
+      "id": 42,
+      "speaker": "SPEAKER_01",
+      "start": 239.398,
+      "end": 241.478,
+      "startLabel": "3:59",
+      "endLabel": "4:01",
+      "text": "May I know is this your first time experiencing this?"
+    },
+    {
+      "id": 43,
+      "speaker": "SPEAKER_00",
+      "start": 241.518,
+      "end": 241.739,
+      "startLabel": "4:01",
+      "endLabel": "4:01",
+      "text": "Yeah."
+    },
+    {
+      "id": 44,
+      "speaker": "SPEAKER_00",
+      "start": 242.019,
+      "end": 242.399,
+      "startLabel": "4:02",
+      "endLabel": "4:02",
+      "text": "Okay."
+    },
+    {
+      "id": 45,
+      "speaker": "SPEAKER_01",
+      "start": 243.813,
+      "end": 245.794,
+      "startLabel": "4:03",
+      "endLabel": "4:05",
+      "text": "Did you have any medical condition?"
+    },
+    {
+      "id": 46,
+      "speaker": "SPEAKER_01",
+      "start": 246.334,
+      "end": 248.155,
+      "startLabel": "4:06",
+      "endLabel": "4:08",
+      "text": "No, medical condition."
+    },
+    {
+      "id": 47,
+      "speaker": "SPEAKER_01",
+      "start": 248.495,
+      "end": 251.137,
+      "startLabel": "4:08",
+      "endLabel": "4:11",
+      "text": "Did you consume any prescription medications?"
+    },
+    {
+      "id": 48,
+      "speaker": "SPEAKER_01",
+      "start": 251.617,
+      "end": 252.017,
+      "startLabel": "4:11",
+      "endLabel": "4:12",
+      "text": "No."
+    },
+    {
+      "id": 49,
+      "speaker": "SPEAKER_01",
+      "start": 252.317,
+      "end": 255.119,
+      "startLabel": "4:12",
+      "endLabel": "4:15",
+      "text": "Any vitamins, supplements, or anything else?"
+    },
+    {
+      "id": 50,
+      "speaker": "SPEAKER_01",
+      "start": 255.139,
+      "end": 258.38,
+      "startLabel": "4:15",
+      "endLabel": "4:18",
+      "text": "Do you have any preference for your medications?"
+    },
+    {
+      "id": 51,
+      "speaker": "SPEAKER_00",
+      "start": 258.58,
+      "end": 260.161,
+      "startLabel": "4:18",
+      "endLabel": "4:20",
+      "text": "I prefer if it is a cream."
+    },
+    {
+      "id": 52,
+      "speaker": "SPEAKER_01",
+      "start": 260.481,
+      "end": 261.161,
+      "startLabel": "4:20",
+      "endLabel": "4:21",
+      "text": "Cream, alright."
+    },
+    {
+      "id": 53,
+      "speaker": "SPEAKER_01",
+      "start": 261.522,
+      "end": 263.903,
+      "startLabel": "4:21",
+      "endLabel": "4:23",
+      "text": "Do you mind giving me some time to share on-site information?"
+    },
+    {
+      "id": 54,
+      "speaker": "SPEAKER_01",
+      "start": 263.943,
+      "end": 264.183,
+      "startLabel": "4:23",
+      "endLabel": "4:24",
+      "text": "Sure."
+    },
+    {
+      "id": 55,
+      "speaker": "SPEAKER_01",
+      "start": 343.091,
+      "end": 344.412,
+      "startLabel": "5:43",
+      "endLabel": "5:44",
+      "text": "All right, thank you for waiting."
+    },
+    {
+      "id": 56,
+      "speaker": "SPEAKER_01",
+      "start": 344.812,
+      "end": 351.857,
+      "startLabel": "5:44",
+      "endLabel": "5:51",
+      "text": "So, from what you have said to me, you are actually experiencing Tanya, and the medication that I'm going to provide you is Clotrimazole Cream."
+    },
+    {
+      "id": 57,
+      "speaker": "SPEAKER_01",
+      "start": 352.237,
+      "end": 360.523,
+      "startLabel": "5:52",
+      "endLabel": "6:00",
+      "text": "So, you can apply to the affected area two times daily, and continue for two weeks to prevent any reward infections, all right?"
+    },
+    {
+      "id": 58,
+      "speaker": "SPEAKER_01",
+      "start": 360.563,
+      "end": 367.387,
+      "startLabel": "6:00",
+      "endLabel": "6:07",
+      "text": "This medication is generally safe, but there might be some side effects, for example, like stingy and also burning sensations."
+    },
+    {
+      "id": 59,
+      "speaker": "SPEAKER_01",
+      "start": 367.867,
+      "end": 368.508,
+      "startLabel": "6:07",
+      "endLabel": "6:08",
+      "text": "Other than that,"
+    },
+    {
+      "id": 60,
+      "speaker": "SPEAKER_01",
+      "start": 369.341,
+      "end": 375.807,
+      "startLabel": "6:09",
+      "endLabel": "6:15",
+      "text": "Try to change your socks frequently and also try the affected area with a separate towel."
+    },
+    {
+      "id": 61,
+      "speaker": "SPEAKER_01",
+      "start": 376.068,
+      "end": 383.536,
+      "startLabel": "6:16",
+      "endLabel": "6:23",
+      "text": "Make sure that you do not share any towels with anyone as it can cause the infections to spread over yourself."
+    },
+    {
+      "id": 62,
+      "speaker": "SPEAKER_01",
+      "start": 383.556,
+      "end": 384.777,
+      "startLabel": "6:23",
+      "endLabel": "6:24",
+      "text": "Is everything clear for you?"
+    },
+    {
+      "id": 63,
+      "speaker": "SPEAKER_01",
+      "start": 385.037,
+      "end": 386.379,
+      "startLabel": "6:25",
+      "endLabel": "6:26",
+      "text": "Do you have any questions for me?"
+    },
+    {
+      "id": 64,
+      "speaker": "SPEAKER_00",
+      "start": 386.839,
+      "end": 387.3,
+      "startLabel": "6:26",
+      "endLabel": "6:27",
+      "text": "Nope."
+    },
+    {
+      "id": 65,
+      "speaker": "SPEAKER_01",
+      "start": 387.82,
+      "end": 389.462,
+      "startLabel": "6:27",
+      "endLabel": "6:29",
+      "text": "Do you mind repeating back what I have just said?"
+    },
+    {
+      "id": 66,
+      "speaker": "SPEAKER_00",
+      "start": 389.802,
+      "end": 392.304,
+      "startLabel": "6:29",
+      "endLabel": "6:32",
+      "text": "I understood all the information given by you."
+    },
+    {
+      "id": 67,
+      "speaker": "SPEAKER_01",
+      "start": 392.524,
+      "end": 393.485,
+      "startLabel": "6:32",
+      "endLabel": "6:33",
+      "text": "Alright, thank you."
+    },
+    {
+      "id": 68,
+      "speaker": "SPEAKER_01",
+      "start": 393.765,
+      "end": 402.613,
+      "startLabel": "6:33",
+      "endLabel": "6:42",
+      "text": "So if the symptoms persist or the symptoms is worsening, you may come back again to the pharmacy or you may go to the doctor to check for a better diagnosis."
+    },
+    {
+      "id": 69,
+      "speaker": "SPEAKER_01",
+      "start": 402.953,
+      "end": 408.178,
+      "startLabel": "6:42",
+      "endLabel": "6:48",
+      "text": "So here is the pamphlet about the tanya that you may look for about some information, okay?"
+    },
+    {
+      "id": 70,
+      "speaker": "SPEAKER_01",
+      "start": 408.678,
+      "end": 409.759,
+      "startLabel": "6:48",
+      "endLabel": "6:49",
+      "text": "Alright, I think that's all."
+    },
+    {
+      "id": 71,
+      "speaker": "SPEAKER_01",
+      "start": 409.799,
+      "end": 410.56,
+      "startLabel": "6:49",
+      "endLabel": "6:50",
+      "text": "Thank you very much."
+    },
+    {
+      "id": 72,
+      "speaker": "SPEAKER_UNKNOWN",
+      "start": 448.957,
+      "end": 449.117,
+      "startLabel": "7:28",
+      "endLabel": "7:29",
+      "text": "you."
+    }
+  ]
+}

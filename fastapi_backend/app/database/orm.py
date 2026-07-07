@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+from urllib.parse import urlparse
+
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+
+from app.database.models import Base
+
+
+# Matches the raw-sqlite jobs layer (app/database/connection.py), which sets
+# ``PRAGMA busy_timeout = 30000``. Without an explicit timeout the ORM engine
+# would fall back to sqlite3's 5 s default and surface transient
+# "database is locked" errors when the separate jobs connection holds the write
+# lock under concurrent local-mode writes.
+_SQLITE_BUSY_TIMEOUT_SECONDS = 30
+
+
+class OrmDatabase:
+    def __init__(self, database_url_or_path: Path | str) -> None:
+        self.url = self._normalize_url(database_url_or_path)
+        self.engine: AsyncEngine = create_async_engine(
+            self.url,
+            pool_pre_ping=True,
+            connect_args=self._connect_args(self.url),
+            future=True,
+        )
+        self.session_factory = async_sessionmaker(
+            self.engine,
+            expire_on_commit=False,
+            autoflush=False,
+        )
+        self._initialized = False
+
+    async def initialize(self) -> None:
+        if self._initialized:
+            return
+        async with self.engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        self._initialized = True
+
+    async def shutdown(self) -> None:
+        await self.engine.dispose()
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[AsyncSession]:
+        await self.initialize()
+        async with self.session_factory() as session:
+            try:
+                yield session
+            finally:
+                await session.close()
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[AsyncSession]:
+        await self.initialize()
+        async with self.session_factory() as session:
+            try:
+                async with session.begin():
+                    yield session
+            finally:
+                await session.close()
+
+    @classmethod
+    def _normalize_url(cls, database_url_or_path: Path | str) -> str:
+        if isinstance(database_url_or_path, Path):
+            return cls._sqlite_url(database_url_or_path)
+
+        raw = str(database_url_or_path).strip()
+        if not raw:
+            raise ValueError("Database URL must not be empty.")
+
+        parsed = urlparse(raw)
+        if parsed.scheme in {"postgres", "postgresql"}:
+            return raw.replace(f"{parsed.scheme}://", "postgresql+psycopg://", 1)
+        if parsed.scheme == "postgresql+psycopg":
+            return raw
+        if parsed.scheme == "sqlite":
+            return raw.replace("sqlite://", "sqlite+aiosqlite://", 1)
+        if parsed.scheme == "sqlite+aiosqlite":
+            return raw
+        return cls._sqlite_url(Path(raw).expanduser())
+
+    @staticmethod
+    def _connect_args(url: str) -> dict[str, object]:
+        if url.startswith("postgresql+psycopg://"):
+            return {"prepare_threshold": None}
+        if url.startswith("sqlite"):
+            return {"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS}
+        return {}
+
+    @staticmethod
+    def _sqlite_url(path: Path) -> str:
+        resolved = path.expanduser().resolve()
+        return f"sqlite+aiosqlite:///{resolved.as_posix()}"

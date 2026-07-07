@@ -1,0 +1,282 @@
+// Client-side auth helper. The token is kept in sessionStorage (cleared on
+// browser close) instead of localStorage so a stolen device is less risky.
+// The token itself is a server-signed HMAC blob; the client treats it as
+// opaque and never inspects/decodes it.
+
+const TOKEN_STORAGE_KEY = 'osce-ai-marker:auth-token';
+const EXPIRY_STORAGE_KEY = 'osce-ai-marker:auth-expires-at';
+const USERNAME_STORAGE_KEY = 'osce-ai-marker:auth-username';
+
+function safeSessionStorage() {
+  try {
+    return window.sessionStorage;
+  } catch (_error) {
+    return null;
+  }
+}
+
+export function getStoredAuth() {
+  const storage = safeSessionStorage();
+  if (!storage) {
+    return null;
+  }
+
+  const token = storage.getItem(TOKEN_STORAGE_KEY);
+  const expiresAt = Number(storage.getItem(EXPIRY_STORAGE_KEY) || 0);
+  const username = storage.getItem(USERNAME_STORAGE_KEY) || '';
+
+  if (!token || !Number.isFinite(expiresAt) || expiresAt < Date.now()) {
+    clearStoredAuth();
+    return null;
+  }
+
+  return { token, expiresAt, username };
+}
+
+export function setStoredAuth({ token, expiresAt, username }) {
+  const storage = safeSessionStorage();
+  if (!storage) {
+    return;
+  }
+
+  storage.setItem(TOKEN_STORAGE_KEY, String(token));
+  storage.setItem(EXPIRY_STORAGE_KEY, String(expiresAt));
+  storage.setItem(USERNAME_STORAGE_KEY, String(username || ''));
+}
+
+export function clearStoredAuth() {
+  clearStreamTicket();
+  const storage = safeSessionStorage();
+  if (!storage) {
+    return;
+  }
+
+  storage.removeItem(TOKEN_STORAGE_KEY);
+  storage.removeItem(EXPIRY_STORAGE_KEY);
+  storage.removeItem(USERNAME_STORAGE_KEY);
+}
+
+// ---------------------------------------------------------------------------
+// Short-lived stream tickets
+//
+// EventSource (SSE) and <video>/<img> media tags cannot send an Authorization
+// header, so historically the long-lived bearer token was placed in the URL
+// (leaking it into access logs). Instead we mint a short-lived, narrowly-scoped
+// "stream ticket" and use that in URLs. The ticket is cached in memory and
+// refreshed before expiry. If no ticket is available yet, callers fall back to
+// the bearer token so media never fails to load.
+// ---------------------------------------------------------------------------
+
+const STREAM_TICKET_REFRESH_SKEW_MS = 60_000;
+let cachedStreamTicket = null; // { ticket, expiresAt }
+let streamTicketInFlight = null;
+
+function streamTicketIsFresh() {
+  return Boolean(
+    cachedStreamTicket?.ticket &&
+      Number.isFinite(cachedStreamTicket.expiresAt) &&
+      cachedStreamTicket.expiresAt - Date.now() > STREAM_TICKET_REFRESH_SKEW_MS,
+  );
+}
+
+export function clearStreamTicket() {
+  cachedStreamTicket = null;
+  streamTicketInFlight = null;
+}
+
+export async function fetchStreamTicket() {
+  const stored = getStoredAuth();
+  if (!stored?.token) {
+    return null;
+  }
+  if (streamTicketInFlight) {
+    return streamTicketInFlight;
+  }
+  streamTicketInFlight = (async () => {
+    try {
+      const response = await fetch('/api/auth/stream-ticket', { headers: authHeaders() });
+      if (!response.ok) {
+        return null;
+      }
+      const body = await response.json().catch(() => ({}));
+      if (body?.ticket) {
+        cachedStreamTicket = { ticket: body.ticket, expiresAt: Number(body.expiresAt) || 0 };
+        return cachedStreamTicket;
+      }
+      return null;
+    } catch (_error) {
+      return null;
+    } finally {
+      streamTicketInFlight = null;
+    }
+  })();
+  return streamTicketInFlight;
+}
+
+export async function ensureStreamTicket() {
+  if (streamTicketIsFresh()) {
+    return cachedStreamTicket;
+  }
+  return fetchStreamTicket();
+}
+
+function cachedStreamTicketValue() {
+  return streamTicketIsFresh() ? cachedStreamTicket.ticket : '';
+}
+
+function appendQueryParam(url, key, value) {
+  try {
+    const u = new URL(url, window.location.origin);
+    u.searchParams.set(key, value);
+    if (url.startsWith('/')) {
+      return `${u.pathname}${u.search}`;
+    }
+    return u.toString();
+  } catch (_error) {
+    const separator = url.includes('?') ? '&' : '?';
+    return `${url}${separator}${key}=${encodeURIComponent(value)}`;
+  }
+}
+
+/**
+ * Append a stream ticket to a URL (used for SSE and media). Falls back to the
+ * bearer token when no ticket is cached yet, so the request never fails auth.
+ */
+export function withStreamTicket(url) {
+  if (!url || typeof url !== 'string') {
+    return url;
+  }
+  const ticket = cachedStreamTicketValue();
+  if (ticket) {
+    return appendQueryParam(url, 'ticket', ticket);
+  }
+  return appendTokenToUrl(url);
+}
+
+/**
+ * Resolve a server media URL (/media/...) for use in a <video>/<img>/<a> tag,
+ * attaching a stream ticket. Non-media URLs (blob:, demo resources, external)
+ * are returned untouched.
+ */
+export function resolveMediaUrl(url) {
+  if (!url || typeof url !== 'string' || !url.startsWith('/media/')) {
+    return url;
+  }
+  return withStreamTicket(url);
+}
+
+export function authHeaders() {
+  const stored = getStoredAuth();
+  if (!stored?.token) {
+    return {};
+  }
+  return { Authorization: `Bearer ${stored.token}` };
+}
+
+export function appendTokenToUrl(url) {
+  const stored = getStoredAuth();
+  if (!stored?.token) {
+    return url;
+  }
+  try {
+    const u = new URL(url, window.location.origin);
+    u.searchParams.set('token', stored.token);
+    if (url.startsWith('/')) {
+      return `${u.pathname}${u.search}`;
+    }
+    return u.toString();
+  } catch (_error) {
+    const separator = url.includes('?') ? '&' : '?';
+    return `${url}${separator}token=${encodeURIComponent(stored.token)}`;
+  }
+}
+
+/**
+ * Wraps window.fetch so every authenticated /api/* request automatically
+ * attaches the Bearer token. Static /media/* and demo-resource requests pass
+ * through untouched.
+ */
+export async function authFetch(input, init = {}) {
+  const url = typeof input === 'string' ? input : input?.url || '';
+  const isApiCall = url.startsWith('/api/');
+
+  const nextInit = { ...init };
+  if (isApiCall) {
+    nextInit.headers = {
+      ...(init.headers || {}),
+      ...authHeaders(),
+    };
+  }
+
+  const response = await fetch(input, nextInit);
+  if (isApiCall && response.status === 401) {
+    clearStoredAuth();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('osce:auth:expired'));
+    }
+  }
+  return response;
+}
+
+export function installFetchAuthShim() {
+  if (typeof window === 'undefined' || window.__osceFetchPatched) {
+    return;
+  }
+
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input?.url || '';
+    const isApiCall = typeof url === 'string' && url.startsWith('/api/');
+
+    if (!isApiCall) {
+      return originalFetch(input, init);
+    }
+
+    const headers = new Headers(init.headers || {});
+    const stored = getStoredAuth();
+    if (stored?.token && !headers.has('Authorization')) {
+      headers.set('Authorization', `Bearer ${stored.token}`);
+    }
+
+    const response = await originalFetch(input, { ...init, headers });
+    if (response.status === 401) {
+      clearStoredAuth();
+      window.dispatchEvent(new CustomEvent('osce:auth:expired'));
+    }
+    return response;
+  };
+  window.__osceFetchPatched = true;
+}
+
+export async function loginRequest(username, password) {
+  const response = await fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(body?.error || 'Login failed.');
+    error.status = response.status;
+    throw error;
+  }
+
+  setStoredAuth(body);
+  // Warm a stream ticket so media/SSE URLs avoid the long-lived token.
+  fetchStreamTicket();
+  return body;
+}
+
+export function logout() {
+  // Best-effort server-side revocation so the token cannot be reused.
+  try {
+    fetch('/api/auth/logout', { method: 'POST', headers: authHeaders() }).catch(() => {});
+  } catch (_error) {
+    /* ignore */
+  }
+  clearStoredAuth();
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('osce:auth:expired'));
+  }
+}

@@ -1,0 +1,135 @@
+{
+  "schema": "whisperx-segments-v1",
+  "source": "demo-local",
+  "generatedAt": "2026-04-01T11:00:00.000Z",
+  "language": "en",
+  "segmentCount": 14,
+  "segments": [
+    {
+      "id": 1,
+      "speaker": "SPEAKER_03",
+      "start": 230.845,
+      "end": 231.326,
+      "startLabel": "3:50",
+      "endLabel": "3:51",
+      "text": "Hi."
+    },
+    {
+      "id": 2,
+      "speaker": "SPEAKER_01",
+      "start": 233.287,
+      "end": 235.268,
+      "startLabel": "3:53",
+      "endLabel": "3:55",
+      "text": "My feet are driving me crazy."
+    },
+    {
+      "id": 3,
+      "speaker": "SPEAKER_01",
+      "start": 235.308,
+      "end": 237.69,
+      "startLabel": "3:55",
+      "endLabel": "3:57",
+      "text": "Can you give me something to fix it quickly?"
+    },
+    {
+      "id": 4,
+      "speaker": "SPEAKER_03",
+      "start": 238.391,
+      "end": 240.172,
+      "startLabel": "3:58",
+      "endLabel": "4:00",
+      "text": "I am your pharmacist today."
+    },
+    {
+      "id": 5,
+      "speaker": "SPEAKER_03",
+      "start": 245.956,
+      "end": 248.799,
+      "startLabel": "4:05",
+      "endLabel": "4:08",
+      "text": "Before I give you any recommendations, can I ask a few questions?"
+    },
+    {
+      "id": 6,
+      "speaker": "SPEAKER_03",
+      "start": 251.981,
+      "end": 254.223,
+      "startLabel": "4:11",
+      "endLabel": "4:14",
+      "text": "Can I have your name, age, and medical number?"
+    },
+    {
+      "id": 7,
+      "speaker": "SPEAKER_01",
+      "start": 268.748,
+      "end": 272.251,
+      "startLabel": "4:28",
+      "endLabel": "4:32",
+      "text": "My age is 50 years and I am 60 kgs."
+    },
+    {
+      "id": 8,
+      "speaker": "SPEAKER_03",
+      "start": 281.599,
+      "end": 287.264,
+      "startLabel": "4:41",
+      "endLabel": "4:47",
+      "text": "Have you noticed any unusual symptoms such as swelling of the skin or fever?"
+    },
+    {
+      "id": 9,
+      "speaker": "SPEAKER_03",
+      "start": 330.446,
+      "end": 335.187,
+      "startLabel": "5:30",
+      "endLabel": "5:35",
+      "text": "Are you currently taking any prescription medicines or over-the-counter medicines?"
+    },
+    {
+      "id": 10,
+      "speaker": "SPEAKER_03",
+      "start": 386.555,
+      "end": 394.837,
+      "startLabel": "6:26",
+      "endLabel": "6:34",
+      "text": "Based on the information given, I believe you are having tinea because you wear shoes all day for work."
+    },
+    {
+      "id": 11,
+      "speaker": "SPEAKER_03",
+      "start": 405.92,
+      "end": 410.481,
+      "startLabel": "6:45",
+      "endLabel": "6:50",
+      "text": "Apply a thin layer onto the affected areas, which is your toes."
+    },
+    {
+      "id": 12,
+      "speaker": "SPEAKER_03",
+      "start": 420.947,
+      "end": 425.188,
+      "startLabel": "7:00",
+      "endLabel": "7:05",
+      "text": "Please continue for two weeks after the symptoms subside."
+    },
+    {
+      "id": 13,
+      "speaker": "SPEAKER_03",
+      "start": 460.059,
+      "end": 461.759,
+      "startLabel": "7:40",
+      "endLabel": "7:41",
+      "text": "Is everything clear for you?"
+    },
+    {
+      "id": 14,
+      "speaker": "SPEAKER_03",
+      "start": 469.168,
+      "end": 470.269,
+      "startLabel": "7:49",
+      "endLabel": "7:50",
+      "text": "Do you have any questions for me?"
+    }
+  ]
+}

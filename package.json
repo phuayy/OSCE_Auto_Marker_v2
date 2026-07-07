@@ -1,0 +1,39 @@
+{
+  "name": "osce-ai-marker-demo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "npm run dev",
+    "dev": "node scripts/dev.mjs",
+    "dev:client": "vite",
+    "dev:api": ".venv\\Scripts\\python scripts/run_api.py",
+    "dev:worker": ".venv\\Scripts\\python scripts/run_hatchet_worker.py",
+    "db:config": "docker compose -f docker-compose.postgres.yml config",
+    "db:up": "docker compose -f docker-compose.postgres.yml up -d",
+    "db:down": "docker compose -f docker-compose.postgres.yml down",
+    "db:logs": "docker compose -f docker-compose.postgres.yml logs -f postgres",
+    "db:ps": "docker compose -f docker-compose.postgres.yml ps",
+    "db:reset": ".venv\\Scripts\\python scripts/reset_db.py",
+    "db:reset:all": ".venv\\Scripts\\python scripts/reset_db.py --all",
+    "db:check": ".venv\\Scripts\\python scripts/check_database.py",
+    "test:api": ".venv\\Scripts\\python -m pytest fastapi_backend/tests",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "classnames": "^2.5.1",
+    "framer-motion": "^11.0.0",
+    "lucide-react": "^0.424.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.0",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^8.2.2",
+    "postcss": "^8.4.45",
+    "tailwindcss": "^3.4.10",
+    "vite": "^5.4.0"
+  }
+}

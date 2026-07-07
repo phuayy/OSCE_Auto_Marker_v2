@@ -1,0 +1,85 @@
+{
+  "session_id": "63972504-c9c5-4dda-9688-047eec287518",
+  "transcript_file": "storage/output/whisperx/63972504-c9c5-4dda-9688-047eec287518/63972504-c9c5-4dda-9688-047eec287518.srt",
+  "case_study_file": "storage/input/case_studies/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-2024-PHR1012-OSCE-Case-9-Tinea.pdf",
+  "rubric_file": "embedded_in_case_study_pdf",
+  "criteria": [
+    {
+      "label": "Elicits that area around the patienAND other symptoms of tinea (there is cracking, redness and peeling of skin between toes) (i.e. when asked to describe symptoms)",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:03:25",
+      "reason": "The student elicited symptoms of redness, cracking, and peeling between the toes when asking the patient to describe symptoms."
+    },
+    {
+      "label": "Elicits that symptoms started three weeks ago after working on the farm wearing boots all day (i.e. when asked when it started)",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:03:34",
+      "reason": "The student elicited that symptoms started around 3 weeks ago when asking about duration."
+    },
+    {
+      "label": "Elicits the patient has not had the symptoms before AND has not tried anything for symptoms yet AND has no signs of infection (no pus, swelling etc.)",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:03:42",
+      "reason": "The student elicited that the patient has not tried anything for symptoms yet and confirmed no swelling, indicating no signs of infection."
+    },
+    {
+      "label": "Advises patient has tinea OR fungal infection on the skin OR cause of itchiness due to wearing boots whole day (hot and humid)",
+      "is_critical": true,
+      "value": "Yes",
+      "timestamp": "00:05:44",
+      "reason": "The student advised the patient has tinea (Tanya, likely a transcription error for tinea) and linked it to wearing boots during long working days."
+    },
+    {
+      "label": "Recommends any of ONE the following topical therapy: Terbinafine, OR Miconazole/ clotrimazole/ econazole/ bifonazole/ ketoconazole, OR Combination hydrocortisone/antifungal",
+      "is_critical": true,
+      "value": "Yes",
+      "timestamp": "00:05:44",
+      "reason": "The student recommended clotrimazole cream, which is one of the specified topical antifungals."
+    },
+    {
+      "label": "Counsels on how to use chosen product in Point 5: - Terbinafine: Apply a thin layer once daily for 1 week - Miconazole: Apply a thin layer twice daily; continue for 2 weeks after symptoms resolve - Clotrimazole/Econazole: Apply a thin layer 2 or 3 times a day; continue for 2 weeks after symptoms resolve - Bifonazole: Apply a thin layer once daily; continue for 2 weeks after symptoms resolve - Ketoconazole: Apply a thin layer 1 or 2 times daily; continue for 2 weeks after symptoms resolve - Combination hydrocortisone/antifungal (available combinations are clotrimazole + hydrocortisone OR miconazole + hydrocortisone): Apply a thin layer 2 times a day for one week then continue with antifungal only",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:05:52",
+      "reason": "The student counseled to apply clotrimazole cream two times daily and continue for two weeks, which aligns with the clotrimazole/econazole dosing instructions."
+    },
+    {
+      "label": "Recommends at least ONE of the following future preventive action: maintain good foot hygiene; keep feet clean and dry especially after working at the farm; avoid sharing towels/footwear; use antifungal (or non-medicated) powder in shoes to reduce moisture; wear open-toed footwear; use cotton (non-synthetic) socks; wear shoes that have breathable material (such as leather); place shoes in the sun to dry if it get damp; discard old shoes that may have a high density of fungal spores",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:06:09",
+      "reason": "The student recommended changing socks frequently and using a separate towel, which aligns with preventive actions like maintaining foot hygiene and avoiding towel sharing."
+    },
+    {
+      "label": "Advises the patient to see their doctor /pharmacist if their symptoms do not improve or worsens",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:06:33",
+      "reason": "The student advised the patient to return to the pharmacy or see a doctor if symptoms persist or worsen."
+    }
+  ],
+  "keep_start_stop": {
+    "keep": "Continue initiating the consultation by introducing yourself and asking open-ended questions to gather a comprehensive history. Maintain a friendly and professional tone throughout the interaction. Keep providing clear medication recommendations and linking them to the patient's symptoms and lifestyle factors.",
+    "start": "Start explicitly confirming the absence of infection signs such as pus, heat, or fever when assessing for complications. Begin offering specific preventive advice like wearing breathable footwear or using antifungal powder in shoes to reduce recurrence risk.",
+    "stop": "Stop relying on implied understanding; avoid assuming the patient knows how to use the medication without clear, step-by-step instructions. Do not skip discussing potential side effects or interactions, even if the medication is considered safe."
+  },
+  "overall_summary": "The student demonstrated a strong consultation by effectively gathering history, identifying tinea, recommending an appropriate antifungal, and providing usage and preventive advice. They successfully linked symptoms to footwear use and advised follow-up if symptoms persist. Minor improvements include explicitly confirming lack of infection signs and offering more specific preventive measures like shoe drying or breathable socks.",
+  "rubric_source": "storage/input/case_studies/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-2024-PHR1012-OSCE-Case-9-Tinea.pdf#rubric-section",
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "scoring_summary": {
+    "total_criteria": 8,
+    "yes_count": 8,
+    "no_count": 0,
+    "critical_total": 2,
+    "critical_yes": 2,
+    "critical_no": 0,
+    "pass_fail": "Pass",
+    "decision_reason": "Pass: all critical criteria are Yes and at least half of all criteria are Yes."
+  },
+  "path_checks": {
+    "transcript_folder_matches_file_stem": true
+  }
+}

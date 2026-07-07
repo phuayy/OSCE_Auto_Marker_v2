@@ -1,0 +1,264 @@
+1
+00:01:24,013 --> 00:01:24,134
+you
+
+2
+00:02:05,770 --> 00:02:06,090
+you
+
+3
+00:02:47,597 --> 00:02:47,797
+Hi.
+
+4
+00:02:47,817 --> 00:02:49,378
+Hi, I am the pharmacist.
+
+5
+00:02:49,398 --> 00:02:50,238
+My name is Anubhav.
+
+6
+00:02:50,258 --> 00:02:51,158
+How can I help you?
+
+7
+00:03:05,952 --> 00:03:07,752
+My feet are driving me crazy.
+
+8
+00:03:08,473 --> 00:03:11,133
+Can you give me something to fix it quickly?
+
+9
+00:03:11,673 --> 00:03:12,874
+Yeah, sure.
+
+10
+00:03:13,074 --> 00:03:16,774
+But do you mind if I ask you a few questions so that I can provide you the most appropriate treatment?
+
+11
+00:03:16,875 --> 00:03:17,755
+Sure.
+
+12
+00:03:17,815 --> 00:03:20,495
+Can I first have your name, age and medical number?
+
+13
+00:03:20,655 --> 00:03:21,656
+My name is Naga.
+
+14
+00:03:22,136 --> 00:03:24,856
+Medical number is URN 23456.
+
+15
+00:03:26,057 --> 00:03:27,317
+And your age?
+
+16
+00:03:27,457 --> 00:03:28,257
+It's 50 years.
+
+17
+00:03:28,857 --> 00:03:29,677
+Right.
+
+18
+00:03:29,737 --> 00:03:32,238
+Do you mind if I just explain more about your symptoms?
+
+19
+00:03:32,908 --> 00:03:36,069
+Okay, there is a flaking and itchiness between the toes.
+
+20
+00:03:36,629 --> 00:03:37,049
+Okay.
+
+21
+00:03:37,909 --> 00:03:43,430
+Is there any other unusual symptoms that you are having a fever or that's a swelling of the skin area?
+
+22
+00:03:44,210 --> 00:03:44,430
+No.
+
+23
+00:03:44,910 --> 00:03:45,590
+Okay.
+
+24
+00:03:45,610 --> 00:03:48,591
+How long have the symptoms been present?
+
+25
+00:03:49,311 --> 00:03:51,071
+This is there for almost three weeks.
+
+26
+00:03:51,751 --> 00:03:52,832
+Three weeks?
+
+27
+00:03:52,972 --> 00:03:53,652
+Okay.
+
+28
+00:03:54,372 --> 00:03:56,412
+Have you tried anything to relieve your symptoms yet?
+
+29
+00:03:56,572 --> 00:03:56,632
+No.
+
+30
+00:03:56,672 --> 00:03:57,952
+Okay.
+
+31
+00:03:57,992 --> 00:04:00,913
+Perhaps you have any idea on what might have caused your symptoms?
+
+32
+00:04:02,176 --> 00:04:07,041
+I am not very sure but I am working in the firm so I will be wearing the boots of the lady.
+
+33
+00:04:07,442 --> 00:04:13,728
+Is this the first time you are experiencing such symptoms?
+
+34
+00:04:14,409 --> 00:04:17,352
+Do you have any medical conditions?
+
+35
+00:04:18,624 --> 00:04:18,884
+No.
+
+36
+00:04:19,365 --> 00:04:22,427
+Are you taking any medication, supplements or herbal treatment?
+
+37
+00:04:22,687 --> 00:04:22,887
+No.
+
+38
+00:04:23,007 --> 00:04:24,308
+Do you have any allergies?
+
+39
+00:04:24,448 --> 00:04:24,668
+No.
+
+40
+00:04:25,268 --> 00:04:26,129
+Okay.
+
+41
+00:04:26,229 --> 00:04:28,451
+Is there any proliferation of the medication?
+
+42
+00:04:29,111 --> 00:04:31,893
+I will be happy if it is a cream.
+
+43
+00:04:32,293 --> 00:04:32,833
+Okay, sure.
+
+44
+00:04:33,234 --> 00:04:36,476
+Do you mind to just give me a moment to check on my resources?
+
+45
+00:04:36,636 --> 00:04:36,856
+Sure.
+
+46
+00:04:52,195 --> 00:04:54,276
+Okay, so hi sir, thanks for waiting.
+
+47
+00:04:54,616 --> 00:05:05,842
+It seems that you are having a tin of patties or as known as actually foods which may be caused by the foods that you are bearing because it calms your food so it creates a humid environment for the fungus to grow.
+
+48
+00:05:06,362 --> 00:05:08,603
+It is very common so do not worry about that.
+
+49
+00:05:09,123 --> 00:05:13,204
+And here's the medication for you, which is a 1% turbinaffin cream.
+
+50
+00:05:13,644 --> 00:05:20,727
+It is a fast relief medication which you can just apply once daily for 7 days onto the affected area.
+
+51
+00:05:21,107 --> 00:05:30,410
+But before you apply, please ensure that you shower before you apply onto the affected area and make sure it is dry and clean.
+
+52
+00:05:30,950 --> 00:05:31,250
+Okay?
+
+53
+00:05:32,052 --> 00:05:40,683
+So while using this medication that could be some side effects like burning or stinging sensation, it is usually more tolerated.
+
+54
+00:05:40,703 --> 00:05:47,291
+However, if you feel that the side effects are unbearable, you can always come back to the pharmacies for a switch of medication.
+
+55
+00:05:48,522 --> 00:05:55,886
+In addition to the medication, I will also suggest you to try out something that's not so occlusive.
+
+56
+00:05:56,206 --> 00:06:03,290
+Try something that is able to give your food circulation of air so that it doesn't create a humid environment.
+
+57
+00:06:03,970 --> 00:06:10,192
+and also dry the affected area using a separate towel and do not share towels with any others.
+
+58
+00:06:10,652 --> 00:06:13,153
+So if I do have any questions for you?
+
+59
+00:06:13,533 --> 00:06:15,093
+I do not have any questions.
+
+60
+00:06:15,654 --> 00:06:17,954
+I believe I've given you a lot of information.
+
+61
+00:06:18,014 --> 00:06:19,795
+Do you mind to repeat after what I've mentioned?
+
+62
+00:06:20,747 --> 00:06:23,448
+I understood all the information given with you.
+
+63
+00:06:23,588 --> 00:06:28,531
+Right, so here's the medication together with the written left nerve as a guidance.
+
+64
+00:06:28,791 --> 00:06:35,534
+If your symptoms got worse or you don't resolve after one week of treatment, you should visit the doctor immediately for further investigation.
+
+65
+00:06:35,554 --> 00:06:36,574
+I hope we get well soon.
+
+66
+00:06:37,575 --> 00:06:37,815
+Okay.
+

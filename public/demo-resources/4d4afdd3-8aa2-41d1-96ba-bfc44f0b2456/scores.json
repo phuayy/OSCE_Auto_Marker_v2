@@ -1,0 +1,85 @@
+{
+  "session_id": "4d4afdd3-8aa2-41d1-96ba-bfc44f0b2456",
+  "transcript_file": "storage/output/whisperx/4d4afdd3-8aa2-41d1-96ba-bfc44f0b2456/4d4afdd3-8aa2-41d1-96ba-bfc44f0b2456.srt",
+  "case_study_file": "storage/input/case_studies/4d4afdd3-8aa2-41d1-96ba-bfc44f0b2456-2024-PHR1012-OSCE-Case-9-Tinea.pdf",
+  "rubric_file": "embedded_in_case_study_pdf",
+  "criteria": [
+    {
+      "label": "Elicits that area around the patienAND other symptoms of tinea (there is cracking, redness and peeling of skin between toes) (i.e. when asked to describe symptoms)",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:04:32",
+      "reason": "The student asked 'Can you describe more about your symptoms?' and the patient responded 'Actually there is a flaking and itchiness between the toes.' This indicates the student elicited the symptom description, which aligns with the criterion despite the transcript's garbled label."
+    },
+    {
+      "label": "Elicits that symptoms started three weeks ago after working on the farm wearing boots all day (i.e. when asked when it started)",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:04:53",
+      "reason": "The student asked 'How long do the symptoms persist?' and the patient responded 'From three weeks.' This indicates the student elicited the duration of symptoms, satisfying the criterion."
+    },
+    {
+      "label": "Elicits the patient has not had the symptoms before AND has not tried anything for symptoms yet AND has no signs of infection (no pus, swelling etc.)",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:04:47",
+      "reason": "The student asked 'So have you noticed any unusual symptoms such as swelling of the skin or fever?' and the patient responded 'No.' The student also asked 'Have you experienced this before?' and the patient responded 'No.' This covers no prior occurrence and no signs of infection, satisfying the criterion."
+    },
+    {
+      "label": "Advises patient has tinea OR fungal infection on the skin OR cause of itchiness due to wearing boots whole day (hot and humid)",
+      "is_critical": true,
+      "value": "Yes",
+      "timestamp": "00:06:26",
+      "reason": "The student stated 'So based on the information given, I believe that you are having tinnia probably because you wear the shoes all day because of the work.' This indicates the student advised the patient has tinea/fungal infection due to wearing boots all day (hot and humid), satisfying the critical criterion."
+    },
+    {
+      "label": "Recommends any of ONE the following topical therapy: Terbinafine, OR Miconazole/ clotrimazole/ econazole/ bifonazole/ ketoconazole, OR Combination hydrocortisone/antifungal",
+      "is_critical": true,
+      "value": "Yes",
+      "timestamp": "00:06:35",
+      "reason": "The student stated 'So I would recommend you a product, it's Azo, it's an Azo antifungus. So I would recommend you the product name, Quatrimazole. It's a 1% cream.' Although 'Quatrimazole' is likely a transcription error for 'clotrimazole' (a listed antifungal), the student recommended an antifungal cream, satisfying the criterion."
+    },
+    {
+      "label": "Counsels on how to use chosen product in Point 5: - Terbinafine: Apply a thin layer once daily for 1 week - Miconazole: Apply a thin layer twice daily; continue for 2 weeks after symptoms resolve - Clotrimazole/Econazole: Apply a thin layer 2 or 3 times a day; continue for 2 weeks after symptoms resolve - Bifonazole: Apply a thin layer once daily; continue for 2 weeks after symptoms resolve - Ketoconazole: Apply a thin layer 1 or 2 times daily; continue for 2 weeks after symptoms resolve - Combination hydrocortisone/antifungal (available combinations are clotrimazole + hydrocortisone OR miconazole + hydrocortisone): Apply a thin layer 2 times a day for one week then continue with antifungal only",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:06:45",
+      "reason": "The student stated 'So you apply a thin layer onto the affected areas, which is your toes. and twice daily, so you clean and dry the affected area and the surrounded area as well, then you apply. So please continue for two weeks after the symptoms subside.' This indicates counselling on application (thin layer, twice daily) and duration (continue for two weeks after symptoms subside), which aligns with the counselling requirements for antifungals like clotrimazole, satisfying the criterion."
+    },
+    {
+      "label": "Recommends at least ONE of the following future preventive action: maintain good foot hygiene; keep feet clean and dry especially after working at the farm; avoid sharing towels/footwear; use antifungal (or non-medicated) powder in shoes to reduce moisture; wear open-toed footwear; use cotton (non-synthetic) socks; wear shoes that have breathable material (such as leather); place shoes in the sun to dry if it get damp; discard old shoes that may have a high density of fungal spores",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:07:16",
+      "reason": "The student stated 'So in addition to the medication, I would advise you to avoid wearing the tight shoes for longer time. So frequently change it and also change to not very tight shoes. And also because you need to clean and dry the affected area, I would advise you to use a separate towel to clean or dry the affected area.' This indicates advice on avoiding tight shoes, changing footwear, and using a separate towel for hygiene, which aligns with preventive actions like keeping feet clean and dry and avoiding shared towels, satisfying the criterion."
+    },
+    {
+      "label": "Advises the patient to see their doctor /pharmacist if their symptoms do not improve or worsens",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:07:43",
+      "reason": "The student stated 'If the symptoms persist after the final treatment, please consult a doctor for further investigation.' This indicates advising the patient to see a doctor if symptoms do not improve, satisfying the criterion."
+    }
+  ],
+  "keep_start_stop": {
+    "keep": "Continue asking open-ended questions to elicit symptom history and duration, as this effectively gathered necessary clinical information. Continue providing clear instructions on medication application and duration, as this supports proper patient use. Continue offering preventive advice related to footwear and hygiene, as this addresses recurrence risk.",
+    "start": "Begin the consultation by introducing yourself and confirming the patient's identity early in the interaction, as per OSCE best practices. Explicitly state the likely diagnosis (tinea/fungal infection) using clear terminology to avoid ambiguity. Recommend a specific antifungal agent from the guideline list (e.g., clotrimazole, terbinafine) by its correct generic name to ensure clarity and adherence to guidelines.",
+    "stop": "Avoid using vague or potentially misheard product names like 'Azo' or 'Quatrimazole' that may cause confusion; instead, use standard generic names. Do not delay providing a clear diagnosis and management plan; integrate this information smoothly after history-taking. Refrain from giving excessive detail about side effects unless prompted, as it may consume time better used for preventive advice or follow-up planning."
+  },
+  "overall_summary": "The student demonstrated a generally competent consultation, effectively eliciting key symptoms, duration, and history of the condition. They correctly identified tinea as the likely cause related to footwear and recommended an appropriate antifungal with reasonable counselling on use. Preventive advice and follow-up guidance were also provided appropriately. Minor improvements include clearer product naming, earlier explicit diagnosis, and more structured opening to enhance clarity and guideline adherence.",
+  "rubric_source": "storage/input/case_studies/4d4afdd3-8aa2-41d1-96ba-bfc44f0b2456-2024-PHR1012-OSCE-Case-9-Tinea.pdf#rubric-section",
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "scoring_summary": {
+    "total_criteria": 8,
+    "yes_count": 8,
+    "no_count": 0,
+    "critical_total": 2,
+    "critical_yes": 2,
+    "critical_no": 0,
+    "pass_fail": "Pass",
+    "decision_reason": "Pass: all critical criteria are Yes and at least half of all criteria are Yes."
+  },
+  "path_checks": {
+    "transcript_folder_matches_file_stem": true
+  }
+}

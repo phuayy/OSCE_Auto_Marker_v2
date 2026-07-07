@@ -1,0 +1,85 @@
+{
+  "session_id": "90f6d699-9ad9-4108-b83d-958311a373cb",
+  "transcript_file": "storage/output/whisperx/90f6d699-9ad9-4108-b83d-958311a373cb/90f6d699-9ad9-4108-b83d-958311a373cb.srt",
+  "case_study_file": "storage/input/case_studies/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-2024-PHR1012-OSCE-Case-9-Tinea.pdf",
+  "rubric_file": "embedded_in_case_study_pdf",
+  "criteria": [
+    {
+      "label": "Elicits that area around the patienAND other symptoms of tinea (there is cracking, redness and peeling of skin between toes) (i.e. when asked to describe symptoms)",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:04:32",
+      "reason": "The student asks the patient to describe more about symptoms, and the patient responds with flaking and itchiness between the toes, which the student acknowledges."
+    },
+    {
+      "label": "Elicits that symptoms started three weeks ago after working on the farm wearing boots all day (i.e. when asked when it started)",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:04:53",
+      "reason": "The student asks how long the symptoms persist, and the patient responds 'From three weeks.' The student later links symptoms to wearing shoes all day due to farm work."
+    },
+    {
+      "label": "Elicits the patient has not had the symptoms before AND has not tried anything for symptoms yet AND has no signs of infection (no pus, swelling etc.)",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:04:47",
+      "reason": "The student asks about unusual symptoms like swelling or fever (patient says no), and asks if experienced before (patient says no). No mention of prior treatment, implying none tried."
+    },
+    {
+      "label": "Advises patient has tinea OR fungal infection on the skin OR cause of itchiness due to wearing boots whole day (hot and humid)",
+      "is_critical": true,
+      "value": "Yes",
+      "timestamp": "00:06:25",
+      "reason": "The student states: 'based on the information given, I believe that you are having tinnia probably because you wear the shoes all day because of the work.' This directly advises tinea/fungal infection due to wearing boots all day (hot and humid context)."
+    },
+    {
+      "label": "Recommends any of ONE the following topical therapy: Terbinafine, OR Miconazole/ clotrimazole/ econazole/ bifonazole/ ketoconazole, OR Combination hydrocortisone/antifungal",
+      "is_critical": true,
+      "value": "Yes",
+      "timestamp": "00:06:35",
+      "reason": "The student recommends 'Quatrimazole' (a clear mishearing of clotrimazole due to transcription error), which is in the clotrimazole/econazole group. This counts as recommending one of the allowed topical therapies."
+    },
+    {
+      "label": "Counsels on how to use chosen product in Point 5: - Terbinafine: Apply a thin layer once daily for 1 week - Miconazole: Apply a thin layer twice daily; continue for 2 weeks after symptoms resolve - Clotrimazole/Econazole: Apply a thin layer 2 or 3 times a day; continue for 2 weeks after symptoms resolve - Bifonazole: Apply a thin layer once daily; continue for 2 weeks after symptoms resolve - Ketoconazole: Apply a thin layer 1 or 2 times daily; continue for 2 weeks after symptoms resolve - Combination hydrocortisone/antifungal (available combinations are clotrimazole + hydrocortisone OR miconazole + hydrocortisone): Apply a thin layer 2 times a day for one week then continue with antifungal only",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:06:45",
+      "reason": "The student advises: 'apply a thin layer onto the affected areas... and twice daily... please continue for two weeks after the symptoms subside.' This matches clotrimazole/econazole dosing (thin layer 2-3 times daily, continue 2 weeks after symptoms resolve)."
+    },
+    {
+      "label": "Recommends at least ONE of the following future preventive action: maintain good foot hygiene; keep feet clean and dry especially after working at the farm; avoid sharing towels/footwear; use antifungal (or non-medicated) powder in shoes to reduce moisture; wear open-toed footwear; use cotton (non-synthetic) socks; wear shoes that have breathable material (such as leather); place shoes in the sun to dry if it get damp; discard old shoes that may have a high density of fungal spores",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:07:16",
+      "reason": "The student advises: 'avoid wearing the tight shoes for longer time... frequently change it and also change to not very tight shoes... use a separate towel to clean or dry the affected area.' This covers preventive actions like avoiding tight footwear, changing shoes, and using separate towel for hygiene."
+    },
+    {
+      "label": "Advises the patient to see their doctor /pharmacist if their symptoms do not improve or worsens",
+      "is_critical": false,
+      "value": "Yes",
+      "timestamp": "00:07:43",
+      "reason": "The student states: 'If the symptoms persist after the final treatment, please consult a doctor for further investigation.' This advises seeing a doctor if symptoms do not improve."
+    }
+  ],
+  "keep_start_stop": {
+    "keep": "You demonstrated strong history-taking by systematically exploring symptom onset, duration, and potential causes, including linking symptoms to farm work and boot wear. Your recommendation of an antifungal agent (clotrimazole) was appropriate and supported by clear usage instructions. You also provided relevant preventive advice and safety-netting guidance for follow-up.",
+    "start": "To improve, explicitly confirm the patient's understanding of the diagnosis and treatment plan using teach-back or open-ended questions. Additionally, specify the exact product name and strength (e.g., clotrimazole 1% cream) rather than relying on potentially misheard terms, and clarify the active ingredient to ensure accuracy.",
+    "stop": "Avoid using vague or potentially misheard product names like 'Quatrimazole' or 'Azo antifungus' that may confuse the patient; instead, use clear, standard terminology for medications. Also, refrain from making assumptions about symptoms (e.g., referring to 'itchiness of the toast') that could undermine credibility; always reflect back the patient's exact words."
+  },
+  "overall_summary": "The student conducted a thorough history, correctly identified tinea as likely due to prolonged boot wear, and recommended an appropriate antifungal (clotrimazole) with accurate dosing and duration advice. Preventive measures and follow-up guidance were also provided. Minor issues included transcription-related product name ambiguity and occasional unclear phrasing, but overall performance met OSCE expectations for a community pharmacist managing tinea pedis.",
+  "rubric_source": "storage/input/case_studies/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-2024-PHR1012-OSCE-Case-9-Tinea.pdf#rubric-section",
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "scoring_summary": {
+    "total_criteria": 8,
+    "yes_count": 8,
+    "no_count": 0,
+    "critical_total": 2,
+    "critical_yes": 2,
+    "critical_no": 0,
+    "pass_fail": "Pass",
+    "decision_reason": "Pass: all critical criteria are Yes and at least half of all criteria are Yes."
+  },
+  "path_checks": {
+    "transcript_folder_matches_file_stem": true
+  }
+}

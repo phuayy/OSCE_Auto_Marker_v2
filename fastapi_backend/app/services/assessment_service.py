@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from typing import Any
+
+from app.core.json_utils import extract_json_object
+from app.repositories.assessment_repository import AssessmentRepository
+
+
+class AssessmentService:
+    def __init__(self, repository: AssessmentRepository) -> None:
+        self.repository = repository
+
+    async def record_session_results(self, session: dict[str, Any]) -> None:
+        results: list[dict[str, Any]] = []
+        for output_key, result_type in (
+            ("scores", "content"),
+            ("communicationScores", "communication"),
+            ("audioProfessionalism", "audio_professionalism"),
+        ):
+            output = (session.get("outputs") or {}).get(output_key)
+            payload = await self._load_payload(output)
+            if payload is None:
+                continue
+            results.append(self._result_payload(result_type, output, payload))
+
+        if results:
+            await self.repository.upsert_assessment(session=session, results=results)
+
+    async def _load_payload(self, output: Any) -> dict[str, Any] | None:
+        if not isinstance(output, dict):
+            return None
+        payload = output.get("payload")
+        if isinstance(payload, dict):
+            return payload
+        absolute_path = output.get("absolutePath")
+        if not absolute_path:
+            return None
+        path = Path(str(absolute_path))
+        if not path.exists():
+            return None
+        raw = await asyncio.to_thread(path.read_text, encoding="utf-8")
+        return extract_json_object(raw)
+
+    def _result_payload(self, result_type: str, output: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        summary = payload.get("scoring_summary") if isinstance(payload.get("scoring_summary"), dict) else {}
+        criteria = payload.get("criteria") if isinstance(payload.get("criteria"), list) else []
+        return {
+            "resultType": result_type,
+            "status": "completed",
+            "scoreTotal": self._first_value(summary, "total_score", "score", "achieved_score"),
+            "scoreMax": self._first_value(summary, "max_score", "total_criteria", "maximum_score"),
+            "passFail": self._first_value(summary, "pass_fail", "result", "status"),
+            "outputPath": output.get("absolutePath"),
+            "payload": payload,
+            "criteria": [self._criterion_payload(item) for item in criteria if isinstance(item, dict)],
+        }
+
+    @classmethod
+    def _criterion_payload(cls, item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "criterionKey": cls._first_value(item, "id", "criterion_id", "key", "number"),
+            "label": cls._first_value(item, "criterion", "label", "name", "description"),
+            "score": cls._first_value(item, "score", "points", "value"),
+            "maxScore": cls._first_value(item, "max_score", "max_points"),
+            "passed": cls._first_value(item, "passed", "met", "is_met"),
+            "isCritical": cls._first_value(item, "is_critical", "critical"),
+            "scoreLabel": cls._first_value(item, "score_label", "label_score"),
+            "timestamp": cls._first_value(item, "timestamp", "time"),
+            "evidence": cls._first_value(item, "evidence", "rationale", "reasoning", "feedback"),
+            "payload": json.loads(json.dumps(item, ensure_ascii=False)),
+        }
+
+    @staticmethod
+    def _first_value(payload: dict[str, Any], *keys: str) -> Any:
+        for key in keys:
+            value = payload.get(key)
+            if value is not None and value != "":
+                return value
+        return None

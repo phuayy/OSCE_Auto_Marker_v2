@@ -1,0 +1,244 @@
+1
+00:00:14,180 --> 00:00:15,361
+The station has entered.
+
+2
+00:00:15,401 --> 00:00:17,443
+Please move to the next station.
+
+3
+00:03:39,279 --> 00:03:40,060
+Do you want me?
+
+4
+00:03:49,621 --> 00:03:52,963
+My feet are driving me crazy.
+
+5
+00:03:53,003 --> 00:03:55,305
+Can you give me something to fix it quickly?
+
+6
+00:03:55,726 --> 00:03:57,267
+My name is Naka.
+
+7
+00:03:57,287 --> 00:04:00,549
+Medical number is URN234567 and date of birth is 169734.
+
+8
+00:04:17,058 --> 00:04:24,460
+Before I prescribe you a double medication for you, is it okay for me to question you or your current condition?
+
+9
+00:04:24,680 --> 00:04:26,280
+Can you please describe your symptoms?
+
+10
+00:04:27,020 --> 00:04:30,101
+Actually I have some flaking and itchiness between the toes.
+
+11
+00:04:30,401 --> 00:04:34,422
+Do you have any additional symptoms like swelling or bleeding?
+
+12
+00:04:34,542 --> 00:04:34,822
+No.
+
+13
+00:04:35,062 --> 00:04:36,602
+How long have you had the symptoms?
+
+14
+00:04:36,902 --> 00:04:40,883
+I think after a long hard working day in the form, so I have this.
+
+15
+00:04:41,243 --> 00:04:41,903
+In the form?
+
+16
+00:04:42,243 --> 00:04:42,803
+In the form.
+
+17
+00:04:43,263 --> 00:04:43,943
+I am a farmer.
+
+18
+00:04:47,645 --> 00:04:51,067
+Have you had this, have you experienced this condition prior to your current episode?
+
+19
+00:04:51,407 --> 00:04:51,607
+No.
+
+20
+00:04:51,627 --> 00:04:54,909
+Do you have any idea on what may have caused this?
+
+21
+00:04:55,489 --> 00:04:56,470
+Not very sure.
+
+22
+00:04:56,510 --> 00:04:57,591
+Not very sure, alright.
+
+23
+00:04:57,671 --> 00:04:59,251
+Have you tried anything to relieve your symptoms?
+
+24
+00:04:59,572 --> 00:04:59,752
+No.
+
+25
+00:05:00,192 --> 00:05:01,753
+No, do you have any allergies?
+
+26
+00:05:02,273 --> 00:05:03,554
+Myobiotic to peanuts.
+
+27
+00:05:03,954 --> 00:05:04,794
+Peanuts, alright.
+
+28
+00:05:05,635 --> 00:05:09,157
+Are you currently, do you have any medical conditions that you know of?
+
+29
+00:05:09,217 --> 00:05:09,337
+No.
+
+30
+00:05:09,917 --> 00:05:13,724
+Are you currently taking any medical or counter-op prescription medications?
+
+31
+00:05:14,505 --> 00:05:16,368
+Are you on any supplements or vitamins?
+
+32
+00:05:17,009 --> 00:05:17,610
+No, all right.
+
+33
+00:05:18,051 --> 00:05:19,974
+If you don't mind, can I please check my resources?
+
+34
+00:05:44,453 --> 00:05:47,969
+Do you perhaps have a preferred formulation?
+
+35
+00:05:49,247 --> 00:05:51,849
+If it is a cream, it will be better.
+
+36
+00:05:52,249 --> 00:05:54,790
+Do you want a faster relief or like...
+
+37
+00:05:55,550 --> 00:05:57,291
+I think it is better to be faster.
+
+38
+00:05:57,351 --> 00:05:58,352
+Faster relief, alright.
+
+39
+00:05:58,692 --> 00:06:08,416
+I believe that you're currently experiencing tinnia, especially focus on your feet, tinnia pedis, which is most probably caused by your work.
+
+40
+00:06:08,516 --> 00:06:14,239
+I think you mentioned this now, but no worries, I'll provide you with a medication called the lima fine.
+
+41
+00:06:15,299 --> 00:06:25,905
+1% cream, you are required to apply to the affected area twice daily and please ensure your affected area is clean and dry before application.
+
+42
+00:06:27,106 --> 00:06:33,690
+You may use it up to 1 week, the medication up is quite strong so your symptoms may be different in 1 week.
+
+43
+00:06:34,890 --> 00:06:41,052
+However, this medicine may cause some slight side effects like burning, stinging and irritation, but no worries.
+
+44
+00:06:41,533 --> 00:06:44,054
+The side effects are tolerable and it's common.
+
+45
+00:06:44,714 --> 00:06:52,256
+In addition to that, I advise you to take some recommendation, which is to try to wear more breathable material shoes.
+
+46
+00:06:53,457 --> 00:07:00,039
+Also, make sure your feet are constantly clean and try to dry your feet with a different towel.
+
+47
+00:07:00,059 --> 00:07:02,460
+Do not use the same towel as your body towel.
+
+48
+00:07:03,061 --> 00:07:10,723
+Also, if there are family members that have these symptoms as well, you need to treat them as necessary.
+
+49
+00:07:11,565 --> 00:07:13,286
+Do you have any questions for me?
+
+50
+00:07:13,927 --> 00:07:14,948
+No questions.
+
+51
+00:07:15,188 --> 00:07:15,909
+All right.
+
+52
+00:07:16,309 --> 00:07:18,651
+If you don't mind, can you please repeat my instructions?
+
+53
+00:07:19,291 --> 00:07:21,233
+I understood all the information given by you.
+
+54
+00:07:21,313 --> 00:07:21,793
+All right.
+
+55
+00:07:22,294 --> 00:07:22,754
+Thank you.
+
+56
+00:07:24,055 --> 00:07:28,839
+I'll provide you with an addition you may refer it back at home regarding a condition of medication.
+
+57
+00:07:29,379 --> 00:07:35,044
+If it does not clarify your concerns and doubts, please feel free to contact the pharmacy and assist you and make possible.
+
+58
+00:07:35,644 --> 00:07:39,788
+However, if your symptoms persist or your condition worsens in one make time,
+
+59
+00:07:40,569 --> 00:07:48,563
+One big time and you may immediately seek general prediction to get your condition moderately checked by a doctor.
+
+60
+00:07:50,226 --> 00:07:52,109
+I hope you get by this time and thank you.
+
+61
+00:08:40,239 --> 00:08:41,663
+Yours please, the shirt has banded.
+

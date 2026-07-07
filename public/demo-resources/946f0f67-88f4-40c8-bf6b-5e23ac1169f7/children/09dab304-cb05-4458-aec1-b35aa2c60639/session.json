@@ -1,0 +1,581 @@
+{
+  "id": "09dab304-cb05-4458-aec1-b35aa2c60639",
+  "name": "Silver Canvas 934 - Student 4",
+  "createdAt": "2026-05-16T08:18:30.314Z",
+  "status": "completed",
+  "pipeline": {
+    "startedAt": "2026-05-16T08:18:30.318Z",
+    "endedAt": "2026-05-16T08:21:13.894Z",
+    "runtimeSeconds": 163.58,
+    "mode": "cpu"
+  },
+  "parentSessionId": "946f0f67-88f4-40c8-bf6b-5e23ac1169f7",
+  "clipSource": {
+    "clipId": "1665b388-aa8e-4a74-a0d6-525ae841ded2",
+    "label": "Student 4"
+  },
+  "files": {
+    "video": {
+      "originalName": "946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-4.mp4",
+      "fileName": "946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-4.mp4",
+      "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/clips/946f0f67-88f4-40c8-bf6b-5e23ac1169f7/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-4.mp4",
+      "sizeBytes": 32677499,
+      "mimeType": "video/mp4",
+      "url": "/media/clips/946f0f67-88f4-40c8-bf6b-5e23ac1169f7/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-4.mp4"
+    },
+    "caseStudy": {
+      "originalName": "2024 PHR1012 OSCE Case 9 (Tinea).pdf",
+      "fileName": "946f0f67-88f4-40c8-bf6b-5e23ac1169f7-2024-PHR1012-OSCE-Case-9-Tinea.pdf",
+      "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/input/case_studies/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-2024-PHR1012-OSCE-Case-9-Tinea.pdf",
+      "sizeBytes": 349478,
+      "mimeType": "application/pdf"
+    }
+  },
+  "outputs": {
+    "audio": {
+      "fileName": "09dab304-cb05-4458-aec1-b35aa2c60639.mp3",
+      "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/audio/09dab304-cb05-4458-aec1-b35aa2c60639.mp3",
+      "url": "/media/audio/09dab304-cb05-4458-aec1-b35aa2c60639.mp3",
+      "sizeBytes": 7706083
+    },
+    "whisperxJson": {
+      "fileName": "09dab304-cb05-4458-aec1-b35aa2c60639.json",
+      "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/whisperx/09dab304-cb05-4458-aec1-b35aa2c60639/09dab304-cb05-4458-aec1-b35aa2c60639.json",
+      "sizeBytes": 70927
+    },
+    "transcript": {
+      "fileName": "09dab304-cb05-4458-aec1-b35aa2c60639.json",
+      "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/transcripts/09dab304-cb05-4458-aec1-b35aa2c60639.json",
+      "url": "/media/transcripts/09dab304-cb05-4458-aec1-b35aa2c60639.json",
+      "sizeBytes": 13166
+    },
+    "subtitle": {
+      "fileName": "09dab304-cb05-4458-aec1-b35aa2c60639.srt",
+      "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/whisperx/09dab304-cb05-4458-aec1-b35aa2c60639/09dab304-cb05-4458-aec1-b35aa2c60639.srt",
+      "url": "/media/whisperx/09dab304-cb05-4458-aec1-b35aa2c60639/09dab304-cb05-4458-aec1-b35aa2c60639.srt",
+      "sizeBytes": 4478
+    },
+    "subtitleTrack": {
+      "fileName": "09dab304-cb05-4458-aec1-b35aa2c60639.vtt",
+      "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/whisperx/09dab304-cb05-4458-aec1-b35aa2c60639/09dab304-cb05-4458-aec1-b35aa2c60639.vtt",
+      "url": "/media/whisperx/09dab304-cb05-4458-aec1-b35aa2c60639/09dab304-cb05-4458-aec1-b35aa2c60639.vtt",
+      "sizeBytes": 3973
+    },
+    "audioProfessionalism": {
+      "fileName": "09dab304-cb05-4458-aec1-b35aa2c60639.json",
+      "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/audio_professionalism/09dab304-cb05-4458-aec1-b35aa2c60639.json",
+      "url": "/media/audio-professionalism/09dab304-cb05-4458-aec1-b35aa2c60639.json",
+      "sizeBytes": 5582,
+      "payload": {
+        "schema": "audio-professionalism-v1",
+        "session_id": "09dab304-cb05-4458-aec1-b35aa2c60639",
+        "audio_file": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/audio/09dab304-cb05-4458-aec1-b35aa2c60639.mp3",
+        "transcript_file": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/transcripts/09dab304-cb05-4458-aec1-b35aa2c60639.json",
+        "generated_at": "2026-05-16T08:20:15.127366Z",
+        "student_speaker": {
+          "id": "SPEAKER_UNKNOWN",
+          "selection": "max_total_duration",
+          "confidence": 1,
+          "gap_seconds": 156.448
+        },
+        "metrics": {
+          "student_talk_time_sec": 157.228,
+          "total_talk_time_sec": 156.448,
+          "student_talk_ratio": 1.005,
+          "patient_talk_time_sec": 0,
+          "patient_talk_ratio": 0,
+          "words_per_minute": 174.78,
+          "filler_words_per_minute": 0,
+          "filler_word_count": 0,
+          "long_student_pauses_over_2s": 4,
+          "mean_response_gap_sec": 0,
+          "long_response_gaps_over_2s": 0,
+          "interruptions_count": 0,
+          "overlap_time_sec": 0,
+          "patient_turn_count": 0,
+          "avg_patient_turn_sec": 0
+        },
+        "audio_features": {
+          "feature_set": "eGeMAPSv02",
+          "pitch_mean_semitone": 27.94635581970215,
+          "pitch_std_semitone": 0.19287025928497314,
+          "pitch_range_semitone": 10.546031951904297,
+          "loudness_mean": 0.3366464078426361,
+          "loudness_std": 0.4008607268333435,
+          "loudness_range": 0.20074036717414856,
+          "jitter_local": null,
+          "shimmer_local_db": null,
+          "hnr_db": null,
+          "feature_keys_available": [
+            "F0semitoneFrom27.5Hz_sma3nz_amean",
+            "F0semitoneFrom27.5Hz_sma3nz_meanFallingSlope",
+            "F0semitoneFrom27.5Hz_sma3nz_meanRisingSlope",
+            "F0semitoneFrom27.5Hz_sma3nz_pctlrange0-2",
+            "F0semitoneFrom27.5Hz_sma3nz_percentile20.0",
+            "F0semitoneFrom27.5Hz_sma3nz_percentile50.0",
+            "F0semitoneFrom27.5Hz_sma3nz_percentile80.0",
+            "F0semitoneFrom27.5Hz_sma3nz_stddevFallingSlope",
+            "F0semitoneFrom27.5Hz_sma3nz_stddevNorm",
+            "F0semitoneFrom27.5Hz_sma3nz_stddevRisingSlope",
+            "F1amplitudeLogRelF0_sma3nz_amean",
+            "F1amplitudeLogRelF0_sma3nz_stddevNorm",
+            "F1bandwidth_sma3nz_amean",
+            "F1bandwidth_sma3nz_stddevNorm",
+            "F1frequency_sma3nz_amean",
+            "F1frequency_sma3nz_stddevNorm",
+            "F2amplitudeLogRelF0_sma3nz_amean",
+            "F2amplitudeLogRelF0_sma3nz_stddevNorm",
+            "F2bandwidth_sma3nz_amean",
+            "F2bandwidth_sma3nz_stddevNorm",
+            "F2frequency_sma3nz_amean",
+            "F2frequency_sma3nz_stddevNorm",
+            "F3amplitudeLogRelF0_sma3nz_amean",
+            "F3amplitudeLogRelF0_sma3nz_stddevNorm",
+            "F3bandwidth_sma3nz_amean",
+            "F3bandwidth_sma3nz_stddevNorm",
+            "F3frequency_sma3nz_amean",
+            "F3frequency_sma3nz_stddevNorm",
+            "HNRdBACF_sma3nz_amean",
+            "HNRdBACF_sma3nz_stddevNorm",
+            "MeanUnvoicedSegmentLength",
+            "MeanVoicedSegmentLengthSec",
+            "StddevUnvoicedSegmentLength",
+            "StddevVoicedSegmentLengthSec",
+            "VoicedSegmentsPerSec",
+            "alphaRatioUV_sma3nz_amean",
+            "alphaRatioV_sma3nz_amean",
+            "alphaRatioV_sma3nz_stddevNorm",
+            "equivalentSoundLevel_dBp",
+            "hammarbergIndexUV_sma3nz_amean",
+            "hammarbergIndexV_sma3nz_amean",
+            "hammarbergIndexV_sma3nz_stddevNorm",
+            "jitterLocal_sma3nz_amean",
+            "jitterLocal_sma3nz_stddevNorm",
+            "logRelF0-H1-A3_sma3nz_amean",
+            "logRelF0-H1-A3_sma3nz_stddevNorm",
+            "logRelF0-H1-H2_sma3nz_amean",
+            "logRelF0-H1-H2_sma3nz_stddevNorm",
+            "loudnessPeaksPerSec",
+            "loudness_sma3_amean",
+            "loudness_sma3_meanFallingSlope",
+            "loudness_sma3_meanRisingSlope",
+            "loudness_sma3_pctlrange0-2",
+            "loudness_sma3_percentile20.0",
+            "loudness_sma3_percentile50.0",
+            "loudness_sma3_percentile80.0",
+            "loudness_sma3_stddevFallingSlope",
+            "loudness_sma3_stddevNorm",
+            "loudness_sma3_stddevRisingSlope",
+            "mfcc1V_sma3nz_amean",
+            "mfcc1V_sma3nz_stddevNorm",
+            "mfcc1_sma3_amean",
+            "mfcc1_sma3_stddevNorm",
+            "mfcc2V_sma3nz_amean",
+            "mfcc2V_sma3nz_stddevNorm",
+            "mfcc2_sma3_amean",
+            "mfcc2_sma3_stddevNorm",
+            "mfcc3V_sma3nz_amean",
+            "mfcc3V_sma3nz_stddevNorm",
+            "mfcc3_sma3_amean",
+            "mfcc3_sma3_stddevNorm",
+            "mfcc4V_sma3nz_amean",
+            "mfcc4V_sma3nz_stddevNorm",
+            "mfcc4_sma3_amean",
+            "mfcc4_sma3_stddevNorm",
+            "shimmerLocaldB_sma3nz_amean",
+            "shimmerLocaldB_sma3nz_stddevNorm",
+            "slopeUV0-500_sma3nz_amean",
+            "slopeUV500-1500_sma3nz_amean",
+            "slopeV0-500_sma3nz_amean",
+            "slopeV0-500_sma3nz_stddevNorm",
+            "slopeV500-1500_sma3nz_amean",
+            "slopeV500-1500_sma3nz_stddevNorm",
+            "spectralFluxUV_sma3nz_amean",
+            "spectralFluxV_sma3nz_amean",
+            "spectralFluxV_sma3nz_stddevNorm",
+            "spectralFlux_sma3_amean",
+            "spectralFlux_sma3_stddevNorm"
+          ],
+          "opensmile_version": "2.6.0"
+        },
+        "evidence_timestamps": [
+          {
+            "type": "long_pause",
+            "start": 105.942,
+            "end": 109.626,
+            "gap_seconds": 3.684
+          },
+          {
+            "type": "long_pause",
+            "start": 114.762,
+            "end": 121.712,
+            "gap_seconds": 6.95
+          },
+          {
+            "type": "long_pause",
+            "start": 130.859,
+            "end": 141.252,
+            "gap_seconds": 10.393
+          },
+          {
+            "type": "long_pause",
+            "start": 300.137,
+            "end": 331.651,
+            "gap_seconds": 31.514
+          }
+        ],
+        "not_observable_from_audio": [
+          "Eye contact",
+          "Head nods",
+          "Posture",
+          "Body language",
+          "Privacy",
+          "Physical distance",
+          "Absence of barriers",
+          "Visual aids"
+        ],
+        "warnings": []
+      }
+    },
+    "communicationScores": {
+      "fileName": "09dab304-cb05-4458-aec1-b35aa2c60639.json",
+      "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/communication_scores/09dab304-cb05-4458-aec1-b35aa2c60639.json",
+      "url": "/media/communication-scores/09dab304-cb05-4458-aec1-b35aa2c60639.json",
+      "sizeBytes": 13821,
+      "payload": {
+        "schema": "communication-scoring-v2",
+        "session_id": "09dab304-cb05-4458-aec1-b35aa2c60639",
+        "rubric_title": "PHR1012 COMMUNICATION RUBRICS",
+        "rubric_schema": "communication-rubric-v1",
+        "scoring_scale": {
+          "All": 3,
+          "Most": 2,
+          "Some": 1,
+          "None": 0
+        },
+        "criteria": [
+          {
+            "id": 1,
+            "label": "Student displays behaviours appropriate to a health professional. Verbal and nonverbal strategies are used to build rapport, convey attention and empathy, and reinforce/enhance.",
+            "section": "Communicative effectiveness",
+            "indicators_total": [
+              "Greets audience and establishes rapport",
+              "Describes purpose or reason for counseling session in terms of benefit to audience",
+              "Demonstrates appropriate nonverbal attending and immediacy behaviors (direct eye contact, head nods, posture, body language, privacy, distance, absence of barriers, etc.) to draw and convey attention and empathy",
+              "Demonstrates respect and interest, willingness to help",
+              "Attends to patient's physical and/or mental comfort (When applicable)",
+              "Uses written information or visual methods (e.g. leaflet, PPT, etc.) to reinforce and supplement (When applicable)"
+            ],
+            "indicators_observed": [
+              "Greets audience and establishes rapport",
+              "Demonstrates respect and interest, willingness to help"
+            ],
+            "indicators_missing": [
+              "Describes purpose or reason for counseling session in terms of benefit to audience",
+              "Attends to patient's physical and/or mental comfort (When applicable)",
+              "Uses written information or visual methods (e.g. leaflet, PPT, etc.) to reinforce and supplement (When applicable)"
+            ],
+            "indicators_not_observable": [
+              "Demonstrates appropriate nonverbal attending and immediacy behaviors (direct eye contact, head nods, posture, body language, privacy, distance, absence of barriers, etc.) to draw and convey attention and empathy"
+            ],
+            "score_label": "Some",
+            "points": 1,
+            "evidence": "The student greets the patient by name and establishes rapport through polite interaction, and demonstrates respect and willingness to help by answering questions and providing recommendations. However, the purpose of the session is not explicitly described in terms of benefit to the patient, and there is no mention of addressing physical or mental comfort or using visual aids.",
+            "timestamp": "00:02:07"
+          },
+          {
+            "id": 2,
+            "label": "Communication is easily understood, concise, fluent and well-paced.",
+            "section": "Communicative effectiveness",
+            "indicators_total": [
+              "Uses concise, easily understood language",
+              "Uses appropriate pace so that audience can understand and follow what is being communicated",
+              "Uses appropriate tone of voice to put the audience at ease",
+              "Speaks fluently. Occasionally uses verbal fillers (uh, um), but does not distract audience from meanings"
+            ],
+            "indicators_observed": [
+              "Uses concise, easily understood language",
+              "Uses appropriate pace so that audience can understand and follow what is being communicated",
+              "Uses appropriate tone of voice to put the audience at ease"
+            ],
+            "indicators_missing": [
+              "Speaks fluently. Occasionally uses verbal fillers (uh, um), but does not distract audience from meanings"
+            ],
+            "indicators_not_observable": [],
+            "score_label": "Most",
+            "points": 2,
+            "evidence": "The student uses clear, easily understood language and maintains an appropriate pace that allows the patient to follow along. The tone of voice is calm and puts the patient at ease. However, there are multiple long pauses (over 2 seconds) that disrupt fluency, although no verbal fillers like 'uh' or 'um' are observed.",
+            "timestamp": "00:03:29"
+          },
+          {
+            "id": 3,
+            "label": "Communication suits audience's level of understanding and needs.",
+            "section": "Communicative effectiveness",
+            "indicators_total": [
+              "Uses terminology audience will likely understand",
+              "Modifies communication to meet audience's special needs (e.g. low health literacy, ESL issues, cultural differences, etc.) (when applicable, may not for every scenario)",
+              "Avoid colloquialism"
+            ],
+            "indicators_observed": [
+              "Uses terminology audience will likely understand",
+              "Avoid colloquialism"
+            ],
+            "indicators_missing": [
+              "Modifies communication to meet audience's special needs (e.g. low health literacy, ESL issues, cultural differences, etc.) (when applicable, may not for every scenario)"
+            ],
+            "indicators_not_observable": [],
+            "score_label": "Most",
+            "points": 2,
+            "evidence": "The student uses plain language such as 'itchiness between the toes' and 'apply cream two times a day', avoiding jargon and colloquialisms, making it easy to understand. However, there is no clear evidence of adapting communication for special needs like low health literacy or cultural differences, such as using teach-back or simplifying further based on patient cues.",
+            "timestamp": "00:03:38"
+          },
+          {
+            "id": 4,
+            "label": "Communication is logical and easy to follow.",
+            "section": "Communicative effectiveness",
+            "indicators_total": [
+              "Organizes presentation/ interview/ patient education in a logical sequence",
+              "Progresses from one section to another using signposting; includes rationale for next section"
+            ],
+            "indicators_observed": [
+              "Organizes presentation/ interview/ patient education in a logical sequence"
+            ],
+            "indicators_missing": [
+              "Progresses from one section to another using signposting; includes rationale for next section"
+            ],
+            "indicators_not_observable": [],
+            "score_label": "Some",
+            "points": 1,
+            "evidence": "The student follows a logical sequence: greeting, history-taking, diagnosis, treatment recommendation, side effects, preventive advice, and closing. However, there is minimal use of signposting (e.g., 'Now I will explain...' or 'Next, let’s talk about...') to explicitly guide the patient between sections or explain the rationale for moving forward.",
+            "timestamp": "00:02:21"
+          },
+          {
+            "id": 5,
+            "label": "Student elicits information effectively to identify the problem through questioning, actively listening and periodically verifying own understanding.",
+            "section": "Application of interpersonal communication to address problems",
+            "indicators_total": [
+              "Identifies the audience's problems or the issues that audience wishes to address with appropriate opening question",
+              "Listens attentively, allowing audience to complete statements without interruption, and leaving space for audience to think before answering, or go on after pausing",
+              "Uses open and closed questioning technique to elicit information and identify problems",
+              "Periodically summarises to verify own understanding of what audience has said; invites audience to correct interpretation or provide further information.",
+              "Confirms list and screens for further problems"
+            ],
+            "indicators_observed": [
+              "Identifies the audience's problems or the issues that audience wishes to address with appropriate opening question",
+              "Listens attentively, allowing audience to complete statements without interruption, and leaving space for audience to think before answering, or go on after pausing",
+              "Uses open and closed questioning technique to elicit information and identify problems"
+            ],
+            "indicators_missing": [
+              "Periodically summarises to verify own understanding of what audience has said; invites audience to correct interpretation or provide further information.",
+              "Confirms list and screens for further problems"
+            ],
+            "indicators_not_observable": [],
+            "score_label": "Most",
+            "points": 2,
+            "evidence": "The student identifies the patient's concern with an appropriate opening question and uses a mix of open and closed questions to gather history. They listen attentively without interrupting. However, there is no periodic summarising to verify understanding, nor do they confirm the list of symptoms or screen for additional problems beyond what was reported.",
+            "timestamp": "00:02:25"
+          },
+          {
+            "id": 6,
+            "label": "Student provides accurate, complete and concise instructions, and engages audience in problem solving.",
+            "section": "Application of interpersonal communication to address problems",
+            "indicators_total": [
+              "Draws accurate and logical conclusions based on assessment of the person's history and information sourced from referenced material",
+              "Provides all relevant instructions/recommendations, based on assessment of audience understanding",
+              "Provides clear, concise and specific instructions that audience can follow and understand",
+              "Avoids overloading with information",
+              "Gives audience opportunity and time to talk to engage audience in collaborative planning and problem-solving",
+              "Helps identify resources to assist in problem resolution"
+            ],
+            "indicators_observed": [
+              "Draws accurate and logical conclusions based on assessment of the person's history and information sourced from referenced material",
+              "Provides all relevant instructions/recommendations, based on assessment of audience understanding",
+              "Provides clear, concise and specific instructions that audience can follow and understand",
+              "Avoids overloading with information"
+            ],
+            "indicators_missing": [
+              "Gives audience opportunity and time to talk to engage audience in collaborative planning and problem-solving",
+              "Helps identify resources to assist in problem resolution"
+            ],
+            "indicators_not_observable": [],
+            "score_label": "Most",
+            "points": 2,
+            "evidence": "The student accurately concludes tinea based on symptoms and provides clear, concise instructions on using Contrerasol 1% cream, frequency, duration, and side effects, without overloading information. They also add preventive advice like breathable footwear. However, there is limited opportunity for the patient to collaborate in planning—such as discussing preferences or barriers—and no explicit help in identifying resources (e.g., where to get the cream, cost, or follow-up clinics).",
+            "timestamp": "00:03:34"
+          },
+          {
+            "id": 7,
+            "label": "Student confirms effectiveness of communication and addresses misunderstandings or gaps in understanding.",
+            "section": "Application of interpersonal communication to address problems",
+            "indicators_total": [
+              "Asks audience to teach back new information provided and suggested changes to be initiated",
+              "Addresses misunderstandings or gaps in understandings",
+              "Establishes plan for follow-up or reviews next step to be taken",
+              "Invites audience to call if questions or concerns arise, thanks audience, concludes encounter"
+            ],
+            "indicators_observed": [
+              "Establishes plan for follow-up or reviews next step to be taken",
+              "Invites audience to call if questions or concerns arise, thanks audience, concludes encounter"
+            ],
+            "indicators_missing": [
+              "Asks audience to teach back new information provided and suggested changes to be initiated",
+              "Addresses misunderstandings or gaps in understandings"
+            ],
+            "indicators_not_observable": [],
+            "score_label": "Some",
+            "points": 1,
+            "evidence": "The student establishes a follow-up plan by advising to return if no improvement in one week and invites the patient to contact them with concerns, concluding the encounter politely. However, they do not use teach-back to confirm understanding, nor do they explicitly check for or address any misunderstandings or gaps in the patient's comprehension of the advice given.",
+            "timestamp": "00:04:40"
+          }
+        ],
+        "overall_summary": "The student demonstrates strong foundational communication skills, including respectful rapport-building, clear and understandable language, logical structure in delivering information, and effective history-taking through appropriate questioning. They provide accurate and concise medical advice with relevant preventive guidance. However, limitations in active verification of understanding (e.g., lack of teach-back or summarising), minimal patient engagement in collaborative planning, and missed opportunities to confirm comprehension or address gaps reduce the overall effectiveness. Additionally, while verbal fluency is good, prolonged pauses disrupt the flow of communication. Nonverbal behaviours could not be assessed due to lack of visual data.",
+        "scoring_summary": {
+          "total_criteria": 7,
+          "total_score": 11,
+          "max_score": 21,
+          "average_score": 1.57,
+          "pass_threshold": 11,
+          "pass_fail": "Pass",
+          "decision_reason": "Pass: total 11/21 meets pass threshold of 11.",
+          "label_counts": {
+            "All": 0,
+            "Most": 4,
+            "Some": 3,
+            "None": 0
+          }
+        },
+        "transcript_file": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/transcripts/09dab304-cb05-4458-aec1-b35aa2c60639.json",
+        "audio_professionalism_file": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/audio_professionalism/09dab304-cb05-4458-aec1-b35aa2c60639.json",
+        "rubric_source": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/auth/communication_rubric.json",
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "generated_at": "2026-05-16T08:21:07.214440Z"
+      }
+    },
+    "videoClips": null,
+    "scores": {
+      "fileName": "09dab304-cb05-4458-aec1-b35aa2c60639.json",
+      "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/scores/09dab304-cb05-4458-aec1-b35aa2c60639.json",
+      "url": "/media/scores/09dab304-cb05-4458-aec1-b35aa2c60639.json",
+      "sizeBytes": 6212,
+      "payload": {
+        "session_id": "09dab304-cb05-4458-aec1-b35aa2c60639",
+        "transcript_file": "storage/output/whisperx/09dab304-cb05-4458-aec1-b35aa2c60639/09dab304-cb05-4458-aec1-b35aa2c60639.srt",
+        "case_study_file": "storage/input/case_studies/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-2024-PHR1012-OSCE-Case-9-Tinea.pdf",
+        "rubric_file": "embedded_in_case_study_pdf",
+        "criteria": [
+          {
+            "label": "Elicits that area around the patienAND other symptoms of tinea (there is cracking, redness and peeling of skin between toes) (i.e. when asked to describe symptoms)",
+            "is_critical": false,
+            "value": "No",
+            "timestamp": "00:00:00",
+            "reason": "No explicit evidence provided."
+          },
+          {
+            "label": "Elicits that symptoms started three weeks ago after working on the farm wearing boots all day (i.e. when asked when it started)",
+            "is_critical": false,
+            "value": "No",
+            "timestamp": "00:00:00",
+            "reason": "No explicit evidence provided."
+          },
+          {
+            "label": "Elicits the patient has not had the symptoms before AND has not tried anything for symptoms yet AND has no signs of infection (no pus, swelling etc.)",
+            "is_critical": false,
+            "value": "No",
+            "timestamp": "00:00:00",
+            "reason": "No explicit evidence provided."
+          },
+          {
+            "label": "Advises patient has tinea OR fungal infection on the skin OR cause of itchiness due to wearing boots whole day (hot and humid)",
+            "is_critical": true,
+            "value": "No",
+            "timestamp": "00:00:00",
+            "reason": "No explicit evidence provided."
+          },
+          {
+            "label": "Recommends any of ONE the following topical therapy: Terbinafine, OR Miconazole/ clotrimazole/ econazole/ bifonazole/ ketoconazole, OR Combination hydrocortisone/antifungal",
+            "is_critical": true,
+            "value": "No",
+            "timestamp": "00:00:00",
+            "reason": "No explicit evidence provided."
+          },
+          {
+            "label": "Counsels on how to use chosen product in Point 5: - Terbinafine: Apply a thin layer once daily for 1 week - Miconazole: Apply a thin layer twice daily; continue for 2 weeks after symptoms resolve - Clotrimazole/Econazole: Apply a thin layer 2 or 3 times a day; continue for 2 weeks after symptoms resolve - Bifonazole: Apply a thin layer once daily; continue for 2 weeks after symptoms resolve - Ketoconazole: Apply a thin layer 1 or 2 times daily; continue for 2 weeks after symptoms resolve - Combination hydrocortisone/antifungal (available combinations are clotrimazole + hydrocortisone OR miconazole + hydrocortisone): Apply a thin layer 2 times a day for one week then continue with antifungal only",
+            "is_critical": false,
+            "value": "No",
+            "timestamp": "00:00:00",
+            "reason": "No explicit evidence provided."
+          },
+          {
+            "label": "Recommends at least ONE of the following future preventive action: maintain good foot hygiene; keep feet clean and dry especially after working at the farm; avoid sharing towels/footwear; use antifungal (or non-medicated) powder in shoes to reduce moisture; wear open-toed footwear; use cotton (non-synthetic) socks; wear shoes that have breathable material (such as leather); place shoes in the sun to dry if it get damp; discard old shoes that may have a high density of fungal spores",
+            "is_critical": false,
+            "value": "No",
+            "timestamp": "00:00:00",
+            "reason": "No explicit evidence provided."
+          },
+          {
+            "label": "Advises the patient to see their doctor /pharmacist if their symptoms do not improve or worsens",
+            "is_critical": false,
+            "value": "No",
+            "timestamp": "00:00:00",
+            "reason": "No explicit evidence provided."
+          }
+        ],
+        "keep_start_stop": {
+          "keep": "Insufficient detail provided to generate this feedback item.",
+          "start": "Insufficient detail provided to generate this feedback item.",
+          "stop": "Insufficient detail provided to generate this feedback item."
+        },
+        "overall_summary": "Summary unavailable.",
+        "warnings": [
+          "Field 'criteria' must be a non-empty array.",
+          "Criteria count must match extracted rubric criteria exactly. Expected 8, got 0.",
+          "criteria[1] value must be exactly Yes or No.",
+          "criteria[1] missing reason.",
+          "criteria[1] missing or invalid timestamp (expected HH:MM:SS).",
+          "criteria[2] value must be exactly Yes or No.",
+          "criteria[2] missing reason.",
+          "criteria[2] missing or invalid timestamp (expected HH:MM:SS).",
+          "criteria[3] value must be exactly Yes or No.",
+          "criteria[3] missing reason.",
+          "criteria[3] missing or invalid timestamp (expected HH:MM:SS).",
+          "criteria[4] value must be exactly Yes or No.",
+          "criteria[4] missing reason.",
+          "criteria[4] missing or invalid timestamp (expected HH:MM:SS).",
+          "criteria[5] value must be exactly Yes or No.",
+          "criteria[5] missing reason.",
+          "criteria[5] missing or invalid timestamp (expected HH:MM:SS).",
+          "criteria[6] value must be exactly Yes or No.",
+          "criteria[6] missing reason.",
+          "criteria[6] missing or invalid timestamp (expected HH:MM:SS).",
+          "criteria[7] value must be exactly Yes or No.",
+          "criteria[7] missing reason.",
+          "criteria[7] missing or invalid timestamp (expected HH:MM:SS).",
+          "criteria[8] value must be exactly Yes or No.",
+          "criteria[8] missing reason.",
+          "criteria[8] missing or invalid timestamp (expected HH:MM:SS).",
+          "Field 'keep_start_stop' must be an object.",
+          "keep_start_stop.keep must contain at least one sentence.",
+          "keep_start_stop.start must contain at least one sentence.",
+          "keep_start_stop.stop must contain at least one sentence.",
+          "Field 'overall_summary' must be a non-empty string."
+        ],
+        "rubric_source": "storage/input/case_studies/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-2024-PHR1012-OSCE-Case-9-Tinea.pdf#rubric-section",
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "scoring_summary": {
+          "total_criteria": 8,
+          "yes_count": 0,
+          "no_count": 8,
+          "critical_total": 2,
+          "critical_yes": 0,
+          "critical_no": 2,
+          "pass_fail": "Fail",
+          "decision_reason": "Fail: at least one critical criterion is marked No."
+        },
+        "path_checks": {
+          "transcript_folder_matches_file_stem": true
+        }
+      }
+    }
+  },
+  "error": null
+}

@@ -1,0 +1,603 @@
+{
+  "schema": "whisperx-segments-v1",
+  "source": "whisperx-local",
+  "generatedAt": "2026-05-16T11:24:07.096Z",
+  "language": "en",
+  "segmentCount": 66,
+  "segments": [
+    {
+      "id": 1,
+      "speaker": "SPEAKER_01",
+      "start": 1.094,
+      "end": 2.541,
+      "startLabel": "0:01",
+      "endLabel": "0:02",
+      "text": "Special, special."
+    },
+    {
+      "id": 2,
+      "speaker": "SPEAKER_00",
+      "start": 102.356,
+      "end": 102.537,
+      "startLabel": "1:42",
+      "endLabel": "1:42",
+      "text": "you"
+    },
+    {
+      "id": 3,
+      "speaker": "SPEAKER_UNKNOWN",
+      "start": 151.395,
+      "end": 151.455,
+      "startLabel": "2:31",
+      "endLabel": "2:31",
+      "text": "you"
+    },
+    {
+      "id": 4,
+      "speaker": "SPEAKER_UNKNOWN",
+      "start": 186.02,
+      "end": 186.301,
+      "startLabel": "3:06",
+      "endLabel": "3:06",
+      "text": "Hi."
+    },
+    {
+      "id": 5,
+      "speaker": "SPEAKER_01",
+      "start": 186.321,
+      "end": 192.148,
+      "startLabel": "3:06",
+      "endLabel": "3:12",
+      "text": "Hi, I am the pharmacist, my name is Anjali, how can I help you?"
+    },
+    {
+      "id": 6,
+      "speaker": "SPEAKER_01",
+      "start": 192.388,
+      "end": 195.231,
+      "startLabel": "3:12",
+      "endLabel": "3:15",
+      "text": "Yeah, when you are ready, we will be, go ahead, ready?"
+    },
+    {
+      "id": 7,
+      "speaker": "SPEAKER_02",
+      "start": 195.271,
+      "end": 195.512,
+      "startLabel": "3:15",
+      "endLabel": "3:15",
+      "text": "Yeah."
+    },
+    {
+      "id": 8,
+      "speaker": "SPEAKER_02",
+      "start": 204.328,
+      "end": 206.129,
+      "startLabel": "3:24",
+      "endLabel": "3:26",
+      "text": "My feet are driving me crazy."
+    },
+    {
+      "id": 9,
+      "speaker": "SPEAKER_02",
+      "start": 206.829,
+      "end": 209.509,
+      "startLabel": "3:26",
+      "endLabel": "3:29",
+      "text": "Can you give me something to fix it quickly?"
+    },
+    {
+      "id": 10,
+      "speaker": "SPEAKER_01",
+      "start": 210.03,
+      "end": 211.25,
+      "startLabel": "3:30",
+      "endLabel": "3:31",
+      "text": "Yeah, sure."
+    },
+    {
+      "id": 11,
+      "speaker": "SPEAKER_01",
+      "start": 211.43,
+      "end": 215.131,
+      "startLabel": "3:31",
+      "endLabel": "3:35",
+      "text": "But do you mind if I ask you a few questions so I can provide you the most appropriate treatment?"
+    },
+    {
+      "id": 12,
+      "speaker": "SPEAKER_01",
+      "start": 215.231,
+      "end": 216.111,
+      "startLabel": "3:35",
+      "endLabel": "3:36",
+      "text": "Sure."
+    },
+    {
+      "id": 13,
+      "speaker": "SPEAKER_01",
+      "start": 216.171,
+      "end": 218.872,
+      "startLabel": "3:36",
+      "endLabel": "3:38",
+      "text": "Can I first have your name, age and a medical number?"
+    },
+    {
+      "id": 14,
+      "speaker": "SPEAKER_02",
+      "start": 219.012,
+      "end": 220.012,
+      "startLabel": "3:39",
+      "endLabel": "3:40",
+      "text": "My name is Naga."
+    },
+    {
+      "id": 15,
+      "speaker": "SPEAKER_02",
+      "start": 220.512,
+      "end": 222.333,
+      "startLabel": "3:40",
+      "endLabel": "3:42",
+      "text": "Medical number is URN 23456."
+    },
+    {
+      "id": 16,
+      "speaker": "SPEAKER_02",
+      "start": 222.413,
+      "end": 223.213,
+      "startLabel": "3:42",
+      "endLabel": "3:43",
+      "text": "And your age?"
+    },
+    {
+      "id": 17,
+      "speaker": "SPEAKER_02",
+      "start": 224.793,
+      "end": 225.974,
+      "startLabel": "3:44",
+      "endLabel": "3:45",
+      "text": "It's 50 years."
+    },
+    {
+      "id": 18,
+      "speaker": "SPEAKER_02",
+      "start": 226.034,
+      "end": 226.274,
+      "startLabel": "3:46",
+      "endLabel": "3:46",
+      "text": "Right."
+    },
+    {
+      "id": 19,
+      "speaker": "SPEAKER_01",
+      "start": 226.314,
+      "end": 230.555,
+      "startLabel": "3:46",
+      "endLabel": "3:50",
+      "text": "Do you mind if I just describe more about your symptoms?"
+    },
+    {
+      "id": 20,
+      "speaker": "SPEAKER_02",
+      "start": 231.268,
+      "end": 234.471,
+      "startLabel": "3:51",
+      "endLabel": "3:54",
+      "text": "Okay, there is a flaking and itchiness between the toes."
+    },
+    {
+      "id": 21,
+      "speaker": "SPEAKER_01",
+      "start": 234.991,
+      "end": 235.411,
+      "startLabel": "3:54",
+      "endLabel": "3:55",
+      "text": "Okay."
+    },
+    {
+      "id": 22,
+      "speaker": "SPEAKER_01",
+      "start": 236.272,
+      "end": 241.796,
+      "startLabel": "3:56",
+      "endLabel": "4:01",
+      "text": "Is there any other unusual symptoms like you are having a fever or there's a swelling of the skin area?"
+    },
+    {
+      "id": 23,
+      "speaker": "SPEAKER_02",
+      "start": 242.577,
+      "end": 242.817,
+      "startLabel": "4:02",
+      "endLabel": "4:02",
+      "text": "No."
+    },
+    {
+      "id": 24,
+      "speaker": "SPEAKER_01",
+      "start": 243.277,
+      "end": 243.958,
+      "startLabel": "4:03",
+      "endLabel": "4:03",
+      "text": "Okay."
+    },
+    {
+      "id": 25,
+      "speaker": "SPEAKER_01",
+      "start": 243.978,
+      "end": 246.96,
+      "startLabel": "4:03",
+      "endLabel": "4:06",
+      "text": "How long have the symptoms been present?"
+    },
+    {
+      "id": 26,
+      "speaker": "SPEAKER_02",
+      "start": 247.681,
+      "end": 249.442,
+      "startLabel": "4:07",
+      "endLabel": "4:09",
+      "text": "This is there for almost three weeks."
+    },
+    {
+      "id": 27,
+      "speaker": "SPEAKER_01",
+      "start": 250.143,
+      "end": 251.203,
+      "startLabel": "4:10",
+      "endLabel": "4:11",
+      "text": "Three weeks?"
+    },
+    {
+      "id": 28,
+      "speaker": "SPEAKER_01",
+      "start": 251.344,
+      "end": 252.044,
+      "startLabel": "4:11",
+      "endLabel": "4:12",
+      "text": "Okay."
+    },
+    {
+      "id": 29,
+      "speaker": "SPEAKER_01",
+      "start": 252.745,
+      "end": 254.786,
+      "startLabel": "4:12",
+      "endLabel": "4:14",
+      "text": "Have you tried anything to relieve your symptoms yet?"
+    },
+    {
+      "id": 30,
+      "speaker": "SPEAKER_02",
+      "start": 254.946,
+      "end": 255.006,
+      "startLabel": "4:14",
+      "endLabel": "4:15",
+      "text": "No."
+    },
+    {
+      "id": 31,
+      "speaker": "SPEAKER_01",
+      "start": 255.046,
+      "end": 256.327,
+      "startLabel": "4:15",
+      "endLabel": "4:16",
+      "text": "Okay."
+    },
+    {
+      "id": 32,
+      "speaker": "SPEAKER_01",
+      "start": 256.367,
+      "end": 259.27,
+      "startLabel": "4:16",
+      "endLabel": "4:19",
+      "text": "Perhaps you have any idea on what might have caused your symptoms?"
+    },
+    {
+      "id": 33,
+      "speaker": "SPEAKER_02",
+      "start": 260.135,
+      "end": 265.4,
+      "startLabel": "4:20",
+      "endLabel": "4:25",
+      "text": "I am not very sure but I am working in the firm so I will be wearing the boots."
+    },
+    {
+      "id": 34,
+      "speaker": "SPEAKER_01",
+      "start": 265.78,
+      "end": 272.066,
+      "startLabel": "4:25",
+      "endLabel": "4:32",
+      "text": "Is this the first time you are experiencing such symptoms?"
+    },
+    {
+      "id": 35,
+      "speaker": "SPEAKER_01",
+      "start": 272.767,
+      "end": 275.75,
+      "startLabel": "4:32",
+      "endLabel": "4:35",
+      "text": "Do you have any medical conditions?"
+    },
+    {
+      "id": 36,
+      "speaker": "SPEAKER_02",
+      "start": 276.984,
+      "end": 277.264,
+      "startLabel": "4:36",
+      "endLabel": "4:37",
+      "text": "No."
+    },
+    {
+      "id": 37,
+      "speaker": "SPEAKER_01",
+      "start": 277.725,
+      "end": 280.787,
+      "startLabel": "4:37",
+      "endLabel": "4:40",
+      "text": "Are you taking any medication, supplements or herbal treatment?"
+    },
+    {
+      "id": 38,
+      "speaker": "SPEAKER_01",
+      "start": 281.067,
+      "end": 281.227,
+      "startLabel": "4:41",
+      "endLabel": "4:41",
+      "text": "No."
+    },
+    {
+      "id": 39,
+      "speaker": "SPEAKER_01",
+      "start": 281.387,
+      "end": 282.668,
+      "startLabel": "4:41",
+      "endLabel": "4:42",
+      "text": "Do you have any allergies?"
+    },
+    {
+      "id": 40,
+      "speaker": "SPEAKER_00",
+      "start": 282.808,
+      "end": 283.048,
+      "startLabel": "4:42",
+      "endLabel": "4:43",
+      "text": "No."
+    },
+    {
+      "id": 41,
+      "speaker": "SPEAKER_01",
+      "start": 283.628,
+      "end": 284.089,
+      "startLabel": "4:43",
+      "endLabel": "4:44",
+      "text": "Okay."
+    },
+    {
+      "id": 42,
+      "speaker": "SPEAKER_01",
+      "start": 284.369,
+      "end": 286.811,
+      "startLabel": "4:44",
+      "endLabel": "4:46",
+      "text": "Is there any proof of formulation on the medication?"
+    },
+    {
+      "id": 43,
+      "speaker": "SPEAKER_02",
+      "start": 287.471,
+      "end": 290.253,
+      "startLabel": "4:47",
+      "endLabel": "4:50",
+      "text": "I will be happy if it is a cream."
+    },
+    {
+      "id": 44,
+      "speaker": "SPEAKER_01",
+      "start": 290.653,
+      "end": 291.193,
+      "startLabel": "4:50",
+      "endLabel": "4:51",
+      "text": "Okay, sure."
+    },
+    {
+      "id": 45,
+      "speaker": "SPEAKER_01",
+      "start": 291.774,
+      "end": 294.856,
+      "startLabel": "4:51",
+      "endLabel": "4:54",
+      "text": "Do you mind to just give me a moment to check on my resources?"
+    },
+    {
+      "id": 46,
+      "speaker": "SPEAKER_01",
+      "start": 295.016,
+      "end": 295.236,
+      "startLabel": "4:55",
+      "endLabel": "4:55",
+      "text": "Sure."
+    },
+    {
+      "id": 47,
+      "speaker": "SPEAKER_01",
+      "start": 310.418,
+      "end": 312.639,
+      "startLabel": "5:10",
+      "endLabel": "5:12",
+      "text": "Okay, so hi sir, thanks for waiting."
+    },
+    {
+      "id": 48,
+      "speaker": "SPEAKER_01",
+      "start": 312.979,
+      "end": 324.202,
+      "startLabel": "5:12",
+      "endLabel": "5:24",
+      "text": "It seems that you are having a tin of patties or as known as actually foods which may be caused by the foods that you are burying because it covers your food so it creates a humid environment for the fungus to grow."
+    },
+    {
+      "id": 49,
+      "speaker": "SPEAKER_01",
+      "start": 324.722,
+      "end": 326.963,
+      "startLabel": "5:24",
+      "endLabel": "5:26",
+      "text": "It is very common so do not worry about that."
+    },
+    {
+      "id": 50,
+      "speaker": "SPEAKER_01",
+      "start": 327.503,
+      "end": 331.565,
+      "startLabel": "5:27",
+      "endLabel": "5:31",
+      "text": "And here's the medication for you, which is a 1% Turbinaffin Cream."
+    },
+    {
+      "id": 51,
+      "speaker": "SPEAKER_01",
+      "start": 332.025,
+      "end": 339.088,
+      "startLabel": "5:32",
+      "endLabel": "5:39",
+      "text": "It is a fast-relief medication which you can just apply once daily for 7 days onto the affected area."
+    },
+    {
+      "id": 52,
+      "speaker": "SPEAKER_01",
+      "start": 339.488,
+      "end": 348.773,
+      "startLabel": "5:39",
+      "endLabel": "5:48",
+      "text": "But before you apply, please ensure that you shower before you apply onto the affected area and make sure it is dry and clean."
+    },
+    {
+      "id": 53,
+      "speaker": "SPEAKER_01",
+      "start": 349.333,
+      "end": 349.613,
+      "startLabel": "5:49",
+      "endLabel": "5:49",
+      "text": "Okay?"
+    },
+    {
+      "id": 54,
+      "speaker": "SPEAKER_01",
+      "start": 350.408,
+      "end": 359.032,
+      "startLabel": "5:50",
+      "endLabel": "5:59",
+      "text": "So while using this medication that could be some side effects like burning or stinging sensation, it is usually more tolerated."
+    },
+    {
+      "id": 55,
+      "speaker": "SPEAKER_01",
+      "start": 359.052,
+      "end": 365.635,
+      "startLabel": "5:59",
+      "endLabel": "6:05",
+      "text": "However, if you feel that the side effects are unbearable, you can always come back to the pharmacies for a switch of medication."
+    },
+    {
+      "id": 56,
+      "speaker": "SPEAKER_01",
+      "start": 366.895,
+      "end": 370.137,
+      "startLabel": "6:06",
+      "endLabel": "6:10",
+      "text": "In addition to the medication, I will also suggest you to"
+    },
+    {
+      "id": 57,
+      "speaker": "SPEAKER_01",
+      "start": 371.519,
+      "end": 388.569,
+      "startLabel": "6:11",
+      "endLabel": "6:28",
+      "text": "try out something that's not so occlusive, try something that is able to give your food a circulation of air so that it doesn't create a humid environment, and also dry the affected area using a separate tower and do not share towers with any others."
+    },
+    {
+      "id": 58,
+      "speaker": "SPEAKER_01",
+      "start": 389.029,
+      "end": 390.65,
+      "startLabel": "6:29",
+      "endLabel": "6:30",
+      "text": "So if I do have any questions for you?"
+    },
+    {
+      "id": 59,
+      "speaker": "SPEAKER_02",
+      "start": 391.071,
+      "end": 393.472,
+      "startLabel": "6:31",
+      "endLabel": "6:33",
+      "text": "I do not have any questions."
+    },
+    {
+      "id": 60,
+      "speaker": "SPEAKER_01",
+      "start": 394.032,
+      "end": 396.354,
+      "startLabel": "6:34",
+      "endLabel": "6:36",
+      "text": "I believe I've given you a lot of information."
+    },
+    {
+      "id": 61,
+      "speaker": "SPEAKER_01",
+      "start": 396.394,
+      "end": 398.155,
+      "startLabel": "6:36",
+      "endLabel": "6:38",
+      "text": "Do you mind to repeat after what I've mentioned?"
+    },
+    {
+      "id": 62,
+      "speaker": "SPEAKER_02",
+      "start": 399.107,
+      "end": 401.809,
+      "startLabel": "6:39",
+      "endLabel": "6:41",
+      "text": "I understood all the information given by you."
+    },
+    {
+      "id": 63,
+      "speaker": "SPEAKER_01",
+      "start": 401.949,
+      "end": 406.652,
+      "startLabel": "6:41",
+      "endLabel": "6:46",
+      "text": "Right, so here's a medication together with a written left foot as a guidance."
+    },
+    {
+      "id": 64,
+      "speaker": "SPEAKER_01",
+      "start": 406.732,
+      "end": 413.896,
+      "startLabel": "6:46",
+      "endLabel": "6:53",
+      "text": "If your symptoms got worse or do not resolve after one week of treatment, you should visit the doctor immediately for further investigation."
+    },
+    {
+      "id": 65,
+      "speaker": "SPEAKER_01",
+      "start": 413.916,
+      "end": 414.937,
+      "startLabel": "6:53",
+      "endLabel": "6:54",
+      "text": "I hope we get well soon."
+    },
+    {
+      "id": 66,
+      "speaker": "SPEAKER_01",
+      "start": 415.938,
+      "end": 416.178,
+      "startLabel": "6:55",
+      "endLabel": "6:56",
+      "text": "Okay."
+    }
+  ]
+}

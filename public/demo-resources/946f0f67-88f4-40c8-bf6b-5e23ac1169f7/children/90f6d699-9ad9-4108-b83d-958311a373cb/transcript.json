@@ -1,0 +1,855 @@
+{
+  "schema": "whisperx-segments-v1",
+  "source": "whisperx-local",
+  "generatedAt": "2026-05-18T04:07:38.324Z",
+  "language": "en",
+  "segmentCount": 94,
+  "segments": [
+    {
+      "id": 1,
+      "speaker": "SPEAKER_03",
+      "start": 0.392,
+      "end": 0.973,
+      "startLabel": "0:00",
+      "endLabel": "0:00",
+      "text": "Thank you."
+    },
+    {
+      "id": 2,
+      "speaker": "SPEAKER_00",
+      "start": 139.399,
+      "end": 139.761,
+      "startLabel": "2:19",
+      "endLabel": "2:19",
+      "text": "Thank you."
+    },
+    {
+      "id": 3,
+      "speaker": "SPEAKER_UNKNOWN",
+      "start": 185.923,
+      "end": 202.166,
+      "startLabel": "3:05",
+      "endLabel": "3:22",
+      "text": "Conchai 5523604"
+    },
+    {
+      "id": 4,
+      "speaker": "SPEAKER_01",
+      "start": 209.651,
+      "end": 209.991,
+      "startLabel": "3:29",
+      "endLabel": "3:29",
+      "text": "Okay."
+    },
+    {
+      "id": 5,
+      "speaker": "SPEAKER_01",
+      "start": 210.011,
+      "end": 211.913,
+      "startLabel": "3:30",
+      "endLabel": "3:31",
+      "text": "So, can I have the answer?"
+    },
+    {
+      "id": 6,
+      "speaker": "SPEAKER_01",
+      "start": 211.933,
+      "end": 212.354,
+      "startLabel": "3:31",
+      "endLabel": "3:32",
+      "text": "Thank you."
+    },
+    {
+      "id": 7,
+      "speaker": "SPEAKER_01",
+      "start": 230.845,
+      "end": 233.227,
+      "startLabel": "3:50",
+      "endLabel": "3:53",
+      "text": "Hi."
+    },
+    {
+      "id": 8,
+      "speaker": "SPEAKER_01",
+      "start": 233.287,
+      "end": 235.268,
+      "startLabel": "3:53",
+      "endLabel": "3:55",
+      "text": "My feet are driving me crazy."
+    },
+    {
+      "id": 9,
+      "speaker": "SPEAKER_01",
+      "start": 235.308,
+      "end": 237.69,
+      "startLabel": "3:55",
+      "endLabel": "3:57",
+      "text": "Can you give me something to fix it quickly?"
+    },
+    {
+      "id": 10,
+      "speaker": "SPEAKER_03",
+      "start": 238.151,
+      "end": 238.371,
+      "startLabel": "3:58",
+      "endLabel": "3:58",
+      "text": "Sure."
+    },
+    {
+      "id": 11,
+      "speaker": "SPEAKER_03",
+      "start": 238.391,
+      "end": 240.172,
+      "startLabel": "3:58",
+      "endLabel": "4:00",
+      "text": "I am your pharmacist today."
+    },
+    {
+      "id": 12,
+      "speaker": "SPEAKER_03",
+      "start": 240.192,
+      "end": 240.953,
+      "startLabel": "4:00",
+      "endLabel": "4:00",
+      "text": "My name is Charlie."
+    },
+    {
+      "id": 13,
+      "speaker": "SPEAKER_03",
+      "start": 241.313,
+      "end": 244.035,
+      "startLabel": "4:01",
+      "endLabel": "4:04",
+      "text": "So, who is the medication for?"
+    },
+    {
+      "id": 14,
+      "speaker": "SPEAKER_01",
+      "start": 244.135,
+      "end": 244.976,
+      "startLabel": "4:04",
+      "endLabel": "4:04",
+      "text": "That is for me."
+    },
+    {
+      "id": 15,
+      "speaker": "SPEAKER_03",
+      "start": 245.336,
+      "end": 245.736,
+      "startLabel": "4:05",
+      "endLabel": "4:05",
+      "text": "Okay."
+    },
+    {
+      "id": 16,
+      "speaker": "SPEAKER_03",
+      "start": 245.956,
+      "end": 248.799,
+      "startLabel": "4:05",
+      "endLabel": "4:08",
+      "text": "Before I give you any recommendations, can I ask a few questions?"
+    },
+    {
+      "id": 17,
+      "speaker": "SPEAKER_03",
+      "start": 248.819,
+      "end": 248.939,
+      "startLabel": "4:08",
+      "endLabel": "4:08",
+      "text": "Sure."
+    },
+    {
+      "id": 18,
+      "speaker": "SPEAKER_03",
+      "start": 248.959,
+      "end": 251.12,
+      "startLabel": "4:08",
+      "endLabel": "4:11",
+      "text": "Just to make sure that everything is as appropriate for you."
+    },
+    {
+      "id": 19,
+      "speaker": "SPEAKER_01",
+      "start": 251.28,
+      "end": 251.561,
+      "startLabel": "4:11",
+      "endLabel": "4:11",
+      "text": "Okay."
+    },
+    {
+      "id": 20,
+      "speaker": "SPEAKER_03",
+      "start": 251.981,
+      "end": 254.243,
+      "startLabel": "4:11",
+      "endLabel": "4:14",
+      "text": "Can I have your name, age and medical number?"
+    },
+    {
+      "id": 21,
+      "speaker": "SPEAKER_01",
+      "start": 254.363,
+      "end": 255.443,
+      "startLabel": "4:14",
+      "endLabel": "4:15",
+      "text": "My name is Naga."
+    },
+    {
+      "id": 22,
+      "speaker": "SPEAKER_01",
+      "start": 256.084,
+      "end": 258.386,
+      "startLabel": "4:16",
+      "endLabel": "4:18",
+      "text": "That is your medical number is URN 23456."
+    },
+    {
+      "id": 23,
+      "speaker": "SPEAKER_01",
+      "start": 258.406,
+      "end": 258.646,
+      "startLabel": "4:18",
+      "endLabel": "4:18",
+      "text": "Okay."
+    },
+    {
+      "id": 24,
+      "speaker": "SPEAKER_01",
+      "start": 260.548,
+      "end": 265.036,
+      "startLabel": "4:20",
+      "endLabel": "4:25",
+      "text": "And Patras is Jalan Sultan 5000 Kuala Lumpur."
+    },
+    {
+      "id": 25,
+      "speaker": "SPEAKER_03",
+      "start": 265.437,
+      "end": 267.941,
+      "startLabel": "4:25",
+      "endLabel": "4:27",
+      "text": "If you can add it as well, if your age and weight."
+    },
+    {
+      "id": 26,
+      "speaker": "SPEAKER_01",
+      "start": 268.748,
+      "end": 272.251,
+      "startLabel": "4:28",
+      "endLabel": "4:32",
+      "text": "My age is 50 years and I am 60 kgs."
+    },
+    {
+      "id": 27,
+      "speaker": "SPEAKER_03",
+      "start": 272.852,
+      "end": 276.095,
+      "startLabel": "4:32",
+      "endLabel": "4:36",
+      "text": "Can you describe more about your symptoms?"
+    },
+    {
+      "id": 28,
+      "speaker": "SPEAKER_01",
+      "start": 276.175,
+      "end": 281.319,
+      "startLabel": "4:36",
+      "endLabel": "4:41",
+      "text": "Actually there is a flaking and itchiness between the toes."
+    },
+    {
+      "id": 29,
+      "speaker": "SPEAKER_03",
+      "start": 281.619,
+      "end": 287.264,
+      "startLabel": "4:41",
+      "endLabel": "4:47",
+      "text": "So have you noticed any unusual symptoms such as swelling of the skin or fever?"
+    },
+    {
+      "id": 30,
+      "speaker": "SPEAKER_03",
+      "start": 287.624,
+      "end": 288.425,
+      "startLabel": "4:47",
+      "endLabel": "4:48",
+      "text": "No."
+    },
+    {
+      "id": 31,
+      "speaker": "SPEAKER_03",
+      "start": 288.505,
+      "end": 290.567,
+      "startLabel": "4:48",
+      "endLabel": "4:50",
+      "text": "Have you experienced this before?"
+    },
+    {
+      "id": 32,
+      "speaker": "SPEAKER_03",
+      "start": 292.447,
+      "end": 293.167,
+      "startLabel": "4:52",
+      "endLabel": "4:53",
+      "text": "No."
+    },
+    {
+      "id": 33,
+      "speaker": "SPEAKER_03",
+      "start": 293.267,
+      "end": 294.848,
+      "startLabel": "4:53",
+      "endLabel": "4:54",
+      "text": "How long do the symptoms persist?"
+    },
+    {
+      "id": 34,
+      "speaker": "SPEAKER_03",
+      "start": 294.968,
+      "end": 296.749,
+      "startLabel": "4:54",
+      "endLabel": "4:56",
+      "text": "From three weeks."
+    },
+    {
+      "id": 35,
+      "speaker": "SPEAKER_03",
+      "start": 297.489,
+      "end": 300.83,
+      "startLabel": "4:57",
+      "endLabel": "5:00",
+      "text": "So I can understand that you might feel really uncomfortable."
+    },
+    {
+      "id": 36,
+      "speaker": "SPEAKER_03",
+      "start": 301.611,
+      "end": 302.491,
+      "startLabel": "5:01",
+      "endLabel": "5:02",
+      "text": "So do not worry."
+    },
+    {
+      "id": 37,
+      "speaker": "SPEAKER_03",
+      "start": 303.071,
+      "end": 304.652,
+      "startLabel": "5:03",
+      "endLabel": "5:04",
+      "text": "What might be the cost of the symptoms?"
+    },
+    {
+      "id": 38,
+      "speaker": "SPEAKER_03",
+      "start": 304.672,
+      "end": 305.653,
+      "startLabel": "5:04",
+      "endLabel": "5:05",
+      "text": "Do you have any idea?"
+    },
+    {
+      "id": 39,
+      "speaker": "SPEAKER_01",
+      "start": 305.853,
+      "end": 309.454,
+      "startLabel": "5:05",
+      "endLabel": "5:09",
+      "text": "Because I am wearing the shoes for a long time maybe."
+    },
+    {
+      "id": 40,
+      "speaker": "SPEAKER_01",
+      "start": 309.654,
+      "end": 311.975,
+      "startLabel": "5:09",
+      "endLabel": "5:11",
+      "text": "I am working in the form."
+    },
+    {
+      "id": 41,
+      "speaker": "SPEAKER_03",
+      "start": 312.076,
+      "end": 313.756,
+      "startLabel": "5:12",
+      "endLabel": "5:13",
+      "text": "Is it oppressive or tight?"
+    },
+    {
+      "id": 42,
+      "speaker": "SPEAKER_03",
+      "start": 316.523,
+      "end": 318.744,
+      "startLabel": "5:16",
+      "endLabel": "5:18",
+      "text": "So, what medical conditions do you have?"
+    },
+    {
+      "id": 43,
+      "speaker": "SPEAKER_01",
+      "start": 319.004,
+      "end": 321.304,
+      "startLabel": "5:19",
+      "endLabel": "5:21",
+      "text": "I don't have any medical conditions."
+    },
+    {
+      "id": 44,
+      "speaker": "SPEAKER_03",
+      "start": 321.344,
+      "end": 322.464,
+      "startLabel": "5:21",
+      "endLabel": "5:22",
+      "text": "What allergies do you have?"
+    },
+    {
+      "id": 45,
+      "speaker": "SPEAKER_01",
+      "start": 322.884,
+      "end": 324.365,
+      "startLabel": "5:22",
+      "endLabel": "5:24",
+      "text": "No allergies."
+    },
+    {
+      "id": 46,
+      "speaker": "SPEAKER_01",
+      "start": 324.425,
+      "end": 329.426,
+      "startLabel": "5:24",
+      "endLabel": "5:29",
+      "text": "I am allergic to peanuts, but it's a like, immediate anaphylaxis."
+    },
+    {
+      "id": 47,
+      "speaker": "SPEAKER_03",
+      "start": 329.986,
+      "end": 331.286,
+      "startLabel": "5:29",
+      "endLabel": "5:31",
+      "text": "Okay, alright."
+    },
+    {
+      "id": 48,
+      "speaker": "SPEAKER_03",
+      "start": 331.426,
+      "end": 335.187,
+      "startLabel": "5:31",
+      "endLabel": "5:35",
+      "text": "Are you currently taking any prescription medicines or the counter medicines?"
+    },
+    {
+      "id": 49,
+      "speaker": "SPEAKER_03",
+      "start": 335.207,
+      "end": 335.367,
+      "startLabel": "5:35",
+      "endLabel": "5:35",
+      "text": "No."
+    },
+    {
+      "id": 50,
+      "speaker": "SPEAKER_03",
+      "start": 335.707,
+      "end": 337.287,
+      "startLabel": "5:35",
+      "endLabel": "5:37",
+      "text": "Supplements or any herbal treatments?"
+    },
+    {
+      "id": 51,
+      "speaker": "SPEAKER_03",
+      "start": 337.367,
+      "end": 337.627,
+      "startLabel": "5:37",
+      "endLabel": "5:37",
+      "text": "No."
+    },
+    {
+      "id": 52,
+      "speaker": "SPEAKER_03",
+      "start": 338.127,
+      "end": 338.547,
+      "startLabel": "5:38",
+      "endLabel": "5:38",
+      "text": "Okay."
+    },
+    {
+      "id": 53,
+      "speaker": "SPEAKER_03",
+      "start": 339.008,
+      "end": 341.028,
+      "startLabel": "5:39",
+      "endLabel": "5:41",
+      "text": "Do you have any preference in your formulation?"
+    },
+    {
+      "id": 54,
+      "speaker": "SPEAKER_01",
+      "start": 342.329,
+      "end": 344.63,
+      "startLabel": "5:42",
+      "endLabel": "5:44",
+      "text": "I would like to have cream."
+    },
+    {
+      "id": 55,
+      "speaker": "SPEAKER_03",
+      "start": 345.15,
+      "end": 345.591,
+      "startLabel": "5:45",
+      "endLabel": "5:45",
+      "text": "Cream?"
+    },
+    {
+      "id": 56,
+      "speaker": "SPEAKER_03",
+      "start": 345.671,
+      "end": 346.051,
+      "startLabel": "5:45",
+      "endLabel": "5:46",
+      "text": "Okay."
+    },
+    {
+      "id": 57,
+      "speaker": "SPEAKER_03",
+      "start": 346.311,
+      "end": 348.112,
+      "startLabel": "5:46",
+      "endLabel": "5:48",
+      "text": "Other than that, no preference?"
+    },
+    {
+      "id": 58,
+      "speaker": "SPEAKER_03",
+      "start": 348.172,
+      "end": 348.372,
+      "startLabel": "5:48",
+      "endLabel": "5:48",
+      "text": "No."
+    },
+    {
+      "id": 59,
+      "speaker": "SPEAKER_03",
+      "start": 348.933,
+      "end": 349.173,
+      "startLabel": "5:48",
+      "endLabel": "5:49",
+      "text": "Okay."
+    },
+    {
+      "id": 60,
+      "speaker": "SPEAKER_03",
+      "start": 349.453,
+      "end": 354.016,
+      "startLabel": "5:49",
+      "endLabel": "5:54",
+      "text": "So to be double confirmed, you want something for the itchiness of the toast?"
+    },
+    {
+      "id": 61,
+      "speaker": "SPEAKER_03",
+      "start": 354.596,
+      "end": 354.796,
+      "startLabel": "5:54",
+      "endLabel": "5:54",
+      "text": "Okay."
+    },
+    {
+      "id": 62,
+      "speaker": "SPEAKER_03",
+      "start": 354.877,
+      "end": 355.937,
+      "startLabel": "5:54",
+      "endLabel": "5:55",
+      "text": "Thank you for information."
+    },
+    {
+      "id": 63,
+      "speaker": "SPEAKER_03",
+      "start": 355.977,
+      "end": 357.878,
+      "startLabel": "5:55",
+      "endLabel": "5:57",
+      "text": "Do you mind if I check my resources?"
+    },
+    {
+      "id": 64,
+      "speaker": "SPEAKER_03",
+      "start": 358.079,
+      "end": 358.419,
+      "startLabel": "5:58",
+      "endLabel": "5:58",
+      "text": "Yes."
+    },
+    {
+      "id": 65,
+      "speaker": "SPEAKER_03",
+      "start": 358.439,
+      "end": 359.299,
+      "startLabel": "5:58",
+      "endLabel": "5:59",
+      "text": "Okay."
+    },
+    {
+      "id": 66,
+      "speaker": "SPEAKER_03",
+      "start": 384.775,
+      "end": 385.555,
+      "startLabel": "6:24",
+      "endLabel": "6:25",
+      "text": "Thank you."
+    },
+    {
+      "id": 67,
+      "speaker": "SPEAKER_03",
+      "start": 385.615,
+      "end": 386.415,
+      "startLabel": "6:25",
+      "endLabel": "6:26",
+      "text": "Thanks for waiting."
+    },
+    {
+      "id": 68,
+      "speaker": "SPEAKER_03",
+      "start": 386.555,
+      "end": 394.857,
+      "startLabel": "6:26",
+      "endLabel": "6:34",
+      "text": "So based on the information given, I believe that you are having tinnia probably because you wear the shoes all day because of the work."
+    },
+    {
+      "id": 69,
+      "speaker": "SPEAKER_03",
+      "start": 395.257,
+      "end": 399.979,
+      "startLabel": "6:35",
+      "endLabel": "6:39",
+      "text": "So I would recommend you a product, it's Azo, it's an Azo antifungus."
+    },
+    {
+      "id": 70,
+      "speaker": "SPEAKER_03",
+      "start": 400.439,
+      "end": 403.399,
+      "startLabel": "6:40",
+      "endLabel": "6:43",
+      "text": "So I would recommend you the product name, Quatrimazole."
+    },
+    {
+      "id": 71,
+      "speaker": "SPEAKER_03",
+      "start": 403.679,
+      "end": 405,
+      "startLabel": "6:43",
+      "endLabel": "6:45",
+      "text": "It's a 1% cream."
+    },
+    {
+      "id": 72,
+      "speaker": "SPEAKER_03",
+      "start": 405.92,
+      "end": 410.481,
+      "startLabel": "6:45",
+      "endLabel": "6:50",
+      "text": "So you apply a thin layer onto the affected areas, which is your toes."
+    },
+    {
+      "id": 73,
+      "speaker": "SPEAKER_03",
+      "start": 411.605,
+      "end": 420.029,
+      "startLabel": "6:51",
+      "endLabel": "7:00",
+      "text": "and twice daily, so you clean and dry the affected area and the surrounded area as well, then you apply."
+    },
+    {
+      "id": 74,
+      "speaker": "SPEAKER_03",
+      "start": 420.95,
+      "end": 425.192,
+      "startLabel": "7:00",
+      "endLabel": "7:05",
+      "text": "So please continue for two weeks after the symptoms subside."
+    },
+    {
+      "id": 75,
+      "speaker": "SPEAKER_03",
+      "start": 425.712,
+      "end": 435.517,
+      "startLabel": "7:05",
+      "endLabel": "7:15",
+      "text": "You might experience some side effects such as burning or stinging sensation, but if you find it unbearable, please come back to your pharmacy so I can for a switch of the medication."
+    },
+    {
+      "id": 76,
+      "speaker": "SPEAKER_03",
+      "start": 436.753,
+      "end": 444.895,
+      "startLabel": "7:16",
+      "endLabel": "7:24",
+      "text": "So in addition to the medication, I would advise you to avoid wearing the tight shoes for longer time."
+    },
+    {
+      "id": 77,
+      "speaker": "SPEAKER_03",
+      "start": 445.355,
+      "end": 451.096,
+      "startLabel": "7:25",
+      "endLabel": "7:31",
+      "text": "So frequently change it and also change to not very tight shoes."
+    },
+    {
+      "id": 78,
+      "speaker": "SPEAKER_03",
+      "start": 451.396,
+      "end": 459.358,
+      "startLabel": "7:31",
+      "endLabel": "7:39",
+      "text": "And also because you need to clean and dry the affected area, I would advise you to use a separate towel to clean or dry the affected area."
+    },
+    {
+      "id": 79,
+      "speaker": "SPEAKER_03",
+      "start": 460.059,
+      "end": 461.759,
+      "startLabel": "7:40",
+      "endLabel": "7:41",
+      "text": "Okay, is everything clear for you?"
+    },
+    {
+      "id": 80,
+      "speaker": "SPEAKER_03",
+      "start": 461.859,
+      "end": 462.059,
+      "startLabel": "7:41",
+      "endLabel": "7:42",
+      "text": "Yeah."
+    },
+    {
+      "id": 81,
+      "speaker": "SPEAKER_03",
+      "start": 463.263,
+      "end": 468.848,
+      "startLabel": "7:43",
+      "endLabel": "7:48",
+      "text": "If the symptoms persist after the final treatment, please consult a doctor for further investigation."
+    },
+    {
+      "id": 82,
+      "speaker": "SPEAKER_03",
+      "start": 469.168,
+      "end": 470.289,
+      "startLabel": "7:49",
+      "endLabel": "7:50",
+      "text": "Do you have any questions for me?"
+    },
+    {
+      "id": 83,
+      "speaker": "SPEAKER_01",
+      "start": 470.77,
+      "end": 471.731,
+      "startLabel": "7:50",
+      "endLabel": "7:51",
+      "text": "No questions."
+    },
+    {
+      "id": 84,
+      "speaker": "SPEAKER_03",
+      "start": 472.091,
+      "end": 475.814,
+      "startLabel": "7:52",
+      "endLabel": "7:55",
+      "text": "Okay, since I've given you a lot of information, do you mind to repeat what I say just now?"
+    },
+    {
+      "id": 85,
+      "speaker": "SPEAKER_01",
+      "start": 476.435,
+      "end": 478.797,
+      "startLabel": "7:56",
+      "endLabel": "7:58",
+      "text": "I understood all the information given by you."
+    },
+    {
+      "id": 86,
+      "speaker": "SPEAKER_03",
+      "start": 479.257,
+      "end": 483.661,
+      "startLabel": "7:59",
+      "endLabel": "8:03",
+      "text": "Okay, so this is your written leaflet as well as your product."
+    },
+    {
+      "id": 87,
+      "speaker": "SPEAKER_03",
+      "start": 484.201,
+      "end": 485.542,
+      "startLabel": "8:04",
+      "endLabel": "8:05",
+      "text": "This is for your guidance."
+    },
+    {
+      "id": 88,
+      "speaker": "SPEAKER_03",
+      "start": 485.762,
+      "end": 486.203,
+      "startLabel": "8:05",
+      "endLabel": "8:06",
+      "text": "Thank you."
+    },
+    {
+      "id": 89,
+      "speaker": "SPEAKER_03",
+      "start": 486.263,
+      "end": 487.144,
+      "startLabel": "8:06",
+      "endLabel": "8:07",
+      "text": "I hope you get well soon."
+    },
+    {
+      "id": 90,
+      "speaker": "SPEAKER_01",
+      "start": 487.904,
+      "end": 488.285,
+      "startLabel": "8:07",
+      "endLabel": "8:08",
+      "text": "Thank you."
+    },
+    {
+      "id": 91,
+      "speaker": "SPEAKER_03",
+      "start": 492.172,
+      "end": 502.204,
+      "startLabel": "8:12",
+      "endLabel": "8:22",
+      "text": "I'm sorry, I had to wait here."
+    },
+    {
+      "id": 92,
+      "speaker": "SPEAKER_UNKNOWN",
+      "start": 502.284,
+      "end": 503.566,
+      "startLabel": "8:22",
+      "endLabel": "8:23",
+      "text": "Go ahead."
+    },
+    {
+      "id": 93,
+      "speaker": "SPEAKER_03",
+      "start": 504.327,
+      "end": 505.188,
+      "startLabel": "8:24",
+      "endLabel": "8:25",
+      "text": "I have to lock up."
+    },
+    {
+      "id": 94,
+      "speaker": "SPEAKER_03",
+      "start": 505.348,
+      "end": 505.668,
+      "startLabel": "8:25",
+      "endLabel": "8:25",
+      "text": "I see."
+    }
+  ]
+}

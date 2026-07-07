@@ -1,0 +1,47 @@
+# ============================================================
+# Dependencies & build output
+# ============================================================
+node_modules/
+dist/
+.vite/
+vite-env.d.ts
+
+# ============================================================
+# Python
+# ============================================================
+*.pyc
+__pycache__/
+.pytest_cache/
+.pytest-tmp/
+.venv/
+venv/
+*.egg-info/
+
+# ============================================================
+# OS / editor cruft
+# ============================================================
+.DS_Store
+Thumbs.db
+*.log
+*.lock
+
+# ============================================================
+# Environment files — keep real secrets private
+# ============================================================
+.env
+.env.*
+!.env.example
+
+# ============================================================
+# Runtime storage — uploads, videos, audio, transcripts,
+# segments/clips, scores, case studies, sessions, auth, db.
+# Ignore ALL contents of storage/, keep only folder structure
+# (.gitkeep files) and the README.
+# ============================================================
+storage/**
+!storage/**/
+!storage/**/.gitkeep
+!storage/README.md
+
+# Never commit auth credentials / signing secrets, even the folder
+storage/auth/

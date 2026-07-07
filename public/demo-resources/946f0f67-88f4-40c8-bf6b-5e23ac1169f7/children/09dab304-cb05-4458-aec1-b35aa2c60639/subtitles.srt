@@ -1,0 +1,232 @@
+1
+00:01:38,035 --> 00:01:39,516
+This is your food.
+
+2
+00:01:39,556 --> 00:01:40,757
+Begin your house.
+
+3
+00:01:40,817 --> 00:01:44,861
+Can we show them how to treat you fine?
+
+4
+00:01:44,881 --> 00:01:45,942
+I want to treat you fine.
+
+5
+00:01:49,626 --> 00:01:54,762
+It is a case in that you read it once you are ready, we can start.
+
+6
+00:02:01,712 --> 00:02:03,553
+My feet are driving me crazy.
+
+7
+00:02:04,074 --> 00:02:06,155
+Can you give me something to fix it quickly?
+
+8
+00:02:06,175 --> 00:02:07,576
+My name is Naga.
+
+9
+00:02:07,636 --> 00:02:10,118
+My medical number is your 234567.
+
+10
+00:02:10,138 --> 00:02:10,859
+My age is 50 years.
+
+11
+00:02:21,252 --> 00:02:23,973
+Before I recommend anything, could you please answer a few questions?
+
+12
+00:02:23,993 --> 00:02:24,954
+Sure.
+
+13
+00:02:25,554 --> 00:02:28,115
+Can you describe more about all the sentences that you have?
+
+14
+00:02:28,995 --> 00:02:31,476
+I have flaking and itchiness between the toes.
+
+15
+00:02:31,736 --> 00:02:33,017
+Okay.
+
+16
+00:02:33,577 --> 00:02:36,298
+What do you think might have caused the sentence and how would have the sentence been?
+
+17
+00:02:36,658 --> 00:02:41,740
+I'm not very sure maybe because of working a long day in the arts and in the farm.
+
+18
+00:02:41,960 --> 00:02:43,260
+Okay.
+
+19
+00:02:43,960 --> 00:02:46,841
+Do you have experience fever, swollen glands?
+
+20
+00:02:46,861 --> 00:02:48,162
+No, okay.
+
+21
+00:02:49,862 --> 00:02:51,423
+Is your first time having this sentence?
+
+22
+00:02:51,723 --> 00:02:52,543
+Yeah.
+
+23
+00:02:52,803 --> 00:02:53,924
+Okay.
+
+24
+00:02:54,704 --> 00:02:56,665
+Have you tried any medication so far?
+
+25
+00:02:56,905 --> 00:02:57,105
+No.
+
+26
+00:02:57,385 --> 00:02:58,185
+No, right?
+
+27
+00:02:59,586 --> 00:03:02,067
+Do you have any medical conditions or allergies?
+
+28
+00:03:02,967 --> 00:03:04,367
+I am allergic to peanuts.
+
+29
+00:03:04,728 --> 00:03:08,669
+Peanut, it's okay.
+
+30
+00:03:08,729 --> 00:03:12,230
+Are you currently taking any over-the-counter medication?
+
+31
+00:03:13,230 --> 00:03:15,891
+What about supplement vitamin or herb products?
+
+32
+00:03:15,931 --> 00:03:16,191
+No.
+
+33
+00:03:16,552 --> 00:03:17,392
+No, alright.
+
+34
+00:03:18,850 --> 00:03:21,274
+So just the itchiness of your feet.
+
+35
+00:03:21,775 --> 00:03:28,386
+Okay, it seems to me that, based on your information, it seems to me that you are having tinnia.
+
+36
+00:03:29,007 --> 00:03:31,271
+And we do have topical cream.
+
+37
+00:03:31,351 --> 00:03:33,014
+Is there anything else that you need?
+
+38
+00:03:34,324 --> 00:03:37,867
+No, then I recommend the Contrerasol 1% cream.
+
+39
+00:03:38,428 --> 00:03:43,813
+And you have to apply the cream two times a day to your affected area.
+
+40
+00:03:43,833 --> 00:03:49,979
+And do remember to continue to use the cream 14 days after your symptoms have disappeared.
+
+41
+00:03:50,119 --> 00:03:51,780
+And develop a stick to prevent recurrence.
+
+42
+00:03:52,321 --> 00:03:58,707
+And some of the common side effects include the mild burning sensation and redness of the skin, but usually quite well tolerated.
+
+43
+00:03:59,347 --> 00:04:03,209
+So don't worry, but if your side fit are very severe, do consult a doctor immediately.
+
+44
+00:04:03,589 --> 00:04:04,950
+Is my explanation clear for you?
+
+45
+00:04:05,170 --> 00:04:09,292
+Okay, do you have any other questions for me?
+
+46
+00:04:10,722 --> 00:04:12,363
+But you might repeat what I said just now.
+
+47
+00:04:12,743 --> 00:04:14,504
+He understood all the information.
+
+48
+00:04:14,564 --> 00:04:15,184
+Okay.
+
+49
+00:04:16,145 --> 00:04:24,809
+Other than taking medication, I will also advise you to wear breathable clothing and especially breathable shoes and to prevent the recurrence in future.
+
+50
+00:04:25,209 --> 00:04:31,952
+And you should also avoid going to the swimming pool area barefoot.
+
+51
+00:04:32,972 --> 00:04:35,733
+Is it all right for you?
+
+52
+00:04:35,793 --> 00:04:39,693
+Here's a recent information about the management here.
+
+53
+00:04:40,133 --> 00:04:47,315
+Do remember to come back to me or see a doctor if your condition still does not improve after one week of using this Cochraneazole 1% cream.
+
+54
+00:04:47,915 --> 00:04:50,495
+Do you have any other questions for me?
+
+55
+00:04:50,975 --> 00:04:53,596
+Then here's your medication.
+
+56
+00:04:53,856 --> 00:04:55,876
+I hope you'll recover soon.
+
+57
+00:04:55,936 --> 00:05:00,137
+Do feel free to come back to us or contact us if you have any other concerns.
+
+58
+00:05:31,651 --> 00:05:31,691
+th
+

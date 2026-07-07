@@ -1,0 +1,380 @@
+1
+00:00:00,392 --> 00:00:01,254
+Thank you.
+
+2
+00:02:19,399 --> 00:02:19,761
+Thank you.
+
+3
+00:03:05,923 --> 00:03:22,166
+Conchai 5523604
+
+4
+00:03:29,650 --> 00:03:29,990
+Okay.
+
+5
+00:03:30,010 --> 00:03:31,911
+So, can I have the answer?
+
+6
+00:03:31,931 --> 00:03:32,352
+Thank you.
+
+7
+00:03:50,845 --> 00:03:53,227
+Hi.
+
+8
+00:03:53,287 --> 00:03:55,268
+My feet are driving me crazy.
+
+9
+00:03:55,308 --> 00:03:57,690
+Can you give me something to fix it quickly?
+
+10
+00:03:58,151 --> 00:03:58,371
+Sure.
+
+11
+00:03:58,391 --> 00:04:00,172
+I am in your pharmacy today.
+
+12
+00:04:00,192 --> 00:04:00,953
+My name is Charlie.
+
+13
+00:04:01,313 --> 00:04:04,035
+So, who is the medication for?
+
+14
+00:04:04,135 --> 00:04:04,976
+That is for me.
+
+15
+00:04:05,296 --> 00:04:08,799
+Before I give you any recommendations, can I ask a few questions?
+
+16
+00:04:08,819 --> 00:04:08,939
+Sure.
+
+17
+00:04:08,959 --> 00:04:11,120
+Just to make sure that everything is as appropriate for you.
+
+18
+00:04:11,280 --> 00:04:11,561
+Okay.
+
+19
+00:04:11,981 --> 00:04:14,243
+Can I have your name, age, and medical number?
+
+20
+00:04:14,363 --> 00:04:15,443
+My name is Naga.
+
+21
+00:04:16,084 --> 00:04:18,406
+That is your medical number is URN 23456.
+
+22
+00:04:20,548 --> 00:04:25,036
+And Patras is Jalan Sultan 5000 Kuala Lumpur.
+
+23
+00:04:25,437 --> 00:04:27,941
+If you can add it as well, if your age and weight.
+
+24
+00:04:28,748 --> 00:04:32,251
+My age is 50 years and I am 60 kgs.
+
+25
+00:04:32,852 --> 00:04:36,095
+Can you describe more about your symptoms?
+
+26
+00:04:36,175 --> 00:04:41,319
+Actually there is a flaking and itchiness between the toes.
+
+27
+00:04:41,599 --> 00:04:47,264
+So have you noticed any unusual symptoms such as swelling of the skin or fever?
+
+28
+00:04:47,624 --> 00:04:48,425
+No.
+
+29
+00:04:48,505 --> 00:04:50,567
+Have you experienced this before?
+
+30
+00:04:52,447 --> 00:04:53,167
+No.
+
+31
+00:04:53,267 --> 00:04:54,848
+How long do the symptoms persist?
+
+32
+00:04:54,968 --> 00:04:56,749
+From three weeks.
+
+33
+00:04:57,489 --> 00:05:00,830
+So I can understand that you might feel really uncomfortable.
+
+34
+00:05:01,611 --> 00:05:02,491
+So do not worry.
+
+35
+00:05:03,071 --> 00:05:04,652
+What might be the cost of the symptoms?
+
+36
+00:05:04,672 --> 00:05:05,653
+Do you have any idea?
+
+37
+00:05:05,853 --> 00:05:09,454
+Because I am wearing the shoes for a long time maybe.
+
+38
+00:05:09,654 --> 00:05:11,975
+I am working in the form.
+
+39
+00:05:12,076 --> 00:05:13,756
+Is it oppressive or tight?
+
+40
+00:05:16,523 --> 00:05:18,744
+So, what medical conditions do you have?
+
+41
+00:05:19,004 --> 00:05:21,304
+I don't have any medical conditions.
+
+42
+00:05:21,344 --> 00:05:22,464
+What allergies do you have?
+
+43
+00:05:22,884 --> 00:05:24,365
+No allergies.
+
+44
+00:05:24,425 --> 00:05:29,426
+I am allergic to peanuts, but it's a like, immediate anaphylaxis.
+
+45
+00:05:29,986 --> 00:05:31,286
+Okay, alright.
+
+46
+00:05:31,426 --> 00:05:35,187
+Are you currently taking any prescription medicines or the counter medicines?
+
+47
+00:05:35,207 --> 00:05:35,367
+No.
+
+48
+00:05:35,707 --> 00:05:37,287
+Supplements or any herbal treatments?
+
+49
+00:05:37,367 --> 00:05:37,627
+No.
+
+50
+00:05:38,127 --> 00:05:38,547
+Okay.
+
+51
+00:05:39,008 --> 00:05:41,028
+Do you have any preference in your formulation?
+
+52
+00:05:42,329 --> 00:05:44,630
+I would like to have cream.
+
+53
+00:05:45,150 --> 00:05:45,591
+Cream?
+
+54
+00:05:45,671 --> 00:05:46,051
+Okay.
+
+55
+00:05:46,311 --> 00:05:48,112
+Other than that, no preference?
+
+56
+00:05:48,172 --> 00:05:48,372
+No.
+
+57
+00:05:48,933 --> 00:05:49,173
+Okay.
+
+58
+00:05:49,453 --> 00:05:54,016
+So to be double confirmed, you want something for the itchiness of the toast?
+
+59
+00:05:54,596 --> 00:05:54,796
+Okay.
+
+60
+00:05:54,897 --> 00:05:55,937
+Thank you for information.
+
+61
+00:05:55,977 --> 00:05:57,878
+Do you mind if I check my resources?
+
+62
+00:05:58,079 --> 00:05:58,419
+Yes.
+
+63
+00:05:58,439 --> 00:05:59,299
+Okay.
+
+64
+00:06:24,775 --> 00:06:25,555
+Thank you.
+
+65
+00:06:25,615 --> 00:06:26,415
+Thanks for waiting.
+
+66
+00:06:26,555 --> 00:06:34,857
+So based on the information given, I believe that you are having tinnia probably because you wear the shoes all day because of the work.
+
+67
+00:06:35,257 --> 00:06:39,979
+So I would recommend you a product, it's Azo, it's an Azo antifungus.
+
+68
+00:06:40,439 --> 00:06:43,399
+So I would recommend you the product name, Quatrimazole.
+
+69
+00:06:43,679 --> 00:06:45,000
+It's a 1% cream.
+
+70
+00:06:45,920 --> 00:06:50,481
+So you apply a thin layer onto the affected areas, which is your toes.
+
+71
+00:06:51,605 --> 00:07:00,029
+and twice daily, so you clean and dry the affected area and the surrounded area as well, then you apply.
+
+72
+00:07:00,950 --> 00:07:05,192
+So please continue for two weeks after the symptoms subside.
+
+73
+00:07:05,712 --> 00:07:15,517
+You might experience some side effects such as burning or stinging sensation, but if you find it unbearable, please come back to your pharmacy so I can for a switch of the medication.
+
+74
+00:07:16,753 --> 00:07:24,895
+So in addition to the medication, I would advise you to avoid wearing the tight shoes for longer time.
+
+75
+00:07:25,355 --> 00:07:31,096
+So frequently change it and also change to not very tight shoes.
+
+76
+00:07:31,396 --> 00:07:39,358
+And also because you need to clean and dry the affected area, I would advise you to use a separate towel to clean or dry the affected area.
+
+77
+00:07:40,059 --> 00:07:41,759
+Okay, is everything clear for you?
+
+78
+00:07:41,859 --> 00:07:42,059
+Yeah.
+
+79
+00:07:43,263 --> 00:07:48,848
+If the symptoms persist after the final treatment, please consult a doctor for further investigation.
+
+80
+00:07:49,168 --> 00:07:50,289
+Do you have any questions for me?
+
+81
+00:07:50,770 --> 00:07:51,731
+No questions.
+
+82
+00:07:52,091 --> 00:07:55,814
+Okay, since I've given you a lot of information, do you mind to repeat what I say just now?
+
+83
+00:07:56,435 --> 00:07:58,797
+I understood all the information given by you.
+
+84
+00:07:59,257 --> 00:08:03,661
+Okay, so this is your written leaflet as well as your product.
+
+85
+00:08:04,201 --> 00:08:05,542
+This is for your guidance.
+
+86
+00:08:05,762 --> 00:08:06,203
+Thank you.
+
+87
+00:08:06,263 --> 00:08:07,144
+I hope you get well soon.
+
+88
+00:08:07,904 --> 00:08:08,285
+Thank you.
+
+89
+00:08:12,132 --> 00:08:13,733
+I'm sorry, I had to wait here.
+
+90
+00:08:13,793 --> 00:08:14,434
+Go ahead.
+
+91
+00:08:14,774 --> 00:08:17,155
+I have to lock up?
+
+92
+00:08:17,255 --> 00:08:17,355
+Yeah.
+
+93
+00:08:18,876 --> 00:08:19,636
+I see.
+
+94
+00:08:21,497 --> 00:08:23,559
+You want to go home?
+
+95
+00:08:24,319 --> 00:08:24,619
+Yes.
+

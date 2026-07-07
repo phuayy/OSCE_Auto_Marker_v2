@@ -1,0 +1,201 @@
+{
+  "schema": "communication-scoring-v2",
+  "session_id": "4d4afdd3-8aa2-41d1-96ba-bfc44f0b2456",
+  "rubric_title": "PHR1012 COMMUNICATION RUBRICS",
+  "rubric_schema": "communication-rubric-v1",
+  "scoring_scale": {
+    "All": 3,
+    "Most": 2,
+    "Some": 1,
+    "None": 0
+  },
+  "criteria": [
+    {
+      "id": 1,
+      "label": "Student displays behaviours appropriate to a health professional. Verbal and nonverbal strategies are used to build rapport, convey attention and empathy, and reinforce/enhance.",
+      "section": "Communicative effectiveness",
+      "indicators_total": [
+        "Greets audience and establishes rapport",
+        "Describes purpose or reason for counseling session in terms of benefit to audience",
+        "Demonstrates appropriate nonverbal attending and immediacy behaviors (direct eye contact, head nods, posture, body language, privacy, distance, absence of barriers, etc.) to draw and convey attention and empathy",
+        "Demonstrates respect and interest, willingness to help",
+        "Attends to patient's physical and/or mental comfort (When applicable)",
+        "Uses written information or visual methods (e.g. leaflet, PPT, etc.) to reinforce and supplement (When applicable)"
+      ],
+      "indicators_observed": [
+        "Greets audience and establishes rapport",
+        "Describes purpose or reason for counseling session in terms of benefit to audience",
+        "Demonstrates respect and interest, willingness to help",
+        "Attends to patient's physical and/or mental comfort (When applicable)",
+        "Uses written information or visual methods (e.g. leaflet, PPT, etc.) to reinforce and supplement (When applicable)"
+      ],
+      "indicators_missing": [],
+      "indicators_not_observable": [
+        "Demonstrates appropriate nonverbal attending and immediacy behaviors (direct eye contact, head nods, posture, body language, privacy, distance, absence of barriers, etc.) to draw and convey attention and empathy"
+      ],
+      "score_label": "All",
+      "points": 3,
+      "evidence": "The student greeted the patient, introduced themselves as the pharmacist, explained the purpose of asking questions to ensure appropriate recommendations, showed empathy about discomfort, and provided a written leaflet for guidance.",
+      "timestamp": "00:03:58"
+    },
+    {
+      "id": 2,
+      "label": "Communication is easily understood, concise, fluent and well-paced.",
+      "section": "Communicative effectiveness",
+      "indicators_total": [
+        "Uses concise, easily understood language",
+        "Uses appropriate pace so that audience can understand and follow what is being communicated",
+        "Uses appropriate tone of voice to put the audience at ease",
+        "Speaks fluently. Occasionally uses verbal fillers (uh, um), but does not distract audience from meanings"
+      ],
+      "indicators_observed": [
+        "Uses concise, easily understood language",
+        "Uses appropriate pace so that audience can understand and follow what is being communicated",
+        "Uses appropriate tone of voice to put the audience at ease",
+        "Speaks fluently. Occasionally uses verbal fillers (uh, um), but does not distract audience from meanings"
+      ],
+      "indicators_missing": [],
+      "indicators_not_observable": [],
+      "score_label": "All",
+      "points": 3,
+      "evidence": "The student spoke clearly without filler words, maintained a understandable pace while checking resources, and used a calm tone that put the patient at ease.",
+      "timestamp": "00:06:26"
+    },
+    {
+      "id": 3,
+      "label": "Communication suits audience's level of understanding and needs.",
+      "section": "Communicative effectiveness",
+      "indicators_total": [
+        "Uses terminology audience will likely understand",
+        "Modifies communication to meet audience's special needs (e.g. low health literacy, ESL issues, cultural differences, etc.) (when applicable, may not for every scenario)",
+        "Avoid colloquialism"
+      ],
+      "indicators_observed": [
+        "Uses terminology audience will likely understand",
+        "Modifies communication to meet audience's special needs (e.g. low health literacy, ESL issues, cultural differences, etc.) (when applicable, may not for every scenario)",
+        "Avoid colloquialism"
+      ],
+      "indicators_missing": [],
+      "indicators_not_observable": [],
+      "score_label": "All",
+      "points": 3,
+      "evidence": "The student used plain language, avoided slang, and tailored explanations (e.g., describing application steps) to the patient's needs and understanding level.",
+      "timestamp": "00:06:45"
+    },
+    {
+      "id": 4,
+      "label": "Communication is logical and easy to follow.",
+      "section": "Communicative effectiveness",
+      "indicators_total": [
+        "Organizes presentation/ interview/ patient education in a logical sequence",
+        "Progresses from one section to another using signposting; includes rationale for next section"
+      ],
+      "indicators_observed": [
+        "Organizes presentation/ interview/ patient education in a logical sequence",
+        "Progresses from one section to another using signposting; includes rationale for next section"
+      ],
+      "indicators_missing": [],
+      "indicators_not_observable": [],
+      "score_label": "All",
+      "points": 3,
+      "evidence": "The interview followed a clear sequence from greeting to history, assessment, recommendation, instructions, and closure, with signposting phrases like 'So' and rationales for each step.",
+      "timestamp": "00:06:26"
+    },
+    {
+      "id": 5,
+      "label": "Student elicits information effectively to identify the problem through questioning, actively listening and periodically verifying own understanding.",
+      "section": "Application of interpersonal communication to address problems",
+      "indicators_total": [
+        "Identifies the audience's problems or the issues that audience wishes to address with appropriate opening question",
+        "Listens attentively, allowing audience to complete statements without interruption, and leaving space for audience to think before answering, or go on after pausing",
+        "Uses open and closed questioning technique to elicit information and identify problems",
+        "Periodically summarises to verify own understanding of what audience has said; invites audience to correct interpretation or provide further information.",
+        "Confirms list and screens for further problems"
+      ],
+      "indicators_observed": [
+        "Identifies the audience's problems or the issues that audience wishes to address with appropriate opening question",
+        "Listens attentively, allowing audience to complete statements without interruption, and leaving space for audience to think before answering, or go on after pausing",
+        "Uses open and closed questioning technique to elicit information and identify problems",
+        "Periodically summarises to verify own understanding of what audience has said; invites audience to correct interpretation or provide further information.",
+        "Confirms list and screens for further problems"
+      ],
+      "indicators_missing": [],
+      "indicators_not_observable": [],
+      "score_label": "All",
+      "points": 3,
+      "evidence": "The student opened with an appropriate question about who the medication was for, listened without interruption, used both open and closed questions, summarised the assessment, and screened for medical history and allergies.",
+      "timestamp": "00:04:01"
+    },
+    {
+      "id": 6,
+      "label": "Student provides accurate, complete and concise instructions, and engages audience in problem solving.",
+      "section": "Application of interpersonal communication to address problems",
+      "indicators_total": [
+        "Draws accurate and logical conclusions based on assessment of the person's history and information sourced from referenced material",
+        "Provides all relevant instructions/recommendations, based on assessment of audience understanding",
+        "Provides clear, concise and specific instructions that audience can follow and understand",
+        "Avoids overloading with information",
+        "Gives audience opportunity and time to talk to engage audience in collaborative planning and problem-solving",
+        "Helps identify resources to assist in problem resolution"
+      ],
+      "indicators_observed": [
+        "Draws accurate and logical conclusions based on assessment of the person's history and information sourced from referenced material",
+        "Provides all relevant instructions/recommendations, based on assessment of audience understanding",
+        "Provides clear, concise and specific instructions that audience can follow and understand",
+        "Avoids overloading with information",
+        "Gives audience opportunity and time to talk to engage audience in collaborative planning and problem-solving",
+        "Helps identify resources to assist in problem resolution"
+      ],
+      "indicators_missing": [],
+      "indicators_not_observable": [],
+      "score_label": "All",
+      "points": 3,
+      "evidence": "The student concluded tinea, gave clear antifungal cream instructions, avoided information overload, invited the patient to teach back and ask questions, and provided a written leaflet and product as resources.",
+      "timestamp": "00:06:45"
+    },
+    {
+      "id": 7,
+      "label": "Student confirms effectiveness of communication and addresses misunderstandings or gaps in understanding.",
+      "section": "Application of interpersonal communication to address problems",
+      "indicators_total": [
+        "Asks audience to teach back new information provided and suggested changes to be initiated",
+        "Addresses misunderstandings or gaps in understandings",
+        "Establishes plan for follow-up or reviews next step to be taken",
+        "Invites audience to call if questions or concerns arise, thanks audience, concludes encounter"
+      ],
+      "indicators_observed": [
+        "Asks audience to teach back new information provided and suggested changes to be initiated",
+        "Addresses misunderstandings or gaps in understandings",
+        "Establishes plan for follow-up or reviews next step to be taken",
+        "Invites audience to call if questions or concerns arise, thanks audience, concludes encounter"
+      ],
+      "indicators_missing": [],
+      "indicators_not_observable": [],
+      "score_label": "All",
+      "points": 3,
+      "evidence": "The student asked the patient to repeat the information, confirmed understanding, gave a follow-up plan if symptoms persisted, invited questions, thanked the patient, and closed the encounter.",
+      "timestamp": "00:07:52"
+    }
+  ],
+  "overall_summary": "The student demonstrated strong communication skills, establishing rapport, gathering information efficiently, and providing clear instructions with empathy. They used appropriate language, logical sequencing, and engaged the patient through teach-back and written resources. Minor slips in terminology did not impede understanding, and the interaction remained patient-centered and professional. Overall, the communication met OSCE expectations for a health professional encounter.",
+  "scoring_summary": {
+    "total_criteria": 7,
+    "total_score": 21,
+    "max_score": 21,
+    "average_score": 3,
+    "pass_threshold": 11,
+    "pass_fail": "Pass",
+    "decision_reason": "Pass: total 21/21 meets pass threshold of 11.",
+    "label_counts": {
+      "All": 7,
+      "Most": 0,
+      "Some": 0,
+      "None": 0
+    }
+  },
+  "transcript_file": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/transcripts/4d4afdd3-8aa2-41d1-96ba-bfc44f0b2456.json",
+  "audio_professionalism_file": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/audio_professionalism/4d4afdd3-8aa2-41d1-96ba-bfc44f0b2456.json",
+  "rubric_source": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/auth/communication_rubric.json",
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "generated_at": "2026-05-16T12:00:00.000000Z"
+}

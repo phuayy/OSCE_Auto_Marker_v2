@@ -1,0 +1,127 @@
+{
+  "id": "946f0f67-88f4-40c8-bf6b-5e23ac1169f7",
+  "name": "Silver Canvas 934",
+  "createdAt": "2026-05-15T16:03:17.789Z",
+  "status": "cropped",
+  "pipeline": {
+    "startedAt": null,
+    "endedAt": null,
+    "runtimeSeconds": null,
+    "mode": "cpu"
+  },
+  "files": {
+    "video": {
+      "originalName": "Cropped_5_students.mp4",
+      "fileName": "946f0f67-88f4-40c8-bf6b-5e23ac1169f7-Cropped_5_students.mp4",
+      "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/input/videos/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-Cropped_5_students.mp4",
+      "sizeBytes": 209479859,
+      "mimeType": "video/mp4",
+      "url": "/media/videos/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-Cropped_5_students.mp4"
+    },
+    "caseStudy": {
+      "originalName": "2024 PHR1012 OSCE Case 9 (Tinea).pdf",
+      "fileName": "946f0f67-88f4-40c8-bf6b-5e23ac1169f7-2024-PHR1012-OSCE-Case-9-Tinea.pdf",
+      "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/input/case_studies/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-2024-PHR1012-OSCE-Case-9-Tinea.pdf",
+      "sizeBytes": 349478,
+      "mimeType": "application/pdf"
+    }
+  },
+  "outputs": {
+    "audio": null,
+    "whisperxJson": null,
+    "transcript": null,
+    "subtitle": null,
+    "subtitleTrack": null,
+    "audioProfessionalism": null,
+    "communicationScores": null,
+    "videoClips": [
+      {
+        "id": "6baeddd1-1a71-40d9-92ba-351fe1949755",
+        "label": "Student 1",
+        "start": 0,
+        "end": 525.7908215877429,
+        "fileName": "946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-1.mp4",
+        "url": "/media/clips/946f0f67-88f4-40c8-bf6b-5e23ac1169f7/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-1.mp4",
+        "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/clips/946f0f67-88f4-40c8-bf6b-5e23ac1169f7/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-1.mp4",
+        "sizeBytes": 46134106,
+        "createdAt": "2026-05-16T07:59:48.033Z",
+        "source": {
+          "type": "manual_timeline_split",
+          "boundariesCount": 4,
+          "labelsProvided": true,
+          "bellEndOffsetSeconds": 5
+        }
+      },
+      {
+        "id": "1b0e96d3-60cf-4b84-b591-c79fc7f6b209",
+        "label": "Student 2",
+        "start": 525.7908215877429,
+        "end": 955.5393568792728,
+        "fileName": "946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-2.mp4",
+        "url": "/media/clips/946f0f67-88f4-40c8-bf6b-5e23ac1169f7/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-2.mp4",
+        "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/clips/946f0f67-88f4-40c8-bf6b-5e23ac1169f7/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-2.mp4",
+        "sizeBytes": 37784592,
+        "createdAt": "2026-05-16T07:59:48.358Z",
+        "source": {
+          "type": "manual_timeline_split",
+          "boundariesCount": 4,
+          "labelsProvided": true,
+          "bellEndOffsetSeconds": 5
+        }
+      },
+      {
+        "id": "478a1954-0eeb-4e34-96bc-ed45bc8a9c56",
+        "label": "Student 3",
+        "start": 955.5393568792728,
+        "end": 1482.9580138279684,
+        "fileName": "946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-3.mp4",
+        "url": "/media/clips/946f0f67-88f4-40c8-bf6b-5e23ac1169f7/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-3.mp4",
+        "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/clips/946f0f67-88f4-40c8-bf6b-5e23ac1169f7/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-3.mp4",
+        "sizeBytes": 46400643,
+        "createdAt": "2026-05-16T07:59:48.708Z",
+        "source": {
+          "type": "manual_timeline_split",
+          "boundariesCount": 4,
+          "labelsProvided": true,
+          "bellEndOffsetSeconds": 5
+        }
+      },
+      {
+        "id": "1665b388-aa8e-4a74-a0d6-525ae841ded2",
+        "label": "Student 4",
+        "start": 1482.9580138279684,
+        "end": 1854.1044761251987,
+        "fileName": "946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-4.mp4",
+        "url": "/media/clips/946f0f67-88f4-40c8-bf6b-5e23ac1169f7/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-4.mp4",
+        "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/clips/946f0f67-88f4-40c8-bf6b-5e23ac1169f7/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-4.mp4",
+        "sizeBytes": 32677499,
+        "createdAt": "2026-05-16T07:59:48.957Z",
+        "source": {
+          "type": "manual_timeline_split",
+          "boundariesCount": 4,
+          "labelsProvided": true,
+          "bellEndOffsetSeconds": 5
+        }
+      },
+      {
+        "id": "918089b6-e9f9-4d2a-9c0a-aeae51e83b6a",
+        "label": "Student 5",
+        "start": 1854.1044761251987,
+        "end": 2400.497589,
+        "fileName": "946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-5.mp4",
+        "url": "/media/clips/946f0f67-88f4-40c8-bf6b-5e23ac1169f7/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-5.mp4",
+        "absolutePath": "/Users/hassaanusmani/Units/FIT3162/OSCE-AI-FYP/storage/output/clips/946f0f67-88f4-40c8-bf6b-5e23ac1169f7/946f0f67-88f4-40c8-bf6b-5e23ac1169f7-clip-5.mp4",
+        "sizeBytes": 47940606,
+        "createdAt": "2026-05-16T07:59:49.321Z",
+        "source": {
+          "type": "manual_timeline_split",
+          "boundariesCount": 4,
+          "labelsProvided": true,
+          "bellEndOffsetSeconds": 5
+        }
+      }
+    ],
+    "scores": null
+  },
+  "error": null
+}

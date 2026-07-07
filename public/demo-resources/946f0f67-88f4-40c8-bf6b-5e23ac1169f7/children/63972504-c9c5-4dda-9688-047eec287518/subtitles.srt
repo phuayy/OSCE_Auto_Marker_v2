@@ -1,0 +1,284 @@
+1
+00:00:43,739 --> 00:00:43,839
+.
+
+2
+00:00:43,899 --> 00:00:43,919
+.
+
+3
+00:03:32,073 --> 00:03:34,137
+No, it's a 9-2-3-5-9-0-8-8-5.
+
+4
+00:03:44,998 --> 00:03:47,520
+Hi, my name is Srinath, I promise you are on duty for today.
+
+5
+00:03:47,580 --> 00:03:48,781
+How may I help you?
+
+6
+00:03:49,182 --> 00:03:51,183
+Hi, my feet are driving me crazy.
+
+7
+00:03:51,443 --> 00:03:53,665
+Can you give me something to fix it quickly?
+
+8
+00:03:53,685 --> 00:03:54,606
+Alright.
+
+9
+00:03:54,746 --> 00:03:58,789
+Okay, so before I provide you with any medications, it's alright if I ask you a few questions.
+
+10
+00:03:59,050 --> 00:03:59,430
+Okay.
+
+11
+00:03:59,610 --> 00:04:00,591
+Okay.
+
+12
+00:04:00,651 --> 00:04:02,492
+Just to confirm, is this medications for you?
+
+13
+00:04:02,573 --> 00:04:02,793
+Yeah.
+
+14
+00:04:03,073 --> 00:04:03,313
+Alright.
+
+15
+00:04:03,593 --> 00:04:06,736
+Do you mind telling me your name, your age and also medical number?
+
+16
+00:04:06,956 --> 00:04:08,818
+My name is Naka.
+
+17
+00:04:08,958 --> 00:04:10,179
+I am 50 years old.
+
+18
+00:04:10,259 --> 00:04:12,000
+Medical number is URN 234567.
+
+19
+00:04:12,020 --> 00:04:12,401
+Alright.
+
+20
+00:04:15,025 --> 00:04:16,810
+Can you describe more about your symptoms?
+
+21
+00:04:17,573 --> 00:04:19,920
+Actually I would like to...
+
+22
+00:04:22,406 --> 00:04:25,407
+I would like to have some medication to fix my symptoms.
+
+23
+00:04:26,087 --> 00:04:31,489
+Actually the skin is red with cracking and peeling between the two toes.
+
+24
+00:04:31,669 --> 00:04:32,089
+Alright.
+
+25
+00:04:32,450 --> 00:04:35,871
+So did you notice any swelling or bleeding at affected area?
+
+26
+00:04:35,891 --> 00:04:36,031
+No.
+
+27
+00:04:36,191 --> 00:04:37,511
+Okay, no swelling.
+
+28
+00:04:38,211 --> 00:04:40,432
+May I know how long have the symptoms started already?
+
+29
+00:04:40,492 --> 00:04:41,793
+I think around 3 weeks.
+
+30
+00:04:42,173 --> 00:04:43,113
+3 weeks already.
+
+31
+00:04:43,573 --> 00:04:45,214
+Okay, so may I know?
+
+32
+00:04:46,114 --> 00:04:48,375
+Have you tried anything to relieve your symptoms?
+
+33
+00:04:48,735 --> 00:04:48,975
+No.
+
+34
+00:04:49,375 --> 00:04:49,895
+Okay.
+
+35
+00:04:50,455 --> 00:04:53,356
+May I know what might trigger the cause of your symptoms?
+
+36
+00:04:53,636 --> 00:04:58,218
+I'm not very sure, maybe because of the long working day in the Hudson.
+
+37
+00:04:58,378 --> 00:04:58,958
+Alright.
+
+38
+00:04:59,058 --> 00:05:02,239
+So, may I know are you kindly having any allergies?
+
+39
+00:05:03,039 --> 00:05:04,319
+I am allergic to peanuts.
+
+40
+00:05:04,720 --> 00:05:05,420
+That's okay.
+
+41
+00:05:05,700 --> 00:05:07,760
+May I know is this your first time experiencing this?
+
+42
+00:05:07,800 --> 00:05:08,041
+Yeah.
+
+43
+00:05:08,301 --> 00:05:08,701
+Okay.
+
+44
+00:05:10,115 --> 00:05:12,076
+Did you have any medical condition?
+
+45
+00:05:12,616 --> 00:05:14,437
+No, medical condition.
+
+46
+00:05:14,797 --> 00:05:17,118
+Did you consume any prescription medications?
+
+47
+00:05:17,198 --> 00:05:17,459
+No.
+
+48
+00:05:17,879 --> 00:05:21,200
+Any vitamins, supplements or anything?
+
+49
+00:05:21,220 --> 00:05:24,082
+Do you have any preference for your medications?
+
+50
+00:05:24,482 --> 00:05:26,463
+I prefer if it is a cream.
+
+51
+00:05:26,783 --> 00:05:27,443
+Cream, alright.
+
+52
+00:05:27,824 --> 00:05:29,004
+Do you mind giving me some time?
+
+53
+00:05:29,024 --> 00:05:30,205
+Did you answer information?
+
+54
+00:05:30,245 --> 00:05:30,485
+Sure.
+
+55
+00:06:49,382 --> 00:06:50,703
+All right, thank you for waiting.
+
+56
+00:06:51,103 --> 00:06:58,146
+So, from what you have said to me, you are actually experiencing Tanya, and the medication that I'm going to provide you is Clotrimazole Cream.
+
+57
+00:06:58,526 --> 00:07:06,810
+So, you can apply to the affected area two times daily, and continue for two weeks to prevent any reward infections, all right?
+
+58
+00:07:06,870 --> 00:07:13,672
+This medication is generally safe, but there might be some side effects, for example, like stingy and also burning sensations.
+
+59
+00:07:14,153 --> 00:07:14,813
+Other than that,
+
+60
+00:07:15,623 --> 00:07:22,110
+Try to change your socks frequently and also try the affected area with a separate towel.
+
+61
+00:07:22,370 --> 00:07:29,839
+Make sure that you do not share any towels with anyone as it can cause the infections to spread over yourself.
+
+62
+00:07:29,859 --> 00:07:31,060
+Is everything clear for you?
+
+63
+00:07:31,341 --> 00:07:32,682
+Do you have any questions for me?
+
+64
+00:07:34,144 --> 00:07:35,686
+Do you mind repeating back what I have to say?
+
+65
+00:07:36,086 --> 00:07:38,607
+I understood all the information given by you.
+
+66
+00:07:38,827 --> 00:07:39,748
+Alright, thank you.
+
+67
+00:07:39,768 --> 00:07:48,912
+So if the symptoms persist or the symptoms is worsening, you may come back again to the pharmacy or you may go to the doctor to check for a better diagnosis.
+
+68
+00:07:49,232 --> 00:07:54,474
+So here is the pamphlet about the tanya that you may look for about some information, okay?
+
+69
+00:07:54,974 --> 00:07:56,035
+Alright, I think that's all.
+
+70
+00:07:56,075 --> 00:07:56,835
+Thank you very much.
+
+71
+00:08:35,318 --> 00:08:35,458
+Okay.
+
