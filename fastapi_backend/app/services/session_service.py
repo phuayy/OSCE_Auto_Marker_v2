@@ -65,6 +65,7 @@ class SessionService:
         sessions: list[dict[str, Any]] = []
         for session in (entry.session for entry in entries):
             outputs = session.get("outputs") or {}
+            pipeline = session.get("pipeline") if isinstance(session.get("pipeline"), dict) else {}
             sessions.append(
                 {
                     "id": session.get("id"),
@@ -76,6 +77,11 @@ class SessionService:
                     "parentSessionId": session.get("parentSessionId") or None,
                     "clipSource": session.get("clipSource") or None,
                     "hasVideoClips": bool(outputs.get("videoClips")),
+                    # Lightweight progress for the session-list cards: the UI
+                    # gauges an in-flight session from its card instead of
+                    # opening it (in-flight sessions are not enterable).
+                    "currentStep": pipeline.get("currentStep") or None,
+                    "pipelineStartedAt": pipeline.get("startedAt") or None,
                 }
             )
         return sessions

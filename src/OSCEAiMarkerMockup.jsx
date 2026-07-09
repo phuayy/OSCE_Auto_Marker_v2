@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { ensureStreamTicket, resolveMediaUrl, withStreamTicket } from '@/auth';
+import { ensureStreamTicket, resolveMediaUrl } from '@/auth';
 import {
   ArrowLeft,
   BellRing,
@@ -302,68 +302,50 @@ function buildLongDemoChildSession(rawSession, scoresPayload, communicationScore
   };
 }
 
-// How often to poll the persisted session while a job is processing. This is a
-// fallback for environments where SSE milestones do not reach the browser —
-// e.g. JOB_QUEUE_BACKEND=hatchet, where the pipeline runs in a separate worker
-// process and the API's in-memory EventService never sees its events. Kept
-// deliberately coarse so it doesn't spam the API/DB.
-const PROCESS_POLL_INTERVAL_MS = 4000;
-
-// Terminal states that should close the processing overlay and stop the timer.
-// 'completed'/'succeeded' = scoring done, 'cropped' = auto-crop workflow done,
-// 'failed'/'cancelled' = stopped. Used for both SSE status codes and the polled
-// session status.
-const TERMINAL_STATUS_CODES = new Set(['completed', 'succeeded', 'cropped', 'failed', 'cancelled']);
-const FAILED_STATUS_CODES = new Set(['failed', 'cancelled']);
-// Statuses for which a session has live work in flight, so clicking it should
-// re-open the progress overlay rather than the static results workspace.
+// Statuses for which a session has live work in flight. In-flight sessions are
+// NOT enterable — the session card shows their stage until a terminal status
+// unlocks them.
 const IN_FLIGHT_STATUSES = new Set(['assembling', 'queued', 'processing']);
 
-// Maps the durable pipeline.steps (persisted to the DB by the worker) onto the
-// four high-level milestones shown in the modal. A step counts as done when it
-// has completed or was skipped (e.g. an optional stage that is disabled).
-function deriveMilestonesFromSteps(pipeline) {
-  const steps = (pipeline && pipeline.steps) || {};
-  const isDone = (name) => {
-    const state = steps[name];
-    return Boolean(state && (state.status === 'completed' || state.status === 'skipped'));
-  };
-  return {
-    convertedToMp3: isDone('audio_extraction'),
-    transcriptionComplete: isDone('transcript_normalization') || isDone('whisperx'),
-    scored: isDone('content_scoring'),
-  };
-}
+// Ordered standard-pipeline steps used to gauge progress on the session cards.
+// Mirrors the backend's pipeline.steps keys (session_service list projection
+// exposes pipeline.currentStep as `currentStep`).
+const PIPELINE_STAGE_SEQUENCE = [
+  ['audio_extraction', 'Extracting audio'],
+  ['whisperx', 'Transcribing (WhisperX)'],
+  ['transcript_normalization', 'Normalizing transcript'],
+  ['audio_professionalism', 'Analyzing audio professionalism'],
+  ['communication_scoring', 'Scoring communication'],
+  ['content_scoring', 'Scoring content'],
+  ['assessment_persistence', 'Saving results'],
+];
 
-// Merge derived milestones into the current ones, only ever advancing a flag to
-// true so a transient empty poll can never visually "un-complete" a milestone.
-function mergeMilestonesFromSteps(previous, pipeline) {
-  const derived = deriveMilestonesFromSteps(pipeline);
-  return {
-    started: previous.started || derived.convertedToMp3 || derived.transcriptionComplete || derived.scored,
-    convertedToMp3: previous.convertedToMp3 || derived.convertedToMp3,
-    transcriptionComplete: previous.transcriptionComplete || derived.transcriptionComplete,
-    scored: previous.scored || derived.scored,
-  };
-}
-
-// The step a run is currently on or failed at, for a human-readable status line.
-function activePipelineStep(pipeline) {
-  const steps = (pipeline && pipeline.steps) || {};
-  const failed = Object.entries(steps).find(([, state]) => state && state.status === 'failed');
-  if (failed) {
-    return { name: failed[0], status: 'failed', error: failed[1]?.error || '' };
+// Human-readable stage + rough completion fraction for an in-flight session,
+// derived from the lightweight list projection (status + workflow +
+// currentStep). This is what the session card shows while the session itself
+// is blocked from being opened.
+function describeProcessingStage(entry) {
+  const status = String(entry?.status || '').toLowerCase();
+  if (status === 'assembling') {
+    return { label: 'Assembling upload', fraction: 0.05 };
   }
-  if (pipeline?.currentStep) {
-    return { name: pipeline.currentStep, status: 'running', error: '' };
+  if (status === 'queued') {
+    return { label: 'Queued for processing', fraction: 0.1 };
   }
-  return null;
-}
-
-function humanizeStepName(name) {
-  return String(name || '')
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, (char) => char.toUpperCase());
+  if (status !== 'processing') {
+    return null;
+  }
+  if (entry?.workflow === 'long') {
+    return { label: 'Detecting student boundaries', fraction: 0.5 };
+  }
+  const stepIndex = PIPELINE_STAGE_SEQUENCE.findIndex(([step]) => step === entry?.currentStep);
+  if (stepIndex >= 0) {
+    return {
+      label: PIPELINE_STAGE_SEQUENCE[stepIndex][1],
+      fraction: (stepIndex + 1) / (PIPELINE_STAGE_SEQUENCE.length + 1),
+    };
+  }
+  return { label: 'Processing', fraction: 0.15 };
 }
 
 export default function OSCEAiMarkerMockup({
@@ -440,8 +422,6 @@ export default function OSCEAiMarkerMockup({
   const caseStudyInputRef = useRef(null);
   const videoPlayerRef = useRef(null);
   const videoPlayerSectionRef = useRef(null);
-  const processEventsRef = useRef(null);
-  const processPollRef = useRef(null);
   const timelineContainerRef = useRef(null);
   const manualTimelineRef = useRef(null);
   const timelineSegmentRefs = useRef(new Map());
@@ -888,20 +868,6 @@ export default function OSCEAiMarkerMockup({
     };
   }, [isPipelineActive]);
 
-  useEffect(
-    () => () => {
-      if (processEventsRef.current) {
-        processEventsRef.current.close();
-        processEventsRef.current = null;
-      }
-      if (processPollRef.current) {
-        clearInterval(processPollRef.current);
-        processPollRef.current = null;
-      }
-    },
-    []
-  );
-
   useEffect(() => {
     if (!activeSegmentId) {
       return;
@@ -1040,257 +1006,16 @@ export default function OSCEAiMarkerMockup({
     }
   }, [showWorkspace]);
 
-  // Auto-poll the session list while any session is actively queued or processing.
+  // Auto-poll the session list while anything is in flight. Runs on the main
+  // page (drives the card stage gauges) AND inside a long-session workspace
+  // (drives the per-clip run states, which derive from the same index).
   useEffect(() => {
-    if (showWorkspace) return;
-    const isActive = sessionIndex.some((s) => s.status === 'assembling' || s.status === 'queued' || s.status === 'processing');
+    const isActive = sessionIndex.some((s) => IN_FLIGHT_STATUSES.has(s.status));
     if (!isActive) return;
     const timer = setInterval(refreshSessionIndex, 8000);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showWorkspace, sessionIndex]);
-
-  function closeProcessEventsStream() {
-    if (processEventsRef.current) {
-      processEventsRef.current.close();
-      processEventsRef.current = null;
-    }
-    if (processPollRef.current) {
-      clearInterval(processPollRef.current);
-      processPollRef.current = null;
-    }
-  }
-
-  function updateLiveLog(rawMessage, source = 'pipeline') {
-    const text = String(rawMessage || '')
-      .replace(/\r/g, '\n')
-      .trim();
-
-    if (!text) {
-      return;
-    }
-
-    const lines = text
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean);
-
-    if (!lines.length) {
-      return;
-    }
-
-    const lastLine = lines[lines.length - 1];
-    setLiveLogLine(lastLine);
-
-    lines.forEach((line) => {
-      debugPipeline(`[${source}] ${line}`);
-    });
-  }
-
-  function connectProcessEvents(sessionId, options = {}) {
-    closeProcessEventsStream();
-
-    const { onStatus } = options || {};
-    // Terminal status can arrive from either SSE or the polling fallback; route
-    // both through one guard so the completion handler runs exactly once.
-    let terminalHandled = false;
-    const handleStatus = (payload) => {
-      const code = String(payload?.code || '').toLowerCase();
-      const isTerminal = TERMINAL_STATUS_CODES.has(code);
-      if (isTerminal) {
-        if (terminalHandled) {
-          return;
-        }
-        terminalHandled = true;
-        if (processPollRef.current) {
-          clearInterval(processPollRef.current);
-          processPollRef.current = null;
-        }
-      }
-      if (onStatus) {
-        onStatus(payload);
-      } else if (isTerminal) {
-        // Flows without a bespoke completion handler (e.g. the direct
-        // upload/process path): close the overlay, stop the timer, and load the
-        // now-persisted results.
-        finishProcessing(sessionId, payload);
-      }
-    };
-
-    // Refresh the stream ticket cache for future reconnects; the current
-    // connection uses whatever ticket is cached (falling back to the token).
-    ensureStreamTicket();
-    const eventSource = new EventSource(withStreamTicket(`/api/sessions/${sessionId}/events`));
-    processEventsRef.current = eventSource;
-
-    eventSource.addEventListener('connected', (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        updateLiveLog(payload.message || 'Live log stream connected.', 'stream');
-      } catch (_error) {
-        updateLiveLog('Live log stream connected.', 'stream');
-      }
-    });
-
-    eventSource.addEventListener('log', (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        updateLiveLog(payload.message, payload.source || 'whisperx');
-      } catch (_error) {
-        updateLiveLog('Unable to parse live log event.', 'stream');
-      }
-    });
-
-    eventSource.addEventListener('milestone', (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        const code = payload.code || '';
-
-        if (code === 'started') {
-          setPipelineMilestones({
-            started: true,
-            convertedToMp3: false,
-            transcriptionComplete: false,
-            scored: false,
-          });
-          setProcessingMessage('Video uploaded. Converting to MP3...');
-        }
-
-        if (code === 'converted_to_mp3') {
-          setPipelineMilestones((previous) => ({
-            ...previous,
-            started: true,
-            convertedToMp3: true,
-          }));
-          setProcessingMessage('Running WhisperX transcription + diarization...');
-        }
-
-        if (code === 'transcription_complete') {
-          setPipelineMilestones((previous) => ({
-            ...previous,
-            started: true,
-            convertedToMp3: true,
-            transcriptionComplete: true,
-          }));
-          setProcessingMessage('Transcript generated. Starting AI scoring...');
-        }
-
-        if (code === 'scoring_started') {
-          setProcessingMessage('Scoring transcript with AI model...');
-        }
-
-        if (code === 'scored') {
-          setPipelineMilestones((previous) => ({
-            ...previous,
-            started: true,
-            convertedToMp3: true,
-            transcriptionComplete: true,
-            scored: true,
-          }));
-          setProcessingMessage('Transcript scored successfully.');
-        }
-
-        updateLiveLog(payload.message, 'milestone');
-      } catch (_error) {
-        updateLiveLog('Unable to parse milestone event.', 'stream');
-      }
-    });
-
-    eventSource.addEventListener('status', (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        updateLiveLog(payload.message, 'status');
-        handleStatus(payload);
-      } catch (_error) {
-        updateLiveLog('Unable to parse status event.', 'stream');
-      }
-    });
-
-    eventSource.onerror = () => {
-      console.warn('Session event stream disconnected.');
-    };
-
-    // SSE milestones live in the process that runs the pipeline; under Hatchet
-    // that is a separate worker, so the browser's stream never sees them. Poll
-    // the persisted session (pipeline.steps + status) as a process-independent
-    // fallback that also survives a page refresh.
-    processPollRef.current = setInterval(() => {
-      pollSessionProgress(sessionId, handleStatus);
-    }, PROCESS_POLL_INTERVAL_MS);
-
-    return eventSource;
-  }
-
-  async function pollSessionProgress(sessionId, handleStatus) {
-    try {
-      const response = await fetch(`/api/sessions/${sessionId}`);
-      if (!response.ok) {
-        return;
-      }
-      const body = await response.json().catch(() => ({}));
-      const sessionPayload = body?.session;
-      if (!sessionPayload) {
-        return;
-      }
-
-      const pipeline = sessionPayload.pipeline || null;
-      setPipelineMilestones((previous) => mergeMilestonesFromSteps(previous, pipeline));
-
-      const step = activePipelineStep(pipeline);
-      if (step?.status === 'running') {
-        setProcessingMessage(`Processing: ${humanizeStepName(step.name)}...`);
-      }
-
-      const status = String(sessionPayload.status || '').toLowerCase();
-      if (TERMINAL_STATUS_CODES.has(status)) {
-        const failureDetail = step?.error
-          ? `Failed at ${humanizeStepName(step.name)}: ${step.error}`
-          : 'Processing failed.';
-        const message = FAILED_STATUS_CODES.has(status)
-          ? sessionPayload.error || failureDetail
-          : 'Processing complete.';
-        handleStatus({ code: status, message });
-      }
-    } catch (_error) {
-      // Transient network/DB hiccup; the next interval retries.
-    }
-  }
-
-  // Default completion handler for flows that did not supply their own onStatus.
-  // Closes the processing overlay, stops the runtime timer (both gated on
-  // isUploading/isProcessing), and loads the persisted results.
-  async function finishProcessing(sessionId, payload) {
-    closeProcessEventsStream();
-    const code = String(payload?.code || '').toLowerCase();
-
-    if (FAILED_STATUS_CODES.has(code)) {
-      setError(payload?.message || 'Processing did not complete.');
-      setIsUploading(false);
-      setIsProcessing(false);
-      setProcessingMessage('');
-      return;
-    }
-
-    try {
-      const loaded = await loadSessionWorkspace(sessionId);
-      setSession(loaded.session);
-      setTranscript(loaded.transcript || { segments: [] });
-      setScoreReport(loaded.scores || loaded?.session?.outputs?.scores?.payload || null);
-      setAudioProfessionalism(
-        loaded.audioProfessionalism || loaded?.session?.outputs?.audioProfessionalism?.payload || null,
-      );
-      setCommunicationScores(
-        loaded.communicationScores || loaded?.session?.outputs?.communicationScores?.payload || null,
-      );
-      setRuntimeSeconds(Math.round(loaded.session?.pipeline?.runtimeSeconds || 0));
-    } catch (loadError) {
-      setError(loadError.message || 'Failed to load results.');
-    } finally {
-      setIsUploading(false);
-      setIsProcessing(false);
-      setProcessingMessage('');
-    }
-  }
+  }, [sessionIndex]);
 
   async function refreshSessionIndex() {
     setSessionIndexLoading(true);
@@ -1375,7 +1100,6 @@ export default function OSCEAiMarkerMockup({
   }
 
   async function openExistingSession(sessionId) {
-    closeProcessEventsStream();
     setError('');
     setNotice('');
     setIsDemoFallback(false);
@@ -1389,14 +1113,17 @@ export default function OSCEAiMarkerMockup({
     try {
       const payload = await loadSessionWorkspace(sessionId);
 
-      // Gate: a long session cannot be entered until auto-crop has finished
-      // (status 'cropped'); opening a still-cropping session would expose an
-      // empty/partial clip list. Bounce back to the list with a notice. This
-      // also covers deep links / reloads that hit the URL→state restore effect.
+      // Gate: an in-flight session (assembling/queued/processing) cannot be
+      // entered — its results are empty/partial until processing finishes.
+      // Bounce back to the list, where the session card shows the live stage.
+      // This also covers deep links / reloads that hit the URL→state restore
+      // effect, so blocking the list button alone is not enough.
       const loaded = payload.session;
-      if (loaded?.workflow === 'long' && IN_FLIGHT_STATUSES.has(String(loaded.status))) {
+      if (IN_FLIGHT_STATUSES.has(String(loaded?.status))) {
         setShowWorkspace(false);
-        setNotice('This long session is still auto-cropping. It will open once cropping has finished.');
+        setNotice(
+          'This session is still processing. Track its stage on the session card — it unlocks when finished.',
+        );
         if (typeof onNavigateSession === 'function') {
           onNavigateSession(null);
         }
@@ -1430,86 +1157,25 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
-  // Re-attach the live progress overlay to an in-flight session (clicked from the
-  // session list). Seeds the milestones/runtime from the session's persisted
-  // pipeline so the overlay reflects current progress immediately, then SSE +
-  // polling keep it live and auto-close it on completion.
-  async function openSessionProgress(sessionId) {
-    setError('');
-    setNotice('');
-    setIsDemoFallback(false);
-    setParentSessionSnapshot(null);
-    setTranscript({ segments: [] });
-    setScoreReport(null);
-    setAudioProfessionalism(null);
-    setCommunicationScores(null);
-    setProcessingMessage('Loading current progress…');
-    setLiveLogLine('Reconnecting to task progress…');
-    setRuntimeSeconds(0);
-    setPipelineMilestones({ started: true, convertedToMp3: false, transcriptionComplete: false, scored: false });
-    setProcessingStage('pipeline');
-    setShowWorkspace(true);
-    setIsUploading(false);
-    setIsProcessing(true);
-
-    try {
-      const response = await fetch(`/api/sessions/${sessionId}`);
-      const body = await response.json().catch(() => ({}));
-      if (response.ok && body?.session) {
-        const sess = body.session;
-        setSession(sess);
-        setProcessingStage(sess.workflow === 'long' ? 'autocrop' : 'pipeline');
-        setPipelineMilestones((previous) => mergeMilestonesFromSteps(previous, sess.pipeline));
-
-        const startedAt = sess.pipeline?.startedAt ? Date.parse(sess.pipeline.startedAt) : NaN;
-        if (Number.isFinite(startedAt)) {
-          setRuntimeSeconds(Math.max(0, Math.round((Date.now() - startedAt) / 1000)));
-        }
-
-        // Finished between the list render and the click — go straight to results.
-        if (TERMINAL_STATUS_CODES.has(String(sess.status || '').toLowerCase())) {
-          await finishProcessing(sessionId, {
-            code: String(sess.status).toLowerCase(),
-            message: sess.error || 'Processing complete.',
-          });
-          return;
-        }
-      }
-    } catch (_error) {
-      // Non-fatal: the live stream + poll below will populate progress.
-    }
-
-    connectProcessEvents(sessionId);
-  }
-
-  // Renders the action control for a saved-session row. Long sessions are gated:
-  // they cannot be opened until auto-crop has finished (status 'cropped'),
-  // because opening a still-cropping session would show an empty/partial clip
-  // list. Standard sessions expose a live "View progress" while in flight.
+  // Renders the action control for a saved-session row. In-flight sessions
+  // (assembling/queued/processing) are deliberately NOT enterable — opening a
+  // half-processed session would show empty/partial results. The card itself
+  // gauges the current stage (see describeProcessingStage); this button
+  // unlocks once processing reaches a terminal state.
   function renderSessionAction(sessionEntry) {
-    const status = sessionEntry.status;
-    const inFlight = IN_FLIGHT_STATUSES.has(status);
-    const isLong = sessionEntry.workflow === 'long';
+    const inFlight = IN_FLIGHT_STATUSES.has(sessionEntry.status);
 
-    if (isLong && inFlight) {
+    if (inFlight) {
       return (
         <Button
           size="sm"
           variant="outline"
           disabled
           className="gap-1"
-          title="This long session opens once auto-crop has finished."
+          title="Available when processing completes. Progress is shown on this card."
         >
           <Loader2 className="h-3 w-3 animate-spin" />
-          {status === 'assembling' ? 'Assembling…' : 'Cropping…'}
-        </Button>
-      );
-    }
-
-    if (inFlight) {
-      return (
-        <Button size="sm" variant="outline" onClick={() => openSessionProgress(sessionEntry.id)}>
-          View progress
+          Processing…
         </Button>
       );
     }
@@ -1522,7 +1188,6 @@ export default function OSCEAiMarkerMockup({
   }
 
   function goHome() {
-    closeProcessEventsStream();
     setShowWorkspace(false);
     setSession(null);
     setTranscript({ segments: [] });
@@ -1625,8 +1290,6 @@ export default function OSCEAiMarkerMockup({
   }
 
   async function openDemoWorkspace(reason) {
-    closeProcessEventsStream();
-
     setError('');
     setIsUploading(false);
     setIsProcessing(true);
@@ -1848,8 +1511,6 @@ export default function OSCEAiMarkerMockup({
   }
 
   async function openLongVideoDemoWorkspace() {
-    closeProcessEventsStream();
-
     setError('');
     setIsUploading(false);
     setIsProcessing(true);
@@ -1960,34 +1621,6 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
-  function waitForQueuedSession(sessionId) {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      connectProcessEvents(sessionId, {
-        onStatus: async (payload) => {
-          const code = payload?.code || '';
-          if (settled) {
-            return;
-          }
-          if (code === 'failed' || code === 'cancelled') {
-            settled = true;
-            reject(new Error(payload.message || 'Queued processing failed.'));
-            return;
-          }
-          if (code === 'completed' || code === 'succeeded') {
-            settled = true;
-            try {
-              await openExistingSession(sessionId);
-              resolve();
-            } catch (error) {
-              reject(error);
-            }
-          }
-        },
-      });
-    });
-  }
-
   async function runAsyncUploadAssessment() {
     const initiateResponse = await fetch('/api/uploads/initiate', {
       method: 'POST',
@@ -2054,12 +1687,14 @@ export default function OSCEAiMarkerMockup({
     if (!completeResponse.ok) {
       throw new Error(completeBody.error || 'Upload finalization failed.');
     }
-    setSession(completeBody.session || initiateBody.session);
-    // Job is now queued — dismiss the overlay immediately so the user isn't blocked.
-    // Background polling (see useEffect below) will refresh status every 8 s.
+    // Upload is committed and the job is queued. Return the user to the main
+    // page: the session card shows the live stage, other sessions stay fully
+    // browsable, and this session unlocks when processing completes.
+    setSession(null);
     setIsUploading(false);
     setIsProcessing(false);
     setSessionNameInput('');
+    setNotice('Assessment started. Track its stage on the session card — it unlocks when finished.');
     await refreshSessionIndex();
     setShowWorkspace(false);
   }
@@ -2085,59 +1720,34 @@ export default function OSCEAiMarkerMockup({
       throw new Error(uploadBody.error || 'Upload failed.');
     }
 
-    setSession(uploadBody.session);
-    setShowWorkspace(true);
+    // The legacy backend runs processing synchronously inside the request, so
+    // it is deliberately NOT awaited: kick it off, return the user to the main
+    // page, and let the 8-second list poll drive the session card's stage
+    // gauge. The card unlocks (button becomes "Open") on a terminal status.
+    const sessionId = uploadBody.session?.id;
+    if (!sessionId) {
+      throw new Error('Upload did not return a session ID.');
+    }
+    const kickoff =
+      uploadFlow === 'long'
+        ? fetch(`/api/sessions/${sessionId}/auto-crop`, { method: 'POST' })
+        : fetch(`/api/sessions/${sessionId}/process`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'gpu' }),
+          });
+    kickoff
+      .catch(() => {})
+      // Success or failure, the durable session status is the source of truth.
+      .then(() => refreshSessionIndex());
+
+    setSession(null);
     setIsUploading(false);
-
-    if (uploadFlow === 'long') {
-      connectProcessEvents(uploadBody.session.id);
-      setProcessingMessage('Detecting bells and estimating clip ranges...');
-      setLiveLogLine('Running bell detection...');
-      const cropResponse = await fetch(`/api/sessions/${uploadBody.session.id}/auto-crop`, { method: 'POST' });
-      const cropBody = await cropResponse.json().catch(() => ({}));
-      if (!cropResponse.ok) {
-        throw new Error(cropBody.error || 'Auto-crop failed.');
-      }
-      setSession(cropBody.session || uploadBody.session);
-      const detectedClips = cropBody?.session?.outputs?.videoClips || [];
-      setSelectedClipId(detectedClips[0]?.id || null);
-      setTranscript({ segments: [] });
-      setScoreReport(null);
-      setAudioProfessionalism(null);
-      setCommunicationScores(null);
-      setProcessingMessage('Auto-crop ready. Review boundaries and export clips.');
-      setLiveLogLine('Auto-crop complete.');
-      return;
-    }
-
-    connectProcessEvents(uploadBody.session.id);
-    setProcessingMessage('Video uploaded. Waiting for conversion...');
-    const processResponse = await fetch(`/api/sessions/${uploadBody.session.id}/process`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'gpu' }),
-    });
-    const processBody = await processResponse.json().catch(() => ({}));
-    if (!processResponse.ok) {
-      throw new Error(processBody.error || 'Processing failed.');
-    }
-    setSession(processBody.session);
-    setTranscript(processBody.transcript || { segments: [] });
-    setScoreReport(processBody.scores || processBody?.session?.outputs?.scores?.payload || null);
-    setCommunicationScores(
-      processBody.communicationScores || processBody?.session?.outputs?.communicationScores?.payload || null
-    );
-    setAudioProfessionalism(
-      processBody.audioProfessionalism || processBody?.session?.outputs?.audioProfessionalism?.payload || null
-    );
-    setRuntimeSeconds(Math.round(processBody.session?.pipeline?.runtimeSeconds || 0));
-    setPipelineMilestones({
-      started: true,
-      convertedToMp3: true,
-      transcriptionComplete: true,
-      scored: true,
-    });
-    setProcessingMessage('Transcript scored successfully.');
+    setIsProcessing(false);
+    setSessionNameInput('');
+    setNotice('Assessment started. Track its stage on the session card — it unlocks when finished.');
+    await refreshSessionIndex();
+    setShowWorkspace(false);
   }
 
   // Opens the pre-flight confirmation overlay (after validating the inputs).
@@ -2212,7 +1822,6 @@ export default function OSCEAiMarkerMockup({
       setError(`Upload failed: ${requestError.message || 'Unknown error. Check that the backend is running.'}`);
       setShowWorkspace(false);
     } finally {
-      closeProcessEventsStream();
       setIsUploading(false);
       setIsProcessing(false);
     }
@@ -2717,34 +2326,11 @@ export default function OSCEAiMarkerMockup({
       return;
     }
 
-    if (!parentSessionSnapshot) {
-      setParentSessionSnapshot({
-        session,
-        transcript,
-        scoreReport,
-        audioProfessionalism,
-        runtimeSeconds,
-        notice,
-      });
-    }
-
+    // Non-blocking: queue the child assessment and STAY on the parent clip
+    // list. The clip row shows the live stage (driven by the 8-second session
+    // index poll) and flips to "View" when the child session completes. The
+    // child is not enterable while in flight (same rule as the session list).
     setError('');
-    setProcessingStage('pipeline');
-    setProcessingMessage(`Assessing ${clip.label || 'clip'}...`);
-    setLiveLogLine('Starting clip assessment...');
-    setRuntimeSeconds(0);
-    setPipelineMilestones({
-      started: true,
-      convertedToMp3: false,
-      transcriptionComplete: false,
-      scored: false,
-    });
-    setTranscript({ segments: [] });
-    setScoreReport(null);
-    setAudioProfessionalism(null);
-    setCommunicationScores(null);
-    setIsProcessing(true);
-
     setClipAssessmentRuns((previous) => ({
       ...previous,
       [clip.id]: { status: 'running' },
@@ -2765,68 +2351,20 @@ export default function OSCEAiMarkerMockup({
         throw new Error('Clip assessment did not return a session ID.');
       }
 
-      // Record the child session id on the running run-state so the user can
-      // re-open the live progress overlay for this clip (e.g. after dismissing
-      // it) without waiting for the next session-list poll.
+      // Record the child session id so the row can show its stage from the
+      // session index without waiting for the next poll to discover it.
       setClipAssessmentRuns((previous) => ({
         ...previous,
         [clip.id]: { status: 'running', sessionId: clipSession.id },
       }));
-
-      setSession(clipSession);
-      connectProcessEvents(clipSession.id, {
-        onStatus: async (payload) => {
-          const code = String(payload?.code || '').toLowerCase();
-          if (code === 'completed') {
-            closeProcessEventsStream();
-            try {
-              const loaded = await loadSessionWorkspace(clipSession.id);
-              setSession(loaded.session);
-              setTranscript(loaded.transcript || { segments: [] });
-              setScoreReport(loaded.scores || loaded?.session?.outputs?.scores?.payload || null);
-              setAudioProfessionalism(
-                loaded.audioProfessionalism || loaded?.session?.outputs?.audioProfessionalism?.payload || null
-              );
-              setCommunicationScores(
-                loaded.communicationScores
-                  || loaded?.session?.outputs?.communicationScores?.payload
-                  || null
-              );
-              setRuntimeSeconds(Math.round(loaded.session?.pipeline?.runtimeSeconds || 0));
-              setNotice('');
-              setClipAssessmentRuns((previous) => ({
-                ...previous,
-                [clip.id]: { status: 'completed', sessionId: loaded.session?.id || clipSession.id },
-              }));
-            } catch (loadError) {
-              setClipAssessmentRuns((previous) => ({
-                ...previous,
-                [clip.id]: { status: 'failed', error: loadError.message || 'Clip assessment failed.' },
-              }));
-              setError(loadError.message || 'Clip assessment failed.');
-            } finally {
-              setIsProcessing(false);
-            }
-          }
-
-          if (code === 'failed') {
-            closeProcessEventsStream();
-            setClipAssessmentRuns((previous) => ({
-              ...previous,
-              [clip.id]: { status: 'failed', error: payload?.message || 'Clip assessment failed.' },
-            }));
-            setError(payload?.message || 'Clip assessment failed.');
-            setIsProcessing(false);
-          }
-        },
-      });
+      setNotice(`Assessment for "${clip.label || 'clip'}" queued — its row updates as it progresses.`);
+      refreshSessionIndex();
     } catch (assessmentError) {
       setClipAssessmentRuns((previous) => ({
         ...previous,
         [clip.id]: { status: 'failed', error: assessmentError.message || 'Clip assessment failed.' },
       }));
       setError(assessmentError.message || 'Clip assessment failed.');
-      setIsProcessing(false);
     }
   }
 
@@ -3418,6 +2956,22 @@ export default function OSCEAiMarkerMockup({
                                 </Badge>
                               ) : null}
                             </div>
+                            {(() => {
+                              // Stage gauge for in-flight sessions: the row is
+                              // not enterable, so the card is where the user
+                              // tracks how far along processing is.
+                              const stage = describeProcessingStage(sessionEntry);
+                              if (!stage) return null;
+                              return (
+                                <div className="mt-2">
+                                  <div className="flex items-center justify-between text-[11px] text-slate-600">
+                                    <span>{stage.label}…</span>
+                                    <span>{Math.round(stage.fraction * 100)}%</span>
+                                  </div>
+                                  <Progress value={stage.fraction * 100} className="mt-1 h-1.5" />
+                                </div>
+                              );
+                            })()}
                           </div>
                           {renderSessionAction(sessionEntry)}
                         </div>
@@ -4205,21 +3759,27 @@ export default function OSCEAiMarkerMockup({
                                   </Button>
                                 </>
                               ) : runState.status === 'running' ? (
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  className="gap-1"
-                                  onClick={() => progressSessionId && openSessionProgress(progressSessionId)}
-                                  disabled={!progressSessionId}
-                                  title={
-                                    progressSessionId
-                                      ? 'Open the live progress overlay for this clip'
-                                      : 'Starting…'
-                                  }
-                                >
-                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                  {progressSessionId ? 'View progress' : 'Starting…'}
-                                </Button>
+                                (() => {
+                                  // Blocked while in flight (same rule as the
+                                  // session list): show the live stage instead
+                                  // of opening a half-processed child session.
+                                  const childEntry = progressSessionId
+                                    ? sessionIndex.find((entry) => String(entry.id) === String(progressSessionId))
+                                    : null;
+                                  const stage = childEntry ? describeProcessingStage(childEntry) : null;
+                                  return (
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="gap-1"
+                                      disabled
+                                      title="Available when this clip's assessment completes."
+                                    >
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                      {stage ? `${stage.label}…` : 'Starting…'}
+                                    </Button>
+                                  );
+                                })()
                               ) : (
                                 <Button
                                   size="sm"

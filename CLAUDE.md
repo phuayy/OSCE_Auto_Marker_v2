@@ -257,12 +257,28 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 - Routes: `#/` (dashboard), `#/session/<id>` (workspace), `#/rubric`.
 - `useHashRoute` hook syncs React state <-> URL. Back/forward and deep-links work.
 
+**Non-blocking processing UX (no progress overlay, no SSE consumption):**
+
+- Starting an assessment uploads (overlay only for the upload itself), then
+  returns the user to the main page — they can browse other sessions freely.
+- In-flight sessions (`assembling`/`queued`/`processing`) are **not enterable**:
+  the session-list card shows a live stage gauge instead
+  (`describeProcessingStage`: status + `currentStep` from the list projection →
+  label + progress bar). The card's button unlocks on a terminal status.
+- An 8-second session-index poll drives all live state (cards AND per-clip run
+  rows inside a long-session workspace). The backend SSE endpoint still exists
+  but the frontend no longer consumes it.
+
 **Key state flows:**
-- `openExistingSession(id)` — load and render a completed session.
-- `openSessionProgress(id)` — reopen live progress overlay for in-flight session.
-- `connectProcessEvents(id, onStatus)` — SSE stream + 4s poll fallback for milestone/status events.
-- `runClipAssessment(clip)` — `POST /assess?defer=1`, then `openSessionProgress`.
-- `renderSessionAction(entry)` — drives session-list row button (Open / View progress / Cropping... disabled).
+
+- `openExistingSession(id)` — open a session; bounces in-flight sessions back
+  to the list with a notice (also guards deep links/reloads).
+- `runClipAssessment(clip)` — `POST /assess?defer=1`, stays on the clip list;
+  the clip row shows the child session's stage and unlocks when completed.
+- `renderSessionAction(entry)` — session-list row button: disabled
+  "Processing…" while in flight, "Open" when terminal.
+- `describeProcessingStage(entry)` — maps list-projection fields to the card's
+  human-readable stage + completion fraction.
 
 `isLongWorkflow` derived from `session.workflow === 'long' || videoClips.length > 0` — NOT from the ephemeral upload-form tab.
 
