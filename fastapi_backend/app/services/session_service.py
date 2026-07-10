@@ -33,10 +33,13 @@ class SessionService:
     async def ensure_names_for_index(self, entries: list[SessionEntry]) -> tuple[list[SessionEntry], set[str]]:
         used_keys: set[str] = set()
         changed: list[SessionEntry] = []
+        # Walk oldest-first so an existing (historical) session always keeps its
+        # name and a later duplicate is the one that gets suffixed — renaming
+        # history out from under the user is far more surprising than adjusting
+        # the newcomer.
         ordered = sorted(
             entries,
             key=lambda entry: self._parse_date(entry.session.get("createdAt")),
-            reverse=True,
         )
         for entry in ordered:
             current_name = normalize_session_name(entry.session.get("name"))[: self.settings.session_name_max_length]
@@ -45,11 +48,31 @@ class SessionService:
                 used_keys.add(key)
                 entry.session["name"] = current_name
                 continue
-            entry.session["name"] = self.reserve_unique_session_name(used_keys)
+            # Duplicate or missing name: prefer a deterministic, meaningful base
+            # (the colliding name itself, the uploaded video's file name, or the
+            # creation date) so reserve_unique_session_name suffixes it instead
+            # of inventing a random one.
+            preferred = current_name or self._derive_fallback_name(entry.session)
+            entry.session["name"] = self.reserve_unique_session_name(used_keys, preferred)
             changed.append(entry)
 
         await asyncio.gather(*(self.repository.write_entry(entry) for entry in changed))
+        ordered.reverse()  # callers (list_sessions, ensure_session_name) expect newest-first
         return ordered, used_keys
+
+    @staticmethod
+    def _derive_fallback_name(session: dict[str, Any]) -> str:
+        """Deterministic display name for a session that has none: the uploaded
+        video's original file name (without extension), else the creation date."""
+        video = (session.get("files") or {}).get("video") or {}
+        stem = Path(str(video.get("originalName") or "")).stem.strip()
+        if stem:
+            return stem
+        raw = str(session.get("createdAt") or "").replace("Z", "+00:00")
+        try:
+            return f"Session {datetime.fromisoformat(raw).strftime('%Y-%m-%d %H:%M')}"
+        except ValueError:
+            return ""
 
     async def ensure_session_name(self, session_id: str, session: dict[str, Any]) -> dict[str, Any]:
         if session.get("name"):

@@ -51,6 +51,14 @@ class ClipService:
         if not video_path.exists():
             raise RuntimeError("Video file is missing for this session.")
         method = self._resolve_segmentation_method(session)
+        # Reflect the crop in the durable status so the session list can gauge
+        # and gate it (in-flight sessions are not enterable). Without this the
+        # legacy fire-and-forget /auto-crop path stays "uploaded" during the
+        # crop and the session opens with an empty clip list.
+        if session.get("status") != "processing":
+            session["status"] = "processing"
+            session["error"] = None
+            await self.sessions.write(session)
         await self.events.publish(
             session_id,
             "milestone",
@@ -63,13 +71,27 @@ class ClipService:
                 ),
             },
         )
-        video_duration = await self.media.get_video_duration_seconds(video_path)
-        detection = await self._run_segmentation(session_id, method, video_path, video_duration)
-        clips = self.media.build_clip_drafts_from_ranges(
-            detection["clipRanges"],
-            video_duration,
-            detection["source"],
-        )
+        try:
+            video_duration = await self.media.get_video_duration_seconds(video_path)
+            detection = await self._run_segmentation(session_id, method, video_path, video_duration)
+            clips = self.media.build_clip_drafts_from_ranges(
+                detection["clipRanges"],
+                video_duration,
+                detection["source"],
+            )
+        except Exception as error:
+            # Leave a terminal status behind — a session stuck on "processing"
+            # can never be opened or retried from the UI.
+            failed = await self.sessions.read(session_id)
+            failed["status"] = "failed"
+            failed["error"] = str(error) or type(error).__name__
+            await self.sessions.write(failed)
+            await self.events.publish(
+                session_id,
+                "status",
+                {"code": "failed", "message": f"Auto-crop failed: {failed['error']}"},
+            )
+            raise
         session.setdefault("outputs", {})["videoClips"] = clips
         session["status"] = "cropped"
         session["error"] = None

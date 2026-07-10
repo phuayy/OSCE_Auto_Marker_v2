@@ -377,6 +377,20 @@ class AsyncUploadService:
                 await self.jobs.start_job(job)
 
         except Exception as error:
+            # Mark the upload itself failed — leaving it on "assembling" would
+            # make every retry of /complete hit the idempotency branch and
+            # return "assembling" forever, with no way to recover client-side.
+            # A "failed" upload falls through the idempotency checks, so the
+            # client can POST /complete again to retry assembly (part files are
+            # only deleted after a successful commit).
+            try:
+                failed_upload = await self.repository.read(upload_id)
+                failed_upload["status"] = "failed"
+                failed_upload["error"] = str(error)
+                failed_upload["failedAt"] = utc_now_iso()
+                await self.repository.write(failed_upload)
+            except Exception:
+                logger.exception("Failed to persist failed upload state for upload %s.", upload_id)
             if session_id:
                 try:
                     session = await self.sessions.read(session_id)

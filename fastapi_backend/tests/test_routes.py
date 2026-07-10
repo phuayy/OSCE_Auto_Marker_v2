@@ -295,6 +295,96 @@ def test_get_session_does_not_persist_from_read_path(tmp_path) -> None:
     assert raw["status"] == "processing"
 
 
+def test_failed_assembly_marks_upload_failed_and_allows_retry(tmp_path) -> None:
+    """A crashed background assembly must not leave the upload stuck on
+    "assembling" (which would make every /complete retry a no-op forever)."""
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    container = client.app.state.container
+
+    async def fake_video_duration(_path: Path) -> float:
+        return 1.0
+
+    container.media.get_video_duration_seconds = fake_video_duration
+    video_bytes = b"video-bytes"
+    case_study_bytes = b"%PDF-1.4 case"
+    initiate = client.post(
+        "/api/uploads/initiate",
+        headers=headers,
+        json={
+            "workflow": "standard",
+            "autoProcess": False,
+            "files": [
+                {"kind": "video", "originalName": "station.mp4", "mimeType": "video/mp4", "sizeBytes": len(video_bytes)},
+                {"kind": "caseStudy", "originalName": "case.pdf", "mimeType": "application/pdf", "sizeBytes": len(case_study_bytes)},
+            ],
+        },
+    )
+    assert initiate.status_code == 201, initiate.text
+    body = initiate.json()
+    for kind, payload in (("video", video_bytes), ("caseStudy", case_study_bytes)):
+        plan = next(item for item in body["fileUploads"] if item["kind"] == kind)
+        part = client.put(
+            f"/api/uploads/{body['uploadId']}/parts/1?fileId={plan['fileId']}",
+            headers=headers,
+            content=payload,
+        )
+        assert part.status_code == 200, part.text
+
+    complete = client.post(f"/api/uploads/{body['uploadId']}/complete", headers=headers, json={})
+    assert complete.status_code == 202, complete.text
+    session_id = complete.json()["session"]["id"]
+
+    # Make assembly blow up, then drive the orphaned background task directly.
+    original_complete_file = container.async_uploads.storage.complete_file
+
+    async def boom(_upload, _file_record):
+        raise RuntimeError("disk full")
+
+    container.async_uploads.storage.complete_file = boom
+    asyncio.run(container.async_uploads._assemble_and_dispatch(body["uploadId"], False))
+
+    failed_upload = asyncio.run(container.async_uploads.repository.read(body["uploadId"]))
+    assert failed_upload["status"] == "failed"
+    assert "disk full" in str(failed_upload.get("error"))
+    failed_session = asyncio.run(container.sessions.read(session_id))
+    assert failed_session["status"] == "failed"
+
+    # A retry is accepted (not short-circuited by the idempotency branches) and
+    # succeeds once the underlying fault is gone.
+    container.async_uploads.storage.complete_file = original_complete_file
+    retry = client.post(f"/api/uploads/{body['uploadId']}/complete", headers=headers, json={})
+    assert retry.status_code == 202, retry.text
+    assert retry.json()["upload"]["status"] == "assembling"
+    asyncio.run(container.async_uploads._assemble_and_dispatch(body["uploadId"], False))
+    assert asyncio.run(container.async_uploads.repository.read(body["uploadId"]))["status"] == "committed"
+    assert asyncio.run(container.sessions.read(session_id))["status"] == "uploaded"
+
+
+def test_legacy_upload_persists_workflow_segmentation_and_name(tmp_path) -> None:
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    response = client.post(
+        "/api/upload",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"workflow": "long", "segmentation": "human", "sessionName": "  Cohort A  "},
+        files={
+            "video": ("station.mp4", b"video-bytes", "video/mp4"),
+            "caseStudy": ("case.pdf", b"%PDF-1.4 case", "application/pdf"),
+        },
+    )
+    assert response.status_code == 200, response.text
+    session = response.json()["session"]
+    assert session["workflow"] == "long"
+    assert session["segmentation"] == "person"  # "human" synonym normalized
+    assert session["name"] == "Cohort A"
+
+    raw_session = asyncio.run(client.app.state.container.sessions.read(session["id"]))
+    assert raw_session["workflow"] == "long"
+    assert raw_session["segmentation"] == "person"
+
+
 def test_direct_upload_uses_object_storage_refs(tmp_path) -> None:
     client = build_test_client(tmp_path)
     token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]

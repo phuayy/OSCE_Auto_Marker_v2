@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 
 from app.api.dependencies import get_container
 from app.core.exceptions import AppError
@@ -35,8 +35,8 @@ async def initiate_upload(
 @router.put("/{upload_id}/parts/{part_number}")
 async def put_upload_part(
     upload_id: str,
-    part_number: int,
     request: Request,
+    part_number: int = Path(ge=1, le=100_000),
     fileId: str | None = Query(None),
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:

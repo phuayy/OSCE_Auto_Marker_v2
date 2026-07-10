@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import ValidationError
 
 from app.api.dependencies import get_container
 from app.core.exceptions import AppError
+from app.schemas.uploads import LegacyUploadForm
 from app.services.clip_service import ClipService
 from app.services.container import AppContainer
 
@@ -17,11 +19,20 @@ async def upload_session(
     caseStudy: UploadFile | None = File(None),
     sessionName: str | None = Form(None),
     segmentation: str | None = Form(None),
+    workflow: str | None = Form(None),
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
     try:
+        # Route the loose multipart form fields through the same validated
+        # schema the async initiate path uses, so both entry points enforce
+        # identical invariants (trimmed/bounded name, known workflow, known
+        # segmentation, segmentation only meaningful for long uploads).
+        form = LegacyUploadForm(sessionName=sessionName, segmentation=segmentation, workflow=workflow)
         container.artifacts.validate_video_upload(video)
         container.artifacts.validate_pdf_upload(caseStudy, field_name="caseStudy")
+    except ValidationError as error:
+        first = error.errors()[0] if error.errors() else {}
+        raise HTTPException(status_code=400, detail=str(first.get("msg") or "Invalid upload form.")) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -48,19 +59,17 @@ async def upload_session(
             max_bytes=container.settings.max_case_study_upload_bytes,
         )
         case_study_meta = await container.rubric_assets.register_case_study_meta(case_study_meta)
-        # Auto-crop segmentation method for the legacy multipart path; unknown
-        # values are dropped so a stale client cannot poison the session.
-        segmentation_method = str(segmentation or "").strip().lower()
-        if segmentation_method == "human":
-            segmentation_method = "person"
-        if segmentation_method not in {"bells", "person"}:
-            segmentation_method = None
         session = {
             "id": session_id,
-            "name": container.sessions.reserve_unique_session_name(used_keys, (sessionName or "").strip()),
+            "name": container.sessions.reserve_unique_session_name(used_keys, form.sessionName or ""),
             "createdAt": container.pipeline.now_iso(),
             "status": "uploaded",
-            "segmentation": segmentation_method,
+            # Persisting the workflow is what lets the frontend render a long
+            # session with the clip workflow (and gate it while cropping) even
+            # on this legacy path — deriving it from detected clips alone
+            # leaves a window where the session looks like a standard one.
+            "workflow": form.workflow,
+            "segmentation": form.segmentation,
             "pipeline": {
                 "startedAt": None,
                 "endedAt": None,

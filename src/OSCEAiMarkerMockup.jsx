@@ -1703,6 +1703,9 @@ export default function OSCEAiMarkerMockup({
     const formData = new FormData();
     formData.append('video', videoFile);
     formData.append('caseStudy', caseStudyFile);
+    // The backend persists the workflow so a long session renders the clip
+    // workflow (and is gated while cropping) even via this legacy path.
+    formData.append('workflow', uploadFlow);
     if (sessionNameInput.trim()) {
       formData.append('sessionName', sessionNameInput.trim());
     }

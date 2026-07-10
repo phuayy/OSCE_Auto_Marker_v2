@@ -54,8 +54,12 @@ async def get_session(session_id: str, container: AppContainer = Depends(get_con
         # to disk by ensure_session_subtitle_track and is regenerated cheaply.
         await container.media.ensure_session_subtitle_track(session)
         return {"session": container.sessions.public_session(session)}
-    except Exception as error:
+    except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail="Session not found.") from error
+    except Exception as error:
+        # A subtitle-generation or serialization failure is NOT a missing
+        # session — masking it as 404 sends the client down the wrong path.
+        raise _http_error(error, fallback_message="Failed to load session.") from error
 
 
 @router.get("/{session_id}/transcript")
