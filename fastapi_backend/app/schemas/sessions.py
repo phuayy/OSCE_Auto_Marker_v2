@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import math
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -19,16 +18,10 @@ class RenameSessionRequest(BaseModel):
 
 
 class ManualClipsRequest(BaseModel):
-    boundaries: list[float] = Field(default_factory=list, max_length=200)
+    boundaries: list[Annotated[float, Field(ge=0, allow_inf_nan=False)]] = Field(
+        default_factory=list, max_length=200
+    )
     labels: list[str] = Field(default_factory=list, max_length=200)
-
-    @field_validator("boundaries")
-    @classmethod
-    def boundaries_must_be_finite_and_non_negative(cls, value: list[float]) -> list[float]:
-        for item in value:
-            if not math.isfinite(item) or item < 0:
-                raise ValueError("Clip boundaries must be non-negative, finite seconds.")
-        return value
 
     @field_validator("labels")
     @classmethod
@@ -37,15 +30,8 @@ class ManualClipsRequest(BaseModel):
 
 
 class RecropClipRequest(BaseModel):
-    start: float = Field(ge=0)
-    end: float = Field(gt=0)
-
-    @field_validator("start", "end")
-    @classmethod
-    def must_be_finite(cls, value: float) -> float:
-        if not math.isfinite(value):
-            raise ValueError("Clip bounds must be finite seconds.")
-        return value
+    start: float = Field(ge=0, allow_inf_nan=False)
+    end: float = Field(gt=0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def end_must_follow_start(self) -> "RecropClipRequest":

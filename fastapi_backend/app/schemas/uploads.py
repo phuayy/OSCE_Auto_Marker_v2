@@ -50,7 +50,8 @@ class UploadMetadataMixin(BaseModel):
     workflow: UploadWorkflow = "standard"
     # Optional user-chosen session name; blank/None falls back to an
     # auto-generated name. The session service de-duplicates it on save.
-    sessionName: str | None = Field(default=None, max_length=SESSION_NAME_MAX_LENGTH)
+    # Over-long names are silently truncated by the validator, not rejected.
+    sessionName: str | None = None
     # Long-workflow only: which auto-crop segmentation method to use.
     segmentation: SegmentationMethod | None = None
 

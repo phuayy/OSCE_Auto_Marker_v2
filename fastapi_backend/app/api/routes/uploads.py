@@ -31,7 +31,7 @@ async def upload_session(
         container.artifacts.validate_video_upload(video)
         container.artifacts.validate_pdf_upload(caseStudy, field_name="caseStudy")
     except ValidationError as error:
-        first = error.errors()[0] if error.errors() else {}
+        first = (error.errors() or [{}])[0]
         raise HTTPException(status_code=400, detail=str(first.get("msg") or "Invalid upload form.")) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
