@@ -4,6 +4,7 @@ import { getStoredAuth, installFetchAuthShim, logout } from '@/auth';
 import { useHashRoute } from '@/lib/useHashRoute';
 import LoginScreen from '@/LoginScreen.jsx';
 import CommunicationRubricPanel from '@/CommunicationRubricPanel.jsx';
+import AnalyticsPage from '@/AnalyticsPage.jsx';
 import OSCEAiMarkerMockup from '@/OSCEAiMarkerMockup.jsx';
 
 installFetchAuthShim();
@@ -48,6 +49,16 @@ export default function AppShell() {
         >
           <CommunicationRubricPanel onBack={() => navigate({ view: 'dashboard' })} />
         </motion.div>
+      ) : route.view === 'analytics' ? (
+        <motion.div
+          key="analytics"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.25 }}
+        >
+          <AnalyticsPage onBack={() => navigate({ view: 'dashboard' })} />
+        </motion.div>
       ) : (
         <motion.div
           key="dashboard"
@@ -61,6 +72,7 @@ export default function AppShell() {
             routeSessionId={route.sessionId}
             onNavigateSession={(sessionId) => navigate({ view: 'dashboard', sessionId })}
             onOpenRubric={() => navigate({ view: 'rubric' })}
+            onOpenAnalytics={() => navigate({ view: 'analytics' })}
             onLogout={handleLogout}
           />
         </motion.div>

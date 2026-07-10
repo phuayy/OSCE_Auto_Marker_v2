@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { ensureStreamTicket, resolveMediaUrl } from '@/auth';
 import {
   ArrowLeft,
+  BarChart3,
   BellRing,
   Brain,
   ClipboardCheck,
@@ -353,6 +354,7 @@ export default function OSCEAiMarkerMockup({
   routeSessionId = null,
   onNavigateSession = null,
   onOpenRubric = null,
+  onOpenAnalytics = null,
   onLogout = null,
 } = {}) {
   const [videoFile, setVideoFile] = useState(null);
@@ -2679,6 +2681,12 @@ export default function OSCEAiMarkerMockup({
             ) : (
               <Badge className="bg-emerald-100 text-emerald-700">{currentModeLabel} Ready</Badge>
             )}
+            {onOpenAnalytics ? (
+              <Button variant="outline" size="sm" className="gap-2" onClick={onOpenAnalytics}>
+                <BarChart3 className="h-4 w-4" />
+                Analytics
+              </Button>
+            ) : null}
             {onOpenRubric ? (
               <Button variant="outline" size="sm" className="gap-2" onClick={onOpenRubric}>
                 <Settings className="h-4 w-4" />

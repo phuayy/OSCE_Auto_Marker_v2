@@ -8,6 +8,7 @@
 //   #/                dashboard — session list / new assessment
 //   #/session/<id>    dashboard — the workspace for a specific session
 //   #/rubric          communication rubric panel
+//   #/analytics       score analytics dashboard
 
 export function parseRoute(hash = window.location.hash) {
   const segments = String(hash || '')
@@ -19,6 +20,9 @@ export function parseRoute(hash = window.location.hash) {
   if (segments[0] === 'rubric') {
     return { view: 'rubric', sessionId: null };
   }
+  if (segments[0] === 'analytics') {
+    return { view: 'analytics', sessionId: null };
+  }
   if (segments[0] === 'session' && segments[1]) {
     return { view: 'dashboard', sessionId: safeDecode(segments[1]) };
   }
@@ -28,6 +32,9 @@ export function parseRoute(hash = window.location.hash) {
 export function buildRoute({ view = 'dashboard', sessionId = null } = {}) {
   if (view === 'rubric') {
     return '#/rubric';
+  }
+  if (view === 'analytics') {
+    return '#/analytics';
   }
   if (sessionId) {
     return `#/session/${encodeURIComponent(sessionId)}`;

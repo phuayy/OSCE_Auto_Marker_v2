@@ -193,6 +193,36 @@ class AssessmentRepository:
                 )
             )
 
+    async def list_result_rows(self) -> list[dict[str, Any]]:
+        """Flat per-result rows joined with session + student, for analytics."""
+        async with self.database.session() as db_session:
+            rows = await db_session.execute(
+                select(AssessmentResultRecord, AssessmentSessionRecord, StudentRecord)
+                .join(
+                    AssessmentSessionRecord,
+                    AssessmentResultRecord.assessment_session_id == AssessmentSessionRecord.id,
+                )
+                .join(StudentRecord, AssessmentSessionRecord.student_id == StudentRecord.id)
+                .order_by(AssessmentSessionRecord.created_at)
+            )
+            return [
+                {
+                    "sessionId": assessment.id,
+                    "sessionName": assessment.session_name,
+                    "studentId": student.id,
+                    "studentName": student.display_name,
+                    "resultType": result.result_type,
+                    "status": result.status,
+                    "scoreTotal": result.score_total,
+                    "scoreMax": result.score_max,
+                    "passFail": result.pass_fail,
+                    "workflow": assessment.workflow,
+                    "parentSessionId": assessment.parent_session_id,
+                    "createdAt": assessment.created_at.isoformat() if assessment.created_at else None,
+                }
+                for result, assessment, student in rows.all()
+            ]
+
     @staticmethod
     def _float_or_none(value: Any) -> float | None:
         if value is None or value == "":
