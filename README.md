@@ -105,7 +105,7 @@ OSCE-AI-FYP/
 │   │   ├── queue/                # Hatchet worker + task definitions
 │   │   ├── repositories/         # DB access (sessions ORM, jobs raw SQL, uploads JSON)
 │   │   └── api/routes/           # sessions, uploads, async_uploads, auth, jobs, health, rubrics
-│   └── tests/                    # pytest suite (87 tests)
+│   └── tests/                    # pytest suite (98 tests)
 ├── scripts/
 │   ├── run_api.py                # API entry point (uvicorn launcher, Windows loop policy)
 │   ├── run_hatchet_worker.py     # Hatchet worker entry point
@@ -223,7 +223,7 @@ Open <http://localhost:5173>, log in with `admin` / your `DEFAULT_ADMIN_PASSWORD
 Invoke-RestMethod http://localhost:8787/api/health
 Invoke-RestMethod http://localhost:8787/api/health/ready
 
-# Backend test suite (87 tests)
+# Backend test suite (98 tests)
 npm run test:api
 
 # Frontend production build
@@ -377,8 +377,9 @@ Standalone experimentation (writes per-second person counts for threshold tuning
 This repository is indexed with **CodeGraph** (`.codegraph/` at the repo root): a
 SQLite knowledge graph of every symbol, call edge, and file, so architecture
 questions are answered with verbatim source + call paths in one query instead of
-grep loops. The index is **synced with the current codebase** (127 files,
-~2,100 symbols, ~4,800 edges, including the RT-DETR segmentation wiring).
+grep loops. The index is **synced with the current codebase** (121 files,
+~2,070 symbols, ~4,790 edges, including the RT-DETR segmentation wiring and the
+2026-07-10 over-engineering cleanup — storage/job-model/time-helper consolidation).
 
 Common commands (run from the repo root):
 
@@ -416,7 +417,7 @@ AI assistants with the CodeGraph MCP tool use this same index automatically.
 npm run dev            # frontend + dev orchestration (port 5173)
 npm run dev:api        # FastAPI backend (port 8787)
 npm run dev:worker     # Hatchet worker (hatchet mode only)
-npm run test:api       # pytest suite (fastapi_backend/tests, 87 tests)
+npm run test:api       # pytest suite (fastapi_backend/tests, 98 tests)
 npm run build          # production frontend build
 npm run db:up|down|logs|ps|check|reset   # PostgreSQL helpers
 ```
