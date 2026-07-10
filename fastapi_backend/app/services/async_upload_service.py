@@ -19,7 +19,8 @@ from app.services.job_queue_service import JobQueueService
 from app.repositories.video_repository import VideoRepository
 from app.services.rubric_asset_service import RubricAssetService
 from app.services.session_service import SessionService
-from app.services.storage_service import LocalObjectStorageService, ObjectStorageService, utc_now_iso
+from app.core.utils import utc_now_iso
+from app.services.storage_service import LocalObjectStorageService
 
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,7 @@ class AsyncUploadService:
         settings: Settings,
         repository: UploadRepository,
         sessions: SessionService,
-        storage: ObjectStorageService,
+        storage: LocalObjectStorageService,
         jobs: JobQueueService,
         media: MediaPipeline,
         events: EventService,

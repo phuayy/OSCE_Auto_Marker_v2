@@ -5,7 +5,6 @@ import hashlib
 import os
 import shutil
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -14,14 +13,10 @@ from fastapi import UploadFile
 
 from app.core.config import Settings
 from app.core.exceptions import AppError
-from app.core.utils import sanitize_file_name
+from app.core.utils import sanitize_file_name, utc_now_iso
 
 
 SourceFileKind = Literal["video", "caseStudy"]
-
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 @dataclass(frozen=True)
@@ -57,52 +52,12 @@ class PreparedUploadFile:
         return payload
 
 
-class ObjectStorageService:
+class LocalObjectStorageService:
     provider = "local"
     strategy = "local_multipart"
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-
-    async def ensure_layout(self) -> None:
-        return None
-
-    def prepare_upload_file(
-        self,
-        *,
-        upload_id: str,
-        session_id: str,
-        file_id: str,
-        kind: str,
-        original_name: str,
-        mime_type: str,
-        size_bytes: int,
-        checksum_sha256: str | None,
-    ) -> PreparedUploadFile:
-        raise NotImplementedError
-
-    async def put_part(self, upload: dict[str, Any], file_id: str, part_number: int, body: bytes) -> dict[str, Any]:
-        raise NotImplementedError
-
-    async def complete_file(self, upload: dict[str, Any], file_record: dict[str, Any]) -> dict[str, Any]:
-        raise NotImplementedError
-
-    async def abort_upload(self, upload: dict[str, Any]) -> None:
-        raise NotImplementedError
-
-    async def save_uploaded_source(
-        self,
-        upload: UploadFile,
-        *,
-        session_id: str,
-        kind: SourceFileKind,
-        max_bytes: int,
-    ) -> dict[str, Any]:
-        raise AppError(
-            f"Direct source upload is not implemented for STORAGE_BACKEND={self.provider}. "
-            "Use the cloud-ready /api/uploads initiate/complete flow for provider-backed uploads.",
-            status_code=501,
-        )
 
     async def prepare_session_sources(self, session: dict[str, Any]) -> dict[str, Any]:
         video = (session.get("files") or {}).get("video") or {}
@@ -111,11 +66,6 @@ class ObjectStorageService:
         if local_path:
             video["absolutePath"] = str(local_path)
         return session
-
-
-class LocalObjectStorageService(ObjectStorageService):
-    provider = "local"
-    strategy = "local_multipart"
 
     async def ensure_layout(self) -> None:
         await asyncio.to_thread(self.settings.object_storage_root.mkdir, parents=True, exist_ok=True)
@@ -355,7 +305,7 @@ class LocalObjectStorageService(ObjectStorageService):
     ) -> dict[str, Any]:
         return {
             "provider": self.provider,
-            "bucket": self.settings.object_bucket or None,
+            "bucket": None,
             "key": key,
             "uri": f"file://{path}",
             "localPath": str(path),
@@ -422,42 +372,10 @@ class LocalObjectStorageService(ObjectStorageService):
         raise AppError("Upload file not found.", status_code=404)
 
 
-class UnsupportedCloudStorageService(ObjectStorageService):
-    def __init__(self, settings: Settings, provider: str, strategy: str) -> None:
-        super().__init__(settings)
-        self.provider = provider
-        self.strategy = strategy
-
-    def prepare_upload_file(self, **_kwargs: Any) -> PreparedUploadFile:
+def create_storage_service(settings: Settings) -> LocalObjectStorageService:
+    if settings.storage_backend != "local":
         raise AppError(
-            f"{self.provider} uploads are configured but provider SDK support is not installed in this local backend yet. "
-            "Use STORAGE_BACKEND=local for now or add the provider implementation behind ObjectStorageService.",
-            status_code=501,
+            f"Unsupported STORAGE_BACKEND: {settings.storage_backend}. Only 'local' is implemented.",
+            status_code=500,
         )
-
-    async def put_part(self, upload: dict[str, Any], file_id: str, part_number: int, body: bytes) -> dict[str, Any]:
-        raise AppError("Direct local part uploads are only available with STORAGE_BACKEND=local.", status_code=400)
-
-    async def complete_file(self, upload: dict[str, Any], file_record: dict[str, Any]) -> dict[str, Any]:
-        raise AppError(f"{self.provider} completion is not implemented in this local backend yet.", status_code=501)
-
-    async def abort_upload(self, upload: dict[str, Any]) -> None:
-        return None
-
-    async def prepare_session_sources(self, session: dict[str, Any]) -> dict[str, Any]:
-        raise AppError(
-            "Cloud source preparation is not implemented yet. Workers must download the object to an ephemeral path "
-            "before invoking ffmpeg/WhisperX.",
-            status_code=501,
-        )
-
-
-def create_storage_service(settings: Settings) -> ObjectStorageService:
-    backend = settings.storage_backend
-    if backend == "local":
-        return LocalObjectStorageService(settings)
-    if backend == "s3":
-        return UnsupportedCloudStorageService(settings, provider="s3", strategy="s3_multipart")
-    if backend == "gcs":
-        return UnsupportedCloudStorageService(settings, provider="gcs", strategy="gcs_resumable")
-    raise AppError(f"Unsupported STORAGE_BACKEND: {backend}", status_code=500)
+    return LocalObjectStorageService(settings)

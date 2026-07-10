@@ -10,7 +10,7 @@ from uuid import uuid4
 from app.core.config import Settings
 from app.core.json_utils import extract_json_object
 from app.core.process import CommandRunner
-from app.core.utils import clamp_number, format_timestamp
+from app.core.utils import clamp_number, format_timestamp, utc_now_iso
 from app.services.auth_service import AuthService
 from app.services.event_service import EventService
 
@@ -67,7 +67,7 @@ class MediaPipeline:
         return {
             "schema": "whisperx-segments-v1",
             "source": "whisperx-local",
-            "generatedAt": self._now_iso(),
+            "generatedAt": utc_now_iso(),
             "language": raw_whisperx_json.get("language"),
             "segmentCount": len(segments),
             "segments": segments,
@@ -566,7 +566,7 @@ class MediaPipeline:
                     "url": f"/media/clips/{session['id']}/{file_name}",
                     "absolutePath": str(output_path),
                     "sizeBytes": stats.st_size,
-                    "createdAt": self._now_iso(),
+                    "createdAt": utc_now_iso(),
                     "source": source_meta,
                 }
             )
@@ -599,7 +599,7 @@ class MediaPipeline:
                     "url": None,
                     "absolutePath": None,
                     "sizeBytes": 0,
-                    "createdAt": self._now_iso(),
+                    "createdAt": utc_now_iso(),
                     "source": source_meta,
                     "isDraft": True,
                 }
@@ -732,9 +732,3 @@ class MediaPipeline:
         if str(device).lower() == "cuda":
             return "WhisperX launched. CUDA model warmup + diarization setup can take 30-90 seconds before first transcript lines."
         return "WhisperX launched. CPU transcription can take several minutes for long recordings."
-
-    @staticmethod
-    def _now_iso() -> str:
-        from datetime import datetime, timezone
-
-        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

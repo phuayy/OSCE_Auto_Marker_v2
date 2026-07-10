@@ -11,10 +11,11 @@ from uuid import uuid4
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.logging_utils import log_context
+from app.core.utils import utc_now_iso
 from app.repositories.job_repository import JobRepository
 from app.services.event_service import EventService
 from app.services.session_service import SessionService
-from app.services.storage_service import ObjectStorageService
+from app.services.storage_service import LocalObjectStorageService
 
 
 logger = logging.getLogger(__name__)
@@ -23,10 +24,6 @@ logger = logging.getLogger(__name__)
 # avoid hammering a flapping downstream when many jobs retry at once.
 _RETRY_BACKOFF_BASE_SECONDS = 1.0
 _RETRY_BACKOFF_CAP_SECONDS = 30.0
-
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def compute_retry_backoff_seconds(
@@ -55,7 +52,7 @@ class JobQueueService:
         repository: JobRepository,
         events: EventService,
         sessions: SessionService,
-        storage: ObjectStorageService,
+        storage: LocalObjectStorageService,
     ) -> None:
         self.settings = settings
         self.repository = repository

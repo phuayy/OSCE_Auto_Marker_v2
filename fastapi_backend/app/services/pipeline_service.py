@@ -10,6 +10,7 @@ from typing import Any
 from app.core.exceptions import AppError
 from app.core.json_utils import extract_json_object, write_json_file
 from app.core.logging_utils import log_context
+from app.core.utils import utc_now_iso
 from app.pipeline.media import MediaPipeline
 from app.pipeline.scoring import ScoringPipeline
 from app.services.assessment_service import AssessmentService
@@ -802,9 +803,7 @@ class PipelineService:
             raise ValueError(f"Expected JSON object in {path}")
         return parsed
 
-    @staticmethod
-    def now_iso() -> str:
-        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    now_iso = staticmethod(utc_now_iso)
 
     @staticmethod
     def runtime_seconds(started_at: str, ended_at: str) -> float:

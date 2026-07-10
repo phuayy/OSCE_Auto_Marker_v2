@@ -278,10 +278,6 @@ class SessionService:
         return await asyncio.to_thread(lambda: extract_json_object(path.read_text(encoding="utf-8")))
 
     @staticmethod
-    def now_iso() -> str:
-        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-    @staticmethod
     def _parse_date(value: Any) -> float:
         try:
             text = str(value or "").replace("Z", "+00:00")

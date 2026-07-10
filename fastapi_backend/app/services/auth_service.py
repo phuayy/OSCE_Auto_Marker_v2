@@ -9,6 +9,7 @@ from typing import Any
 
 from app.core.config import Settings
 from app.core.json_utils import read_json_file
+from app.core.utils import utc_now_iso
 from app.core.security import (
     STREAM_TICKET_SCOPE,
     build_auth_payload,
@@ -68,7 +69,7 @@ class AuthService:
         payload = {
             "username": self.settings.default_admin_username,
             "passwordHash": hash_password(self.settings.default_admin_password, self.settings.auth_bcrypt_rounds),
-            "createdAt": self._now_iso(),
+            "createdAt": utc_now_iso(),
         }
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         return payload
@@ -167,9 +168,3 @@ class AuthService:
             return False
         self._revocations.revoke(token_id, expires_at_ms)
         return True
-
-    @staticmethod
-    def _now_iso() -> str:
-        from datetime import datetime, timezone
-
-        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

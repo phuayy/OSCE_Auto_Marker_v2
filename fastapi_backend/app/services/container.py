@@ -28,7 +28,7 @@ from app.services.pipeline_service import PipelineService
 from app.services.rubric_asset_service import RubricAssetService
 from app.services.rubric_service import RubricService
 from app.services.session_service import SessionService
-from app.services.storage_service import ObjectStorageService, create_storage_service
+from app.services.storage_service import LocalObjectStorageService, create_storage_service
 
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ class AppContainer:
     auth: AuthService
     events: EventService
     sessions: SessionService
-    storage: ObjectStorageService
+    storage: LocalObjectStorageService
     jobs: JobQueueService
     rubric_assets: RubricAssetService
     assessments: AssessmentService

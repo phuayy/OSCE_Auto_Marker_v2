@@ -252,9 +252,7 @@ class Settings:
     sse_max_tracked_sessions: int = read_int_env("SSE_MAX_TRACKED_SESSIONS", 1000)
     session_name_max_length: int = 80
     storage_backend: str = os.getenv("STORAGE_BACKEND", "local").strip().lower() or "local"
-    object_bucket: str = os.getenv("OBJECT_BUCKET", "").strip()
     object_prefix: str = os.getenv("OBJECT_PREFIX", "").strip().strip("/")
-    signed_url_ttl_seconds: int = read_int_env("SIGNED_URL_TTL_SECONDS", 900)
     upload_part_size_mb: int = read_int_env("UPLOAD_PART_SIZE_MB", 8)
     upload_session_ttl_hours: int = read_int_env("UPLOAD_SESSION_TTL_HOURS", 24)
     job_queue_backend: str = os.getenv("JOB_QUEUE_BACKEND", "local").strip().lower() or "local"
