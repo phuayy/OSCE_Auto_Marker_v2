@@ -166,6 +166,22 @@ class VideoRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 
+class NotificationRecord(Base):
+    __tablename__ = "notifications"
+    __table_args__ = (
+        Index("idx_notifications_created_at", "created_at"),
+        Index("idx_notifications_read_at", "read_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    # Null = unread. Single-user system, so read state lives on the row itself.
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class SessionRecord(Base):
     __tablename__ = "sessions"
     __table_args__ = (

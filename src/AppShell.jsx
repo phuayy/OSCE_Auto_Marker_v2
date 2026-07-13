@@ -6,6 +6,7 @@ import LoginScreen from '@/LoginScreen.jsx';
 import CommunicationRubricPanel from '@/CommunicationRubricPanel.jsx';
 import AnalyticsPage from '@/AnalyticsPage.jsx';
 import OSCEAiMarkerMockup from '@/OSCEAiMarkerMockup.jsx';
+import { NotificationToast, useNotifications } from '@/notifications.jsx';
 
 installFetchAuthShim();
 
@@ -14,6 +15,10 @@ export default function AppShell() {
   // The hash route is the source of truth for which page is shown, so a reload
   // (or a shared link) lands the user on the same page rather than the landing.
   const [route, navigate] = useHashRoute();
+  // Global notification state: the toast renders on every page; the bell and
+  // feed live inside the dashboard and receive this same state as props.
+  // (Called unconditionally per hooks rules; polls 401 harmlessly pre-login.)
+  const notifications = useNotifications();
 
   useEffect(() => {
     function handleExpired() {
@@ -38,7 +43,9 @@ export default function AppShell() {
   }
 
   return (
-    <AnimatePresence mode="wait">
+    <>
+      <NotificationToast toast={notifications.toast} onDismiss={notifications.dismiss} />
+      <AnimatePresence mode="wait">
       {route.view === 'rubric' ? (
         <motion.div
           key="rubric"
@@ -74,9 +81,11 @@ export default function AppShell() {
             onOpenRubric={() => navigate({ view: 'rubric' })}
             onOpenAnalytics={() => navigate({ view: 'analytics' })}
             onLogout={handleLogout}
+            notifications={notifications}
           />
         </motion.div>
       )}
-    </AnimatePresence>
+      </AnimatePresence>
+    </>
   );
 }

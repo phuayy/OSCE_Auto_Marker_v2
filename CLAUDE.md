@@ -80,7 +80,8 @@ OSCE-AI-FYP/
 │       │       ├── health.py            # /api/health (liveness) + /api/health/ready (readiness)
 │       │       ├── jobs.py              # /api/jobs/**
 │       │       ├── rubrics.py           # /api/rubrics/**
-│       │       └── media.py             # /media/** static file serving (auth-gated)
+│       │       ├── media.py             # /media/** static file serving (auth-gated)
+│       │       └── notifications.py     # /api/notifications (list + mark read)
 │       ├── schemas/             # Pydantic request/response models
 │       └── queue/
 │           ├── hatchet_worker.py    # Hatchet worker lifespan + redispatch loop
@@ -226,6 +227,7 @@ Defined in [models.py](fastapi_backend/app/database/models.py):
 | `assessment_sessions` | `AssessmentSessionRecord` | Per-student assessment link |
 | `assessment_results` | `AssessmentResultRecord` | Per-scorer result + scores |
 | `assessment_criteria` | `AssessmentCriterionRecord` | Per-rubric-criterion evidence |
+| `notifications` | `NotificationRecord` | Task-completion notification history; `read_at` null = unread |
 
 Jobs table (`jobs`, `job_events`) managed by raw SQL via `JobRepository` / `Database`.
 

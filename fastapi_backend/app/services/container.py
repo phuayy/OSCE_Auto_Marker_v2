@@ -13,6 +13,7 @@ from app.pipeline.media import MediaPipeline
 from app.pipeline.scoring import ScoringPipeline
 from app.repositories.assessment_repository import AssessmentRepository
 from app.repositories.job_repository import JobRepository
+from app.repositories.notification_repository import NotificationRepository
 from app.repositories.rubric_asset_repository import RubricAssetRepository
 from app.repositories.session_repository import SessionRepository
 from app.repositories.upload_repository import UploadRepository
@@ -54,6 +55,7 @@ class AppContainer:
     scoring: ScoringPipeline
     pipeline: PipelineService
     clips: ClipService
+    notifications: NotificationRepository
     login_rate_limiter: FixedWindowRateLimiter
 
     async def startup(self, *, dispatch_queued_jobs: bool = True, recover_interrupted_jobs: bool | None = None) -> None:
@@ -106,8 +108,9 @@ def create_container(settings: Settings | None = None) -> AppContainer:
     rubrics = RubricService(active_settings, runner, artifacts, rubric_assets)
     media = MediaPipeline(active_settings, runner, events, auth)
     scoring = ScoringPipeline(active_settings, runner, events, auth, rubrics)
-    pipeline = PipelineService(sessions, events, media, scoring, assessments)
-    clips = ClipService(sessions, events, media, pipeline, jobs)
+    notifications = NotificationRepository(orm_database)
+    pipeline = PipelineService(sessions, events, media, scoring, assessments, notifications)
+    clips = ClipService(sessions, events, media, pipeline, jobs, notifications)
     jobs.bind_handlers(pipeline=pipeline, clips=clips)
     login_rate_limiter = FixedWindowRateLimiter(
         max_attempts=active_settings.login_rate_limit_max_attempts,
@@ -143,5 +146,6 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         scoring=scoring,
         pipeline=pipeline,
         clips=clips,
+        notifications=notifications,
         login_rate_limiter=login_rate_limiter,
     )

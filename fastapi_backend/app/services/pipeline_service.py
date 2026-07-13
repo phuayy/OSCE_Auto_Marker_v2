@@ -13,6 +13,7 @@ from app.core.logging_utils import log_context
 from app.core.utils import utc_now_iso
 from app.pipeline.media import MediaPipeline
 from app.pipeline.scoring import ScoringPipeline
+from app.repositories.notification_repository import NotificationRepository
 from app.services.assessment_service import AssessmentService
 from app.services.event_service import EventService
 from app.services.session_service import SessionService
@@ -29,12 +30,24 @@ class PipelineService:
         media: MediaPipeline,
         scoring: ScoringPipeline,
         assessments: AssessmentService | None = None,
+        notifications: NotificationRepository | None = None,
     ) -> None:
         self.sessions = sessions
         self.events = events
         self.media = media
         self.scoring = scoring
         self.assessments = assessments
+        self.notifications = notifications
+
+    async def _notify_scoring_complete(self, session: dict[str, Any]) -> None:
+        if self.notifications is None:
+            return
+        name = str(session.get("name") or session.get("id"))
+        await self.notifications.notify(
+            "Scoring complete",
+            f'Scoring is complete for "{name}". Results are ready to review.',
+            session_id=str(session["id"]),
+        )
 
     async def mark_session_failed(self, session_id: str, error: Exception) -> None:
         message = self._exception_message(error, "Processing failed.")
@@ -114,6 +127,7 @@ class PipelineService:
             pipeline["endedAt"] = self.now_iso()
             pipeline["runtimeSeconds"] = self.runtime_seconds(str(pipeline["startedAt"]), str(pipeline["endedAt"]))
             await self.sessions.write(session)
+            await self._notify_scoring_complete(session)
         await self._record_assessment_results(session)
 
         return {
@@ -207,6 +221,7 @@ class PipelineService:
         session["pipeline"]["endedAt"] = ended_at
         session["pipeline"]["runtimeSeconds"] = self.runtime_seconds(started_at, ended_at)
         await self.sessions.write(session)
+        await self._notify_scoring_complete(session)
         await self._record_assessment_results(session)
         await self.events.publish(
             session_id,

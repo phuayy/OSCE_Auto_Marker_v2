@@ -27,12 +27,14 @@ class ClipService:
         media: MediaPipeline,
         pipeline: PipelineService,
         jobs: Any | None = None,
+        notifications: Any | None = None,
     ) -> None:
         self.sessions = sessions
         self.events = events
         self.media = media
         self.pipeline = pipeline
         self.jobs = jobs
+        self.notifications = notifications
 
     def _resolve_segmentation_method(self, session: dict[str, Any]) -> str:
         """Per-session segmentation choice (from the upload form), falling back
@@ -96,6 +98,13 @@ class ClipService:
         session["status"] = "cropped"
         session["error"] = None
         await self.sessions.write(session)
+        if self.notifications is not None:
+            await self.notifications.notify(
+                "Clips ready",
+                f'"{session.get("name") or session_id}" has been split into '
+                f"{len(clips)} clip{'s' if len(clips) != 1 else ''} — ready for assessment.",
+                session_id=session_id,
+            )
         await self.events.publish(
             session_id,
             "milestone",

@@ -31,6 +31,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Progress } from '@/components/ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import LongVideoSummaryCharts from './LongVideoSummaryCharts.jsx';
+import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
 
 const SCORE_TEMPLATE = [
   {
@@ -356,6 +357,7 @@ export default function OSCEAiMarkerMockup({
   onOpenRubric = null,
   onOpenAnalytics = null,
   onLogout = null,
+  notifications = null,
 } = {}) {
   const [videoFile, setVideoFile] = useState(null);
   const [communicationScores, setCommunicationScores] = useState(null);
@@ -2681,6 +2683,13 @@ export default function OSCEAiMarkerMockup({
             ) : (
               <Badge className="bg-emerald-100 text-emerald-700">{currentModeLabel} Ready</Badge>
             )}
+            {notifications ? (
+              <NotificationBell
+                items={notifications.items}
+                unreadCount={notifications.unreadCount}
+                onDismiss={notifications.dismiss}
+              />
+            ) : null}
             {onOpenAnalytics ? (
               <Button variant="outline" size="sm" className="gap-2" onClick={onOpenAnalytics}>
                 <BarChart3 className="h-4 w-4" />
@@ -3015,6 +3024,14 @@ export default function OSCEAiMarkerMockup({
                   />
                 </CardContent>
               </Card> */}
+
+              {notifications ? (
+                <NotificationFeed
+                  items={notifications.items}
+                  unreadCount={notifications.unreadCount}
+                  onDismiss={notifications.dismiss}
+                />
+              ) : null}
             </div>
           </section>
         )}

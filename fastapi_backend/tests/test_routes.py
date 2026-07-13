@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
 from app.api.dependencies import authorize_request
-from app.api.routes import async_uploads, auth, health, jobs, sessions, uploads
+from app.api.routes import async_uploads, auth, health, jobs, notifications, sessions, uploads
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.services.container import create_container
@@ -67,6 +67,7 @@ def build_test_client(tmp_path: Path) -> TestClient:
     app.include_router(async_uploads.router, prefix="/api")
     app.include_router(jobs.router, prefix="/api")
     app.include_router(sessions.router, prefix="/api")
+    app.include_router(notifications.router, prefix="/api")
     return TestClient(app)
 
 
@@ -104,6 +105,29 @@ def test_session_listing_returns_seeded_session(tmp_path) -> None:
     response = client.get("/api/sessions", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
     assert response.json()["sessions"][0]["id"] == "s1"
+
+
+def test_notifications_list_and_mark_read(tmp_path) -> None:
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    container = client.app.state.container
+
+    asyncio.run(container.notifications.notify("Scoring complete", "Session A is scored.", session_id="s1"))
+
+    listed = client.get("/api/notifications", headers=headers)
+    assert listed.status_code == 200
+    body = listed.json()
+    assert body["unreadCount"] == 1
+    assert body["notifications"][0]["title"] == "Scoring complete"
+
+    notification_id = body["notifications"][0]["id"]
+    marked = client.post(f"/api/notifications/{notification_id}/read", headers=headers)
+    assert marked.status_code == 200
+    assert marked.json()["unreadCount"] == 0
+
+    missing = client.post("/api/notifications/nope/read", headers=headers)
+    assert missing.status_code == 404
 
 
 def test_async_upload_initiate_and_local_part(tmp_path) -> None:
