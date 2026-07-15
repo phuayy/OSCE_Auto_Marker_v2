@@ -16,10 +16,32 @@ Run (uses the project's .venv which has torch+cuda+transformers):
         --video "C:/Users/.../Common Cold_Session 1.mp4"
 
 Defaults point at the requested output locations:
-    annotations -> C:/Users/yeeye/Downloads/ra test output/annotations
-    report      -> C:/Users/yeeye/Downloads/ra test output/rt_detr_report.xlsx
+    annotations -> C:/Users/yeeye/Downloads/ra test output/annotations_2
+    report      -> C:/Users/yeeye/Downloads/ra test output/rt_detr_report_2.xlsx
 
 This is a debug script: it does NOT touch production code, only imports it.
+
+Segmentation tuning (this file only — production ``detect_human_segments.py``
+is untouched until this is validated against real footage):
+
+  * Per-box confidence gate raised to 0.7 (``--confidence``) — a detection
+    below that score is not counted as a person at all, cutting false
+    positives from partial/occluded bodies.
+  * Session start/end no longer use the production module's morphological
+    open+close (``dhs.build_session_ranges``); that approach flips ANY
+    interior run shorter than the flicker-tolerance regardless of value, so
+    it can just as easily erase a short *genuine* active stretch as it
+    absorbs a short misclassification run once the tolerance is large. See
+    ``build_tolerant_session_ranges`` below for the replacement: a
+    N-of-M ("at most K bad samples in a window of W") confirmation, which is
+    the standard debounce technique for noisy boolean sensors and is what
+    the request actually described ("40 good + 10 bad in 50 frames = start
+    the clip"). Both boundaries reuse the identical mechanism
+    (``--start-after-seconds``/``--flicker-tolerance-seconds`` for the start
+    window, ``--end-after-seconds``/``--flicker-tolerance-seconds`` for the
+    end window), so start confirmation and clip cut-off behave the same way.
+  * The confirmed clip is anchored to the FIRST sample that individually
+    crossed the threshold, not the sample where confirmation completed.
 """
 
 from __future__ import annotations
@@ -36,6 +58,122 @@ import detect_human_segments as dhs  # noqa: E402
 
 DEFAULT_VIDEO = r"C:\Users\yeeye\Downloads\RA Dataset\video\Common Cold_Session 1.mp4"
 DEFAULT_OUT_ROOT = r"C:\Users\yeeye\Downloads\ra test output"
+
+
+# ---------------------------------------------------------------------------
+# Tolerant N-of-M session segmentation (debug-only variant).
+#
+# Confirms a state transition once a fixed-length sample window has AT MOST
+# `tolerance` samples that disagree with the target state ("at most 10 bad
+# samples out of a 50-sample window"). This is symmetric: the exact same
+# check confirms both session start and session end, so a clip's cut-off
+# tolerates model bottleneck the same way its start does.
+# ---------------------------------------------------------------------------
+
+
+def _window_confirms(flags: list[bool], start: int, window: int, tolerance: int, want: bool) -> str:
+    """Check ``flags[start:start+window]`` against ``want``.
+
+    Returns "confirmed" (<= tolerance disagreements), "failed" (too many),
+    or "insufficient" (fewer than ``window`` samples remain before EOF).
+    """
+    end = start + window
+    if end > len(flags):
+        return "insufficient"
+    bad = sum(1 for flag in flags[start:end] if flag != want)
+    return "confirmed" if bad <= tolerance else "failed"
+
+
+def build_tolerant_session_ranges(
+    counts: list[int],
+    video_duration: float,
+    *,
+    min_people: int,
+    sample_dt: float,
+    start_window_samples: int,
+    start_tolerance_samples: int,
+    end_window_samples: int,
+    end_tolerance_samples: int,
+    start_offset_seconds: float,
+    end_offset_seconds: float,
+    min_clip_seconds: float,
+) -> tuple[list[dict], list[dict]]:
+    """N-of-M hysteresis over per-sample person counts.
+
+    Anchors each confirmed clip to the FIRST sample that individually
+    crossed ``min_people`` (or dropped below it), not the sample where the
+    confirmation window completed — mirrors "take the first frame identified
+    as 2 people and start the clip from there".
+    """
+    flags = [count >= min_people for count in counts]
+    n = len(flags)
+    ranges: list[dict] = []
+    transitions: list[dict] = []
+    state = "idle"
+    anchor: int | None = None
+    session_start_index = 0
+    index = 0
+    while index < n:
+        if state == "idle":
+            if anchor is None:
+                if not flags[index]:
+                    index += 1
+                    continue
+                anchor = index
+            result = _window_confirms(flags, anchor, start_window_samples, start_tolerance_samples, True)
+            if result == "confirmed":
+                session_start_index = anchor
+                transitions.append(
+                    {"at": round(anchor * sample_dt, 3), "event": "session_start", "run_samples": start_window_samples}
+                )
+                state = "active"
+                index = anchor + start_window_samples
+                anchor = None
+            elif result == "failed":
+                index = anchor + 1
+                anchor = None
+            else:  # insufficient samples left before EOF — this attempt can never confirm
+                break
+        else:  # active
+            if anchor is None:
+                if flags[index]:
+                    index += 1
+                    continue
+                anchor = index
+            result = _window_confirms(flags, anchor, end_window_samples, end_tolerance_samples, False)
+            if result == "confirmed":
+                ranges.append({"start": session_start_index * sample_dt, "end": anchor * sample_dt})
+                transitions.append(
+                    {"at": round(anchor * sample_dt, 3), "event": "session_end", "run_samples": end_window_samples}
+                )
+                state = "idle"
+                index = anchor + end_window_samples
+                anchor = None
+            elif result == "failed":
+                index = anchor + 1
+                anchor = None
+            else:
+                break
+
+    if state == "active":
+        ranges.append({"start": session_start_index * sample_dt, "end": video_duration})
+        transitions.append({"at": round(video_duration, 3), "event": "session_end_at_eof"})
+
+    # Padding + clamping + minimum-duration filtering — same semantics as
+    # dhs.build_session_ranges (offset padding, overlap guard, min duration).
+    padded: list[dict] = []
+    for clip_range in ranges:
+        start = max(0.0, min(video_duration, clip_range["start"] - start_offset_seconds))
+        end = max(0.0, min(video_duration, clip_range["end"] + end_offset_seconds))
+        if end - start >= min_clip_seconds:
+            padded.append({"start": round(start, 3), "end": round(end, 3)})
+    for i in range(len(padded) - 1):
+        if padded[i]["end"] > padded[i + 1]["start"]:
+            padded[i]["end"] = padded[i + 1]["start"]
+    padded = [r for r in padded if r["end"] - r["start"] >= min_clip_seconds]
+    for i, clip_range in enumerate(padded, start=1):
+        clip_range["student_index"] = i
+    return padded, transitions
 
 
 # ---------------------------------------------------------------------------
@@ -250,18 +388,30 @@ def write_report(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="RT-DETR human-detection debug: annotate frames + Excel report.")
     p.add_argument("--video", default=DEFAULT_VIDEO)
-    p.add_argument("--annotations-dir", default=str(Path(DEFAULT_OUT_ROOT) / "annotations"))
-    p.add_argument("--report", default=str(Path(DEFAULT_OUT_ROOT) / "rt_detr_report.xlsx"))
+    p.add_argument("--annotations-dir", default=str(Path(DEFAULT_OUT_ROOT) / "annotations_2"))
+    p.add_argument("--report", default=str(Path(DEFAULT_OUT_ROOT) / "rt_detr_report_2.xlsx"))
     p.add_argument("--sample-fps", type=float, default=1.0)
     p.add_argument("--min-people", type=int, default=2)
-    p.add_argument("--start-after-seconds", type=float, default=4.0)
-    p.add_argument("--end-after-seconds", type=float, default=8.0)
-    p.add_argument("--flicker-tolerance-seconds", type=float, default=2.0)
-    p.add_argument("--median-window", type=int, default=3)
+    p.add_argument(
+        "--start-after-seconds", type=float, default=50.0,
+        help="Confirmation window (samples, at sample-fps) that must be mostly person-positive to open a clip",
+    )
+    p.add_argument(
+        "--end-after-seconds", type=float, default=50.0,
+        help="Confirmation window (samples, at sample-fps) that must be mostly person-negative to close a clip",
+    )
+    p.add_argument(
+        "--flicker-tolerance-seconds", type=float, default=10.0,
+        help="Max disagreeing samples tolerated inside a confirmation window (model-bottleneck tolerance)",
+    )
+    p.add_argument("--median-window", type=int, default=3, help="Unused by the tolerant segmenter; kept for CLI parity")
     p.add_argument("--start-offset", type=float, default=0.0)
     p.add_argument("--end-offset", type=float, default=2.0)
     p.add_argument("--min-clip-seconds", type=float, default=0.5)
-    p.add_argument("--confidence", type=float, default=0.5)
+    p.add_argument(
+        "--confidence", type=float, default=0.7,
+        help="Per-box detection score required for a box to count as a person (default 0.7)",
+    )
     p.add_argument("--model", default=dhs.DEFAULT_MODEL)
     p.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
     p.add_argument("--batch-size", type=int, default=8)
@@ -381,7 +531,19 @@ def main() -> int:
         histogram[str(c)] = histogram.get(str(c), 0) + 1
     dhs.log(f"Person-count histogram: {histogram}")
 
-    clip_ranges, transitions = dhs.build_session_ranges(counts, video_duration, seg_cfg)
+    clip_ranges, transitions = build_tolerant_session_ranges(
+        counts,
+        video_duration,
+        min_people=seg_cfg.min_people,
+        sample_dt=seg_cfg.sample_dt,
+        start_window_samples=seg_cfg.seconds_to_samples(seg_cfg.start_after_seconds),
+        start_tolerance_samples=seg_cfg.seconds_to_samples(seg_cfg.flicker_tolerance_seconds),
+        end_window_samples=seg_cfg.seconds_to_samples(seg_cfg.end_after_seconds),
+        end_tolerance_samples=seg_cfg.seconds_to_samples(seg_cfg.flicker_tolerance_seconds),
+        start_offset_seconds=seg_cfg.start_offset_seconds,
+        end_offset_seconds=seg_cfg.end_offset_seconds,
+        min_clip_seconds=seg_cfg.min_clip_seconds,
+    )
     dhs.log(f"Detected {len(clip_ranges)} student clip(s).")
 
     # Map each sampled frame to in-session / clip membership from the FINAL ranges.

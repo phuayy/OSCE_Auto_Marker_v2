@@ -324,7 +324,12 @@ class PersonCounter:
         for model_id in candidates:
             try:
                 log(f"Loading detector {model_id} on {self.device} (fp16={self.use_fp16})...")
-                self.processor = AutoImageProcessor.from_pretrained(model_id)
+                # use_fast=True selects the torchvision-backed RTDetrImageProcessorFast
+                # instead of the PIL-backed slow processor — same numpy-array input
+                # contract and output shape, ~2-3x faster preprocessing, negligible
+                # (~1e-7) numeric difference. Silences the "slow image processor"
+                # deprecation warning (transformers defaults to fast from v4.52).
+                self.processor = AutoImageProcessor.from_pretrained(model_id, use_fast=True)
                 model = AutoModelForObjectDetection.from_pretrained(model_id)
                 self.resolved_model_id = model_id
                 break
