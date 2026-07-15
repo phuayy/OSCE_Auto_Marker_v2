@@ -435,3 +435,72 @@ def test_direct_upload_uses_object_storage_refs(tmp_path) -> None:
     raw_video = raw_session["files"]["video"]
     assert raw_video["storageRef"]["localPath"].startswith(str(tmp_path / "storage" / "objects"))
     assert Path(raw_video["absolutePath"]).exists()
+
+
+def _initiate_with_one_part(client: TestClient, headers: dict[str, str]) -> str:
+    """Initiate an upload and push a single video part; return the upload id."""
+    video_bytes = b"video-bytes"
+    initiate = client.post(
+        "/api/uploads/initiate",
+        headers=headers,
+        json={
+            "workflow": "standard",
+            "autoProcess": False,
+            "files": [
+                {"kind": "video", "originalName": "s.mp4", "mimeType": "video/mp4", "sizeBytes": len(video_bytes)},
+                {"kind": "caseStudy", "originalName": "c.pdf", "mimeType": "application/pdf", "sizeBytes": 5},
+            ],
+        },
+    )
+    assert initiate.status_code == 201, initiate.text
+    body = initiate.json()
+    video = next(item for item in body["fileUploads"] if item["kind"] == "video")
+    part = client.put(
+        f"/api/uploads/{body['uploadId']}/parts/1?fileId={video['fileId']}",
+        headers=headers,
+        content=video_bytes,
+    )
+    assert part.status_code == 200, part.text
+    return body["uploadId"]
+
+
+def test_recover_expired_uploads_reclaims_abandoned_and_spares_fresh(tmp_path) -> None:
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    container = client.app.state.container
+    service = container.async_uploads
+
+    expired_id = _initiate_with_one_part(client, headers)
+    fresh_id = _initiate_with_one_part(client, headers)
+
+    # Backdate the first upload past its TTL; leave the second inside its window.
+    expired_upload = asyncio.run(service.repository.read(expired_id))
+    expired_upload["expiresAt"] = "2000-01-01T00:00:00Z"
+    asyncio.run(service.repository.write(expired_upload))
+
+    parts_dir = container.storage.settings.object_storage_root / ".uploads" / expired_id
+    assert parts_dir.exists()  # raw part files present before the sweep
+
+    asyncio.run(service.recover_expired_uploads())
+
+    # Expired upload fully reclaimed.
+    reclaimed = asyncio.run(service.repository.read(expired_id))
+    assert reclaimed["status"] == "expired"
+    assert "expiredAt" in reclaimed
+    assert not parts_dir.exists()  # 500 MB-equivalent leak freed
+
+    expired_session = asyncio.run(container.sessions.read(str(expired_upload["sessionId"])))
+    assert expired_session["status"] == "failed"
+    assert "expired" in (expired_session.get("error") or "").lower()
+
+    expired_job = asyncio.run(container.jobs.repository.read(str(expired_upload["jobId"])))
+    assert expired_job["status"] == "cancelled"
+
+    # Fresh upload untouched — still live, parts intact.
+    fresh_upload = asyncio.run(service.repository.read(fresh_id))
+    assert fresh_upload["status"] == "uploading"
+    fresh_parts = container.storage.settings.object_storage_root / ".uploads" / fresh_id
+    assert fresh_parts.exists()
+    fresh_session = asyncio.run(container.sessions.read(str(fresh_upload["sessionId"])))
+    assert fresh_session["status"] == "waiting_for_upload"

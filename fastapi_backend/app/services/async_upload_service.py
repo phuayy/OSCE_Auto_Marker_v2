@@ -531,6 +531,96 @@ class AsyncUploadService:
                 recovered,
             )
 
+    # Pre-commit upload states whose session/job may still be safely failed by
+    # the expiry sweep. A session past these (uploaded/queued/processing/…) has
+    # already left the upload phase and must never be clobbered by cleanup.
+    _RECOVERABLE_UPLOAD_STATES = frozenset({"initiated", "uploading", "failed"})
+    _RECOVERABLE_SESSION_STATES = frozenset({"waiting_for_upload", "uploading", "assembling"})
+
+    async def recover_expired_uploads(self) -> None:
+        """Reclaim uploads abandoned mid-transfer once their TTL has elapsed.
+
+        The ``assembling`` sweep (``recover_stale_assembling_uploads``) only covers
+        uploads killed during background assembly. An upload interrupted *earlier*
+        — during part transfer — is left in ``initiated``/``uploading`` with its
+        raw part files on disk and its session pinned at ``waiting_for_upload``.
+        Nothing else deletes those parts, so a 500 MB video interrupted by, say, a
+        transient ``os.replace`` failure (now retried, but any client disconnect
+        does the same) leaks its bytes indefinitely and leaves a dead session card.
+
+        TTL (``expiresAt``, default 24h) is the safety signal: an upload still
+        inside its window may be a live transfer, so only *expired* records are
+        reclaimed. For each: mark it ``expired``, delete its part tree via
+        ``abort_upload``, fail the still-pre-commit session, and cancel the pending
+        job. A ``committed`` upload's session/job are already past the upload phase
+        and are left untouched. All steps are idempotent, so repeated startups and
+        a later explicit abort cannot double-act or corrupt state.
+        """
+        try:
+            all_uploads = await self.repository.read_all()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Expired-upload sweep: could not read upload records — %s", exc)
+            return
+
+        reclaimed = 0
+        for upload in all_uploads:
+            if str(upload.get("status")) not in self._RECOVERABLE_UPLOAD_STATES:
+                continue
+            if not self._is_expired(upload):
+                continue
+
+            upload_id = str(upload.get("id", ""))
+            session_id = str(upload.get("sessionId", ""))
+
+            # 1. Delete raw part files first — reclaiming bytes is the primary goal
+            #    and must not be blocked by a later record/session write failing.
+            try:
+                await self.storage.abort_upload(upload)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Expired-upload sweep: could not delete parts for %s — %s", upload_id, exc)
+
+            # 2. Mark the upload record terminal so the sweep never revisits it.
+            try:
+                upload["status"] = "expired"
+                upload["expiredAt"] = utc_now_iso()
+                await self.repository.write(upload)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Expired-upload sweep: could not mark upload %s expired — %s", upload_id, exc)
+                continue
+
+            # 3. Fail the session, but only while it is still in the upload phase.
+            if session_id:
+                try:
+                    session = await self.sessions.read(session_id)
+                    if str(session.get("status")) in self._RECOVERABLE_SESSION_STATES:
+                        session["status"] = "failed"
+                        session["error"] = (
+                            "Upload expired before completion. Please start a new assessment to re-upload."
+                        )
+                        await self.sessions.write(session)
+                except FileNotFoundError:
+                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Expired-upload sweep: could not fail session %s — %s", session_id, exc)
+
+            # 4. Cancel the pending job (no-ops if already terminal).
+            job_id = str(upload.get("jobId") or "")
+            if job_id:
+                try:
+                    await self.jobs.cancel(job_id, "Upload expired before completion.")
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Expired-upload sweep: could not cancel job %s — %s", job_id, exc)
+
+            reclaimed += 1
+            logger.warning(
+                "Expired-upload sweep: reclaimed upload %s (session %s) — parts deleted, session failed.",
+                upload_id,
+                session_id,
+            )
+
+        if reclaimed:
+            logger.warning("Expired-upload sweep complete: %d abandoned upload(s) reclaimed.", reclaimed)
+
     def public_upload(self, upload: dict[str, Any]) -> dict[str, Any]:
         files = []
         for item in upload.get("files") or []:

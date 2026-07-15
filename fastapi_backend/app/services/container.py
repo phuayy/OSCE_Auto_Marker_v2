@@ -76,6 +76,10 @@ class AppContainer:
         # Recover uploads/sessions stuck in "assembling" before dispatching
         # queued jobs, so no job is started for a session in a bad state.
         await self.async_uploads.recover_stale_assembling_uploads()
+        # Reclaim uploads abandoned mid-transfer (parts on disk, session pinned at
+        # waiting_for_upload) once their TTL has elapsed — frees leaked bytes and
+        # clears dead session cards.
+        await self.async_uploads.recover_expired_uploads()
         await self.jobs.startup(dispatch_queued=dispatch_queued_jobs, recover_interrupted=should_recover)
 
     async def shutdown(self) -> None:

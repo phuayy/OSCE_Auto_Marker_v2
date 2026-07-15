@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+from app.core.utils import atomic_replace
 
 
 def read_json_file(path: Path) -> dict[str, Any] | None:
@@ -43,6 +44,6 @@ def write_json_file(path: Path, payload: dict[str, Any]) -> None:
     tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
         tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        os.replace(tmp_path, path)
+        atomic_replace(tmp_path, path)
     finally:
         tmp_path.unlink(missing_ok=True)

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +12,7 @@ from fastapi import UploadFile
 
 from app.core.config import Settings
 from app.core.exceptions import AppError
-from app.core.utils import sanitize_file_name, utc_now_iso
+from app.core.utils import atomic_replace, sanitize_file_name, utc_now_iso
 
 
 SourceFileKind = Literal["video", "caseStudy"]
@@ -131,7 +130,7 @@ class LocalObjectStorageService:
                             )
                         hasher.update(chunk)
                         buffer.write(chunk)
-                os.replace(tmp_path, final_path)
+                atomic_replace(tmp_path, final_path)
                 return hasher.hexdigest(), copied
             except Exception:
                 tmp_path.unlink(missing_ok=True)
@@ -175,7 +174,7 @@ class LocalObjectStorageService:
             tmp_path = part_path.with_name(f".tmp-{uuid4().hex[:8]}")
             try:
                 tmp_path.write_bytes(body)
-                os.replace(tmp_path, part_path)
+                atomic_replace(tmp_path, part_path)
             finally:
                 tmp_path.unlink(missing_ok=True)
             return digest
@@ -252,7 +251,7 @@ class LocalObjectStorageService:
                 expected_sha = file_record.get("checksumSha256")
                 if expected_sha and str(expected_sha).lower() != digest:
                     raise AppError(f"{file_record.get('kind')} checksum mismatch.", status_code=400)
-                os.replace(tmp_path, final_path)
+                atomic_replace(tmp_path, final_path)
                 return digest
             except Exception:
                 tmp_path.unlink(missing_ok=True)

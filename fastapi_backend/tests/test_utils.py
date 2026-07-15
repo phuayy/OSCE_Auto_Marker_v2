@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sys
 from typing import Any
@@ -232,6 +233,69 @@ def test_local_storage_completion_reuses_existing_final_object(tmp_path) -> None
     assert retry_ref["checksumSha256"] == first_ref["checksumSha256"]
     assert retry_ref["localPath"] == first_ref["localPath"]
     assert stale_file_record["status"] == "committed"
+
+
+def test_atomic_replace_retries_transient_permission_error(tmp_path, monkeypatch) -> None:
+    from app.core import utils
+
+    src = tmp_path / "src.tmp"
+    dst = tmp_path / "dst.json"
+    src.write_text("payload", encoding="utf-8")
+
+    calls = {"n": 0}
+    real_replace = os.replace
+
+    def flaky_replace(a: Any, b: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] < 3:  # deny the first two attempts like an AV scan would
+            raise PermissionError(5, "Access is denied")
+        real_replace(a, b)
+
+    monkeypatch.setattr(utils.os, "replace", flaky_replace)
+    monkeypatch.setattr(utils.time, "sleep", lambda _s: None)  # skip real backoff wait
+
+    utils.atomic_replace(src, dst)
+
+    assert calls["n"] == 3
+    assert dst.read_text(encoding="utf-8") == "payload"
+    assert not src.exists()
+
+
+def test_atomic_replace_reraises_after_exhausting_attempts(tmp_path, monkeypatch) -> None:
+    from app.core import utils
+
+    src = tmp_path / "s.tmp"
+    dst = tmp_path / "d.json"
+    src.write_text("x", encoding="utf-8")
+
+    def always_denied(_a: Any, _b: Any) -> None:
+        raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(utils.os, "replace", always_denied)
+    monkeypatch.setattr(utils.time, "sleep", lambda _s: None)
+
+    with pytest.raises(PermissionError):
+        utils.atomic_replace(src, dst, attempts=3)
+
+
+def test_atomic_replace_does_not_retry_other_errors(tmp_path, monkeypatch) -> None:
+    from app.core import utils
+
+    src = tmp_path / "s.tmp"
+    dst = tmp_path / "d.json"
+
+    calls = {"n": 0}
+
+    def missing_src(_a: Any, _b: Any) -> None:
+        calls["n"] += 1
+        raise FileNotFoundError("no such file")
+
+    monkeypatch.setattr(utils.os, "replace", missing_src)
+    monkeypatch.setattr(utils.time, "sleep", lambda _s: None)
+
+    with pytest.raises(FileNotFoundError):
+        utils.atomic_replace(src, dst)
+    assert calls["n"] == 1  # real fault surfaces immediately, no retry loop
 
 
 def test_local_storage_detects_checksum_mismatch(tmp_path) -> None:
