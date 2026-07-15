@@ -193,6 +193,37 @@ class AssessmentRepository:
                 )
             )
 
+    async def delete_for_session(self, session_id: str) -> bool:
+        """Wipe every assessment row tied to a session: the criteria, the
+        results, and the assessment_session itself. Deletes children before
+        parents explicitly rather than leaning on ORM cascade (a bulk ``delete``
+        statement bypasses relationship cascades and SQLite FK enforcement is
+        off), so no orphaned criteria/result rows are ever left behind."""
+        async with self.database.transaction() as db_session:
+            assessment = await db_session.get(AssessmentSessionRecord, session_id)
+            if assessment is None:
+                return False
+            result_ids = (
+                await db_session.scalars(
+                    select(AssessmentResultRecord.id).where(
+                        AssessmentResultRecord.assessment_session_id == session_id
+                    )
+                )
+            ).all()
+            if result_ids:
+                await db_session.execute(
+                    delete(AssessmentCriterionRecord).where(
+                        AssessmentCriterionRecord.result_id.in_(result_ids)
+                    )
+                )
+            await db_session.execute(
+                delete(AssessmentResultRecord).where(
+                    AssessmentResultRecord.assessment_session_id == session_id
+                )
+            )
+            await db_session.delete(assessment)
+        return True
+
     async def list_result_rows(self) -> list[dict[str, Any]]:
         """Flat per-result rows joined with session + student, for analytics."""
         async with self.database.session() as db_session:

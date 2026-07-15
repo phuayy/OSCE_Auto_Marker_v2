@@ -19,6 +19,7 @@ import {
   Scissors,
   Settings,
   Sparkles,
+  Trash2,
   UploadCloud,
   User,
   Users,
@@ -378,6 +379,7 @@ export default function OSCEAiMarkerMockup({
   const [sessionIndexError, setSessionIndexError] = useState('');
   const [sessionNameDrafts, setSessionNameDrafts] = useState({});
   const [renamingSessionId, setRenamingSessionId] = useState(null);
+  const [deletingSessionId, setDeletingSessionId] = useState(null);
 
   const [session, setSession] = useState(null);
   const [transcript, setTranscript] = useState({ segments: [] });
@@ -1258,6 +1260,46 @@ export default function OSCEAiMarkerMockup({
       setSessionIndexError(error.message || 'Failed to rename session.');
     } finally {
       setRenamingSessionId(null);
+    }
+  }
+
+  async function deleteSession(sessionId, { childLabel } = {}) {
+    if (!sessionId) {
+      return false;
+    }
+    const isChild = Boolean(childLabel);
+    const confirmMessage = isChild
+      ? `Delete the assessment for "${childLabel}"? This permanently removes its scores and results. This cannot be undone.`
+      : 'Delete this session and every student assessment under it? This permanently removes all scores, results and files. This cannot be undone.';
+    if (!window.confirm(confirmMessage)) {
+      return false;
+    }
+
+    setDeletingSessionId(sessionId);
+    setSessionIndexError('');
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(body.error || 'Failed to delete session.');
+      }
+      const removed = new Set(
+        Array.isArray(body.deletedSessionIds) ? body.deletedSessionIds.map(String) : [String(sessionId)]
+      );
+      // If the open workspace (or its parent) was deleted, bail back to the
+      // dashboard; refreshSessionIndex runs inside goHome.
+      if (session?.id && removed.has(String(session.id))) {
+        goHome();
+      } else {
+        setSessionIndex((previous) => previous.filter((entry) => !removed.has(String(entry.id))));
+        await refreshSessionIndex();
+      }
+      return true;
+    } catch (error) {
+      setSessionIndexError(error.message || 'Failed to delete session.');
+      return false;
+    } finally {
+      setDeletingSessionId(null);
     }
   }
 
@@ -2375,6 +2417,56 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
+  async function rerunClipAssessment(clip, childSessionId) {
+    if (!clip?.id) {
+      return;
+    }
+    // No existing child (or demo bundle) → fall back to a first run, which
+    // handles the demo path and creates the child session.
+    if (!childSessionId || session?._demoChildren) {
+      return runClipAssessment(clip);
+    }
+    if (clipAssessmentRuns[clip.id]?.status === 'running') {
+      return;
+    }
+
+    setError('');
+    setClipAssessmentRuns((previous) => ({
+      ...previous,
+      [clip.id]: { status: 'running', sessionId: childSessionId },
+    }));
+    try {
+      const response = await fetch(`/api/sessions/${childSessionId}/rerun`, { method: 'POST' });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(body.error || 'Re-run failed.');
+      }
+      setNotice(`Re-running assessment for "${clip.label || 'clip'}" — its row updates as it progresses.`);
+      refreshSessionIndex();
+    } catch (rerunError) {
+      setClipAssessmentRuns((previous) => ({
+        ...previous,
+        [clip.id]: { status: 'failed', sessionId: childSessionId, error: rerunError.message || 'Re-run failed.' },
+      }));
+      setError(rerunError.message || 'Re-run failed.');
+    }
+  }
+
+  async function deleteClipAssessment(clip, childSessionId) {
+    if (!childSessionId) {
+      return;
+    }
+    const removed = await deleteSession(childSessionId, { childLabel: clip?.label || 'this clip' });
+    if (removed) {
+      // Drop the run state so the clip row returns to "Run assessment".
+      setClipAssessmentRuns((previous) => {
+        const next = { ...previous };
+        delete next[clip.id];
+        return next;
+      });
+    }
+  }
+
   async function openClipAssessmentView(clip, runState) {
     const clipSessionId = runState?.sessionId;
     if (!clipSessionId) {
@@ -2993,7 +3085,23 @@ export default function OSCEAiMarkerMockup({
                               );
                             })()}
                           </div>
-                          {renderSessionAction(sessionEntry)}
+                          <div className="flex shrink-0 items-center gap-1">
+                            {renderSessionAction(sessionEntry)}
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => deleteSession(sessionEntry.id)}
+                              disabled={deletingSessionId === sessionEntry.id}
+                              title="Delete this session and all student assessments under it"
+                              className="text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+                            >
+                              {deletingSessionId === sessionEntry.id ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <Trash2 className="h-4 w-4" />
+                              )}
+                            </Button>
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -3764,30 +3872,58 @@ export default function OSCEAiMarkerMockup({
                               </span>
                             </div>
                             <div className="mt-2 flex flex-wrap items-center gap-2">
-                              {isCompleted ? (
-                                <>
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    onClick={() => openClipAssessmentView(clip, runState)}
-                                    disabled={isProcessing}
-                                  >
-                                    View
-                                  </Button>
+                              {(() => {
+                                // Delete button shared by the completed/failed
+                                // states — wipes the child session's scores and
+                                // returns the clip row to "Run assessment".
+                                const deleteButton = (
                                   <Button
                                     size="sm"
                                     variant="ghost"
-                                    onClick={() => runClipAssessment(clip)}
+                                    onClick={() => deleteClipAssessment(clip, progressSessionId)}
+                                    disabled={isProcessing || deletingSessionId === progressSessionId}
+                                    title="Delete this clip's assessment and scores"
+                                    className="text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+                                  >
+                                    {deletingSessionId === progressSessionId ? (
+                                      <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                      <Trash2 className="mr-1 h-3.5 w-3.5" />
+                                    )}
+                                    Delete
+                                  </Button>
+                                );
+                                const rerunButton = (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => rerunClipAssessment(clip, progressSessionId)}
                                     disabled={isProcessing}
-                                    title="Re-run assessment for this clip"
+                                    title="Re-run assessment for this clip (keeps the same record)"
                                     className="text-slate-700 hover:bg-slate-100"
                                   >
                                     <RotateCw className="mr-1 h-3.5 w-3.5" />
                                     Re-run
                                   </Button>
-                                </>
-                              ) : runState.status === 'running' ? (
-                                (() => {
+                                );
+
+                                if (isCompleted) {
+                                  return (
+                                    <>
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => openClipAssessmentView(clip, runState)}
+                                        disabled={isProcessing}
+                                      >
+                                        View
+                                      </Button>
+                                      {rerunButton}
+                                      {deleteButton}
+                                    </>
+                                  );
+                                }
+                                if (runState.status === 'running') {
                                   // Blocked while in flight (same rule as the
                                   // session list): show the live stage instead
                                   // of opening a half-processed child session.
@@ -3807,16 +3943,27 @@ export default function OSCEAiMarkerMockup({
                                       {stage ? `${stage.label}…` : 'Starting…'}
                                     </Button>
                                   );
-                                })()
-                              ) : (
-                                <Button
-                                  size="sm"
-                                  onClick={() => runClipAssessment(clip)}
-                                  disabled={isProcessing}
-                                >
-                                  Run assessment
-                                </Button>
-                              )}
+                                }
+                                if (runState.status === 'failed' && progressSessionId) {
+                                  // A failed child still exists as a record —
+                                  // offer to re-run it in place or delete it.
+                                  return (
+                                    <>
+                                      {rerunButton}
+                                      {deleteButton}
+                                    </>
+                                  );
+                                }
+                                return (
+                                  <Button
+                                    size="sm"
+                                    onClick={() => runClipAssessment(clip)}
+                                    disabled={isProcessing}
+                                  >
+                                    Run assessment
+                                  </Button>
+                                );
+                              })()}
                               {runState.status === 'failed' && runState.error ? (
                                 <span className="text-xs text-rose-600">{runState.error}</span>
                               ) : null}

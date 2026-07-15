@@ -4,7 +4,7 @@ import logging
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from app.database.models import NotificationRecord, utc_now
 from app.database.orm import OrmDatabase
@@ -50,6 +50,13 @@ class NotificationRepository:
             return int(
                 await db.scalar(select(func.count()).where(NotificationRecord.read_at.is_(None))) or 0
             )
+
+    async def delete_for_session(self, session_id: str) -> int:
+        async with self.database.transaction() as db:
+            result = await db.execute(
+                delete(NotificationRecord).where(NotificationRecord.session_id == session_id)
+            )
+        return int(result.rowcount or 0)
 
     async def mark_read(self, notification_id: str) -> bool:
         async with self.database.transaction() as db:

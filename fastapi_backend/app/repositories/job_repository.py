@@ -158,6 +158,28 @@ class JobRepository:
 
         return await self.database.run(_read_all)
 
+    async def delete_for_session(self, session_id: str) -> int:
+        """Delete every job for a session plus its attempt/event rows. Children
+        are removed explicitly (SQLite enforces FK cascade only with
+        ``PRAGMA foreign_keys=ON``, which this connection does not set)."""
+
+        def _delete(connection: sqlite3.Connection) -> int:
+            job_ids = [
+                str(row["id"])
+                for row in connection.execute(
+                    "SELECT id FROM jobs WHERE session_id = ?", (session_id,)
+                ).fetchall()
+            ]
+            if not job_ids:
+                return 0
+            placeholders = ",".join("?" for _ in job_ids)
+            connection.execute(f"DELETE FROM job_attempts WHERE job_id IN ({placeholders})", job_ids)
+            connection.execute(f"DELETE FROM job_events WHERE job_id IN ({placeholders})", job_ids)
+            connection.execute("DELETE FROM jobs WHERE session_id = ?", (session_id,))
+            return len(job_ids)
+
+        return await self.database.run(_delete, write=True)
+
     async def list_for_session(self, session_id: str) -> list[dict[str, Any]]:
         def _list(connection: sqlite3.Connection) -> list[dict[str, Any]]:
             rows = connection.execute(

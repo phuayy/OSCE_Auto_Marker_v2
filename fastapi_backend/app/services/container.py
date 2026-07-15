@@ -28,6 +28,7 @@ from app.services.job_queue_service import JobQueueService
 from app.services.pipeline_service import PipelineService
 from app.services.rubric_asset_service import RubricAssetService
 from app.services.rubric_service import RubricService
+from app.services.session_maintenance_service import SessionMaintenanceService
 from app.services.session_service import SessionService
 from app.services.storage_service import LocalObjectStorageService, create_storage_service
 
@@ -56,6 +57,8 @@ class AppContainer:
     pipeline: PipelineService
     clips: ClipService
     notifications: NotificationRepository
+    videos: VideoRepository
+    session_maintenance: SessionMaintenanceService
     login_rate_limiter: FixedWindowRateLimiter
 
     async def startup(self, *, dispatch_queued_jobs: bool = True, recover_interrupted_jobs: bool | None = None) -> None:
@@ -120,6 +123,7 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         max_attempts=active_settings.login_rate_limit_max_attempts,
         window_seconds=active_settings.login_rate_limit_window_seconds,
     )
+    videos = VideoRepository(orm_database)
     async_uploads = AsyncUploadService(
         active_settings,
         UploadRepository(active_settings.paths.uploads_dir),
@@ -129,7 +133,15 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         media,
         events,
         rubric_assets,
-        VideoRepository(orm_database),
+        videos,
+    )
+    session_maintenance = SessionMaintenanceService(
+        active_settings,
+        sessions,
+        assessments,
+        jobs,
+        notifications,
+        videos,
     )
     return AppContainer(
         settings=active_settings,
@@ -151,5 +163,7 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         pipeline=pipeline,
         clips=clips,
         notifications=notifications,
+        videos=videos,
+        session_maintenance=session_maintenance,
         login_rate_limiter=login_rate_limiter,
     )

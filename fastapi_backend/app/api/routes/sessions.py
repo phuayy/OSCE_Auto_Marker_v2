@@ -62,6 +62,26 @@ async def get_session(session_id: str, container: AppContainer = Depends(get_con
         raise _http_error(error, fallback_message="Failed to load session.") from error
 
 
+@router.delete("/{session_id}")
+async def delete_session(session_id: str, container: AppContainer = Depends(get_container)) -> dict[str, object]:
+    try:
+        return await container.session_maintenance.delete_session(session_id)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Session not found.") from error
+    except Exception as error:
+        raise _http_error(error, fallback_message="Failed to delete session.") from error
+
+
+@router.post("/{session_id}/rerun")
+async def rerun_session(session_id: str, container: AppContainer = Depends(get_container)) -> dict[str, object]:
+    try:
+        return await container.session_maintenance.rerun_session(session_id)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Session not found.") from error
+    except Exception as error:
+        raise _http_error(error, fallback_message="Failed to re-run session.") from error
+
+
 @router.get("/{session_id}/transcript")
 async def get_transcript(session_id: str, container: AppContainer = Depends(get_container)) -> dict[str, object]:
     try:

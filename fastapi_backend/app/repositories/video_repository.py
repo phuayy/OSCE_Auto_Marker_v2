@@ -4,7 +4,7 @@ from datetime import timezone
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.database.models import VideoRecord
 from app.database.orm import OrmDatabase
@@ -42,6 +42,14 @@ class VideoRepository:
             await s.commit()
             await s.refresh(rec)
         return self._to_dict(rec)
+
+    async def delete_for_session(self, session_id: str) -> int:
+        async with self.db.session() as s:
+            result = await s.execute(
+                delete(VideoRecord).where(VideoRecord.session_id == session_id)
+            )
+            await s.commit()
+        return int(result.rowcount or 0)
 
     async def get_for_session(self, session_id: str) -> dict[str, Any] | None:
         async with self.db.session() as s:

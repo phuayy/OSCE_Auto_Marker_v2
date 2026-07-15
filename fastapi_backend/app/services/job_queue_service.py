@@ -12,6 +12,7 @@ from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.logging_utils import log_context
 from app.core.utils import utc_now_iso
+from app.domain.jobs import ACTIVE_JOB_STATUSES
 from app.repositories.job_repository import JobRepository
 from app.services.event_service import EventService
 from app.services.session_service import SessionService
@@ -208,6 +209,28 @@ class JobQueueService:
         await self.events.publish(str(job.get("sessionId")), "status", {"code": "cancelled", "message": reason})
         await self._sync_session_job(job)
         return job
+
+    async def purge_session(self, session_id: str) -> int:
+        """Cancel any in-flight job for a session and delete all of its job
+        rows. Cancel first so the local worker task stops touching the session
+        that is about to be deleted."""
+        jobs = await self.repository.list_for_session(session_id)
+        for job in jobs:
+            job_id = str(job.get("id"))
+            if str(job.get("status")) in ACTIVE_JOB_STATUSES:
+                try:
+                    await self.cancel(job_id, "Session deleted.")
+                except Exception:
+                    logger.warning(
+                        "Failed to cancel job %s while purging session %s.",
+                        job_id,
+                        session_id,
+                        extra=log_context(session_id, "session_purge"),
+                    )
+            task = self._tasks.pop(job_id, None)
+            if task:
+                task.cancel()
+        return await self.repository.delete_for_session(session_id)
 
     def public_job(self, job: dict[str, Any] | None) -> dict[str, Any] | None:
         if not job:

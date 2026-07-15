@@ -136,6 +136,23 @@ class SessionRepository:
             )
             return [SessionEntry(session=_record_to_dict(r)) for r in result.scalars().all()]
 
+    async def list_child_ids(self, parent_session_id: str) -> list[str]:
+        """Ids of every session whose parent is ``parent_session_id`` (clip
+        assessment children of a long-video session)."""
+        async with self.database.session() as db_session:
+            result = await db_session.execute(
+                select(SessionRecord.id).where(SessionRecord.parent_session_id == parent_session_id)
+            )
+            return [str(row) for row in result.scalars().all()]
+
+    async def delete(self, session_id: str) -> bool:
+        async with self.database.transaction() as db_session:
+            record = await db_session.get(SessionRecord, session_id)
+            if record is None:
+                return False
+            await db_session.delete(record)
+        return True
+
     async def write_entry(self, entry: SessionEntry) -> None:
         await self.write(entry.session)
 

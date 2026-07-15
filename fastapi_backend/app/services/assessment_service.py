@@ -32,6 +32,9 @@ class AssessmentService:
     async def list_result_rows(self) -> list[dict[str, Any]]:
         return await self.repository.list_result_rows()
 
+    async def delete_session_results(self, session_id: str) -> bool:
+        return await self.repository.delete_for_session(session_id)
+
     async def _load_payload(self, output: Any) -> dict[str, Any] | None:
         if not isinstance(output, dict):
             return None
