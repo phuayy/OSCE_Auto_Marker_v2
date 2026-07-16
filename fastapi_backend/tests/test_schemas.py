@@ -75,3 +75,11 @@ def test_manual_clips_rejects_bad_boundaries() -> None:
         ManualClipsRequest(boundaries=list(float(i) for i in range(201)))
     ok = ManualClipsRequest(boundaries=[30.0, 60.0], labels=["  Student 1  "])
     assert ok.labels == ["Student 1"]
+
+
+def test_manual_clips_kinds_normalized_and_validated() -> None:
+    ok = ManualClipsRequest(boundaries=[30.0], kinds=[" Session ", "INTERMISSION"])
+    assert ok.kinds == ["session", "intermission"]
+    assert ManualClipsRequest(boundaries=[30.0]).kinds == []  # optional — old clients
+    with pytest.raises(ValidationError):
+        ManualClipsRequest(boundaries=[30.0], kinds=["break"])

@@ -76,8 +76,10 @@ class ClipService:
         try:
             video_duration = await self.media.get_video_duration_seconds(video_path)
             detection = await self._run_segmentation(session_id, method, video_path, video_duration)
+            # The person detector partitions the WHOLE timeline (sessions +
+            # greyed intermissions); the bell detector only emits sessions.
             clips = self.media.build_clip_drafts_from_ranges(
-                detection["clipRanges"],
+                detection.get("timelineSegments") or detection["clipRanges"],
                 video_duration,
                 detection["source"],
             )
@@ -98,19 +100,35 @@ class ClipService:
         session["status"] = "cropped"
         session["error"] = None
         await self.sessions.write(session)
+        # Counts are session clips only — intermissions are greyed timeline
+        # markers, not student clips.
+        session_count = sum(1 for clip in clips if clip.get("kind") != "intermission")
+        intermission_count = len(clips) - session_count
         if self.notifications is not None:
             await self.notifications.notify(
                 "Clips ready",
                 f'"{session.get("name") or session_id}" has been split into '
-                f"{len(clips)} clip{'s' if len(clips) != 1 else ''} — ready for assessment.",
+                f"{session_count} clip{'s' if session_count != 1 else ''} — ready for assessment.",
                 session_id=session_id,
             )
         await self.events.publish(
             session_id,
             "milestone",
-            {"code": "autocrop_complete", "message": f"detected {len(clips)} clip{'s' if len(clips) != 1 else ''}"},
+            {
+                "code": "autocrop_complete",
+                "message": (
+                    f"detected {session_count} session clip{'s' if session_count != 1 else ''}"
+                    + (f" and {intermission_count} intermission{'s' if intermission_count != 1 else ''}"
+                       if intermission_count else "")
+                ),
+            },
         )
-        return {"session": self.sessions.public_session(session), "clipCount": len(clips), "source": detection["source"]}
+        return {
+            "session": self.sessions.public_session(session),
+            "clipCount": session_count,
+            "intermissionCount": intermission_count,
+            "source": detection["source"],
+        }
 
     async def _run_segmentation(
         self,
@@ -177,7 +195,13 @@ class ClipService:
             sample_rate=self.media.settings.bell_detector_sample_rate,
         )
 
-    async def manual_clips(self, session_id: str, boundaries: list[float], labels: list[str]) -> dict[str, Any]:
+    async def manual_clips(
+        self,
+        session_id: str,
+        boundaries: list[float],
+        labels: list[str],
+        kinds: list[str] | None = None,
+    ) -> dict[str, Any]:
         session = await self.sessions.read(session_id)
         video_path = Path(str(((session.get("files") or {}).get("video") or {}).get("absolutePath") or ""))
         if not video_path.exists():
@@ -186,15 +210,26 @@ class ClipService:
         clip_ranges = self.media.build_manual_clip_ranges(video_duration, boundaries)
         if not clip_ranges:
             raise AppError("Manual separators did not produce valid clip ranges.", status_code=400)
+        # Per-segment kinds (session|intermission) map positionally onto the
+        # segments the boundaries produce; missing/short lists default to
+        # "session" so pre-kinds clients keep working unchanged.
+        for index, clip_range in enumerate(clip_ranges):
+            if kinds and index < len(kinds) and str(kinds[index]).strip().lower() == "intermission":
+                clip_range["kind"] = "intermission"
         source = {
             "type": "manual_timeline_split",
             "boundariesCount": len(boundaries or []),
             "labelsProvided": len(labels or []) > 0,
             "bellEndOffsetSeconds": self.media.settings.bell_end_offset_seconds,
         }
-        await self.media.write_video_clips_from_ranges(session, clip_ranges, source, labels)
+        clips = await self.media.write_video_clips_from_ranges(session, clip_ranges, source, labels)
         await self.sessions.write(session)
-        return {"session": self.sessions.public_session(session), "clipCount": len(session["outputs"]["videoClips"])}
+        session_count = sum(1 for clip in clips if clip.get("kind") != "intermission")
+        return {
+            "session": self.sessions.public_session(session),
+            "clipCount": session_count,
+            "intermissionCount": len(clips) - session_count,
+        }
 
     async def recrop_clip(self, session_id: str, clip_id: str, start: float, end: float) -> dict[str, Any]:
         session = await self.sessions.read(session_id)
@@ -250,6 +285,11 @@ class ClipService:
         clip = next((item for item in clips if str(item.get("id")) == str(clip_id)), None)
         if clip is None:
             raise AppError("Clip not found.", status_code=404)
+        if str(clip.get("kind") or "").lower() == "intermission":
+            raise AppError(
+                "This segment is an intermission (no confirmed session detected) and cannot be assessed.",
+                status_code=400,
+            )
         clip_path = Path(str(clip.get("absolutePath") or ""))
         if not clip_path.exists():
             raise AppError("Clip file is missing. Export clips before assessment.", status_code=400)
@@ -451,6 +491,8 @@ class ClipService:
             "label": str(clip.get("label") or ""),
             "start": clip.get("start"),
             "end": clip.get("end"),
+            "kind": str(clip.get("kind") or "session"),
+            "personCount": clip.get("personCount"),
             "fileName": clip.get("fileName"),
             "url": clip.get("url"),
             "sizeBytes": clip.get("sizeBytes"),

@@ -174,7 +174,7 @@ async def create_manual_clips(
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
     try:
-        return await container.clips.manual_clips(session_id, payload.boundaries, payload.labels)
+        return await container.clips.manual_clips(session_id, payload.boundaries, payload.labels, payload.kinds)
     except Exception as error:
         raise _http_error(error, fallback_message="Manual clip split failed.") from error
 

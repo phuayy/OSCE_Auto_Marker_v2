@@ -1,37 +1,37 @@
 #!/usr/bin/env python3
 """Detect OSCE session boundaries from *person presence* using RT-DETR.
 
-Experimental vision-based alternative to ``detect_bell_segments.py``. Instead
-of listening for transition bells, this script samples video frames at a low
-rate (default 1 frame/second), counts people per frame with an RT-DETR object
-detector, and derives student clip ranges from sustained changes in person
-count:
+Vision-based alternative to ``detect_bell_segments.py``. The script samples
+video frames at a low rate (default 1 frame/second), counts people per frame
+with an RT-DETR object detector, and derives student clip ranges from
+sustained changes in person count:
 
 * A session is ACTIVE while at least ``--min-people`` (default 2: the student
   plus the patient/examiner) are visible.
-* A session ENDS when fewer than ``--min-people`` are visible continuously for
-  ``--end-after-seconds`` (default 8.0 s ~= 240 frames of a 30 fps source, per
-  the project requirement). The clip is closed at the moment the low-person
-  run *began* — that is when someone actually left the room — not when the
-  threshold was crossed.
-* The next session STARTS once >= ``--min-people`` are visible continuously
-  for ``--start-after-seconds`` (a debounce so a person briefly crossing the
-  frame does not open a phantom session).
+* Boundaries are confirmed with a tolerant **N-of-M window** (the standard
+  debounce for noisy boolean sensors): a session STARTS at the first sample
+  that crossed the threshold once a full ``--start-after-seconds`` window
+  contains at most ``--flicker-tolerance-seconds`` disagreeing samples
+  (defaults: 50-sample window, 10 tolerated misclassifications @ 1 fps), and
+  ENDS symmetrically via ``--end-after-seconds``. A short detector dropout can
+  never split a session; a short crowd blip can never open one.
 
-Robustness against detector flicker (the model missing a person for a few
-frames) is layered — no single mis-detection can flip a boundary:
+Besides the confirmed session clips the script also emits a full **timeline
+partition**: an ordered, gapless cover of ``[0, video_duration]`` where every
+segment is either a confirmed ``session`` or an ``intermission`` (empty room /
+single person walking about). Intermissions let the UI show — greyed out —
+what happened between sessions instead of silently dropping that footage.
 
-1. **Sparse sampling** (default 1 fps) means a "few bad frames" at native fps
-   usually never reach the classifier at all.
-2. A **median filter** (``--median-window``) over the per-sample person counts
-   removes single-sample spikes/dips.
-3. **Morphological closing** on the boolean in-session signal fills
-   contradictory blips shorter than ``--flicker-tolerance-seconds`` in BOTH
-   directions (a missed person during a session, a phantom person during a
-   gap).
-4. The **hysteresis state machine** itself only reacts to runs longer than the
-   start/end confirmation windows; anything shorter is absorbed into the
-   current state.
+Detection can run over **N parallel worker processes** (``--workers`` /
+``HUMAN_SEGMENTS_WORKERS``, default 1). The video is split into contiguous
+time-chunks aligned to the sample grid; each worker loads its own model,
+detects over its chunk, and the parent merges the per-chunk person counts back
+into one global timeline before segmenting ONCE — a session straddling a chunk
+boundary is still detected. On a single small GPU (e.g. 4 GB RTX 3050) CUDA
+serializes across processes, so >1 worker costs 2x model VRAM for ~no speedup;
+the default stays 1 and parallelism is opt-in for multi-GPU / CPU hosts. The
+per-process OOM batch-halving/CPU-fallback keeps oversubscribed runs degrading
+instead of dying.
 
 Model selection (researched for an RTX 3050 Laptop GPU, 4 GB VRAM, sharing the
 machine with WhisperX ``large-v2``):
@@ -59,26 +59,32 @@ transcription starts for those clips. Set ``JOB_WORKER_CONCURRENCY=1`` if you
 also need cross-session exclusivity on the GPU.
 
 CLI contract mirrors ``detect_bell_segments.py``: progress goes to stderr,
-stdout carries exactly one JSON document whose ``clip_ranges`` key holds
-``[{"start": float, "end": float, "student_index": int}, ...]`` — the same
-shape ``MediaPipeline.normalize_clip_ranges`` / ``build_clip_drafts_from_ranges``
-already consume, so wiring it into ``media.py`` later is a drop-in.
+stdout carries exactly one JSON document. ``clip_ranges`` holds the confirmed
+sessions ``[{"start": float, "end": float, "student_index": int}, ...]`` (the
+shape ``MediaPipeline.normalize_clip_ranges`` consumes); ``timeline_segments``
+holds the full partition ``[{"start", "end", "kind", "person_count",
+"student_index"?}, ...]``.
 
 Usage:
     python scripts/detect_human_segments.py \
         --video storage/input/videos/<session>.mp4 --video-duration 3600 \
-        [--sample-fps 1.0] [--end-after-seconds 8] [--output out.json]
+        [--sample-fps 1.0] [--workers 1] [--output out.json]
+
+    python scripts/detect_human_segments.py --self-check   # pure-math asserts
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
+import multiprocessing as mp
 import os
 import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
@@ -127,19 +133,26 @@ DEFAULT_MODEL = "PekingU/rtdetr_v2_r18vd"
 # transformers without RT-DETRv2 support). All are person-capable COCO models.
 FALLBACK_MODELS = ("PekingU/rtdetr_r18vd", "PekingU/rtdetr_r50vd")
 
-DETECTOR_NAME = "osce-human-presence-rtdetr-v1"
+DETECTOR_NAME = "osce-human-presence-rtdetr-v2"
+
+SESSION_KIND = "session"
+INTERMISSION_KIND = "intermission"
 
 
 @dataclass(frozen=True)
 class SegmenterConfig:
-    """Pure segmentation parameters (no I/O concerns) — unit-testable."""
+    """Pure segmentation parameters (no I/O concerns) — unit-testable.
+
+    Defaults are the values validated against real OSCE footage with the
+    debug harnesses (``debug_scripts/rt_detr*.py``): a 50-sample confirmation
+    window tolerating 10 misclassified samples, at 1 sample/second.
+    """
 
     sample_fps: float = 1.0
     min_people: int = 2
-    start_after_seconds: float = 4.0
-    end_after_seconds: float = 8.0
-    flicker_tolerance_seconds: float = 2.0
-    median_window: int = 3
+    start_after_seconds: float = 50.0
+    end_after_seconds: float = 50.0
+    flicker_tolerance_seconds: float = 10.0
     start_offset_seconds: float = 0.0
     end_offset_seconds: float = 2.0
     min_clip_seconds: float = 0.5
@@ -156,7 +169,7 @@ class SegmenterConfig:
 class DetectorConfig:
     model_id: str = DEFAULT_MODEL
     device: str = "auto"  # auto | cuda | cpu
-    confidence: float = 0.5
+    confidence: float = 0.7
     batch_size: int = 8
     decode_width: int = 640  # ffmpeg pre-scale; the processor re-sizes anyway
 
@@ -171,6 +184,8 @@ class DetectionStats:
     oom_batch_reductions: int = 0
     cpu_fallback: bool = False
     effective_batch_size: int = 0
+    workers: int = 1
+    padded_samples: int = 0
     person_count_histogram: dict[str, int] = field(default_factory=dict)
 
 
@@ -261,7 +276,10 @@ def iter_sampled_frames(
             chunk = process.stdout.read(frame_bytes)
             if not chunk or len(chunk) < frame_bytes:
                 break
-            yield np.frombuffer(chunk, dtype=np.uint8).reshape((out_height, out_width, 3))
+            # .copy() detaches from the immutable `bytes` read buffer — np.frombuffer's
+            # array is read-only (a view over `chunk`), which the fast image processor's
+            # zero-copy torch conversion warns about (UB if anything ever writes into it).
+            yield np.frombuffer(chunk, dtype=np.uint8).reshape((out_height, out_width, 3)).copy()
     finally:
         process.stdout.close()
         stderr_tail = b""
@@ -272,6 +290,66 @@ def iter_sampled_frames(
         if return_code not in (0, None):
             raise RuntimeError(
                 f"ffmpeg frame decoding failed (exit {return_code}): "
+                f"{stderr_tail.decode('utf-8', 'replace').strip()[:400]}"
+            )
+
+
+def iter_chunk_frames(
+    ffmpeg_bin: str,
+    video_path: Path,
+    *,
+    start_seconds: float,
+    duration_seconds: float,
+    sample_fps: float,
+    out_width: int,
+    out_height: int,
+) -> Iterator["Any"]:
+    """Yield RGB numpy frames for one time-chunk (multi-worker decoding).
+
+    ``-ss`` before ``-i`` is frame-accurate in modern ffmpeg (decodes from the
+    previous keyframe, discards up to the seek point) and resets output
+    timestamps, so the ``fps=`` grid starts exactly at ``start_seconds`` —
+    matching the global sample grid when start_seconds is a multiple of the
+    sample interval. Unlike ``iter_sampled_frames``, an early generator close
+    kills ffmpeg instead of raising (workers stop reading once their planned
+    sample count is reached).
+    """
+    import numpy as np
+
+    frame_bytes = out_width * out_height * 3
+    args = [
+        ffmpeg_bin,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-ss", f"{start_seconds:.6f}",
+        "-i", str(video_path),
+        "-t", f"{duration_seconds:.6f}",
+        "-vf", f"fps={sample_fps},scale={out_width}:{out_height}",
+        "-pix_fmt", "rgb24",
+        "-f", "rawvideo",
+        "pipe:1",
+    ]
+    process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert process.stdout is not None
+    try:
+        while True:
+            chunk = process.stdout.read(frame_bytes)
+            if not chunk or len(chunk) < frame_bytes:
+                break
+            yield np.frombuffer(chunk, dtype=np.uint8).reshape((out_height, out_width, 3)).copy()
+    finally:
+        killed = process.poll() is None  # still running => generator closed early
+        if killed:
+            process.kill()
+        process.stdout.close()
+        stderr_tail = b""
+        if process.stderr is not None:
+            stderr_tail = process.stderr.read() or b""
+            process.stderr.close()
+        return_code = process.wait()
+        if return_code not in (0, None) and not killed:
+            raise RuntimeError(
+                f"ffmpeg chunk decoding failed (exit {return_code}): "
                 f"{stderr_tail.decode('utf-8', 'replace').strip()[:400]}"
             )
 
@@ -322,21 +400,36 @@ class PersonCounter:
         candidates.extend(m for m in FALLBACK_MODELS if m not in candidates)
         last_error: Exception | None = None
         for model_id in candidates:
-            try:
-                log(f"Loading detector {model_id} on {self.device} (fp16={self.use_fp16})...")
-                # use_fast=True selects the torchvision-backed RTDetrImageProcessorFast
-                # instead of the PIL-backed slow processor — same numpy-array input
-                # contract and output shape, ~2-3x faster preprocessing, negligible
-                # (~1e-7) numeric difference. Silences the "slow image processor"
-                # deprecation warning (transformers defaults to fast from v4.52).
-                self.processor = AutoImageProcessor.from_pretrained(model_id, use_fast=True)
-                model = AutoModelForObjectDetection.from_pretrained(model_id)
-                self.resolved_model_id = model_id
+            # Try the local HF cache first: from_pretrained() otherwise always
+            # does a network HEAD to check for a newer revision, even when the
+            # checkpoint is fully cached — pure overhead, and a slow/flaky path
+            # to huggingface.co turns it into a 30s+ retry stall per worker.
+            # Falls back to the normal (network-allowed) load on a cache miss.
+            for local_only in (True, False):
+                try:
+                    log(
+                        f"Loading detector {model_id} on {self.device} (fp16={self.use_fp16}, "
+                        f"local_files_only={local_only})..."
+                    )
+                    # use_fast=True selects the torchvision-backed RTDetrImageProcessorFast
+                    # instead of the PIL-backed slow processor — same numpy-array input
+                    # contract and output shape, ~2-3x faster preprocessing, negligible
+                    # (~1e-7) numeric difference. Silences the "slow image processor"
+                    # deprecation warning (transformers defaults to fast from v4.52).
+                    self.processor = AutoImageProcessor.from_pretrained(
+                        model_id, use_fast=True, local_files_only=local_only
+                    )
+                    model = AutoModelForObjectDetection.from_pretrained(
+                        model_id, local_files_only=local_only
+                    )
+                    self.resolved_model_id = model_id
+                    break
+                except Exception as error:  # noqa: BLE001 — surface the last cause below
+                    last_error = error
+                    model = None
+            if model is not None:
                 break
-            except Exception as error:  # noqa: BLE001 — surface the last cause below
-                last_error = error
-                log(f"Could not load {model_id}: {error}")
-                model = None
+            log(f"Could not load {model_id}: {last_error}")
         if model is None:
             raise RuntimeError(
                 "No RT-DETR checkpoint could be loaded. First run needs internet "
@@ -429,130 +522,460 @@ class PersonCounter:
 # ---------------------------------------------------------------------------
 
 
-def median_smooth(counts: list[int], window: int) -> list[int]:
-    """Centered rolling median; kills single-sample detector flicker."""
-    if window <= 1 or len(counts) <= 2:
-        return list(counts)
-    half = window // 2
-    smoothed: list[int] = []
-    for index in range(len(counts)):
-        lo = max(0, index - half)
-        hi = min(len(counts), index + half + 1)
-        neighborhood = sorted(counts[lo:hi])
-        smoothed.append(neighborhood[len(neighborhood) // 2])
-    return smoothed
+def _window_confirms(flags: list[bool], start: int, window: int, tolerance: int, want: bool) -> str:
+    """Check ``flags[start:start+window]`` against ``want``.
 
-
-def _run_length_encode(flags: list[bool]) -> list[tuple[bool, int, int]]:
-    """RLE as ``(value, start_index, length)`` tuples."""
-    runs: list[tuple[bool, int, int]] = []
-    start = 0
-    for index in range(1, len(flags) + 1):
-        if index == len(flags) or flags[index] != flags[start]:
-            runs.append((flags[start], start, index - start))
-            start = index
-    return runs
-
-
-def close_flicker_gaps(flags: list[bool], max_gap_samples: int) -> list[bool]:
-    """Morphological closing in both directions.
-
-    Any run shorter than ``max_gap_samples`` that sits BETWEEN two runs of the
-    opposite value is inverted — this absorbs both a briefly-missed person
-    inside a session and a phantom second person inside a gap. Runs at the
-    edges of the signal are left alone (no context to justify flipping them).
+    Returns "confirmed" (<= tolerance disagreements), "failed" (too many),
+    or "insufficient" (fewer than ``window`` samples remain before EOF).
     """
-    if max_gap_samples <= 0 or len(flags) < 3:
-        return list(flags)
-    result = list(flags)
-    runs = _run_length_encode(result)
-    for run_index in range(1, len(runs) - 1):
-        value, start, length = runs[run_index]
-        if length <= max_gap_samples:
-            for index in range(start, start + length):
-                result[index] = not value
-    return result
+    end = start + window
+    if end > len(flags):
+        return "insufficient"
+    bad = sum(1 for flag in flags[start:end] if flag != want)
+    return "confirmed" if bad <= tolerance else "failed"
 
 
-def build_session_ranges(
+def build_tolerant_session_ranges(
     counts: list[int],
     video_duration: float,
-    config: SegmenterConfig,
-) -> tuple[list[dict[str, float]], list[dict[str, Any]]]:
-    """Hysteresis state machine over per-sample person counts.
+    *,
+    min_people: int,
+    sample_dt: float,
+    start_window_samples: int,
+    start_tolerance_samples: int,
+    end_window_samples: int,
+    end_tolerance_samples: int,
+    start_offset_seconds: float,
+    end_offset_seconds: float,
+    min_clip_seconds: float,
+) -> tuple[list[dict], list[dict]]:
+    """Tolerant N-of-M hysteresis over per-sample person counts.
 
-    Returns ``(clip_ranges, transitions)`` where transitions document every
-    accepted state change (for the debug payload / tuning experiments).
+    Confirms a state transition once a fixed-length sample window has AT MOST
+    ``tolerance`` samples that disagree with the target state ("at most 10 bad
+    samples out of a 50-sample window"). Symmetric: the exact same check
+    confirms both session start and session end, so a clip's cut-off tolerates
+    detector dropouts the same way its start does.
 
-    Edge cases handled:
-    * Video starts mid-session (people already present at t=0) -> the first
-      clip starts at 0.
-    * Video ends mid-session -> the final clip is closed at video_duration.
-    * Detector flicker -> pre-smoothed by the caller AND runs shorter than the
-      confirmation windows are absorbed here.
-    * A low-person dip shorter than ``end_after_seconds`` never splits a
-      session; a crowd blip shorter than ``start_after_seconds`` never opens
-      one.
+    Anchors each confirmed clip to the FIRST sample that individually crossed
+    ``min_people`` (or dropped below it), not the sample where the
+    confirmation window completed — "take the first frame identified as
+    2 people and start the clip from there".
+
+    Edge cases:
+    * Video starts mid-session -> first clip starts at 0.
+    * Video ends mid-session -> final clip closes at ``video_duration``.
+    * A window that cannot complete before EOF never confirms (state holds).
     """
-    smoothed = median_smooth(counts, config.median_window)
-    in_session_raw = [count >= config.min_people for count in smoothed]
-    in_session = close_flicker_gaps(
-        in_session_raw,
-        config.seconds_to_samples(config.flicker_tolerance_seconds),
-    )
-
-    start_confirm = config.seconds_to_samples(config.start_after_seconds)
-    end_confirm = config.seconds_to_samples(config.end_after_seconds)
-    dt = config.sample_dt
-
-    ranges: list[dict[str, float]] = []
-    transitions: list[dict[str, Any]] = []
-    active_start: float | None = None
-
-    runs = _run_length_encode(in_session)
-    for value, start_index, length in runs:
-        run_start_time = start_index * dt
-        if active_start is None:
-            # IDLE: only a sufficiently long high-person run opens a session.
-            if value and length >= start_confirm:
-                active_start = run_start_time
+    flags = [count >= min_people for count in counts]
+    n = len(flags)
+    ranges: list[dict] = []
+    transitions: list[dict] = []
+    state = "idle"
+    anchor: int | None = None
+    session_start_index = 0
+    index = 0
+    while index < n:
+        if state == "idle":
+            if anchor is None:
+                if not flags[index]:
+                    index += 1
+                    continue
+                anchor = index
+            result = _window_confirms(flags, anchor, start_window_samples, start_tolerance_samples, True)
+            if result == "confirmed":
+                session_start_index = anchor
                 transitions.append(
-                    {"at": round(run_start_time, 3), "event": "session_start", "run_samples": length}
+                    {"at": round(anchor * sample_dt, 3), "event": "session_start", "run_samples": start_window_samples}
                 )
-        else:
-            # ACTIVE: only a sufficiently long low-person run closes it. The
-            # session ends when the low run BEGAN (that is when people left).
-            if not value and length >= end_confirm:
-                ranges.append({"start": active_start, "end": run_start_time})
+                state = "active"
+                index = anchor + start_window_samples
+                anchor = None
+            elif result == "failed":
+                index = anchor + 1
+                anchor = None
+            else:  # insufficient samples left before EOF — this attempt can never confirm
+                break
+        else:  # active
+            if anchor is None:
+                if flags[index]:
+                    index += 1
+                    continue
+                anchor = index
+            result = _window_confirms(flags, anchor, end_window_samples, end_tolerance_samples, False)
+            if result == "confirmed":
+                ranges.append({"start": session_start_index * sample_dt, "end": anchor * sample_dt})
                 transitions.append(
-                    {"at": round(run_start_time, 3), "event": "session_end", "run_samples": length}
+                    {"at": round(anchor * sample_dt, 3), "event": "session_end", "run_samples": end_window_samples}
                 )
-                active_start = None
+                state = "idle"
+                index = anchor + end_window_samples
+                anchor = None
+            elif result == "failed":
+                index = anchor + 1
+                anchor = None
+            else:
+                break
 
-    if active_start is not None:
-        # Video ended while a session was still active.
-        ranges.append({"start": active_start, "end": video_duration})
+    if state == "active":
+        ranges.append({"start": session_start_index * sample_dt, "end": video_duration})
         transitions.append({"at": round(video_duration, 3), "event": "session_end_at_eof"})
 
-    # Padding + clamping + minimum-duration filtering, mirroring the bell
-    # detector's offset semantics.
-    padded: list[dict[str, float]] = []
+    # Padding + clamping + minimum-duration filtering (offset padding, overlap
+    # guard, min duration) — mirrors the bell detector's offset semantics.
+    padded: list[dict] = []
     for clip_range in ranges:
-        start = max(0.0, min(video_duration, clip_range["start"] - config.start_offset_seconds))
-        end = max(0.0, min(video_duration, clip_range["end"] + config.end_offset_seconds))
-        if end - start >= config.min_clip_seconds:
+        start = max(0.0, min(video_duration, clip_range["start"] - start_offset_seconds))
+        end = max(0.0, min(video_duration, clip_range["end"] + end_offset_seconds))
+        if end - start >= min_clip_seconds:
             padded.append({"start": round(start, 3), "end": round(end, 3)})
-
-    # Overlap guard: end-padding of clip N must not spill past the (padded)
-    # start of clip N+1.
-    for index in range(len(padded) - 1):
-        if padded[index]["end"] > padded[index + 1]["start"]:
-            padded[index]["end"] = padded[index + 1]["start"]
-    padded = [r for r in padded if r["end"] - r["start"] >= config.min_clip_seconds]
-
-    for index, clip_range in enumerate(padded, start=1):
-        clip_range["student_index"] = index
+    for i in range(len(padded) - 1):
+        if padded[i]["end"] > padded[i + 1]["start"]:
+            padded[i]["end"] = padded[i + 1]["start"]
+    padded = [r for r in padded if r["end"] - r["start"] >= min_clip_seconds]
+    for i, clip_range in enumerate(padded, start=1):
+        clip_range["student_index"] = i
     return padded, transitions
+
+
+def _majority_person_count(counts: list[int], start_seconds: float, end_seconds: float, sample_dt: float) -> int:
+    """Most common sampled person count inside ``[start, end]`` (ties -> larger)."""
+    first = max(0, math.ceil(start_seconds / sample_dt - 1e-9))
+    last = min(len(counts) - 1, int(end_seconds / sample_dt + 1e-9))
+    if last < first:
+        return 0
+    tally: dict[int, int] = {}
+    for value in counts[first : last + 1]:
+        tally[value] = tally.get(value, 0) + 1
+    return max(tally.items(), key=lambda item: (item[1], item[0]))[0]
+
+
+def build_timeline_segments(
+    counts: list[int],
+    clip_ranges: list[dict],
+    video_duration: float,
+    sample_dt: float,
+) -> list[dict]:
+    """Ordered, gapless partition of ``[0, video_duration]``.
+
+    Confirmed sessions become ``kind="session"`` segments (carrying their
+    ``student_index``); everything between them becomes ``kind="intermission"``
+    segments so the UI can show — greyed out — the empty-room / one-person
+    stretches instead of silently dropping them. ``person_count`` is the
+    majority sampled count within the segment (0 = empty room, 1 = one person).
+    """
+    segments: list[dict] = []
+
+    def add_intermission(start: float, end: float) -> None:
+        if end - start <= 1e-6:
+            return
+        segments.append(
+            {
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "kind": INTERMISSION_KIND,
+                "person_count": _majority_person_count(counts, start, end, sample_dt),
+            }
+        )
+
+    cursor = 0.0
+    for clip in clip_ranges:
+        add_intermission(cursor, clip["start"])
+        segments.append(
+            {
+                "start": clip["start"],
+                "end": clip["end"],
+                "kind": SESSION_KIND,
+                "person_count": _majority_person_count(counts, clip["start"], clip["end"], sample_dt),
+                "student_index": clip.get("student_index"),
+            }
+        )
+        cursor = clip["end"]
+    add_intermission(cursor, video_duration)
+    return segments
+
+
+# ---------------------------------------------------------------------------
+# Multi-process detection: chunk planning + worker + orchestration
+# ---------------------------------------------------------------------------
+
+
+def split_sample_indices(total_samples: int, workers: int) -> list[tuple[int, int]]:
+    """Split ``[0, total_samples)`` into up to ``workers`` contiguous near-equal
+    half-open spans. Never returns an empty span; fewer spans than requested
+    when the video is shorter than the worker count."""
+    if total_samples <= 0:
+        return []
+    workers = max(1, min(workers, total_samples))
+    base, extra = divmod(total_samples, workers)
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for i in range(workers):
+        size = base + (1 if i < extra else 0)
+        spans.append((start, start + size))
+        start += size
+    return spans
+
+
+def run_chunk(task: dict) -> dict:
+    """Decode + detect one time-chunk (runs in a spawned child process).
+
+    Returns per-sample person counts plus timing/diagnostic fields; frames
+    never cross the process boundary.
+    """
+    wall_started = time.perf_counter()
+    worker_id = int(task["worker"])
+    start_index = int(task["start_index"])
+    end_index = int(task["end_index"])
+    expected = end_index - start_index
+    sample_dt = float(task["sample_dt"])
+
+    def wlog(message: str) -> None:
+        log(f"[worker {worker_id}] {message}")
+
+    detector_config = DetectorConfig(
+        model_id=task["model_id"],
+        device=task["device"],
+        confidence=task["confidence"],
+        batch_size=task["batch_size"],
+        decode_width=task["decode_width"],
+    )
+    stats = DetectionStats(effective_batch_size=detector_config.batch_size)
+    counter = PersonCounter(detector_config)
+    load_started = time.perf_counter()
+    counter.load()
+    load_seconds = time.perf_counter() - load_started
+    wlog(
+        f"model ready in {load_seconds:.1f}s ({counter.device}); "
+        f"samples {start_index}..{end_index - 1} (t={start_index * sample_dt:.0f}s..)"
+    )
+
+    counts: list[int] = []
+    batch: list[Any] = []
+    decode_started = time.perf_counter()
+    inference_seconds = 0.0
+    try:
+        for frame in iter_chunk_frames(
+            task["ffmpeg_bin"],
+            Path(task["video_path"]),
+            start_seconds=start_index * sample_dt,
+            duration_seconds=expected * sample_dt,
+            sample_fps=task["sample_fps"],
+            out_width=task["out_width"],
+            out_height=task["out_height"],
+        ):
+            batch.append(frame)
+            if len(batch) >= detector_config.batch_size:
+                inference_started = time.perf_counter()
+                counts.extend(counter.count_people(batch, stats))
+                inference_seconds += time.perf_counter() - inference_started
+                batch = []
+                if len(counts) % 120 < detector_config.batch_size:
+                    wlog(f"analysed {len(counts)}/{expected} samples")
+            if len(counts) + len(batch) >= expected:
+                break  # planned sample count reached — stop decoding
+        if batch:
+            inference_started = time.perf_counter()
+            counts.extend(counter.count_people(batch, stats))
+            inference_seconds += time.perf_counter() - inference_started
+    finally:
+        counter.close()
+
+    counts = counts[:expected]  # safety cap; padding for short chunks is the parent's job
+    wlog(f"done: {len(counts)}/{expected} samples in {time.perf_counter() - wall_started:.1f}s")
+    return {
+        "chunk_index": int(task["chunk_index"]),
+        "start_index": start_index,
+        "end_index": end_index,
+        "counts": counts,
+        "decode_seconds": time.perf_counter() - decode_started - inference_seconds,
+        "inference_seconds": inference_seconds,
+        "oom_batch_reductions": stats.oom_batch_reductions,
+        "cpu_fallback": stats.cpu_fallback,
+        "device": counter.device,
+        "model": counter.resolved_model_id,
+    }
+
+
+def detect_counts_parallel(
+    *,
+    workers: int,
+    total_samples: int,
+    video_path: Path,
+    ffmpeg_bin: str,
+    sample_fps: float,
+    sample_dt: float,
+    out_width: int,
+    out_height: int,
+    detector_config: DetectorConfig,
+    stats: DetectionStats,
+) -> tuple[list[int], str, str]:
+    """Fan detection out over N worker processes and merge the count timeline.
+
+    Segmentation runs ONCE over the merged counts in the parent, so a session
+    straddling a chunk boundary is still detected. Chunks that decode short
+    (EOF rounding) are padded by repeating their last count so the global
+    timeline stays index-aligned. Returns ``(counts, device, model)``.
+    """
+    spans = split_sample_indices(total_samples, workers)
+    if not spans:
+        raise RuntimeError("Video too short to sample any frames.")
+    for i, (span_start, span_end) in enumerate(spans):
+        log(f"chunk {i}: samples {span_start}..{span_end - 1} (t={span_start * sample_dt:.0f}s..)")
+
+    tasks = [
+        {
+            "chunk_index": i,
+            "worker": i,
+            "start_index": span_start,
+            "end_index": span_end,
+            "sample_dt": sample_dt,
+            "sample_fps": sample_fps,
+            "video_path": str(video_path),
+            "ffmpeg_bin": ffmpeg_bin,
+            "out_width": out_width,
+            "out_height": out_height,
+            "model_id": detector_config.model_id,
+            "device": detector_config.device,
+            "confidence": detector_config.confidence,
+            "batch_size": detector_config.batch_size,
+            "decode_width": detector_config.decode_width,
+        }
+        for i, (span_start, span_end) in enumerate(spans)
+    ]
+
+    context = mp.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=len(tasks), mp_context=context) as pool:
+        results = list(pool.map(run_chunk, tasks))  # map preserves chunk order
+
+    counts: list[int] = []
+    for result in results:
+        expected = result["end_index"] - result["start_index"]
+        chunk_counts = list(result["counts"])
+        if len(chunk_counts) < expected:
+            short_by = expected - len(chunk_counts)
+            pad_value = chunk_counts[-1] if chunk_counts else 0
+            log(f"chunk {result['chunk_index']} decoded {short_by} sample(s) short — padding with {pad_value}.")
+            stats.padded_samples += short_by
+            chunk_counts.extend([pad_value] * short_by)
+        counts.extend(chunk_counts)
+        stats.decode_seconds += result["decode_seconds"]
+        stats.inference_seconds += result["inference_seconds"]
+        stats.oom_batch_reductions += result["oom_batch_reductions"]
+        stats.cpu_fallback = stats.cpu_fallback or result["cpu_fallback"]
+
+    device = ", ".join(sorted({r["device"] for r in results}))
+    model = results[0]["model"]
+    return counts, device, model
+
+
+def detect_counts_single(
+    *,
+    video_path: Path,
+    ffmpeg_bin: str,
+    sample_fps: float,
+    out_width: int,
+    out_height: int,
+    expected_samples: int,
+    detector_config: DetectorConfig,
+    stats: DetectionStats,
+) -> tuple[list[int], str, str]:
+    """Single-process decode + detect (decodes to EOF — no padding needed)."""
+    counter = PersonCounter(detector_config)
+    counter.load()
+
+    counts: list[int] = []
+    batch: list[Any] = []
+    decode_started = time.perf_counter()
+    inference_seconds = 0.0
+    try:
+        for frame in iter_sampled_frames(
+            ffmpeg_bin,
+            video_path,
+            sample_fps=sample_fps,
+            out_width=out_width,
+            out_height=out_height,
+        ):
+            batch.append(frame)
+            if len(batch) >= detector_config.batch_size:
+                inference_started = time.perf_counter()
+                counts.extend(counter.count_people(batch, stats))
+                inference_seconds += time.perf_counter() - inference_started
+                batch = []
+                if len(counts) % 120 < detector_config.batch_size:
+                    done_pct = min(100.0, 100.0 * len(counts) / max(1, expected_samples))
+                    log(f"Analysed {len(counts)} frames (~{done_pct:.0f}%).")
+        if batch:
+            inference_started = time.perf_counter()
+            counts.extend(counter.count_people(batch, stats))
+            inference_seconds += time.perf_counter() - inference_started
+    finally:
+        counter.close()
+
+    stats.decode_seconds = time.perf_counter() - decode_started - inference_seconds
+    stats.inference_seconds = inference_seconds
+    return counts, counter.device, counter.resolved_model_id
+
+
+# ---------------------------------------------------------------------------
+# Self-check (pure math — no model, no video)
+# ---------------------------------------------------------------------------
+
+
+def self_check() -> None:
+    # Chunk split: contiguous cover, never an empty span.
+    for total, workers in [(10, 2), (11, 3), (1, 4), (0, 2), (100, 1), (7, 7), (5, 100)]:
+        spans = split_sample_indices(total, workers)
+        assert all(a < b for a, b in spans), f"empty span in {spans}"
+        flat = [i for a, b in spans for i in range(a, b)]
+        assert flat == list(range(total)), f"split of {total}/{workers} not a contiguous cover: {spans}"
+    assert split_sample_indices(0, 2) == []
+
+    # Tolerant segmenter: 100 idle, 100 active with 8 scattered dropouts (within
+    # the 10-sample tolerance), 100 idle -> exactly one session, anchored at the
+    # first active sample and cut at the first idle sample. Dropouts sit clear of
+    # the session end: a dropout within ~tolerance samples of the true end would
+    # legitimately anchor the cut earlier (by design — first bad sample wins).
+    counts = [0] * 100 + [2] * 100 + [0] * 100
+    for miss in (110, 125, 140, 155, 160, 170, 175, 180):
+        counts[miss] = 1  # detector flicker inside the session
+    kwargs = dict(
+        min_people=2,
+        sample_dt=1.0,
+        start_window_samples=50,
+        start_tolerance_samples=10,
+        end_window_samples=50,
+        end_tolerance_samples=10,
+        start_offset_seconds=0.0,
+        end_offset_seconds=0.0,
+        min_clip_seconds=0.5,
+    )
+    ranges, _transitions = build_tolerant_session_ranges(counts, 300.0, **kwargs)
+    assert len(ranges) == 1, f"expected 1 session, got {ranges}"
+    assert ranges[0]["start"] == 100.0 and ranges[0]["end"] == 200.0, ranges
+    assert ranges[0]["student_index"] == 1
+
+    # >10 disagreements in every window -> no session confirmed.
+    noisy = [2 if i % 3 == 0 else 0 for i in range(300)]  # 2/3 of samples idle
+    ranges_noisy, _ = build_tolerant_session_ranges(noisy, 300.0, **kwargs)
+    assert ranges_noisy == [], ranges_noisy
+
+    # Timeline partition: gapless ordered cover; sessions match clip_ranges.
+    segments = build_timeline_segments(counts, ranges, 300.0, 1.0)
+    assert segments[0]["start"] == 0.0 and segments[-1]["end"] == 300.0
+    for left, right in zip(segments, segments[1:]):
+        assert left["end"] == right["start"], f"partition gap: {left} -> {right}"
+    sessions = [s for s in segments if s["kind"] == SESSION_KIND]
+    assert [(s["start"], s["end"]) for s in sessions] == [(r["start"], r["end"]) for r in ranges]
+    assert all(s["kind"] == INTERMISSION_KIND for s in segments if s not in sessions)
+    assert segments[0]["person_count"] == 0  # empty room before the session
+
+    # No sessions at all -> one whole-video intermission.
+    empty_segments = build_timeline_segments([0] * 60, [], 60.0, 1.0)
+    assert len(empty_segments) == 1
+    assert empty_segments[0] == {"start": 0.0, "end": 60.0, "kind": INTERMISSION_KIND, "person_count": 0}
+
+    print("self-check OK")
 
 
 # ---------------------------------------------------------------------------
@@ -567,11 +990,11 @@ def parse_args() -> argparse.Namespace:
             "(RT-DETR person detection over sparsely sampled frames)."
         )
     )
-    parser.add_argument("--video", required=True, help="Path to the source video file")
+    parser.add_argument("--video", default="", help="Path to the source video file")
     parser.add_argument(
         "--video-duration",
-        required=True,
         type=float,
+        default=0.0,
         help="Full source video duration in seconds (from ffprobe, supplied by the caller)",
     )
     parser.add_argument("--output", default="", help="Optional path to also write the JSON payload to")
@@ -582,37 +1005,49 @@ def parse_args() -> argparse.Namespace:
         help="Frames analysed per second of video (default 1.0 — do NOT run every frame)",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=read_int_env("HUMAN_SEGMENTS_WORKERS", 1),
+        help=(
+            "Parallel detector processes over time-chunks (default 1). Each worker "
+            "loads its own model copy — leave at 1 on a single small GPU."
+        ),
+    )
+    parser.add_argument(
         "--min-people",
         type=int,
         default=read_int_env("HUMAN_SEGMENTS_MIN_PEOPLE", 2),
         help="People required on screen for a session to count as active (default 2)",
     )
     parser.add_argument(
-        "--end-after-seconds",
+        "--start-after-seconds",
         type=float,
-        default=read_float_env("HUMAN_SEGMENTS_END_AFTER_SECONDS", 8.0),
+        default=read_float_env("HUMAN_SEGMENTS_START_AFTER_SECONDS", 50.0),
         help=(
-            "Continuous seconds below --min-people that end a session "
-            "(default 8.0 s ~= 240 frames @ 30 fps)"
+            "Confirmation window (seconds, at --sample-fps) that must be mostly "
+            "person-positive to open a clip (default 50)"
         ),
     )
     parser.add_argument(
-        "--start-after-seconds",
+        "--end-after-seconds",
         type=float,
-        default=read_float_env("HUMAN_SEGMENTS_START_AFTER_SECONDS", 4.0),
-        help="Continuous seconds at/above --min-people that start a session (default 4.0)",
+        default=read_float_env("HUMAN_SEGMENTS_END_AFTER_SECONDS", 50.0),
+        help=(
+            "Confirmation window (seconds, at --sample-fps) that must be mostly "
+            "person-negative to close a clip (default 50)"
+        ),
     )
     parser.add_argument(
         "--flicker-tolerance-seconds",
         type=float,
-        default=read_float_env("HUMAN_SEGMENTS_FLICKER_TOLERANCE_SECONDS", 2.0),
-        help="Contradictory blips shorter than this are absorbed (detector flicker guard)",
+        default=read_float_env("HUMAN_SEGMENTS_FLICKER_TOLERANCE_SECONDS", 10.0),
+        help="Max disagreeing samples tolerated inside a confirmation window (default 10)",
     )
     parser.add_argument(
         "--median-window",
         type=int,
         default=read_int_env("HUMAN_SEGMENTS_MEDIAN_WINDOW", 3),
-        help="Rolling-median window (samples) applied to person counts (default 3)",
+        help="Unused (superseded by the tolerant N-of-M segmenter); accepted for CLI compatibility",
     )
     parser.add_argument("--start-offset", type=float, default=0.0, help="Seconds to pad before each clip start")
     parser.add_argument("--end-offset", type=float, default=2.0, help="Seconds to pad after each clip end")
@@ -620,8 +1055,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--confidence",
         type=float,
-        default=read_float_env("HUMAN_SEGMENTS_CONFIDENCE", 0.5),
-        help="Detection score threshold for counting a person (default 0.5)",
+        default=read_float_env("HUMAN_SEGMENTS_CONFIDENCE", 0.7),
+        help="Detection score threshold for counting a person (default 0.7)",
     )
     parser.add_argument(
         "--model",
@@ -659,11 +1094,21 @@ def parse_args() -> argparse.Namespace:
             "whole video instead of an empty list"
         ),
     )
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Run the pure-math asserts (chunk split, segmenter, partition) and exit",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.self_check:
+        self_check()
+        return 0
+    if not args.video:
+        raise ValueError("--video is required.")
     video_path = Path(args.video).expanduser().resolve()
     if not video_path.exists():
         raise FileNotFoundError(f"Video file not found: {video_path}")
@@ -677,7 +1122,6 @@ def main() -> int:
         start_after_seconds=max(0.0, float(args.start_after_seconds)),
         end_after_seconds=max(0.0, float(args.end_after_seconds)),
         flicker_tolerance_seconds=max(0.0, float(args.flicker_tolerance_seconds)),
-        median_window=max(1, int(args.median_window)),
         start_offset_seconds=max(0.0, float(args.start_offset)),
         end_offset_seconds=max(0.0, float(args.end_offset)),
         min_clip_seconds=max(0.0, float(args.min_clip_seconds)),
@@ -689,6 +1133,7 @@ def main() -> int:
         batch_size=max(1, int(args.batch_size)),
         decode_width=max(160, int(args.decode_width)),
     )
+    workers = max(1, int(args.workers))
 
     ffmpeg_bin = resolve_binary("FFMPEG_BIN", "ffmpeg")
     ffprobe_bin = resolve_binary("FFPROBE_BIN", "ffprobe")
@@ -702,43 +1147,36 @@ def main() -> int:
     log(
         f"Sampling {video_path.name} at {segmenter_config.sample_fps} fps "
         f"({source_width}x{source_height} -> {out_width}x{out_height}, "
-        f"~{expected_samples} frames expected)."
+        f"~{expected_samples} frames expected, {workers} worker(s))."
     )
 
-    stats = DetectionStats(effective_batch_size=detector_config.batch_size)
-    counter = PersonCounter(detector_config)
-    counter.load()
-
-    counts: list[int] = []
-    batch: list[Any] = []
-    decode_started = time.perf_counter()
-    inference_seconds = 0.0
-    try:
-        for frame in iter_sampled_frames(
-            ffmpeg_bin,
-            video_path,
+    stats = DetectionStats(effective_batch_size=detector_config.batch_size, workers=workers)
+    if workers > 1:
+        counts, device, resolved_model = detect_counts_parallel(
+            workers=workers,
+            total_samples=expected_samples,
+            video_path=video_path,
+            ffmpeg_bin=ffmpeg_bin,
+            sample_fps=segmenter_config.sample_fps,
+            sample_dt=segmenter_config.sample_dt,
+            out_width=out_width,
+            out_height=out_height,
+            detector_config=detector_config,
+            stats=stats,
+        )
+    else:
+        counts, device, resolved_model = detect_counts_single(
+            video_path=video_path,
+            ffmpeg_bin=ffmpeg_bin,
             sample_fps=segmenter_config.sample_fps,
             out_width=out_width,
             out_height=out_height,
-        ):
-            batch.append(frame)
-            if len(batch) >= detector_config.batch_size:
-                inference_started = time.perf_counter()
-                counts.extend(counter.count_people(batch, stats))
-                inference_seconds += time.perf_counter() - inference_started
-                batch = []
-                if len(counts) % 120 < detector_config.batch_size:
-                    done_pct = min(100.0, 100.0 * len(counts) / max(1, expected_samples))
-                    log(f"Analysed {len(counts)} frames (~{done_pct:.0f}%).")
-        if batch:
-            inference_started = time.perf_counter()
-            counts.extend(counter.count_people(batch, stats))
-            inference_seconds += time.perf_counter() - inference_started
-    finally:
-        counter.close()
-
-    stats.decode_seconds = round(time.perf_counter() - decode_started - inference_seconds, 3)
-    stats.inference_seconds = round(inference_seconds, 3)
+            expected_samples=expected_samples,
+            detector_config=detector_config,
+            stats=stats,
+        )
+    stats.decode_seconds = round(stats.decode_seconds, 3)
+    stats.inference_seconds = round(stats.inference_seconds, 3)
     stats.sampled_frames = len(counts)
 
     if not counts:
@@ -752,14 +1190,33 @@ def main() -> int:
         stats.person_count_histogram[key] = stats.person_count_histogram.get(key, 0) + 1
     log(f"Person-count histogram: {stats.person_count_histogram}")
 
-    clip_ranges, transitions = build_session_ranges(counts, video_duration, segmenter_config)
+    clip_ranges, transitions = build_tolerant_session_ranges(
+        counts,
+        video_duration,
+        min_people=segmenter_config.min_people,
+        sample_dt=segmenter_config.sample_dt,
+        start_window_samples=segmenter_config.seconds_to_samples(segmenter_config.start_after_seconds),
+        start_tolerance_samples=segmenter_config.seconds_to_samples(segmenter_config.flicker_tolerance_seconds),
+        end_window_samples=segmenter_config.seconds_to_samples(segmenter_config.end_after_seconds),
+        end_tolerance_samples=segmenter_config.seconds_to_samples(segmenter_config.flicker_tolerance_seconds),
+        start_offset_seconds=segmenter_config.start_offset_seconds,
+        end_offset_seconds=segmenter_config.end_offset_seconds,
+        min_clip_seconds=segmenter_config.min_clip_seconds,
+    )
     used_trigger = "person_presence"
     if not clip_ranges and args.allow_fallback_full_video:
         log("No session boundaries found — falling back to one full-video clip.")
         clip_ranges = [{"start": 0.0, "end": video_duration, "student_index": 1}]
         used_trigger = "fallback_full_video"
 
-    log(f"Detected {len(clip_ranges)} session clip(s) via {used_trigger}.")
+    timeline_segments = build_timeline_segments(
+        counts, clip_ranges, video_duration, segmenter_config.sample_dt
+    )
+    intermission_count = sum(1 for segment in timeline_segments if segment["kind"] == INTERMISSION_KIND)
+    log(
+        f"Detected {len(clip_ranges)} session clip(s) and {intermission_count} "
+        f"intermission(s) via {used_trigger}."
+    )
 
     if args.dump_samples:
         samples_path = Path(args.dump_samples).expanduser().resolve()
@@ -777,8 +1234,8 @@ def main() -> int:
         "used_trigger": used_trigger,
         "video_file": str(video_path),
         "video_duration": video_duration,
-        "model": counter.resolved_model_id,
-        "device": counter.device,
+        "model": resolved_model,
+        "device": device,
         "confidence": detector_config.confidence,
         "sample_fps": segmenter_config.sample_fps,
         "sampled_frames": stats.sampled_frames,
@@ -786,18 +1243,20 @@ def main() -> int:
         "start_after_seconds": segmenter_config.start_after_seconds,
         "end_after_seconds": segmenter_config.end_after_seconds,
         "flicker_tolerance_seconds": segmenter_config.flicker_tolerance_seconds,
-        "median_window": segmenter_config.median_window,
         "start_offset": segmenter_config.start_offset_seconds,
         "end_offset": segmenter_config.end_offset_seconds,
         "min_clip_seconds": segmenter_config.min_clip_seconds,
         "student_count": len(clip_ranges),
         "clip_ranges": clip_ranges,
+        "timeline_segments": timeline_segments,
         "transitions": transitions,
         "person_count_histogram": stats.person_count_histogram,
         "debug": {
             "decode_seconds": stats.decode_seconds,
             "inference_seconds": stats.inference_seconds,
             "batch_size": detector_config.batch_size,
+            "workers": stats.workers,
+            "padded_samples": stats.padded_samples,
             "oom_batch_reductions": stats.oom_batch_reductions,
             "cpu_fallback": stats.cpu_fallback,
             "decode_resolution": f"{out_width}x{out_height}",

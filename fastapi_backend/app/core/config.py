@@ -310,6 +310,10 @@ class Settings:
     enable_human_detector: bool = read_bool_env("ENABLE_HUMAN_DETECTOR", True)
     human_detector_end_offset_seconds: float = read_float_env("HUMAN_SEGMENTS_END_OFFSET_SECONDS", 2.0)
     human_detector_start_offset_seconds: float = read_float_env("HUMAN_SEGMENTS_START_OFFSET_SECONDS", 0.0)
+    # Parallel detector worker processes (each loads its own model copy).
+    # Default 1: on a single small GPU CUDA serializes across processes, so
+    # extra workers cost 2x VRAM for ~no speedup — opt-in for multi-GPU/CPU.
+    human_detector_workers: int = read_int_env("HUMAN_SEGMENTS_WORKERS", 1)
 
     @property
     def paths(self) -> StoragePaths:

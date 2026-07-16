@@ -22,11 +22,23 @@ class ManualClipsRequest(BaseModel):
         default_factory=list, max_length=200
     )
     labels: list[str] = Field(default_factory=list, max_length=200)
+    # Per-segment kinds, positional (segment i = between boundary i-1 and i).
+    # Optional: omitted/short lists default to "session" segments.
+    kinds: list[str] = Field(default_factory=list, max_length=201)
 
     @field_validator("labels")
     @classmethod
     def trim_labels(cls, value: list[str]) -> list[str]:
         return [str(item or "").strip()[:80] for item in value]
+
+    @field_validator("kinds")
+    @classmethod
+    def normalize_kinds(cls, value: list[str]) -> list[str]:
+        normalized = [str(item or "").strip().lower() for item in value]
+        invalid = sorted({item for item in normalized if item not in {"session", "intermission"}})
+        if invalid:
+            raise ValueError(f"Segment kinds must be 'session' or 'intermission' (got: {', '.join(invalid)}).")
+        return normalized
 
 
 class RecropClipRequest(BaseModel):

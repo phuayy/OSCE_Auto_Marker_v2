@@ -33,6 +33,18 @@ import { Progress } from '@/components/ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import LongVideoSummaryCharts from './LongVideoSummaryCharts.jsx';
 import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
+import {
+  INTERMISSION_KIND,
+  contextMenuActions,
+  ensureKinds,
+  hitTestTimeline,
+  insertSeparator,
+  normalizeLabels,
+  removeSeparator,
+  sessionOrdinals,
+  timeAtOffset,
+  toggleSegmentKind,
+} from './lib/manualTimeline.js';
 
 const SCORE_TEMPLATE = [
   {
@@ -412,6 +424,10 @@ export default function OSCEAiMarkerMockup({
   const [manualSegmentCount, setManualSegmentCount] = useState(0);
   const [manualBoundaries, setManualBoundaries] = useState([]);
   const [manualLabels, setManualLabels] = useState([]);
+  // Per-segment kind ('session' | 'intermission'), parallel to manualLabels.
+  const [manualSegmentKinds, setManualSegmentKinds] = useState([]);
+  // Right-click context menu on the manual timeline: null | { x, y, hit }.
+  const [timelineMenu, setTimelineMenu] = useState(null);
   const [draggingBoundaryIndex, setDraggingBoundaryIndex] = useState(null);
   const [isSavingManualSegments, setIsSavingManualSegments] = useState(false);
   const [currentVideoTime, setCurrentVideoTime] = useState(0);
@@ -430,6 +446,7 @@ export default function OSCEAiMarkerMockup({
   const videoPlayerSectionRef = useRef(null);
   const timelineContainerRef = useRef(null);
   const manualTimelineRef = useRef(null);
+  const timelineMenuRef = useRef(null);
   const timelineSegmentRefs = useRef(new Map());
 
   const transcriptSegments = useMemo(() => {
@@ -512,6 +529,13 @@ export default function OSCEAiMarkerMockup({
 
   const hasClipFiles = useMemo(() => videoClips.some((clip) => Boolean(clip?.url)), [videoClips]);
   const hasDraftClips = videoClips.length > 0 && !hasClipFiles;
+  // Session clips are the assessable student clips; intermissions are greyed
+  // timeline markers (empty room / lone person between stations).
+  const sessionClipCount = useMemo(
+    () => videoClips.filter((clip) => clip?.kind !== INTERMISSION_KIND).length,
+    [videoClips]
+  );
+  const intermissionClipCount = videoClips.length - sessionClipCount;
   // While viewing a session, the session's own workflow (or the presence of
   // detected clips) is the source of truth — NOT the transient upload-form tab,
   // which is only correct right after picking it. This guarantees a long session
@@ -560,15 +584,22 @@ export default function OSCEAiMarkerMockup({
         }
       }
 
+      // The person detector emits a full timeline partition — seed each
+      // segment's kind so intermissions render greyed from the first paint.
+      const nextKinds = sortedClips.map((clip) =>
+        clip.kind === INTERMISSION_KIND ? INTERMISSION_KIND : 'session'
+      );
       setManualSegmentCount(sortedClips.length);
       setManualBoundaries(nextBoundaries);
-      setManualLabels(sortedClips.map((clip, index) => String(clip.label || `Student ${index + 1}`)));
+      setManualSegmentKinds(nextKinds);
+      setManualLabels(normalizeLabels(sortedClips.map((clip) => String(clip.label || '')), nextKinds));
       return;
     }
 
     if (manualSegmentCount < 2) {
       setManualSegmentCount(2);
       setManualBoundaries([videoDurationSeconds / 2]);
+      setManualSegmentKinds(['session', 'session']);
       setManualLabels(['Student 1', 'Student 2']);
     }
   }, [videoClips, videoDurationSeconds]);
@@ -1153,7 +1184,8 @@ export default function OSCEAiMarkerMockup({
       const nextClips = Array.isArray(payload.session?.outputs?.videoClips)
         ? payload.session.outputs.videoClips
         : [];
-      setSelectedClipId(nextClips[0]?.id || null);
+      // Select the first SESSION clip — intermissions are greyed markers.
+      setSelectedClipId(nextClips.find((clip) => clip.kind !== INTERMISSION_KIND)?.id || null);
       setUploadFlow(nextClips.length > 0 ? 'long' : 'standard');
       setShowWorkspace(true);
     } catch (error) {
@@ -2171,6 +2203,7 @@ export default function OSCEAiMarkerMockup({
     }
     setManualSegmentCount(segmentCount);
     setManualBoundaries(boundaries);
+    setManualSegmentKinds(Array(segmentCount).fill('session'));
     syncManualLabels(segmentCount, true);
   }
 
@@ -2232,6 +2265,117 @@ export default function OSCEAiMarkerMockup({
   function handleManualSegmentClick(segmentStart) {
     seekVideoPreview(Number(segmentStart || 0));
   }
+
+  // Clicking anywhere on the timeline moves the playhead to the exact clicked
+  // second (clicking a separator seeks to its second via its own mousedown).
+  function handleTimelineClick(event) {
+    const container = manualTimelineRef.current;
+    if (!container || !Number.isFinite(videoDurationSeconds) || videoDurationSeconds <= 0) {
+      return;
+    }
+    const rect = container.getBoundingClientRect();
+    seekVideoPreview(timeAtOffset(event.clientX - rect.left, rect.width, videoDurationSeconds));
+  }
+
+  function handleTimelineContextMenu(event) {
+    const container = manualTimelineRef.current;
+    if (!container || !Number.isFinite(videoDurationSeconds) || videoDurationSeconds <= 0) {
+      return;
+    }
+    event.preventDefault();
+    const rect = container.getBoundingClientRect();
+    const hit = hitTestTimeline({
+      offsetX: event.clientX - rect.left,
+      width: rect.width,
+      duration: videoDurationSeconds,
+      boundaries: manualBoundaries,
+      playheadSeconds: currentVideoTime,
+    });
+    setTimelineMenu({ x: event.clientX, y: event.clientY, hit });
+  }
+
+  function applyTimelineMenuAction(action) {
+    const hit = timelineMenu?.hit;
+    setTimelineMenu(null);
+    if (!hit) {
+      return;
+    }
+    const segmentCount = manualBoundaries.length + 1;
+
+    if (action === 'add') {
+      const next = insertSeparator({
+        boundaries: manualBoundaries,
+        labels: manualLabels,
+        kinds: manualSegmentKinds,
+        timeSeconds: hit.timeSeconds,
+        duration: videoDurationSeconds,
+      });
+      if (!next) {
+        setNotice('Separator not added — too close to an existing separator or the video edge.');
+        return;
+      }
+      setManualBoundaries(next.boundaries);
+      setManualLabels(next.labels);
+      setManualSegmentKinds(next.kinds);
+      setManualSegmentCount(next.boundaries.length + 1);
+      seekVideoPreview(hit.timeSeconds);
+      return;
+    }
+
+    if (action === 'delete' && hit.separatorIndex !== null) {
+      const next = removeSeparator({
+        boundaries: manualBoundaries,
+        labels: manualLabels,
+        kinds: manualSegmentKinds,
+        separatorIndex: hit.separatorIndex,
+      });
+      if (!next) {
+        return;
+      }
+      setManualBoundaries(next.boundaries);
+      setManualLabels(next.labels);
+      setManualSegmentKinds(next.kinds);
+      setManualSegmentCount(next.boundaries.length + 1);
+      return;
+    }
+
+    if (action === 'toggle' && hit.segmentIndex !== null) {
+      const next = toggleSegmentKind({
+        labels: manualLabels,
+        kinds: manualSegmentKinds,
+        segmentIndex: hit.segmentIndex,
+        segmentCount,
+      });
+      if (!next) {
+        return;
+      }
+      setManualLabels(next.labels);
+      setManualSegmentKinds(next.kinds);
+    }
+  }
+
+  // Close the timeline context menu on outside click / Escape.
+  useEffect(() => {
+    if (!timelineMenu) {
+      return undefined;
+    }
+    const handlePointerDown = (event) => {
+      if (!timelineMenuRef.current?.contains(event.target)) {
+        setTimelineMenu(null);
+      }
+    };
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        setTimelineMenu(null);
+      }
+    };
+    window.addEventListener('mousedown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [timelineMenu]);
 
   async function renameClipLabel(clipId, nextLabel) {
     if (!session?.id || !clipId) {
@@ -2301,14 +2445,11 @@ export default function OSCEAiMarkerMockup({
     try {
       const sortedBoundaries = [...manualBoundaries].sort((a, b) => a - b).map((value) => Number(value));
       const expectedSegmentCount = sortedBoundaries.length + 1;
-      const normalizedLabels = [];
-      for (let index = 0; index < expectedSegmentCount; index += 1) {
-        const candidate = String(manualLabels[index] || '').trim();
-        normalizedLabels.push(candidate || `Student ${index + 1}`);
-      }
+      const kinds = ensureKinds(manualSegmentKinds, expectedSegmentCount);
       const payload = {
         boundaries: sortedBoundaries,
-        labels: normalizedLabels,
+        labels: normalizeLabels(manualLabels, kinds),
+        kinds, // intermission segments become greyed markers — no MP4 is cut
       };
       const response = await fetch(`/api/sessions/${session.id}/clips/manual`, {
         method: 'POST',
@@ -2322,7 +2463,8 @@ export default function OSCEAiMarkerMockup({
       if (body?.session) {
         setSession(body.session);
         const nextClips = Array.isArray(body.session?.outputs?.videoClips) ? body.session.outputs.videoClips : [];
-        setSelectedClipId(nextClips[0]?.id || null);
+        // Select the first SESSION clip — intermissions are greyed markers.
+        setSelectedClipId(nextClips.find((clip) => clip.kind !== INTERMISSION_KIND)?.id || null);
       }
     } catch (saveError) {
       setError(saveError.message || 'Failed to save manual segments.');
@@ -2603,8 +2745,16 @@ export default function OSCEAiMarkerMockup({
 
       {hasDraftClips ? (
         <div className="mb-3 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-900">
-          Auto-detected clip boundaries loaded. Adjust the separators, rename students, then export clips to create
-          individual videos.
+          Auto-detected <span className="font-semibold">{sessionClipCount}</span> session clip
+          {sessionClipCount === 1 ? '' : 's'}
+          {intermissionClipCount > 0 ? (
+            <>
+              {' '}
+              and <span className="font-semibold">{intermissionClipCount}</span> intermission
+              {intermissionClipCount === 1 ? '' : 's'} (greyed)
+            </>
+          ) : null}
+          . Adjust the separators, rename students, then export clips to create individual videos.
         </div>
       ) : null}
 
@@ -2615,11 +2765,14 @@ export default function OSCEAiMarkerMockup({
           {' / '}
           <span>{formatRuntime(videoDurationSeconds)}</span>
         </span>
-        <span className="hidden text-slate-500 sm:inline">Drag a separator — video follows.</span>
+        <span className="hidden text-slate-500 sm:inline">
+          Click to seek · drag a separator to adjust · right-click for actions.
+        </span>
       </div>
 
       <div
         ref={manualTimelineRef}
+        onContextMenu={handleTimelineContextMenu}
         className="relative h-14 overflow-hidden rounded-xl border border-slate-300 bg-white shadow-sm"
       >
         {[0, ...manualBoundaries, videoDurationSeconds]
@@ -2638,15 +2791,23 @@ export default function OSCEAiMarkerMockup({
               'bg-rose-200',
               'bg-blue-200',
             ];
-            const labelValue = String(manualLabels[index] || '').trim() || `Student ${index + 1}`;
+            const isIntermission = manualSegmentKinds[index] === INTERMISSION_KIND;
+            const labelValue =
+              String(manualLabels[index] || '').trim() ||
+              (isIntermission ? 'Intermission' : `Student ${index + 1}`);
+            // Intermissions render greyed + hatched, visually distinct from
+            // the coloured session segments.
+            const segmentClass = isIntermission
+              ? 'bg-slate-200 text-slate-500 [background-image:repeating-linear-gradient(45deg,transparent,transparent_6px,rgba(148,163,184,0.25)_6px,rgba(148,163,184,0.25)_12px)]'
+              : `text-slate-800 ${palette[index % palette.length]}`;
             return (
               <button
                 key={`manual-segment-${index}-${start.toFixed(2)}`}
                 type="button"
-                onClick={() => handleManualSegmentClick(start)}
-                className={`absolute top-0 flex h-full items-center justify-center truncate px-2 text-[11px] font-semibold text-slate-800 transition ${palette[index % palette.length]} hover:brightness-95`}
+                onClick={handleTimelineClick}
+                className={`absolute top-0 flex h-full items-center justify-center truncate px-2 text-[11px] font-semibold transition ${segmentClass} hover:brightness-95`}
                 style={{ left: `${left}%`, width: `${Math.max(width, 0)}%` }}
-                title={`Jump video to ${formatRuntime(start)} (${labelValue})`}
+                title={`${labelValue}: click to move the playhead to that exact second`}
               >
                 <span className="truncate drop-shadow-sm">{labelValue}</span>
               </button>
@@ -2682,6 +2843,72 @@ export default function OSCEAiMarkerMockup({
         })}
       </div>
 
+      {timelineMenu ? (
+        <div
+          ref={timelineMenuRef}
+          role="menu"
+          className="fixed z-[80] w-64 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-xl"
+          style={{
+            left: Math.min(timelineMenu.x, (typeof window !== 'undefined' ? window.innerWidth : 0) - 272),
+            top: Math.min(timelineMenu.y, (typeof window !== 'undefined' ? window.innerHeight : 0) - 132),
+          }}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          {(() => {
+            const actions = contextMenuActions(timelineMenu.hit.target);
+            const segmentKind =
+              timelineMenu.hit.segmentIndex !== null
+                ? ensureKinds(manualSegmentKinds, manualBoundaries.length + 1)[timelineMenu.hit.segmentIndex]
+                : null;
+            const menuItemClass = (enabled) =>
+              `flex w-full items-center gap-2 px-3 py-2 text-left text-sm ${
+                enabled
+                  ? 'text-slate-700 hover:bg-cyan-50 hover:text-cyan-900'
+                  : 'cursor-not-allowed text-slate-300'
+              }`;
+            return (
+              <>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!actions.deleteEnabled}
+                  onClick={() => applyTimelineMenuAction('delete')}
+                  className={menuItemClass(actions.deleteEnabled)}
+                  title={actions.deleteEnabled ? undefined : 'Right-click a separator to delete it.'}
+                >
+                  <Trash2 className="h-3.5 w-3.5 shrink-0" />
+                  Delete separator
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!actions.addEnabled}
+                  onClick={() => applyTimelineMenuAction('add')}
+                  className={menuItemClass(actions.addEnabled)}
+                  title={actions.addEnabled ? undefined : 'Right-click a clip area or the playhead to add a separator.'}
+                >
+                  <Scissors className="h-3.5 w-3.5 shrink-0" />
+                  Add separator at {formatRuntime(timelineMenu.hit.timeSeconds)}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!actions.toggleEnabled}
+                  onClick={() => applyTimelineMenuAction('toggle')}
+                  className={menuItemClass(actions.toggleEnabled)}
+                  title={actions.toggleEnabled ? undefined : 'Right-click a clip area to switch its type.'}
+                >
+                  <RotateCw className="h-3.5 w-3.5 shrink-0" />
+                  {segmentKind === INTERMISSION_KIND
+                    ? 'Switch to session clip'
+                    : 'Switch to intermission (break)'}
+                </button>
+              </>
+            );
+          })()}
+        </div>
+      ) : null}
+
       {manualBoundaries.length > 0 && manualLabels.length > 0 ? (
         <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {manualLabels.map((labelValue, segmentIndex) => {
@@ -2691,21 +2918,33 @@ export default function OSCEAiMarkerMockup({
               segmentIndex === manualBoundaries.length
                 ? Number(videoDurationSeconds || 0)
                 : Number(manualBoundaries[segmentIndex] || 0);
+            const isIntermission = manualSegmentKinds[segmentIndex] === INTERMISSION_KIND;
+            const ordinal = sessionOrdinals(
+              ensureKinds(manualSegmentKinds, manualLabels.length)
+            )[segmentIndex];
             return (
               <div
                 key={`manual-label-${segmentIndex}`}
-                className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-2 py-2 shadow-sm"
+                className={`flex items-center gap-2 rounded-xl border px-2 py-2 shadow-sm ${
+                  isIntermission ? 'border-slate-200 bg-slate-100 opacity-70' : 'border-slate-200 bg-white'
+                }`}
               >
                 <div className="flex w-8 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-[11px] font-bold text-slate-700">
-                  {segmentIndex + 1}
+                  {isIntermission ? '—' : ordinal}
                 </div>
-                <input
-                  type="text"
-                  value={labelValue}
-                  onChange={(event) => updateManualLabelAt(segmentIndex, event.target.value)}
-                  placeholder={`Student ${segmentIndex + 1}`}
-                  className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-800 focus:border-cyan-400 focus:outline-none focus:ring-2 focus:ring-cyan-400/30"
-                />
+                {isIntermission ? (
+                  <span className="min-w-0 flex-1 truncate px-1 text-xs font-medium italic text-slate-500">
+                    Intermission (break)
+                  </span>
+                ) : (
+                  <input
+                    type="text"
+                    value={labelValue}
+                    onChange={(event) => updateManualLabelAt(segmentIndex, event.target.value)}
+                    placeholder={`Student ${ordinal || segmentIndex + 1}`}
+                    className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-800 focus:border-cyan-400 focus:outline-none focus:ring-2 focus:ring-cyan-400/30"
+                  />
+                )}
                 <button
                   type="button"
                   onClick={() => handleManualSegmentClick(segmentStart)}
@@ -3835,6 +4074,37 @@ export default function OSCEAiMarkerMockup({
                     </CardHeader>
                     <CardContent className="space-y-3">
                       {videoClips.map((clip, index) => {
+                        if (clip.kind === INTERMISSION_KIND) {
+                          // Intermissions are timeline markers (empty room /
+                          // lone person) — greyed out, never assessable.
+                          const personNote =
+                            clip.personCount === 0
+                              ? 'No people detected'
+                              : clip.personCount === 1
+                                ? '1 person — not a session'
+                                : 'Marked as intermission';
+                          return (
+                            <div
+                              key={clip.id}
+                              className="rounded-xl border border-dashed border-slate-300 bg-slate-100 p-3 opacity-70"
+                              title="Intermission segments cannot be assessed."
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div>
+                                  <div className="text-sm font-semibold italic text-slate-500">
+                                    {clip.label || 'Intermission'}
+                                  </div>
+                                  <div className="text-xs text-slate-400">
+                                    {formatRuntime(clip.start)} - {formatRuntime(clip.end)}
+                                  </div>
+                                </div>
+                                <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-semibold text-slate-500">
+                                  {personNote}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        }
                         const runState = clipAssessmentRuns[clip.id] || { status: 'idle' };
                         const isCompleted = runState.status === 'completed' && Boolean(runState.sessionId);
                         // Child session id backing a running clip, used to re-open its progress overlay.
@@ -4681,6 +4951,33 @@ function StudentClipSplitterCard({
           <>
             <div className="max-h-60 space-y-2 overflow-y-auto pr-2">
               {videoClips.map((clip) => {
+                if (clip.kind === 'intermission') {
+                  // Greyed marker row — an intermission has no exported file
+                  // and is not selectable/renamable/downloadable.
+                  return (
+                    <div
+                      key={clip.id}
+                      className="w-full rounded-xl border border-dashed border-slate-300 bg-slate-100 p-3 text-left opacity-70"
+                      title="Intermission (break) — not a student clip."
+                    >
+                      <div className="mb-1 flex items-center justify-between gap-2 text-xs text-slate-400">
+                        <span className="text-sm font-semibold italic text-slate-500">
+                          {clip.label || 'Intermission'}
+                        </span>
+                        <span className="shrink-0 whitespace-nowrap">
+                          {formatRuntime(clip.start)} - {formatRuntime(clip.end)}
+                        </span>
+                      </div>
+                      <div className="text-xs text-slate-400">
+                        {clip.personCount === 0
+                          ? 'No people detected'
+                          : clip.personCount === 1
+                            ? '1 person — not a session'
+                            : 'Marked as intermission'}
+                      </div>
+                    </div>
+                  );
+                }
                 const isSelected = String(selectedClipId) === String(clip.id);
                 const isRenaming = String(renamingClipId) === String(clip.id);
                 return (

@@ -65,6 +65,12 @@ class FakeMedia:
             raise self.person_error
         return {
             "clipRanges": [{"start": 0.0, "end": 60.0}, {"start": 70.0, "end": 120.0}],
+            # Full timeline partition: sessions + the greyed intermission gap.
+            "timelineSegments": [
+                {"start": 0.0, "end": 60.0, "kind": "session", "personCount": 2, "studentIndex": 1},
+                {"start": 60.0, "end": 70.0, "kind": "intermission", "personCount": 1},
+                {"start": 70.0, "end": 120.0, "kind": "session", "personCount": 2, "studentIndex": 2},
+            ],
             "source": {"type": "person_detection_rtdetr", "usedTrigger": "person_presence"},
         }
 
@@ -83,14 +89,20 @@ class FakeMedia:
 
     def build_clip_drafts_from_ranges(
         self,
-        clip_ranges: list[dict[str, float]],
+        clip_ranges: list[dict[str, Any]],
         _video_duration_seconds: float,
         source_meta: dict[str, Any],
         label_overrides: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         _ = label_overrides
         return [
-            {"id": f"clip-{index}", "start": item["start"], "end": item["end"], "source": source_meta}
+            {
+                "id": f"clip-{index}",
+                "start": item["start"],
+                "end": item["end"],
+                "kind": str(item.get("kind") or "session"),
+                "source": source_meta,
+            }
             for index, item in enumerate(clip_ranges, start=1)
         ]
 
@@ -139,9 +151,13 @@ def test_auto_crop_uses_person_detector_when_selected(tmp_path) -> None:
     assert media.person_calls[0]["sessionId"] == "session-long-1"
     assert media.bell_calls == []
     assert result["source"]["type"] == "person_detection_rtdetr"
+    # clipCount counts session clips only; the timeline partition also carries
+    # the greyed intermission between them.
     assert result["clipCount"] == 2
+    assert result["intermissionCount"] == 1
     assert sessions.current["status"] == "cropped"
-    assert len(sessions.current["outputs"]["videoClips"]) == 2
+    clips = sessions.current["outputs"]["videoClips"]
+    assert [clip["kind"] for clip in clips] == ["session", "intermission", "session"]
 
 
 def test_auto_crop_defaults_to_bell_detector(tmp_path) -> None:
@@ -178,6 +194,25 @@ def test_auto_crop_person_failure_falls_back_to_bells(tmp_path) -> None:
     # The fallback is surfaced in the live log, not silent.
     log_messages = [payload.get("message", "") for _sid, kind, payload in events.items if kind == "log"]
     assert any("Falling back to bell detection" in message for message in log_messages)
+
+
+def test_assess_clip_rejects_intermission_segments(tmp_path) -> None:
+    import pytest
+
+    from app.core.exceptions import AppError
+
+    service, _media, sessions, _events = build_clip_service(tmp_path, "person")
+    session = sessions.current
+    session["outputs"] = {
+        "videoClips": [
+            {"id": "clip-gap", "kind": "intermission", "label": "Intermission", "start": 60.0, "end": 70.0},
+        ]
+    }
+
+    with pytest.raises(AppError) as exc_info:
+        asyncio.run(service.assess_clip("session-long-1", "clip-gap", defer=True))
+    assert exc_info.value.status_code == 400
+    assert "intermission" in str(exc_info.value).lower()
 
 
 def test_initiate_persists_segmentation_choice(tmp_path) -> None:

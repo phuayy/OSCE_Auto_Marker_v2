@@ -315,6 +315,33 @@ class MediaPipeline:
         normalized.sort(key=lambda item: item["start"])
         return normalized
 
+    def normalize_timeline_segments(
+        self, segments: list[dict[str, Any]], video_duration_seconds: float
+    ) -> list[dict[str, Any]]:
+        """Sanitize the detector's full-timeline partition (sessions + intermissions).
+
+        Unknown kinds and non-positive spans are dropped; the rest are clamped
+        to the video bounds and sorted. Intermissions may be shorter than the
+        minimum clip duration — they are timeline markers, never cropped files.
+        """
+        normalized: list[dict[str, Any]] = []
+        for segment in segments or []:
+            kind = str(segment.get("kind") or "").strip().lower()
+            if kind not in {"session", "intermission"}:
+                continue
+            start = clamp_number(segment.get("start"), 0, video_duration_seconds)
+            end = clamp_number(segment.get("end"), 0, video_duration_seconds)
+            if end - start <= 0:
+                continue
+            entry: dict[str, Any] = {"start": start, "end": end, "kind": kind}
+            if isinstance(segment.get("person_count"), (int, float)):
+                entry["personCount"] = int(segment["person_count"])
+            if kind == "session" and segment.get("student_index") is not None:
+                entry["studentIndex"] = int(segment["student_index"])
+            normalized.append(entry)
+        normalized.sort(key=lambda item: item["start"])
+        return normalized
+
     async def detect_bell_clip_ranges_with_python(
         self,
         source_path: Path,
@@ -439,6 +466,8 @@ class MediaPipeline:
             str(self.settings.human_detector_end_offset_seconds),
             "--start-offset",
             str(self.settings.human_detector_start_offset_seconds),
+            "--workers",
+            str(max(1, self.settings.human_detector_workers)),
         ]
 
         async def stream_progress(stream: str, text: str) -> None:
@@ -479,6 +508,9 @@ class MediaPipeline:
         debug = payload.get("debug") if isinstance(payload.get("debug"), dict) else {}
         return {
             "clipRanges": clip_ranges,
+            "timelineSegments": self.normalize_timeline_segments(
+                payload.get("timeline_segments") or [], video_duration_seconds
+            ),
             "source": {
                 "type": "person_detection_rtdetr",
                 "detector": str(payload.get("detector") or "osce-human-presence-rtdetr-v1"),
@@ -496,6 +528,7 @@ class MediaPipeline:
                 "endOffsetSeconds": self.settings.human_detector_end_offset_seconds,
                 "startOffsetSeconds": self.settings.human_detector_start_offset_seconds,
                 "cpuFallback": bool(debug.get("cpu_fallback")),
+                "workers": int(debug.get("workers") or 1),
                 "studentCount": int(payload.get("student_count") or len(clip_ranges)),
             },
         }
@@ -527,10 +560,18 @@ class MediaPipeline:
         cleaned = str("" if raw_label is None else raw_label).strip()
         return (cleaned or fallback)[:80]
 
+    @staticmethod
+    def _clip_kind(clip_range: dict[str, Any]) -> str:
+        """Segment kind for a range: "session" (assessable, gets a file) or
+        "intermission" (greyed timeline marker — empty room / lone person).
+        Ranges without a kind (bell detector, recrop) are sessions."""
+        kind = str(clip_range.get("kind") or "").strip().lower()
+        return kind if kind == "intermission" else "session"
+
     async def write_video_clips_from_ranges(
         self,
         session: dict[str, Any],
-        clip_ranges: list[dict[str, float]],
+        clip_ranges: list[dict[str, Any]],
         source_meta: dict[str, Any],
         label_overrides: list[str] | None = None,
     ) -> list[dict[str, Any]]:
@@ -540,70 +581,98 @@ class MediaPipeline:
         session_clip_dir.mkdir(parents=True, exist_ok=True)
         overrides = label_overrides or []
         clips: list[dict[str, Any]] = []
+        student_index = 0
         for index, clip_range in enumerate(clip_ranges):
             start = clamp_number(clip_range["start"], 0, video_duration_seconds)
             end = clamp_number(clip_range["end"], 0, video_duration_seconds)
             if end - start < self.settings.auto_crop_min_clip_seconds:
                 continue
-            file_index = index + 1
-            file_name = f"{session['id']}-clip-{file_index}.mp4"
-            output_path = session_clip_dir / file_name
-            await self.crop_video_segment(
-                input_path=video_path,
-                start_seconds=start,
-                end_seconds=end,
-                output_path=output_path,
-            )
-            stats = output_path.stat()
-            label = self.sanitize_clip_label(overrides[index] if index < len(overrides) else None, f"Student {file_index}")
-            clips.append(
-                {
-                    "id": str(uuid4()),
-                    "label": label,
-                    "start": start,
-                    "end": end,
-                    "fileName": file_name,
-                    "url": f"/media/clips/{session['id']}/{file_name}",
-                    "absolutePath": str(output_path),
-                    "sizeBytes": stats.st_size,
-                    "createdAt": utc_now_iso(),
-                    "source": source_meta,
-                }
-            )
+            kind = self._clip_kind(clip_range)
+            override = overrides[index] if index < len(overrides) else None
+            clip: dict[str, Any] = {
+                "id": str(uuid4()),
+                "start": start,
+                "end": end,
+                "kind": kind,
+                "createdAt": utc_now_iso(),
+                "source": source_meta,
+            }
+            if isinstance(clip_range.get("personCount"), (int, float)):
+                clip["personCount"] = int(clip_range["personCount"])
+            if kind == "intermission":
+                # Timeline marker only — never cropped to a file, never assessable.
+                clip.update(
+                    {
+                        "label": self.sanitize_clip_label(override, "Intermission"),
+                        "fileName": None,
+                        "url": None,
+                        "absolutePath": None,
+                        "sizeBytes": 0,
+                    }
+                )
+            else:
+                student_index += 1
+                file_name = f"{session['id']}-clip-{index + 1}.mp4"
+                output_path = session_clip_dir / file_name
+                await self.crop_video_segment(
+                    input_path=video_path,
+                    start_seconds=start,
+                    end_seconds=end,
+                    output_path=output_path,
+                )
+                stats = output_path.stat()
+                clip.update(
+                    {
+                        "label": self.sanitize_clip_label(override, f"Student {student_index}"),
+                        "fileName": file_name,
+                        "url": f"/media/clips/{session['id']}/{file_name}",
+                        "absolutePath": str(output_path),
+                        "sizeBytes": stats.st_size,
+                    }
+                )
+            clips.append(clip)
         session.setdefault("outputs", {})["videoClips"] = clips
         return clips
 
     def build_clip_drafts_from_ranges(
         self,
-        clip_ranges: list[dict[str, float]],
+        clip_ranges: list[dict[str, Any]],
         video_duration_seconds: float,
         source_meta: dict[str, Any],
         label_overrides: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         overrides = label_overrides or []
         clips: list[dict[str, Any]] = []
+        student_index = 0
         for index, clip_range in enumerate(clip_ranges):
             start = clamp_number(clip_range.get("start"), 0, video_duration_seconds)
             end = clamp_number(clip_range.get("end"), 0, video_duration_seconds)
             if end - start < self.settings.auto_crop_min_clip_seconds:
                 continue
-            file_index = index + 1
-            label = self.sanitize_clip_label(overrides[index] if index < len(overrides) else None, f"Student {file_index}")
-            clips.append(
-                {
-                    "id": str(uuid4()),
-                    "label": label,
-                    "start": start,
-                    "end": end,
-                    "fileName": None,
-                    "url": None,
-                    "absolutePath": None,
-                    "sizeBytes": 0,
-                    "createdAt": utc_now_iso(),
-                    "source": source_meta,
-                    "isDraft": True,
-                }
-            )
+            kind = self._clip_kind(clip_range)
+            if kind == "session":
+                student_index += 1
+                fallback_label = f"Student {student_index}"
+            else:
+                fallback_label = "Intermission"
+            override = overrides[index] if index < len(overrides) else None
+            clip: dict[str, Any] = {
+                "id": str(uuid4()),
+                "label": self.sanitize_clip_label(override, fallback_label),
+                "start": start,
+                "end": end,
+                "kind": kind,
+                "fileName": None,
+                "url": None,
+                "absolutePath": None,
+                "sizeBytes": 0,
+                "createdAt": utc_now_iso(),
+                "source": source_meta,
+                "isDraft": True,
+            }
+            if isinstance(clip_range.get("personCount"), (int, float)):
+                clip["personCount"] = int(clip_range["personCount"])
+            clips.append(clip)
         return clips
 
     async def run_whisperx_transcription(self, session: dict[str, Any], audio_info: dict[str, Any]) -> dict[str, Path | None]:
