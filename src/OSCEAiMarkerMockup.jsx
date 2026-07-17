@@ -536,6 +536,20 @@ export default function OSCEAiMarkerMockup({
     [videoClips]
   );
   const intermissionClipCount = videoClips.length - sessionClipCount;
+  // The session/intermission distinction exists only for human-detection
+  // segmentation. Bell detection splits AT bells (its constraint) — every
+  // segment is a student clip, so the toggle is not offered there.
+  const isPersonSegmentedSession = useMemo(
+    () =>
+      Boolean(
+        session?.segmentation === 'person' ||
+          videoClips.some(
+            (clip) =>
+              clip?.kind === INTERMISSION_KIND || clip?.source?.type === 'person_detection_rtdetr'
+          )
+      ),
+    [session?.segmentation, videoClips]
+  );
   // While viewing a session, the session's own workflow (or the presence of
   // detected clips) is the source of truth — NOT the transient upload-form tab,
   // which is only correct right after picking it. This guarantees a long session
@@ -2340,6 +2354,10 @@ export default function OSCEAiMarkerMockup({
     }
 
     if (action === 'toggle' && hit.segmentIndex !== null) {
+      if (!isPersonSegmentedSession) {
+        // Bell-segmented sessions split at bells only — no intermission concept.
+        return;
+      }
       const next = toggleSegmentKind({
         labels: manualLabels,
         kinds: manualSegmentKinds,
@@ -2449,7 +2467,10 @@ export default function OSCEAiMarkerMockup({
       const payload = {
         boundaries: sortedBoundaries,
         labels: normalizeLabels(manualLabels, kinds),
-        kinds, // intermission segments become greyed markers — no MP4 is cut
+        // Kinds are a human-detection concept: intermission segments export as
+        // greyed markers — no MP4 is cut, no downstream compute is spent. Bell
+        // splits have no intermissions, so the field is omitted (all sessions).
+        ...(isPersonSegmentedSession ? { kinds } : {}),
       };
       const response = await fetch(`/api/sessions/${session.id}/clips/manual`, {
         method: 'POST',
@@ -2856,6 +2877,12 @@ export default function OSCEAiMarkerMockup({
         >
           {(() => {
             const actions = contextMenuActions(timelineMenu.hit.target);
+            // Session/intermission marking is a human-detection feature; bell
+            // detection splits at bells only, so the toggle stays blocked.
+            const toggleAllowed = actions.toggleEnabled && isPersonSegmentedSession;
+            const toggleBlockedHint = !actions.toggleEnabled
+              ? 'Right-click a clip area to switch its type.'
+              : 'Available for human-detection sessions only (bell splits have no intermissions).';
             const segmentKind =
               timelineMenu.hit.segmentIndex !== null
                 ? ensureKinds(manualSegmentKinds, manualBoundaries.length + 1)[timelineMenu.hit.segmentIndex]
@@ -2893,10 +2920,10 @@ export default function OSCEAiMarkerMockup({
                 <button
                   type="button"
                   role="menuitem"
-                  disabled={!actions.toggleEnabled}
+                  disabled={!toggleAllowed}
                   onClick={() => applyTimelineMenuAction('toggle')}
-                  className={menuItemClass(actions.toggleEnabled)}
-                  title={actions.toggleEnabled ? undefined : 'Right-click a clip area to switch its type.'}
+                  className={menuItemClass(toggleAllowed)}
+                  title={toggleAllowed ? undefined : toggleBlockedHint}
                 >
                   <RotateCw className="h-3.5 w-3.5 shrink-0" />
                   {segmentKind === INTERMISSION_KIND
