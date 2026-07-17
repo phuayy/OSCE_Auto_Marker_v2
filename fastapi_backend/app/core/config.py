@@ -276,10 +276,20 @@ class Settings:
     scorer_python_bin: str = ""
     whisperx_bin: str = os.getenv("WHISPERX_BIN", "whisperx").strip() or "whisperx"
     whisperx_language: str = os.getenv("WHISPERX_LANGUAGE", "en")
+    # The WhisperX CLI defaults to "small" when --model is omitted, so this must
+    # always be passed explicitly. large-v3 is the accuracy default; use
+    # distil-large-v3 if transcription latency becomes a problem.
+    whisperx_model: str = os.getenv("WHISPERX_MODEL", "large-v3").strip() or "large-v3"
     whisperx_device: str = os.getenv("WHISPERX_DEVICE", "cuda").strip() or "cuda"
     whisperx_compute_type: str = os.getenv("WHISPERX_COMPUTE_TYPE", "float16").strip() or "float16"
     whisperx_output_format: str = os.getenv("WHISPERX_OUTPUT_FORMAT", "all").strip() or "all"
     whisperx_log_heartbeat_ms: int = read_int_env("WHISPERX_LOG_HEARTBEAT_MS", 5000)
+    # ffmpeg -af chain for the dedicated WhisperX input WAV; "" disables the
+    # extra pass and WhisperX reads the extracted MP3 directly.
+    whisperx_audio_filters: str = os.getenv("WHISPERX_AUDIO_FILTERS", "highpass=f=80,loudnorm").strip()
+    # Optional register-priming sentence passed as --initial_prompt ("" = off).
+    whisperx_initial_prompt: str = os.getenv("WHISPERX_INITIAL_PROMPT", "").strip()
+    transcript_correction_min_ratio: float = read_float_env("TRANSCRIPT_CORRECTION_MIN_RATIO", 0.84)
 
     audio_mp3_sample_rate: str = os.getenv("AUDIO_MP3_SAMPLE_RATE", "48000").strip() or "48000"
     audio_mp3_vbr_quality: str = os.getenv("AUDIO_MP3_VBR_QUALITY", "0").strip() or "0"

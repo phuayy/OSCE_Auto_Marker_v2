@@ -699,6 +699,8 @@ class MediaPipeline:
         whisperx_compute_type = self._resolve_whisperx_compute_type(whisperx_device)
         args = [
             str(audio_info["absolutePath"]),
+            "--model",
+            self.settings.whisperx_model,
             "--device",
             whisperx_device,
             "--compute_type",
