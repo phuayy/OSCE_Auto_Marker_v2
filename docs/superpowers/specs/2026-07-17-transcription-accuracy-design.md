@@ -17,7 +17,7 @@ All sessions within one OSCE run share a marking rubric, so a per-case term corp
 ## Decisions (from brainstorming)
 
 - **Fully local** ASR — no cloud speech APIs; student audio never leaves the machine.
-- **Corpus is frontend-managed**: static seed corpora + user-created corpora in localStorage; user picks one corpus at upload; it applies to the whole session and is inherited by every clip child. **No LLM calls** for corpus extraction.
+- **Corpus is DB-backed** (revised 2026-07-18, superseding the earlier localStorage decision): corpora live in a `corpora` table with stable ids, managed via `/api/corpora` CRUD and a small frontend editor; seed corpora inserted when the table is empty. The user picks one corpus (or **None**) at upload; the chosen terms are snapshotted into the session and inherited by every clip child. **No LLM calls** for corpus extraction.
 - **Post-correction is deterministic only** (fuzzy matching, stdlib) — no LLM correction pass, no scorer-prompt changes.
 - Approach: layered stack (each layer independent and independently testable).
 
@@ -39,21 +39,20 @@ All sessions within one OSCE run share a marking rubric, so a per-case term corp
 - Env knob `WHISPERX_AUDIO_FILTERS` (default `highpass=f=80,loudnorm`); empty string disables the extra pass and feeds the MP3 exactly as today. This is the calibration knob for varied recording setups.
 - Applies identically to clip-child sessions (each runs the same pipeline on its clip MP4).
 
-### 3. Corpus library (frontend)
+### 3. Corpus library (DB-backed; revised 2026-07-18)
 
-- New pure module `src/lib/corpus.js` (no React; node-testable like `manualTimeline.test.mjs`):
-  - Seed corpora as JS constants — at minimum "General OSCE" (common clinical/consultation vocabulary) and "Common Cold (URTI)" as the worked example (nasal block, blocked nose, runny nose, sore throat, paracetamol, antihistamine, lozenges, …).
-  - User-created corpora persisted under a versioned localStorage key (e.g. `osce.corpora.v1`). Seed corpora are copy-on-edit (never mutated in place).
-  - Helpers: list / save / delete / normalize terms (trim, dedupe, drop empties, cap 200 terms × 64 chars) / build the hotwords string capped to Whisper's ~224-token prompt budget (earlier terms win).
+- New `CorpusRecord` ORM model (`corpora` table): `id` (uuid), `name` (unique), `terms` (JSON list of strings), timestamps. Created by `create_all` like the other tables.
+- `CorpusRepository(orm_database)` on the container: `list_rows` / `get` / `create` / `update` / `delete` / `seed_defaults` (inserts the seed corpora only when the table is empty, so deleting a seed does not resurrect it).
+- Seed corpora: "General OSCE" (common clinical/consultation vocabulary) and "Common Cold (URTI)" as the worked example (nasal block, blocked nose, runny nose, sore throat, paracetamol, antihistamine, lozenges, …).
+- Routes `/api/corpora` (auth-gated by the global middleware like every `/api` route): `GET` list, `POST` create, `PUT /{id}` update, `DELETE /{id}`. Term validation lives in the request schema: ≤200 terms, each trimmed, ≤64 chars, empties dropped, deduped case-insensitively (order preserved).
 - UI (in `OSCEAiMarkerMockup.jsx` upload form):
-  - "Transcription corpus" dropdown — default "General OSCE"; "None" available.
-  - "Manage corpora" editor: corpus name + one-term-per-line textarea; save/delete.
+  - "Transcription corpus" dropdown fed from `GET /api/corpora` — **default "None"** (no biasing; plain transcription for scoring), with the seed and user corpora listed by name.
+  - "Manage corpora" editor: corpus name + one-term-per-line textarea; create/save/delete via the API.
   - The chosen corpus name appears in the pre-flight confirmation overlay.
-- Accepted trade-off: localStorage is per-browser (single-admin app). Selected terms are snapshotted into the session at upload, so library edits never retroactively affect past sessions.
 
 ### 4. Session plumbing (backend)
 
-- `InitiateUploadRequest` and the legacy `/upload` form gain `corpusName: str | None` and `corpusTerms: list[str] | None` (pydantic-validated: ≤200 items, trimmed, each ≤64 chars, empties dropped). Both upload paths store `session.corpus = {"name": ..., "terms": [...]}` in the session payload.
+- `InitiateUploadRequest` and the legacy `/upload` form gain `corpusId: str | None` (None/empty = no corpus). At upload time the backend resolves the id and snapshots `session.corpus = {"id": ..., "name": ..., "terms": [...]}` into the session payload — later corpus edits never retroactively affect existing sessions, and the pipeline (including the Hatchet worker process) needs no corpus lookup at transcription time. Unknown `corpusId` → 400.
 - `clip_service.assess_clip` copies the parent session's `corpus` into each child session — one pick at upload covers every clip marked within that session.
 - `run_whisperx_transcription` appends `--hotwords "<comma-joined terms>"` when the session has non-empty corpus terms; flag omitted otherwise.
 - Optional `WHISPERX_INITIAL_PROMPT` env (default empty = off) passed as `--initial_prompt` for register-priming experiments; no UI.
@@ -76,7 +75,7 @@ All sessions within one OSCE run share a marking rubric, so a per-case term corp
 
 ### 6. Verification
 
-- Unit tests: `transcript_correction` pytest ("nasal blog"→"nasal block", "parasitamol"→"paracetamol", no false positive on clean text, punctuation preserved); `corpus.js` node test (normalize/cap/build-hotwords).
+- Unit tests: `transcript_correction` pytest ("nasal blog"→"nasal block", "parasitamol"→"paracetamol", no false positive on clean text, punctuation preserved); corpus repository + route tests (seeding, CRUD, validation); WhisperX invocation test (`--model`, `--hotwords`, filtered wav input).
 - End-to-end A/B: pick 1-2 existing sessions, `POST /api/sessions/{id}/rerun` (existing endpoint re-transcribes with new model/filters/hotwords since the whisperx artifact dir differs — verify cache-reuse doesn't skip transcription; if it does, clear the session's whisperx output dir first), then diff old vs new transcript text and inspect `corrections`.
 - No formal WER harness — no ground-truth transcripts exist. Noted as future work (as is accent-fine-tuned Whisper, e.g. Mesolitica Malaysian-Whisper via CTranslate2 conversion).
 
@@ -94,5 +93,4 @@ All sessions within one OSCE run share a marking rubric, so a per-case term corp
 
 - Cloud ASR, LLM transcript correction, LLM corpus extraction, scorer-prompt changes.
 - Whisper fine-tuning / Malaysian-accent fine-tuned checkpoints (future work).
-- Backend storage/CRUD for corpora (frontend-owned by decision).
 - Formal WER evaluation harness.
