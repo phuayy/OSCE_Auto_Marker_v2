@@ -70,3 +70,23 @@ def test_whisperx_args_pass_configured_model(tmp_path: Path) -> None:
     args = runner.whisperx_args()
     assert args[args.index("--model") + 1] == "large-v3"
     assert outputs["jsonAbsolutePath"] is not None
+
+
+def test_whisperx_reads_filtered_wav_and_mp3_stays_untouched(tmp_path: Path) -> None:
+    media, runner = make_media(tmp_path)
+    run_transcription(media, tmp_path)
+
+    ffmpeg_calls = [args for command, args, _ in runner.calls if command == "ffmpeg"]
+    assert len(ffmpeg_calls) == 1
+    assert ffmpeg_calls[0][ffmpeg_calls[0].index("-af") + 1] == "highpass=f=80,loudnorm"
+    # Same stem as the MP3 so WhisperX's output JSON keeps the cached base name.
+    assert runner.whisperx_args()[0].endswith("session-1.wav")
+    assert (tmp_path / "session-1.mp3").read_bytes() == b"fake-mp3"
+
+
+def test_empty_filter_chain_feeds_mp3_directly(tmp_path: Path) -> None:
+    media, runner = make_media(tmp_path, whisperx_audio_filters="")
+    run_transcription(media, tmp_path)
+
+    assert not any(command == "ffmpeg" for command, _, _ in runner.calls)
+    assert runner.whisperx_args()[0].endswith("session-1.mp3")

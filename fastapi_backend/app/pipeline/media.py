@@ -694,11 +694,12 @@ class MediaPipeline:
             return existing_outputs
 
         output_base_name = Path(str(audio_info["fileName"])).stem
+        transcription_input_path = await self._prepare_whisperx_audio(audio_info)
         hf_token = self.auth.runtime.whisperx_hf_token
         whisperx_device = await self._resolve_whisperx_device(str(session["id"]))
         whisperx_compute_type = self._resolve_whisperx_compute_type(whisperx_device)
         args = [
-            str(audio_info["absolutePath"]),
+            str(transcription_input_path),
             "--model",
             self.settings.whisperx_model,
             "--device",
@@ -767,6 +768,37 @@ class MediaPipeline:
         if not completed_outputs:
             raise RuntimeError("WhisperX completed but no JSON output file was found.")
         return completed_outputs
+
+    async def _prepare_whisperx_audio(self, audio_info: dict[str, Any]) -> Path:
+        """Derive the dedicated WhisperX input WAV (16 kHz mono, filtered).
+
+        The extracted MP3 must stay untouched — the audio-professionalism scorer
+        measures loudness on it, and normalizing it would corrupt that signal.
+        The WAV keeps the MP3's stem so WhisperX's output artifacts keep the
+        base name the artifact cache looks up.
+        """
+        source_path = Path(str(audio_info["absolutePath"]))
+        filters = self.settings.whisperx_audio_filters
+        if not filters:
+            return source_path
+        wav_path = source_path.with_suffix(".wav")
+        args = [
+            "-y",
+            "-i",
+            str(source_path),
+            "-vn",
+            "-af",
+            filters,
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-sample_fmt",
+            "s16",
+            str(wav_path),
+        ]
+        await self.runner.run(self.settings.ffmpeg_bin, args, "WhisperX input WAV (ffmpeg filters)")
+        return wav_path
 
     async def _resolve_whisperx_device(self, session_id: str) -> str:
         requested = str(self.settings.whisperx_device or "cpu").strip().lower()
