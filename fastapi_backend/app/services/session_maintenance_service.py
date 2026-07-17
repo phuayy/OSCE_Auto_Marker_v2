@@ -122,6 +122,10 @@ class SessionMaintenanceService:
         # Remove stale score artifacts + old assessment rows so a failed re-run
         # never leaves last run's scores behind masquerading as current.
         self._delete_artifacts(session, keep_clips=True, keep_owned_video=True)
+        # Wipe the whole WhisperX artifact dir too: its cache lookup has a
+        # latest-file fallback, so any unrecorded leftover JSON from an old
+        # attempt would silently skip re-transcription on this re-run.
+        self._rmtree(self.settings.paths.output_whisperx_dir / session_id)
         await self._safe("delete assessments", session_id, self.assessments.delete_session_results(session_id))
 
         session["outputs"] = {}
