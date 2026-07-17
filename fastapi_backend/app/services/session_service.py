@@ -214,6 +214,16 @@ class SessionService:
             "pipeline": session.get("pipeline"),
             "parentSessionId": session.get("parentSessionId"),
             "clipSource": session.get("clipSource"),
+            # Transcription-corpus snapshot chosen at upload (or None). New
+            # payload fields must be whitelisted here or the browser never sees
+            # them (see the videoClips "kind" lesson).
+            "corpus": {
+                "id": (session.get("corpus") or {}).get("id"),
+                "name": (session.get("corpus") or {}).get("name"),
+                "terms": (session.get("corpus") or {}).get("terms") or [],
+            }
+            if session.get("corpus")
+            else None,
             "files": {
                 "video": {
                     "originalName": video.get("originalName"),

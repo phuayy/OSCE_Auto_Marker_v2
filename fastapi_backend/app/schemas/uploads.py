@@ -54,6 +54,9 @@ class UploadMetadataMixin(BaseModel):
     sessionName: str | None = None
     # Long-workflow only: which auto-crop segmentation method to use.
     segmentation: SegmentationMethod | None = None
+    # Optional transcription-corpus id whose terms bias WhisperX for the whole
+    # session (and every clip child). None/""/"none" = plain transcription.
+    corpusId: str | None = None
 
     @field_validator("workflow", mode="before")
     @classmethod
@@ -68,6 +71,16 @@ class UploadMetadataMixin(BaseModel):
             return None
         cleaned = str(value).strip()[:SESSION_NAME_MAX_LENGTH]
         return cleaned or None
+
+    @field_validator("corpusId", mode="before")
+    @classmethod
+    def trim_corpus_id(cls, value: Any) -> str | None:
+        if value in {None, ""}:
+            return None
+        cleaned = str(value).strip()
+        if not cleaned or cleaned.lower() == "none":
+            return None
+        return cleaned[:64]
 
     @field_validator("segmentation", mode="before")
     @classmethod

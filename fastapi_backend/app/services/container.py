@@ -138,6 +138,7 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         events,
         rubric_assets,
         videos,
+        corpora=corpora,
     )
     session_maintenance = SessionMaintenanceService(
         active_settings,

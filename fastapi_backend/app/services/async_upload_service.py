@@ -11,6 +11,7 @@ from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.tasks import BackgroundTaskRegistry
 from app.pipeline.media import MediaPipeline
+from app.repositories.corpus_repository import CorpusRepository
 from app.repositories.upload_repository import UploadRepository
 from app.schemas.uploads import CompleteUploadRequest, InitiateUploadRequest
 from app.services.clip_service import ClipService
@@ -40,6 +41,7 @@ class AsyncUploadService:
         events: EventService,
         rubric_assets: RubricAssetService,
         videos: VideoRepository,
+        corpora: CorpusRepository | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository
@@ -50,6 +52,7 @@ class AsyncUploadService:
         self.events = events
         self.rubric_assets = rubric_assets
         self.videos = videos
+        self.corpora = corpora
         self._completion_locks: dict[str, asyncio.Lock] = {}
         self._completion_locks_guard = asyncio.Lock()
         # Holds strong references to background assembly tasks so the event loop
@@ -58,6 +61,7 @@ class AsyncUploadService:
 
     async def initiate(self, payload: InitiateUploadRequest) -> dict[str, Any]:
         self._validate_declared_files(payload)
+        corpus_snapshot = await self._resolve_corpus_snapshot(payload.corpusId)
         session_id = str(uuid4())
         upload_id = str(uuid4())
         expires_at = self._expires_at()
@@ -113,6 +117,9 @@ class AsyncUploadService:
             # Long-workflow auto-crop method ("bells" | "person"); None defers
             # to the server default at job execution time.
             "segmentation": payload.segmentation if payload.workflow == "long" else None,
+            # Snapshot of the chosen transcription corpus (or None); inherited
+            # by clip children so one pick covers every clip in the session.
+            "corpus": corpus_snapshot,
             "upload": {
                 "id": upload_id,
                 "status": "initiated",
@@ -158,6 +165,16 @@ class AsyncUploadService:
             "fileUploads": [prepared.to_response() for prepared in prepared_files],
             "job": self.jobs.public_job(job),
         }
+
+    async def _resolve_corpus_snapshot(self, corpus_id: str | None) -> dict[str, Any] | None:
+        if not corpus_id:
+            return None
+        if self.corpora is None:
+            raise AppError("Transcription corpora are not configured.", status_code=400)
+        try:
+            return await self.corpora.snapshot(corpus_id)
+        except LookupError as error:
+            raise AppError("Transcription corpus not found.", status_code=400) from error
 
     async def put_part(self, upload_id: str, file_id: str | None, part_number: int, body: bytes) -> dict[str, Any]:
         upload = await self.repository.read(upload_id)

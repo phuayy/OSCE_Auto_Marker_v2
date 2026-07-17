@@ -90,3 +90,41 @@ def test_empty_filter_chain_feeds_mp3_directly(tmp_path: Path) -> None:
 
     assert not any(command == "ffmpeg" for command, _, _ in runner.calls)
     assert runner.whisperx_args()[0].endswith("session-1.mp3")
+
+
+def test_session_corpus_terms_become_hotwords(tmp_path: Path) -> None:
+    media, runner = make_media(tmp_path)
+    session = {
+        "id": "session-1",
+        "corpus": {"id": "c1", "name": "Common Cold (URTI)", "terms": ["nasal block", "paracetamol"]},
+    }
+    run_transcription(media, tmp_path, session)
+
+    args = runner.whisperx_args()
+    assert args[args.index("--hotwords") + 1] == "nasal block, paracetamol"
+
+
+def test_no_corpus_means_no_hotwords_flag(tmp_path: Path) -> None:
+    media, runner = make_media(tmp_path)
+    run_transcription(media, tmp_path)
+
+    assert "--hotwords" not in runner.whisperx_args()
+    assert "--initial_prompt" not in runner.whisperx_args()
+
+
+def test_initial_prompt_setting_is_forwarded(tmp_path: Path) -> None:
+    media, runner = make_media(tmp_path, whisperx_initial_prompt="A medical OSCE consultation.")
+    run_transcription(media, tmp_path)
+
+    args = runner.whisperx_args()
+    assert args[args.index("--initial_prompt") + 1] == "A medical OSCE consultation."
+
+
+def test_build_hotwords_caps_prompt_budget() -> None:
+    terms = [f"term-{index:03d}" for index in range(300)]
+    hotwords = MediaPipeline.build_hotwords(terms)
+
+    assert len(hotwords) <= 900
+    assert hotwords.startswith("term-000")  # earlier terms win the budget
+    assert MediaPipeline.build_hotwords([]) == ""
+    assert MediaPipeline.build_hotwords(["  ", None]) == ""

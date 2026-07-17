@@ -322,6 +322,9 @@ class ClipService:
             },
             "parentSessionId": parent_session["id"],
             "clipSource": {"clipId": clip.get("id"), "label": clip.get("label")},
+            # Inherit the parent's transcription-corpus snapshot so the corpus
+            # picked at upload biases every clip assessed within the session.
+            "corpus": parent_session.get("corpus"),
             "files": {
                 "video": {
                     "originalName": clip.get("fileName")

@@ -20,6 +20,7 @@ async def upload_session(
     sessionName: str | None = Form(None),
     segmentation: str | None = Form(None),
     workflow: str | None = Form(None),
+    corpusId: str | None = Form(None),
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
     try:
@@ -27,7 +28,9 @@ async def upload_session(
         # schema the async initiate path uses, so both entry points enforce
         # identical invariants (trimmed/bounded name, known workflow, known
         # segmentation, segmentation only meaningful for long uploads).
-        form = LegacyUploadForm(sessionName=sessionName, segmentation=segmentation, workflow=workflow)
+        form = LegacyUploadForm(
+            sessionName=sessionName, segmentation=segmentation, workflow=workflow, corpusId=corpusId
+        )
         container.artifacts.validate_video_upload(video)
         container.artifacts.validate_pdf_upload(caseStudy, field_name="caseStudy")
     except ValidationError as error:
@@ -35,6 +38,11 @@ async def upload_session(
         raise HTTPException(status_code=400, detail=str(first.get("msg") or "Invalid upload form.")) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+
+    try:
+        corpus_snapshot = await container.corpora.snapshot(form.corpusId)
+    except LookupError as error:
+        raise HTTPException(status_code=400, detail="Transcription corpus not found.") from error
 
     if video is None:
         raise HTTPException(status_code=400, detail="A video file is required.")
@@ -70,6 +78,7 @@ async def upload_session(
             # leaves a window where the session looks like a standard one.
             "workflow": form.workflow,
             "segmentation": form.segmentation,
+            "corpus": corpus_snapshot,
             "pipeline": {
                 "startedAt": None,
                 "endedAt": None,

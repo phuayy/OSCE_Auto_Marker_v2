@@ -195,6 +195,48 @@ def test_initiate_uses_chosen_session_name(tmp_path) -> None:
     assert response.json()["session"]["name"] == chosen
 
 
+def test_initiate_snapshots_selected_corpus_into_session(tmp_path) -> None:
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    container = client.app.state.container
+    corpus = asyncio.run(container.corpora.create("Common Cold", ["nasal block", "paracetamol"]))
+
+    files = [
+        {"kind": "video", "originalName": "station.mp4", "mimeType": "video/mp4", "sizeBytes": 5},
+        {"kind": "caseStudy", "originalName": "case.pdf", "mimeType": "application/pdf", "sizeBytes": 4},
+    ]
+    response = client.post(
+        "/api/uploads/initiate",
+        headers=headers,
+        json={"workflow": "standard", "autoProcess": True, "corpusId": corpus["id"], "files": files},
+    )
+    assert response.status_code == 201, response.text
+    public = response.json()["session"]["corpus"]
+    assert public == {"id": corpus["id"], "name": "Common Cold", "terms": ["nasal block", "paracetamol"]}
+
+    # The snapshot is persisted on the session, so a later corpus edit/delete
+    # cannot affect this session's transcription.
+    stored = asyncio.run(container.sessions.read(response.json()["session"]["id"]))
+    assert stored["corpus"]["terms"] == ["nasal block", "paracetamol"]
+
+    # "None" option: no corpusId (or the literal "none") means no biasing.
+    none_response = client.post(
+        "/api/uploads/initiate",
+        headers=headers,
+        json={"workflow": "standard", "autoProcess": True, "corpusId": "none", "files": files},
+    )
+    assert none_response.status_code == 201, none_response.text
+    assert none_response.json()["session"]["corpus"] is None
+
+    unknown = client.post(
+        "/api/uploads/initiate",
+        headers=headers,
+        json={"workflow": "standard", "autoProcess": True, "corpusId": "missing-id", "files": files},
+    )
+    assert unknown.status_code == 400
+
+
 def test_async_upload_complete_commits_local_parts(tmp_path) -> None:
     client = build_test_client(tmp_path)
     token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]

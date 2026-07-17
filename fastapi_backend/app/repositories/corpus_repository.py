@@ -107,6 +107,20 @@ class CorpusRepository:
         logger.info("Seeded %d default transcription corpora.", len(SEED_CORPORA))
         return len(SEED_CORPORA)
 
+    async def snapshot(self, corpus_id: str | None) -> dict[str, Any] | None:
+        """Session-embeddable copy {id, name, terms} of a corpus, or None when
+        no corpus was requested. Snapshotting at upload time means later corpus
+        edits/deletes never affect existing sessions, and the pipeline (incl.
+        the Hatchet worker process) needs no corpus lookup at transcription
+        time. Raises LookupError for an unknown id (callers map it to HTTP 400).
+        """
+        if not corpus_id:
+            return None
+        corpus = await self.get(corpus_id)
+        if corpus is None:
+            raise LookupError("Corpus not found.")
+        return {"id": corpus["id"], "name": corpus["name"], "terms": corpus["terms"]}
+
     async def list_rows(self) -> list[dict[str, Any]]:
         async with self.database.session() as db:
             records = (await db.scalars(select(CorpusRecord).order_by(CorpusRecord.name))).all()

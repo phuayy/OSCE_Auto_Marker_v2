@@ -716,6 +716,12 @@ class MediaPipeline:
             "--output_format",
             self.settings.whisperx_output_format,
         ]
+        corpus_terms = (session.get("corpus") or {}).get("terms") or []
+        hotwords = self.build_hotwords(corpus_terms)
+        if hotwords:
+            args.extend(["--hotwords", hotwords])
+        if self.settings.whisperx_initial_prompt:
+            args.extend(["--initial_prompt", self.settings.whisperx_initial_prompt])
         visible_args = ["***" if index > 0 and args[index - 1] == "--hf_token" else arg for index, arg in enumerate(args)]
         await self.events.publish(
             str(session["id"]),
@@ -768,6 +774,23 @@ class MediaPipeline:
         if not completed_outputs:
             raise RuntimeError("WhisperX completed but no JSON output file was found.")
         return completed_outputs
+
+    @staticmethod
+    def build_hotwords(terms: list[Any], max_chars: int = 900) -> str:
+        """Comma-joined hotwords string capped to roughly Whisper's 224-token
+        prompt budget (~4 chars/token); earlier corpus terms win the budget."""
+        parts: list[str] = []
+        total = 0
+        for raw in terms:
+            term = str(raw or "").strip()
+            if not term:
+                continue
+            added = len(term) + (2 if parts else 0)
+            if total + added > max_chars:
+                break
+            parts.append(term)
+            total += added
+        return ", ".join(parts)
 
     async def _prepare_whisperx_audio(self, audio_info: dict[str, Any]) -> Path:
         """Derive the dedicated WhisperX input WAV (16 kHz mono, filtered).

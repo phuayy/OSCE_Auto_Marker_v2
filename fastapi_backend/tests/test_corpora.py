@@ -109,3 +109,74 @@ def test_normalize_corpus_terms_handles_non_lists() -> None:
     assert normalize_corpus_terms(None) == []
     assert normalize_corpus_terms("nasal block") == []
     assert normalize_corpus_terms([" nasal block ", 42]) == ["nasal block", "42"]
+
+
+def test_clip_child_session_inherits_parent_corpus(tmp_path: Path) -> None:
+    import copy
+    from types import SimpleNamespace
+
+    from app.core.utils import utc_now_iso
+    from app.services.clip_service import ClipService
+
+    class FakeSessions:
+        def __init__(self, initial: dict) -> None:
+            self.sessions = {str(initial["id"]): copy.deepcopy(initial)}
+
+        async def read(self, session_id: str) -> dict:
+            return copy.deepcopy(self.sessions[str(session_id)])
+
+        async def write(self, session: dict) -> None:
+            self.sessions[str(session["id"])] = copy.deepcopy(session)
+
+        async def read_all_entries(self) -> list:
+            return []
+
+        async def ensure_names_for_index(self, entries: list) -> tuple[list, set]:
+            return [], set()
+
+        def reserve_unique_session_name(self, used_keys: set, preferred: str = "") -> str:
+            return preferred or "Child"
+
+        def public_session(self, session: dict) -> dict:
+            return copy.deepcopy(session)
+
+    class FakeJobs:
+        async def enqueue(self, *_args, **_kwargs) -> dict:
+            return {"id": "job-1", "status": "queued"}
+
+        def public_job(self, job: dict) -> dict:
+            return dict(job)
+
+    clip_path = tmp_path / "clip-1.mp4"
+    clip_path.write_bytes(b"clip")
+    case_study_path = tmp_path / "case.pdf"
+    case_study_path.write_bytes(b"%PDF-1.4")
+    corpus_snapshot = {"id": "c1", "name": "Common Cold (URTI)", "terms": ["nasal block"]}
+    parent = {
+        "id": "parent-1",
+        "name": "Parent",
+        "status": "cropped",
+        "workflow": "long",
+        "corpus": corpus_snapshot,
+        "files": {"caseStudy": {"originalName": "case.pdf", "absolutePath": str(case_study_path)}},
+        "outputs": {
+            "videoClips": [
+                {"id": "clip-1", "label": "Student 1", "kind": "session", "absolutePath": str(clip_path)}
+            ]
+        },
+    }
+    sessions = FakeSessions(parent)
+    settings = Settings(root_dir=tmp_path, backend_root=tmp_path, ffmpeg_bin="f", ffprobe_bin="f", scorer_python_bin="p")
+    service = ClipService(
+        sessions=sessions,
+        events=SimpleNamespace(),
+        media=SimpleNamespace(settings=settings),
+        pipeline=SimpleNamespace(now_iso=utc_now_iso),
+        jobs=FakeJobs(),
+    )
+
+    result = asyncio.run(service.assess_clip("parent-1", "clip-1", defer=True))
+
+    child = sessions.sessions[str(result["session"]["id"])]
+    assert child["corpus"] == corpus_snapshot
+    assert child["parentSessionId"] == "parent-1"
