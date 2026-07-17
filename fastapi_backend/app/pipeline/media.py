@@ -547,12 +547,15 @@ class MediaPipeline:
                 boundary_set.add(numeric)
         normalized_boundaries = sorted(boundary_set)
         points = [0.0, *normalized_boundaries, duration]
-        ranges: list[dict[str, float]] = []
+        ranges: list[dict[str, Any]] = []
         for index in range(len(points) - 1):
             start = clamp_number(points[index], 0, duration)
             end = clamp_number(points[index + 1], 0, duration)
             if end - start >= self.settings.auto_crop_min_clip_seconds:
-                ranges.append({"start": start, "end": end})
+                # segmentIndex is the PRE-filter position: labels/kinds sent by
+                # the client are positional per segment, so a dropped sub-minimum
+                # sliver must not shift the mapping of everything after it.
+                ranges.append({"start": start, "end": end, "segmentIndex": index})
         return ranges
 
     @staticmethod

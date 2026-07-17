@@ -210,19 +210,26 @@ class ClipService:
         clip_ranges = self.media.build_manual_clip_ranges(video_duration, boundaries)
         if not clip_ranges:
             raise AppError("Manual separators did not produce valid clip ranges.", status_code=400)
-        # Per-segment kinds (session|intermission) map positionally onto the
-        # segments the boundaries produce; missing/short lists default to
-        # "session" so pre-kinds clients keep working unchanged.
-        for index, clip_range in enumerate(clip_ranges):
-            if kinds and index < len(kinds) and str(kinds[index]).strip().lower() == "intermission":
+        # Kinds and labels are positional per SEGMENT (as the client sees them).
+        # Ranges carry their pre-filter segmentIndex, so a sub-minimum sliver
+        # dropped by build_manual_clip_ranges cannot shift the mapping of every
+        # segment after it. Missing/short kind lists default to "session" so
+        # pre-kinds clients keep working unchanged.
+        aligned_labels: list[str] = []
+        for clip_range in clip_ranges:
+            segment_index = int(clip_range.get("segmentIndex", -1))
+            if kinds and 0 <= segment_index < len(kinds) and str(kinds[segment_index]).strip().lower() == "intermission":
                 clip_range["kind"] = "intermission"
+            aligned_labels.append(
+                labels[segment_index] if labels and 0 <= segment_index < len(labels) else ""
+            )
         source = {
             "type": "manual_timeline_split",
             "boundariesCount": len(boundaries or []),
             "labelsProvided": len(labels or []) > 0,
             "bellEndOffsetSeconds": self.media.settings.bell_end_offset_seconds,
         }
-        clips = await self.media.write_video_clips_from_ranges(session, clip_ranges, source, labels)
+        clips = await self.media.write_video_clips_from_ranges(session, clip_ranges, source, aligned_labels)
         await self.sessions.write(session)
         session_count = sum(1 for clip in clips if clip.get("kind") != "intermission")
         return {

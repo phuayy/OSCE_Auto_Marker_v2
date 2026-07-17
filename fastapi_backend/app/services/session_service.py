@@ -254,6 +254,10 @@ class SessionService:
                         "label": str(clip.get("label") or ""),
                         "start": float(clip.get("start") or 0),
                         "end": float(clip.get("end") or 0),
+                        # session | intermission — drives the greyed manual-crop
+                        # segments and keeps intermissions out of export/assessment.
+                        "kind": str(clip.get("kind") or "session"),
+                        "personCount": clip.get("personCount"),
                         "fileName": clip.get("fileName"),
                         "url": clip.get("url"),
                         "sizeBytes": int(clip.get("sizeBytes") or 0),

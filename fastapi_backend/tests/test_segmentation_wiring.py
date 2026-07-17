@@ -196,6 +196,47 @@ def test_auto_crop_person_failure_falls_back_to_bells(tmp_path) -> None:
     assert any("Falling back to bell detection" in message for message in log_messages)
 
 
+def test_public_session_projects_clip_kinds() -> None:
+    """public_session must not strip kind/personCount from clips — the manual
+    crop editor seeds its greyed intermissions from them (dropping them made
+    every segment render as Student N)."""
+    from app.services.session_service import SessionService
+
+    session = {
+        "id": "session-long-1",
+        "files": {"video": {}},
+        "outputs": {
+            "videoClips": [
+                {"id": "c1", "label": "Student 1", "start": 0.0, "end": 60.0, "kind": "session", "personCount": 2},
+                {"id": "c2", "label": "Intermission", "start": 60.0, "end": 70.0, "kind": "intermission", "personCount": 1},
+                {"id": "c3", "label": "Legacy", "start": 70.0, "end": 120.0},  # pre-kinds clip
+            ]
+        },
+    }
+    clips = SessionService.public_session(session)["outputs"]["videoClips"]
+    assert [(clip["kind"], clip["personCount"]) for clip in clips] == [
+        ("session", 2),
+        ("intermission", 1),
+        ("session", None),  # legacy clips default to session
+    ]
+
+
+def test_manual_clip_ranges_keep_segment_index_after_sliver_drop(tmp_path) -> None:
+    """A sub-minimum segment dropped by the boundary split must not shift the
+    positional kind/label mapping of every segment after it — segmentIndex
+    records the pre-filter position."""
+    from app.pipeline.media import MediaPipeline
+
+    media = MediaPipeline(build_settings(tmp_path), None, None, None)
+    # Segments: [0-30], [30-30.3] (sliver, dropped), [30.3-60], [60-120].
+    ranges = media.build_manual_clip_ranges(120.0, [30.0, 30.3, 60.0])
+    assert [(r["start"], r["end"], r["segmentIndex"]) for r in ranges] == [
+        (0.0, 30.0, 0),
+        (30.3, 60.0, 2),
+        (60.0, 120.0, 3),
+    ]
+
+
 def test_assess_clip_rejects_intermission_segments(tmp_path) -> None:
     import pytest
 
