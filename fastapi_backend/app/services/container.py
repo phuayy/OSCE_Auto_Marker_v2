@@ -12,6 +12,7 @@ from app.database.orm import OrmDatabase
 from app.pipeline.media import MediaPipeline
 from app.pipeline.scoring import ScoringPipeline
 from app.repositories.assessment_repository import AssessmentRepository
+from app.repositories.corpus_repository import CorpusRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.notification_repository import NotificationRepository
 from app.repositories.rubric_asset_repository import RubricAssetRepository
@@ -57,6 +58,7 @@ class AppContainer:
     pipeline: PipelineService
     clips: ClipService
     notifications: NotificationRepository
+    corpora: CorpusRepository
     videos: VideoRepository
     session_maintenance: SessionMaintenanceService
     login_rate_limiter: FixedWindowRateLimiter
@@ -74,6 +76,7 @@ class AppContainer:
         await self.database.initialize()
         await self.orm_database.initialize()
         await self.sessions.migrate_legacy_sessions()
+        await self.corpora.seed_defaults()
         await self.auth.initialize()
         await self.rubrics.ensure_parsed()
         # Recover uploads/sessions stuck in "assembling" before dispatching
@@ -116,6 +119,7 @@ def create_container(settings: Settings | None = None) -> AppContainer:
     media = MediaPipeline(active_settings, runner, events, auth)
     scoring = ScoringPipeline(active_settings, runner, events, auth, rubrics)
     notifications = NotificationRepository(orm_database)
+    corpora = CorpusRepository(orm_database)
     pipeline = PipelineService(sessions, events, media, scoring, assessments, notifications)
     clips = ClipService(sessions, events, media, pipeline, jobs, notifications)
     jobs.bind_handlers(pipeline=pipeline, clips=clips)
@@ -163,6 +167,7 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         pipeline=pipeline,
         clips=clips,
         notifications=notifications,
+        corpora=corpora,
         videos=videos,
         session_maintenance=session_maintenance,
         login_rate_limiter=login_rate_limiter,

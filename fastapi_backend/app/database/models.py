@@ -182,6 +182,22 @@ class NotificationRecord(Base):
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class CorpusRecord(Base):
+    """Named list of domain terms used to bias WhisperX (--hotwords) and drive
+    deterministic transcript correction. Picked per session at upload time; the
+    chosen terms are snapshotted into the session payload, so editing or
+    deleting a corpus never affects existing sessions."""
+
+    __tablename__ = "corpora"
+    __table_args__ = (UniqueConstraint("name", name="uq_corpora_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    terms: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
 class SessionRecord(Base):
     __tablename__ = "sessions"
     __table_args__ = (
