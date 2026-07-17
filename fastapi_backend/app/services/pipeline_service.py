@@ -13,6 +13,7 @@ from app.core.logging_utils import log_context
 from app.core.utils import utc_now_iso
 from app.pipeline.media import MediaPipeline
 from app.pipeline.scoring import ScoringPipeline
+from app.pipeline.transcript_correction import apply_replacements_to_file, correct_segments
 from app.repositories.notification_repository import NotificationRepository
 from app.services.assessment_service import AssessmentService
 from app.services.event_service import EventService
@@ -138,6 +139,46 @@ class PipelineService:
             "scores": scoring_outputs.get("scores"),
         }
 
+    async def _apply_corpus_corrections(
+        self,
+        session: dict[str, Any],
+        transcript: dict[str, Any],
+        whisperx_outputs: dict[str, Any],
+    ) -> None:
+        """Fuzzy-correct corpus terms in the normalized transcript and mirror
+        the substitutions into the SRT/VTT files so player subtitles agree with
+        what the scorers read. Best-effort: a correction failure must never
+        fail the pipeline — the uncorrected transcript proceeds."""
+        corpus = session.get("corpus") or {}
+        terms = corpus.get("terms") or []
+        transcript["corpusName"] = corpus.get("name")
+        transcript["corrections"] = []
+        if not terms:
+            return
+        try:
+            corrections = correct_segments(
+                transcript.get("segments") or [],
+                terms,
+                self.media.settings.transcript_correction_min_ratio,
+            )
+            transcript["corrections"] = corrections
+            if not corrections:
+                return
+            for output_key in ("srtAbsolutePath", "vttAbsolutePath"):
+                subtitle_path = whisperx_outputs.get(output_key)
+                if subtitle_path:
+                    await asyncio.to_thread(apply_replacements_to_file, Path(str(subtitle_path)), corrections)
+            await self.events.publish(
+                str(session["id"]),
+                "log",
+                {
+                    "source": "transcript-correction",
+                    "message": f"Applied {len(corrections)} corpus term correction(s) from '{corpus.get('name')}'.",
+                },
+            )
+        except Exception:
+            logger.exception("Corpus correction failed for session %s; using uncorrected transcript.", session.get("id"))
+
     async def _process_from_video(self, session: dict[str, Any]) -> dict[str, Any]:
         session_id = str(session["id"])
         pipeline = session.setdefault("pipeline", {})
@@ -163,6 +204,7 @@ class PipelineService:
         await self._mark_pipeline_step(session, "transcript_normalization", "running")
         whisperx_raw = await self._read_json(Path(str(whisperx_outputs["jsonAbsolutePath"])))
         normalized_transcript = self.media.normalize_whisperx_transcript(whisperx_raw)
+        await self._apply_corpus_corrections(session, normalized_transcript, whisperx_outputs)
 
         transcript_file_name = f"{session_id}.json"
         transcript_path = self.media.settings.paths.output_transcripts_dir / transcript_file_name
