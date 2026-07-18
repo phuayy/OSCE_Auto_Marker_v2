@@ -144,6 +144,10 @@ class StoragePaths:
         return self.storage_root / "output" / "scores"
 
     @property
+    def output_llm_preprocess_dir(self) -> Path:
+        return self.storage_root / "output" / "llm_preprocess"
+
+    @property
     def output_communication_scores_dir(self) -> Path:
         return self.storage_root / "output" / "communication_scores"
 
@@ -211,6 +215,7 @@ class StoragePaths:
             self.output_whisperx_dir,
             self.output_transcripts_dir,
             self.output_scores_dir,
+            self.output_llm_preprocess_dir,
             self.output_communication_scores_dir,
             self.output_clips_dir,
             self.auth_dir,
@@ -385,6 +390,10 @@ class Settings:
     @property
     def scorer_script_path(self) -> Path:
         return self.root_dir / "scripts" / "nvidia_osce_assessor.py"
+
+    @property
+    def llm_preprocess_script_path(self) -> Path:
+        return self.root_dir / "scripts" / "nemotron_transcript_preprocessor.py"
 
     @property
     def audio_professionalism_script_path(self) -> Path:

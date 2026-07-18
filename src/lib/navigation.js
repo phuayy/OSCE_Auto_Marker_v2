@@ -9,6 +9,7 @@
 //   #/session/<id>    dashboard — the workspace for a specific session
 //   #/rubric          communication rubric panel
 //   #/analytics       score analytics dashboard
+//   #/settings        global settings (LLM preprocess toggle, corpora)
 
 export function parseRoute(hash = window.location.hash) {
   const segments = String(hash || '')
@@ -23,6 +24,9 @@ export function parseRoute(hash = window.location.hash) {
   if (segments[0] === 'analytics') {
     return { view: 'analytics', sessionId: null };
   }
+  if (segments[0] === 'settings') {
+    return { view: 'settings', sessionId: null };
+  }
   if (segments[0] === 'session' && segments[1]) {
     return { view: 'dashboard', sessionId: safeDecode(segments[1]) };
   }
@@ -35,6 +39,9 @@ export function buildRoute({ view = 'dashboard', sessionId = null } = {}) {
   }
   if (view === 'analytics') {
     return '#/analytics';
+  }
+  if (view === 'settings') {
+    return '#/settings';
   }
   if (sessionId) {
     return `#/session/${encodeURIComponent(sessionId)}`;

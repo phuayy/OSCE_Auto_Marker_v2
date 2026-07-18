@@ -11,9 +11,11 @@ from app.core.exceptions import AppError
 from app.core.json_utils import extract_json_object, write_json_file
 from app.core.logging_utils import log_context
 from app.core.utils import utc_now_iso
+from app.pipeline.llm_preprocess import TranscriptPreprocessor, diff_replacements, merge_corrected_segments
 from app.pipeline.media import MediaPipeline
 from app.pipeline.scoring import ScoringPipeline
 from app.pipeline.transcript_correction import apply_replacements_to_file, correct_segments
+from app.repositories.app_settings_repository import AppSettingsRepository
 from app.repositories.notification_repository import NotificationRepository
 from app.services.assessment_service import AssessmentService
 from app.services.event_service import EventService
@@ -32,6 +34,8 @@ class PipelineService:
         scoring: ScoringPipeline,
         assessments: AssessmentService | None = None,
         notifications: NotificationRepository | None = None,
+        preprocessor: TranscriptPreprocessor | None = None,
+        app_settings: AppSettingsRepository | None = None,
     ) -> None:
         self.sessions = sessions
         self.events = events
@@ -39,6 +43,8 @@ class PipelineService:
         self.scoring = scoring
         self.assessments = assessments
         self.notifications = notifications
+        self.preprocessor = preprocessor
+        self.app_settings = app_settings
 
     async def _notify_scoring_complete(self, session: dict[str, Any]) -> None:
         if self.notifications is None:
@@ -179,6 +185,71 @@ class PipelineService:
         except Exception:
             logger.exception("Corpus correction failed for session %s; using uncorrected transcript.", session.get("id"))
 
+    async def _run_llm_preprocess(
+        self,
+        session: dict[str, Any],
+        transcript: dict[str, Any],
+        whisperx_outputs: dict[str, Any],
+        transcript_path: Path,
+    ) -> None:
+        """Optional Nemotron cleanup of the normalized transcript before any
+        scorer reads it. Gated by the global llmTranscriptPreprocess setting,
+        read live from the DB so a toggle applies to every subsequent run —
+        clip children and Hatchet workers included. Best-effort: a failure is
+        recorded on the step but never fails the run; scoring proceeds with
+        the uncorrected transcript (same policy as corpus corrections)."""
+        step = "llm_preprocess"
+        enabled = (
+            self.preprocessor is not None
+            and self.app_settings is not None
+            and await self.app_settings.llm_preprocess_enabled()
+        )
+        if not enabled:
+            await self._mark_pipeline_step(session, step, "skipped")
+            return
+        await self._mark_pipeline_step(session, step, "running")
+        try:
+            payload = await self.preprocessor.run(session, transcript_path)
+            changes = merge_corrected_segments(transcript, payload.get("segments") or [])
+            transcript["llmPreprocess"] = {
+                "applied": True,
+                "model": payload.get("model"),
+                "changes": changes,
+            }
+            # Rewrite even with zero changes: the llmPreprocess report block is
+            # part of the transcript artifact.
+            await asyncio.to_thread(write_json_file, transcript_path, transcript)
+            transcript_info = (session.get("outputs") or {}).get("transcript")
+            if isinstance(transcript_info, dict):
+                transcript_info["sizeBytes"] = transcript_path.stat().st_size
+            subtitle_replacements = [
+                replacement
+                for change in changes
+                for replacement in diff_replacements(change["original"], change["corrected"])
+            ]
+            if subtitle_replacements:
+                for output_key in ("srtAbsolutePath", "vttAbsolutePath"):
+                    subtitle_path = whisperx_outputs.get(output_key)
+                    if subtitle_path:
+                        await asyncio.to_thread(
+                            apply_replacements_to_file, Path(str(subtitle_path)), subtitle_replacements
+                        )
+            await self.events.publish(
+                str(session["id"]),
+                "log",
+                {
+                    "source": "llm-preprocess",
+                    "message": f"LLM transcript preprocess corrected {len(changes)} segment(s).",
+                },
+            )
+            await self._mark_pipeline_step(session, step, "completed", metadata={"changedSegments": len(changes)})
+        except Exception as error:
+            logger.exception(
+                "LLM transcript preprocess failed for session %s; scoring uses the uncorrected transcript.",
+                session.get("id"),
+            )
+            await self._mark_pipeline_step(session, step, "failed", error=error)
+
     async def _process_from_video(self, session: dict[str, Any]) -> dict[str, Any]:
         session_id = str(session["id"])
         pipeline = session.setdefault("pipeline", {})
@@ -251,6 +322,8 @@ class PipelineService:
             "milestone",
             {"code": "transcription_complete", "message": "transcription/diarization complete"},
         )
+
+        await self._run_llm_preprocess(session, normalized_transcript, whisperx_outputs, transcript_path)
 
         await self.sessions.write(session)
         scoring_outputs = await self._run_fresh_scoring_branches(session)

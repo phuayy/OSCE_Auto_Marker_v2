@@ -198,6 +198,19 @@ class CorpusRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 
+class AppSettingRecord(Base):
+    """Global application settings as key/value rows. The pipeline reads them
+    live from the shared DB at run time, so a change applies to every
+    subsequent run — including clip children and the Hatchet worker process —
+    without a restart or per-session snapshot."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[Any] = mapped_column(JSON, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
 class SessionRecord(Base):
     __tablename__ = "sessions"
     __table_args__ = (

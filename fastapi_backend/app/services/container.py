@@ -9,8 +9,10 @@ from app.core.process import CommandRunner
 from app.core.rate_limit import FixedWindowRateLimiter
 from app.database import Database
 from app.database.orm import OrmDatabase
+from app.pipeline.llm_preprocess import TranscriptPreprocessor
 from app.pipeline.media import MediaPipeline
 from app.pipeline.scoring import ScoringPipeline
+from app.repositories.app_settings_repository import AppSettingsRepository
 from app.repositories.assessment_repository import AssessmentRepository
 from app.repositories.corpus_repository import CorpusRepository
 from app.repositories.job_repository import JobRepository
@@ -59,6 +61,7 @@ class AppContainer:
     clips: ClipService
     notifications: NotificationRepository
     corpora: CorpusRepository
+    app_settings: AppSettingsRepository
     videos: VideoRepository
     session_maintenance: SessionMaintenanceService
     login_rate_limiter: FixedWindowRateLimiter
@@ -120,7 +123,18 @@ def create_container(settings: Settings | None = None) -> AppContainer:
     scoring = ScoringPipeline(active_settings, runner, events, auth, rubrics)
     notifications = NotificationRepository(orm_database)
     corpora = CorpusRepository(orm_database)
-    pipeline = PipelineService(sessions, events, media, scoring, assessments, notifications)
+    app_settings = AppSettingsRepository(orm_database)
+    preprocessor = TranscriptPreprocessor(active_settings, runner, events, auth)
+    pipeline = PipelineService(
+        sessions,
+        events,
+        media,
+        scoring,
+        assessments,
+        notifications,
+        preprocessor=preprocessor,
+        app_settings=app_settings,
+    )
     clips = ClipService(sessions, events, media, pipeline, jobs, notifications)
     jobs.bind_handlers(pipeline=pipeline, clips=clips)
     login_rate_limiter = FixedWindowRateLimiter(
@@ -169,6 +183,7 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         clips=clips,
         notifications=notifications,
         corpora=corpora,
+        app_settings=app_settings,
         videos=videos,
         session_maintenance=session_maintenance,
         login_rate_limiter=login_rate_limiter,

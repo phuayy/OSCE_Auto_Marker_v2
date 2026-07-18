@@ -10,6 +10,7 @@ import {
   Clock3,
   Download,
   FileSpreadsheet,
+  FileText,
   Loader2,
   LogOut,
   MessageSquare,
@@ -31,6 +32,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import CorporaManager from './CorporaManager.jsx';
 import LongVideoSummaryCharts from './LongVideoSummaryCharts.jsx';
 import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
 import {
@@ -335,6 +337,7 @@ const PIPELINE_STAGE_SEQUENCE = [
   ['audio_extraction', 'Extracting audio'],
   ['whisperx', 'Transcribing (WhisperX)'],
   ['transcript_normalization', 'Normalizing transcript'],
+  ['llm_preprocess', 'Cleaning transcript (LLM)'],
   ['audio_professionalism', 'Analyzing audio professionalism'],
   ['communication_scoring', 'Scoring communication'],
   ['content_scoring', 'Scoring content'],
@@ -375,6 +378,7 @@ export default function OSCEAiMarkerMockup({
   onNavigateSession = null,
   onOpenRubric = null,
   onOpenAnalytics = null,
+  onOpenSettings = null,
   onLogout = null,
   notifications = null,
 } = {}) {
@@ -396,11 +400,9 @@ export default function OSCEAiMarkerMockup({
   // automatically applies to every clip assessed within that session.
   const [corpora, setCorpora] = useState([]);
   const [selectedCorpusId, setSelectedCorpusId] = useState('');
+  // CRUD lives in CorporaManager (shared with the Settings page); this modal
+  // flag just shows it next to the pre-flight corpus picker.
   const [showCorpusManager, setShowCorpusManager] = useState(false);
-  // null = closed; {id: null} = creating; {id} = editing that corpus.
-  const [corpusEditor, setCorpusEditor] = useState(null);
-  const [corpusSaving, setCorpusSaving] = useState(false);
-  const [corpusError, setCorpusError] = useState('');
 
   const [sessionIndex, setSessionIndex] = useState([]);
   const [sessionIndexLoading, setSessionIndexLoading] = useState(false);
@@ -1114,70 +1116,12 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
-  function openCorpusEditor(corpus = null) {
-    setCorpusError('');
-    setCorpusEditor(
-      corpus
-        ? { id: corpus.id, name: corpus.name || '', termsText: (corpus.terms || []).join('\n') }
-        : { id: null, name: '', termsText: '' },
-    );
-  }
-
-  async function saveCorpusEditor() {
-    if (!corpusEditor) return;
-    const name = corpusEditor.name.trim();
-    if (!name) {
-      setCorpusError('Corpus name is required.');
-      return;
-    }
-    const terms = corpusEditor.termsText
-      .split('\n')
-      .map((term) => term.trim())
-      .filter(Boolean);
-    setCorpusSaving(true);
-    setCorpusError('');
-    try {
-      const response = await fetch(corpusEditor.id ? `/api/corpora/${corpusEditor.id}` : '/api/corpora', {
-        method: corpusEditor.id ? 'PUT' : 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, terms }),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to save corpus.');
-      }
-      const savedId = body.corpus?.id;
-      if (savedId && !corpusEditor.id) {
-        // Creating a corpus from the picker usually means "use it now".
-        setSelectedCorpusId(savedId);
-      }
-      setCorpusEditor(null);
-      await refreshCorpora();
-    } catch (saveError) {
-      setCorpusError(saveError.message || 'Failed to save corpus.');
-    } finally {
-      setCorpusSaving(false);
-    }
-  }
-
-  async function deleteCorpusById(corpus) {
-    if (!window.confirm(`Delete corpus "${corpus.name}"? Sessions already created keep their own copy of the terms.`)) {
-      return;
-    }
-    setCorpusError('');
-    try {
-      const response = await fetch(`/api/corpora/${corpus.id}`, { method: 'DELETE' });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to delete corpus.');
-      }
-      if (selectedCorpusId === corpus.id) {
-        setSelectedCorpusId('');
-      }
-      await refreshCorpora();
-    } catch (deleteError) {
-      setCorpusError(deleteError.message || 'Failed to delete corpus.');
-    }
+  // Keep the pre-flight picker in sync with edits made in the corpora manager
+  // (modal here or the Settings page): adopt the fresh list and drop a
+  // selection whose corpus was deleted.
+  function handleCorporaChanged(list) {
+    setCorpora(list);
+    setSelectedCorpusId((previous) => (list.some((corpus) => corpus.id === previous) ? previous : ''));
   }
 
   async function refreshSessionIndex() {
@@ -3266,23 +3210,16 @@ export default function OSCEAiMarkerMockup({
             ) : null}
             {onOpenRubric ? (
               <Button variant="outline" size="sm" className="gap-2" onClick={onOpenRubric}>
-                <Settings className="h-4 w-4" />
+                <FileText className="h-4 w-4" />
                 Communication Rubric
               </Button>
             ) : null}
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-2"
-              onClick={() => {
-                setCorpusEditor(null);
-                setCorpusError('');
-                setShowCorpusManager(true);
-              }}
-            >
-              <Mic className="h-4 w-4" />
-              Transcription Corpora
-            </Button>
+            {onOpenSettings ? (
+              <Button variant="outline" size="sm" className="gap-2" onClick={onOpenSettings}>
+                <Settings className="h-4 w-4" />
+                Settings
+              </Button>
+            ) : null}
             {authUsername ? (
               <div className="flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1">
                 <User className="h-3.5 w-3.5 text-slate-500" />
@@ -4746,11 +4683,7 @@ export default function OSCEAiMarkerMockup({
                       </label>
                       <button
                         type="button"
-                        onClick={() => {
-                          setCorpusEditor(null);
-                          setCorpusError('');
-                          setShowCorpusManager(true);
-                        }}
+                        onClick={() => setShowCorpusManager(true)}
                         className="text-[11px] font-semibold text-cyan-700 underline-offset-2 hover:underline"
                       >
                         Manage corpora
@@ -4835,121 +4768,14 @@ export default function OSCEAiMarkerMockup({
               className="w-full max-w-lg"
               onClick={(event) => event.stopPropagation()}
             >
-              <Card className="border-slate-200 bg-white shadow-xl">
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-lg">
-                    <Mic className="h-5 w-5 text-cyan-700" />
-                    {corpusEditor ? (corpusEditor.id ? 'Edit corpus' : 'New corpus') : 'Transcription corpora'}
-                  </CardTitle>
-                  <CardDescription>
-                    Term lists that bias transcription towards case-specific vocabulary. Sessions keep a
-                    copy of the terms they were created with, so edits never change past results.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  {corpusError && (
-                    <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
-                      {corpusError}
-                    </div>
-                  )}
-                  {corpusEditor ? (
-                    <>
-                      <div>
-                        <label htmlFor="corpus-name-input" className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                          Corpus name
-                        </label>
-                        <input
-                          id="corpus-name-input"
-                          type="text"
-                          value={corpusEditor.name}
-                          maxLength={120}
-                          autoFocus
-                          onChange={(event) => setCorpusEditor({ ...corpusEditor, name: event.target.value })}
-                          placeholder="e.g. Asthma (Adult)"
-                          className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
-                        />
-                      </div>
-                      <div>
-                        <label htmlFor="corpus-terms-input" className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                          Terms — one per line
-                        </label>
-                        <textarea
-                          id="corpus-terms-input"
-                          value={corpusEditor.termsText}
-                          onChange={(event) => setCorpusEditor({ ...corpusEditor, termsText: event.target.value })}
-                          rows={10}
-                          placeholder={'nasal block\nrunny nose\nparacetamol'}
-                          className="mt-1 w-full resize-y rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-800 outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
-                        />
-                        <p className="mt-1 text-[11px] text-slate-400">
-                          Up to 200 terms; symptoms, medicines and phrases from this case study's rubric work best.
-                        </p>
-                      </div>
-                      <div className="flex items-center justify-end gap-2 pt-1">
-                        <Button variant="outline" size="sm" onClick={() => setCorpusEditor(null)} disabled={corpusSaving}>
-                          Back
-                        </Button>
-                        <Button
-                          size="sm"
-                          className="gap-2 bg-gradient-to-r from-cyan-600 to-blue-700 text-white hover:from-cyan-700 hover:to-blue-800"
-                          onClick={saveCorpusEditor}
-                          disabled={corpusSaving}
-                        >
-                          {corpusSaving && <Loader2 className="h-4 w-4 animate-spin" />}
-                          Save corpus
-                        </Button>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
-                        {corpora.length === 0 && (
-                          <div className="rounded-xl border border-dashed border-slate-300 p-4 text-center text-sm text-slate-500">
-                            No corpora yet. Create one for this case study.
-                          </div>
-                        )}
-                        {corpora.map((corpus) => (
-                          <div
-                            key={corpus.id}
-                            className="flex items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2"
-                          >
-                            <div className="min-w-0">
-                              <div className="truncate text-sm font-medium text-slate-800">{corpus.name}</div>
-                              <div className="text-[11px] text-slate-500">{(corpus.terms || []).length} terms</div>
-                            </div>
-                            <div className="flex shrink-0 items-center gap-1">
-                              <Button variant="outline" size="sm" onClick={() => openCorpusEditor(corpus)}>
-                                Edit
-                              </Button>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="text-rose-600 hover:bg-rose-50"
-                                onClick={() => deleteCorpusById(corpus)}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                      <div className="flex items-center justify-between gap-2 pt-1">
-                        <Button variant="outline" size="sm" onClick={() => setShowCorpusManager(false)}>
-                          Close
-                        </Button>
-                        <Button
-                          size="sm"
-                          className="gap-2 bg-gradient-to-r from-cyan-600 to-blue-700 text-white hover:from-cyan-700 hover:to-blue-800"
-                          onClick={() => openCorpusEditor()}
-                        >
-                          <Sparkles className="h-4 w-4" />
-                          New corpus
-                        </Button>
-                      </div>
-                    </>
-                  )}
-                </CardContent>
-              </Card>
+              <CorporaManager
+                onClose={() => setShowCorpusManager(false)}
+                onChanged={handleCorporaChanged}
+                onCreated={(corpus) => {
+                  // Creating a corpus from the picker usually means "use it now".
+                  setSelectedCorpusId(corpus.id);
+                }}
+              />
             </motion.div>
           </motion.div>
         )}

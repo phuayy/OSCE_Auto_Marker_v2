@@ -12,7 +12,19 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.dependencies import authorize_request
-from app.api.routes import analytics, async_uploads, auth, corpora, health, jobs, notifications, rubrics, sessions, uploads
+from app.api.routes import (
+    analytics,
+    async_uploads,
+    auth,
+    corpora,
+    health,
+    jobs,
+    notifications,
+    rubrics,
+    sessions,
+    settings as settings_routes,
+    uploads,
+)
 from app.core.asyncio_compat import configure_windows_selector_event_loop_policy
 from app.core.config import Settings
 from app.core.exceptions import AppError
@@ -129,3 +141,4 @@ app.include_router(sessions.router, prefix="/api")
 app.include_router(analytics.router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(corpora.router, prefix="/api")
+app.include_router(settings_routes.router, prefix="/api")

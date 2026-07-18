@@ -5,6 +5,7 @@ import { useHashRoute } from '@/lib/useHashRoute';
 import LoginScreen from '@/LoginScreen.jsx';
 import CommunicationRubricPanel from '@/CommunicationRubricPanel.jsx';
 import AnalyticsPage from '@/AnalyticsPage.jsx';
+import SettingsPage from '@/SettingsPage.jsx';
 import OSCEAiMarkerMockup from '@/OSCEAiMarkerMockup.jsx';
 import { NotificationToast, useNotifications } from '@/notifications.jsx';
 
@@ -67,6 +68,16 @@ export default function AppShell() {
         >
           <AnalyticsPage onBack={() => navigate({ view: 'dashboard' })} />
         </motion.div>
+      ) : route.view === 'settings' ? (
+        <motion.div
+          key="settings"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.25 }}
+        >
+          <SettingsPage onBack={() => navigate({ view: 'dashboard' })} />
+        </motion.div>
       ) : (
         <motion.div
           key="dashboard"
@@ -81,6 +92,7 @@ export default function AppShell() {
             onNavigateSession={(sessionId) => navigate({ view: 'dashboard', sessionId })}
             onOpenRubric={() => navigate({ view: 'rubric' })}
             onOpenAnalytics={() => navigate({ view: 'analytics' })}
+            onOpenSettings={() => navigate({ view: 'settings' })}
             onLogout={handleLogout}
             notifications={notifications}
           />
