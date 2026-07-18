@@ -45,6 +45,12 @@ import {
   timeAtOffset,
   toggleSegmentKind,
 } from './lib/manualTimeline.js';
+import {
+  areAllSelected,
+  planClipDispatch,
+  selectableClipIds,
+  toggleSelection,
+} from './lib/clipSelection.js';
 
 const SCORE_TEMPLATE = [
   {
@@ -444,6 +450,9 @@ export default function OSCEAiMarkerMockup({
   const [renamingClipId, setRenamingClipId] = useState(null);
   const [parentSessionSnapshot, setParentSessionSnapshot] = useState(null);
   const [clipAssessmentRuns, setClipAssessmentRuns] = useState({});
+  // Batch-run selection: ids of clips checked in the Clip Assessments panel.
+  const [selectedClipAssessmentIds, setSelectedClipAssessmentIds] = useState(() => new Set());
+  const [isQueueingSelectedClips, setIsQueueingSelectedClips] = useState(false);
   const [clipSummaries, setClipSummaries] = useState(null);
   const [isLoadingClipSummaries, setIsLoadingClipSummaries] = useState(false);
   // Demo-only override: the long-video demo can pre-load summaries directly
@@ -539,6 +548,18 @@ export default function OSCEAiMarkerMockup({
 
   const hasClipFiles = useMemo(() => videoClips.some((clip) => Boolean(clip?.url)), [videoClips]);
   const hasDraftClips = videoClips.length > 0 && !hasClipFiles;
+  // Batch-run selection derives from live run state: a clip that starts
+  // running drops out of the selectable set (and the selected count) instead
+  // of needing effect-based pruning when clips or statuses change.
+  const batchSelectableClipIds = useMemo(
+    () => selectableClipIds(videoClips, clipAssessmentRuns),
+    [videoClips, clipAssessmentRuns]
+  );
+  const selectedRunnableClipIds = useMemo(
+    () => batchSelectableClipIds.filter((id) => selectedClipAssessmentIds.has(id)),
+    [batchSelectableClipIds, selectedClipAssessmentIds]
+  );
+  const allClipsSelected = areAllSelected(selectedClipAssessmentIds, batchSelectableClipIds);
   // Session clips are the assessable student clips; intermissions are greyed
   // timeline markers (empty room / lone person between stations).
   const sessionClipCount = useMemo(
@@ -1251,6 +1272,7 @@ export default function OSCEAiMarkerMockup({
     setLiveLogLine('Loading session metadata...');
     setParentSessionSnapshot(null);
     setClipAssessmentRuns({});
+    setSelectedClipAssessmentIds(new Set());
 
     try {
       const payload = await loadSessionWorkspace(sessionId);
@@ -1342,6 +1364,7 @@ export default function OSCEAiMarkerMockup({
     setSelectedClipId(null);
     setParentSessionSnapshot(null);
     setClipAssessmentRuns({});
+    setSelectedClipAssessmentIds(new Set());
     setClipSummaries(null);
     setDemoLongVideoSummaries(null);
     setIsLoadingClipSummaries(false);
@@ -1493,6 +1516,7 @@ export default function OSCEAiMarkerMockup({
       setClipSummaries(null);
       setDemoLongVideoSummaries(null);
       setClipAssessmentRuns({});
+      setSelectedClipAssessmentIds(new Set());
       setRuntimeSeconds(Math.round(demoBundle.session?.pipeline?.runtimeSeconds || 0));
       setPipelineMilestones({
         started: true,
@@ -2589,16 +2613,22 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
+  // Returns true when the clip's assessment was queued (or demo-completed),
+  // false otherwise — the batch runner uses this to keep failed clips checked.
   async function runClipAssessment(clip) {
     if (!session?.id || !clip?.id) {
-      return;
+      return false;
     }
 
     // Guard against double-submission: if this clip already has an assessment
     // queued/running, do not create a second child session for it.
     if (clipAssessmentRuns[clip.id]?.status === 'running') {
-      return;
+      return false;
     }
+
+    // A dispatched clip leaves the batch selection so the checkboxes always
+    // mirror what "Run Selected Assessments" would actually queue.
+    unselectClipForBatch(clip.id);
 
     // Demo path: simulate the re-run by briefly switching to a "running" state,
     // then re-loading the pre-bundled child assessment from disk.
@@ -2630,7 +2660,7 @@ export default function OSCEAiMarkerMockup({
       setNotice(
         `Demo mode: a real re-run would call the NVIDIA assessor again. Showing the cached score for "${clip.label || ''}".`,
       );
-      return;
+      return true;
     }
 
     // Non-blocking: queue the child assessment and STAY on the parent clip
@@ -2666,18 +2696,20 @@ export default function OSCEAiMarkerMockup({
       }));
       setNotice(`Assessment for "${clip.label || 'clip'}" queued — its row updates as it progresses.`);
       refreshSessionIndex();
+      return true;
     } catch (assessmentError) {
       setClipAssessmentRuns((previous) => ({
         ...previous,
         [clip.id]: { status: 'failed', error: assessmentError.message || 'Clip assessment failed.' },
       }));
       setError(assessmentError.message || 'Clip assessment failed.');
+      return false;
     }
   }
 
   async function rerunClipAssessment(clip, childSessionId) {
     if (!clip?.id) {
-      return;
+      return false;
     }
     // No existing child (or demo bundle) → fall back to a first run, which
     // handles the demo path and creates the child session.
@@ -2685,9 +2717,10 @@ export default function OSCEAiMarkerMockup({
       return runClipAssessment(clip);
     }
     if (clipAssessmentRuns[clip.id]?.status === 'running') {
-      return;
+      return false;
     }
 
+    unselectClipForBatch(clip.id);
     setError('');
     setClipAssessmentRuns((previous) => ({
       ...previous,
@@ -2701,12 +2734,94 @@ export default function OSCEAiMarkerMockup({
       }
       setNotice(`Re-running assessment for "${clip.label || 'clip'}" — its row updates as it progresses.`);
       refreshSessionIndex();
+      return true;
     } catch (rerunError) {
       setClipAssessmentRuns((previous) => ({
         ...previous,
         [clip.id]: { status: 'failed', sessionId: childSessionId, error: rerunError.message || 'Re-run failed.' },
       }));
       setError(rerunError.message || 'Re-run failed.');
+      return false;
+    }
+  }
+
+  function unselectClipForBatch(clipId) {
+    setSelectedClipAssessmentIds((previous) => {
+      if (!previous.has(clipId)) {
+        return previous;
+      }
+      const next = new Set(previous);
+      next.delete(clipId);
+      return next;
+    });
+  }
+
+  function toggleClipSelected(clipId) {
+    setSelectedClipAssessmentIds((previous) => toggleSelection(previous, clipId));
+  }
+
+  function toggleSelectAllClips() {
+    setSelectedClipAssessmentIds(allClipsSelected ? new Set() : new Set(batchSelectableClipIds));
+  }
+
+  async function runSelectedClipAssessments() {
+    if (isQueueingSelectedClips || selectedRunnableClipIds.length === 0) {
+      return;
+    }
+
+    const clipsById = new Map(videoClips.map((clip) => [clip.id, clip]));
+    // Snapshot each clip's dispatch route up front — run state advances as the
+    // loop queues clips, and decisions should reflect the pre-batch statuses.
+    const plans = selectedRunnableClipIds.map((clipId) => [
+      clipId,
+      planClipDispatch(clipAssessmentRuns[clipId], clipAssessmentIndex[clipId]),
+    ]);
+
+    // Re-scoring a completed clip costs real assessor calls and replaces its
+    // scores — make that explicit instead of silently re-running.
+    const completedCount = plans.filter(([, plan]) => plan.status === 'completed').length;
+    if (
+      completedCount > 0 &&
+      !window.confirm(
+        completedCount === 1
+          ? '1 selected clip already has a completed assessment; running it again will re-score it. Continue?'
+          : `${completedCount} selected clips already have completed assessments; running them again will re-score them. Continue?`
+      )
+    ) {
+      return;
+    }
+
+    setIsQueueingSelectedClips(true);
+    const failedToQueue = new Set();
+    let queuedCount = 0;
+    try {
+      // Sequential on purpose: one POST at a time keeps queue order matching
+      // the clip order and avoids bursting the backend with parallel requests.
+      for (const [clipId, plan] of plans) {
+        const clip = clipsById.get(clipId);
+        const queued =
+          plan.mode === 'rerun'
+            ? await rerunClipAssessment(clip, plan.childSessionId)
+            : await runClipAssessment(clip);
+        if (queued) {
+          queuedCount += 1;
+        } else {
+          failedToQueue.add(clipId);
+        }
+      }
+    } finally {
+      // Queued clips already unchecked themselves; re-check the failures so
+      // the user can fix the issue and retry the batch in one click.
+      if (failedToQueue.size > 0) {
+        setSelectedClipAssessmentIds((previous) => new Set([...previous, ...failedToQueue]));
+      }
+      setIsQueueingSelectedClips(false);
+    }
+
+    if (queuedCount > 0) {
+      setNotice(
+        `Queued ${queuedCount} clip assessment${queuedCount === 1 ? '' : 's'} — rows update as they progress.`
+      );
     }
   }
 
@@ -3155,6 +3270,19 @@ export default function OSCEAiMarkerMockup({
                 Communication Rubric
               </Button>
             ) : null}
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2"
+              onClick={() => {
+                setCorpusEditor(null);
+                setCorpusError('');
+                setShowCorpusManager(true);
+              }}
+            >
+              <Mic className="h-4 w-4" />
+              Transcription Corpora
+            </Button>
             {authUsername ? (
               <div className="flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1">
                 <User className="h-3.5 w-3.5 text-slate-500" />
@@ -4202,7 +4330,46 @@ export default function OSCEAiMarkerMockup({
                   <Card className="border-slate-200 bg-white shadow-sm">
                     <CardHeader>
                       <CardTitle className="text-base">Clip Assessments</CardTitle>
-                      <CardDescription>Run full scoring on each exported student clip.</CardDescription>
+                      <CardDescription>
+                        Run full scoring on each exported student clip, or tick clips to queue them together.
+                      </CardDescription>
+                      <div className="flex flex-wrap items-center gap-2 pt-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={toggleSelectAllClips}
+                          disabled={isQueueingSelectedClips || batchSelectableClipIds.length === 0}
+                          title={
+                            allClipsSelected
+                              ? 'Clear the current clip selection'
+                              : 'Select every clip that can be queued'
+                          }
+                        >
+                          {allClipsSelected ? 'Unselect all' : 'Select all'}
+                        </Button>
+                        <Button
+                          size="sm"
+                          onClick={runSelectedClipAssessments}
+                          disabled={
+                            isProcessing || isQueueingSelectedClips || selectedRunnableClipIds.length === 0
+                          }
+                          title={
+                            selectedRunnableClipIds.length === 0
+                              ? 'Tick at least one clip to queue its assessment.'
+                              : `Queue scoring for ${selectedRunnableClipIds.length} selected clip${
+                                  selectedRunnableClipIds.length === 1 ? '' : 's'
+                                }`
+                          }
+                        >
+                          {isQueueingSelectedClips ? (
+                            <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <PlayCircle className="mr-1 h-3.5 w-3.5" />
+                          )}
+                          Run Selected Assessments
+                          {selectedRunnableClipIds.length > 0 ? ` (${selectedRunnableClipIds.length})` : ''}
+                        </Button>
+                      </div>
                     </CardHeader>
                     <CardContent className="space-y-3">
                       {videoClips.map((clip, index) => {
@@ -4261,12 +4428,27 @@ export default function OSCEAiMarkerMockup({
                         return (
                           <div key={clip.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                             <div className="flex items-center justify-between gap-2">
-                              <div>
-                                <div className="text-sm font-semibold text-slate-900">
-                                  {clip.label || `Student ${index + 1}`}
-                                </div>
-                                <div className="text-xs text-slate-500">
-                                  {formatRuntime(clip.start)} - {formatRuntime(clip.end)}
+                              <div className="flex min-w-0 items-start gap-2.5">
+                                <input
+                                  type="checkbox"
+                                  className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer accent-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
+                                  checked={selectedClipAssessmentIds.has(clip.id)}
+                                  disabled={runState.status === 'running' || isQueueingSelectedClips}
+                                  onChange={() => toggleClipSelected(clip.id)}
+                                  aria-label={`Select ${clip.label || `Student ${index + 1}`} for batch assessment`}
+                                  title={
+                                    runState.status === 'running'
+                                      ? 'Already queued — available again when this run finishes.'
+                                      : 'Include this clip in "Run Selected Assessments"'
+                                  }
+                                />
+                                <div className="min-w-0">
+                                  <div className="text-sm font-semibold text-slate-900">
+                                    {clip.label || `Student ${index + 1}`}
+                                  </div>
+                                  <div className="text-xs text-slate-500">
+                                    {formatRuntime(clip.start)} - {formatRuntime(clip.end)}
+                                  </div>
                                 </div>
                               </div>
                               <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${statusClass}`}>

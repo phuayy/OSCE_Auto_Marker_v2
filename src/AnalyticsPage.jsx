@@ -283,9 +283,11 @@ function FilterRow({ label, color, filter, onChange, sessions, students, onRemov
 function StatTile({ icon: Icon, label, primary, secondary, hint, compare }) {
   return (
     <Card className="border-slate-200 bg-white shadow-sm">
-      <CardContent className="flex flex-col gap-1 p-4">
-        <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500">
-          <Icon className="h-3.5 w-3.5" aria-hidden />
+      <CardContent className="flex flex-col gap-2 p-5 pt-6">
+        <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
+          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-50 text-blue-600">
+            <Icon className="h-3.5 w-3.5" aria-hidden />
+          </span>
           {label}
         </div>
         <div className="flex items-baseline gap-2">
@@ -680,7 +682,7 @@ export default function AnalyticsPage({ onBack }) {
           >
             {/* Filters — one row per filter set, scoping everything below. */}
             <Card className="border-slate-200 bg-white shadow-sm">
-              <CardContent className="flex flex-col gap-3 p-4">
+              <CardContent className="flex flex-col gap-3 p-5 pt-6">
                 <FilterRow
                   label={compare ? 'Primary' : 'Filters'}
                   color={SERIES_A}
