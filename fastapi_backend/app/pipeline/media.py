@@ -706,6 +706,8 @@ class MediaPipeline:
             whisperx_device,
             "--compute_type",
             whisperx_compute_type,
+            "--batch_size",
+            str(self.settings.whisperx_batch_size),
             "--diarize",
             "--hf_token",
             hf_token,
@@ -843,7 +845,7 @@ class MediaPipeline:
         requested = str(self.settings.whisperx_compute_type or "float16").strip().lower()
         # CTranslate2 on CPU does not support float16; downgrade to a CPU-safe type
         # so a cuda->cpu fallback never crashes the run.
-        if str(device).lower() == "cpu" and requested in {"float16", "fp16", "half"}:
+        if str(device).lower() == "cpu" and requested in {"float16", "fp16", "half", "int8_float16"}:
             return "int8"
         return requested
 

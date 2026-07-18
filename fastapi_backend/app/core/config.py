@@ -286,7 +286,11 @@ class Settings:
     # distil-large-v3 if transcription latency becomes a problem.
     whisperx_model: str = os.getenv("WHISPERX_MODEL", "large-v3").strip() or "large-v3"
     whisperx_device: str = os.getenv("WHISPERX_DEVICE", "cuda").strip() or "cuda"
-    whisperx_compute_type: str = os.getenv("WHISPERX_COMPUTE_TYPE", "float16").strip() or "float16"
+    # The WhisperX CLI only accepts default/float16/float32/int8.
+    whisperx_compute_type: str = os.getenv("WHISPERX_COMPUTE_TYPE", "int8").strip() or "int8"
+    # WhisperX CLI defaults to 8, which OOMs large-v3 on <=6GB cards once the
+    # pyannote diarisation models share the device. Raise if you get a bigger GPU.
+    whisperx_batch_size: int = read_int_env("WHISPERX_BATCH_SIZE", 1)
     whisperx_output_format: str = os.getenv("WHISPERX_OUTPUT_FORMAT", "all").strip() or "all"
     whisperx_log_heartbeat_ms: int = read_int_env("WHISPERX_LOG_HEARTBEAT_MS", 5000)
     # ffmpeg -af chain for the dedicated WhisperX input WAV; "" disables the
