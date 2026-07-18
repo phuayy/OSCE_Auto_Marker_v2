@@ -4,6 +4,9 @@ import { Bell } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 
 const POLL_INTERVAL_MS = 8000;
+// When the backend is unreachable (dev restart, cold boot) the poll backs off
+// up to this ceiling instead of hammering the dead port every 8s.
+const MAX_POLL_INTERVAL_MS = 30000;
 
 function timeAgo(iso) {
   const then = new Date(iso).getTime();
@@ -19,8 +22,12 @@ function timeAgo(iso) {
  * Global notification state: polls the backend, exposes the history list,
  * unread badge count, and the single active toast (a newer arrival replaces
  * the current one). Mount ONCE (in AppShell) and pass down as props.
+ *
+ * `enabled` gates the poll on auth: nothing is fetched pre-login, polling
+ * stops (and state resets) on logout/expiry, and the first poll after login
+ * seeds silently — no toast replay of history.
  */
-export function useNotifications() {
+export function useNotifications(enabled) {
   const [items, setItems] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [toast, setToast] = useState(null);
@@ -28,31 +35,58 @@ export function useNotifications() {
   // page load goes to the feed/badge without popping a toast.
   const knownIdsRef = useRef(null);
 
+  // Returns true when the backend answered (even 401/500), false when it is
+  // unreachable — the poll loop backs off on false.
   const refresh = useCallback(async () => {
     try {
       const response = await fetch('/api/notifications');
-      if (!response.ok) return;
+      if (!response.ok) {
+        // 502 is the vite proxy's "backend unavailable" answer.
+        return response.status !== 502;
+      }
       const body = await response.json();
       const list = Array.isArray(body.notifications) ? body.notifications : [];
       setItems(list);
       setUnreadCount(Number(body.unreadCount) || 0);
       if (knownIdsRef.current === null) {
         knownIdsRef.current = new Set(list.map((item) => item.id));
-        return;
+        return true;
       }
       const fresh = list.filter((item) => !item.read && !knownIdsRef.current.has(item.id));
       for (const item of list) knownIdsRef.current.add(item.id);
       if (fresh.length > 0) setToast(fresh[0]); // list is newest-first
+      return true;
     } catch {
-      // Network hiccup — the next poll retries.
+      return false; // Backend down/booting — back off and retry.
     }
   }, []);
 
   useEffect(() => {
-    refresh();
-    const timer = setInterval(refresh, POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [refresh]);
+    if (!enabled) {
+      // Logged out (or session expired): stop polling and reset so the next
+      // login seeds fresh — no stale items, no toast replay.
+      setItems([]);
+      setUnreadCount(0);
+      setToast(null);
+      knownIdsRef.current = null;
+      return undefined;
+    }
+    let cancelled = false;
+    let timerId;
+    let delay = POLL_INTERVAL_MS;
+    async function tick() {
+      const reachable = await refresh();
+      if (cancelled) return;
+      // Exponential backoff while the backend is down; snap back on success.
+      delay = reachable ? POLL_INTERVAL_MS : Math.min(delay * 2, MAX_POLL_INTERVAL_MS);
+      timerId = setTimeout(tick, delay);
+    }
+    tick();
+    return () => {
+      cancelled = true;
+      clearTimeout(timerId);
+    };
+  }, [enabled, refresh]);
 
   const dismiss = useCallback(async (id) => {
     // Optimistic: badge and list update immediately, server call follows.

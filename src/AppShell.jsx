@@ -17,8 +17,9 @@ export default function AppShell() {
   const [route, navigate] = useHashRoute();
   // Global notification state: the toast renders on every page; the bell and
   // feed live inside the dashboard and receive this same state as props.
-  // (Called unconditionally per hooks rules; polls 401 harmlessly pre-login.)
-  const notifications = useNotifications();
+  // (Hook called unconditionally per hooks rules; the auth flag gates the
+  // actual polling so nothing hits the API pre-login.)
+  const notifications = useNotifications(Boolean(authState));
 
   useEffect(() => {
     function handleExpired() {
