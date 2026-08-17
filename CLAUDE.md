@@ -291,7 +291,9 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 | Variable | Default | Purpose |
 |---|---|---|
 | `WHISPERX_DEVICE` | `cuda` | `cuda` or `cpu` |
-| `WHISPERX_COMPUTE_TYPE` | `float16` | `float16` (GPU) auto-downgrades to `int8` on CPU |
+| `WHISPERX_MODEL` | `large-v3` | Whisper checkpoint; `distil-large-v3` for lower latency |
+| `WHISPERX_COMPUTE_TYPE` | `int8` | `float16` on larger GPUs; auto-downgrades to `int8` on CPU |
+| `WHISPERX_BATCH_SIZE` | `1` | Raise on GPUs with more than 6 GB VRAM |
 | `PARALLEL_SCORING` | `true` | Run content branch parallel to communication branch |
 | `JOB_QUEUE_BACKEND` | `local` | `local` or `hatchet` |
 | `DATABASE_URL` | SQLite in storage/ | PostgreSQL or SQLite URL |

@@ -34,7 +34,7 @@ per-process OOM batch-halving/CPU-fallback keeps oversubscribed runs degrading
 instead of dying.
 
 Model selection (researched for an RTX 3050 Laptop GPU, 4 GB VRAM, sharing the
-machine with WhisperX ``large-v2``):
+machine with WhisperX ``large-v3``):
 
 ===========================================  ========  =================  ==========================
 Model (HuggingFace id)                       Params    VRAM @640 (fp16)   Notes
