@@ -28,7 +28,7 @@ The end product: an examiner uploads a video, walks away, and comes back to a pe
 | Frontend | React 18 + Vite, Tailwind CSS, shadcn/ui patterns, plain JS (hash routing, no react-router) |
 | Backend | FastAPI (Python 3.12), uvicorn, SQLAlchemy async |
 | Databases | Dual: raw `aiosqlite` for the jobs queue; SQLAlchemy ORM for sessions/assessments/rubrics/videos. SQLite by default, PostgreSQL optional |
-| Transcription | WhisperX CLI (large-v3, CUDA int8 or CPU int8) — subprocess |
+| Transcription | WhisperX CLI (large-v3, CUDA float16 or CPU int8) — subprocess |
 | Vision segmentation | RT-DETRv2-R18 (`PekingU/rtdetr_v2_r18vd`) via HuggingFace `transformers` — subprocess, ~1.5 GB VRAM fp16 |
 | Audio segmentation | librosa bell + silence detection — subprocess |
 | LLM scoring | NVIDIA Nemotron via `https://integrate.api.nvidia.com/v1` (OpenAI-compatible client) — subprocess |
@@ -168,10 +168,11 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 # expect: 2.8.0+cu128 True
 ```
 
-> **4 GB VRAM note:** the default WhisperX model is `large-v3`. At `float16` (~3 GB)
-> it does not fit alongside pyannote diarisation, so the defaults are
-> `WHISPERX_COMPUTE_TYPE=int8` (~1.5 GB) and `WHISPERX_BATCH_SIZE=1`. Raise both on a
-> larger GPU; if transcription is too slow, set `WHISPERX_MODEL=distil-large-v3`.
+> **4 GB VRAM note:** the defaults are `large-v3` at `WHISPERX_COMPUTE_TYPE=float16`
+> (~3 GB, the native weight precision) with `WHISPERX_BATCH_SIZE=1`. On a 4 GB card
+> that is tight and can OOM once pyannote diarisation shares the device — set
+> `WHISPERX_COMPUTE_TYPE=int8` (~1.5 GB, near-identical accuracy) in `.env` if it
+> does. If transcription is too slow, set `WHISPERX_MODEL=distil-large-v3`.
 
 ### 6.3 Install ffmpeg (if not present)
 

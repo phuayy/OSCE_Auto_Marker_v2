@@ -286,8 +286,11 @@ class Settings:
     # distil-large-v3 if transcription latency becomes a problem.
     whisperx_model: str = os.getenv("WHISPERX_MODEL", "large-v3").strip() or "large-v3"
     whisperx_device: str = os.getenv("WHISPERX_DEVICE", "cuda").strip() or "cuda"
-    # The WhisperX CLI only accepts default/float16/float32/int8.
-    whisperx_compute_type: str = os.getenv("WHISPERX_COMPUTE_TYPE", "int8").strip() or "int8"
+    # The WhisperX CLI only accepts default/float16/float32/int8. float16 matches
+    # the native large-v3 weight precision (~3 GB) and is the accuracy default;
+    # float32 only upcasts the same weights for ~2x the VRAM. Set int8 (~1.5 GB) on
+    # <=4 GB cards where float16 plus pyannote diarisation does not fit.
+    whisperx_compute_type: str = os.getenv("WHISPERX_COMPUTE_TYPE", "float16").strip() or "float16"
     # WhisperX CLI defaults to 8, which OOMs large-v3 on <=6GB cards once the
     # pyannote diarisation models share the device. Raise if you get a bigger GPU.
     whisperx_batch_size: int = read_int_env("WHISPERX_BATCH_SIZE", 1)
