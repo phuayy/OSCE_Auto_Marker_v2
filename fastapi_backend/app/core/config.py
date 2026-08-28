@@ -75,6 +75,14 @@ def read_csv_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     return values or default
 
 
+def winget_packages_dir() -> Path:
+    """Root of winget's per-user package installs; a non-existent path when unset."""
+    local_appdata = os.getenv("LOCALAPPDATA", "").strip()
+    if os.name != "nt" or not local_appdata:
+        return Path("winget-packages-root-not-available")
+    return Path(local_appdata) / "Microsoft" / "WinGet" / "Packages"
+
+
 def resolve_binary_from_candidates(
     env_value: str | None,
     fallback_command: str,
@@ -482,17 +490,30 @@ class Settings:
     def load(cls) -> "Settings":
         raw_root = os.getenv("APP_ROOT", "").strip()
         root_dir = Path(raw_root).expanduser() if raw_root else Path(__file__).resolve().parents[3]
+        # winget installs ffmpeg under a versioned package directory and does not
+        # always create shims in WinGet\Links, so the bin folder stays off PATH.
+        # Newest version first, so an upgrade is picked up without touching .env.
+        winget_ffmpeg_bins = sorted(
+            (
+                bin_dir
+                for pattern in ("Gyan.FFmpeg*", "BtbN.FFmpeg*")
+                for bin_dir in winget_packages_dir().glob(f"{pattern}/*/bin")
+            ),
+            reverse=True,
+        )
         windows_ffmpeg = [
             Path(r"C:\ffmpeg\bin\ffmpeg.exe"),
             Path(r"C:\Program Files\ffmpeg\bin\ffmpeg.exe"),
             Path(r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe"),
             Path(r"C:\ProgramData\chocolatey\bin\ffmpeg.exe"),
+            *(bin_dir / "ffmpeg.exe" for bin_dir in winget_ffmpeg_bins),
         ]
         windows_ffprobe = [
             Path(r"C:\ffmpeg\bin\ffprobe.exe"),
             Path(r"C:\Program Files\ffmpeg\bin\ffprobe.exe"),
             Path(r"C:\Program Files (x86)\ffmpeg\bin\ffprobe.exe"),
             Path(r"C:\ProgramData\chocolatey\bin\ffprobe.exe"),
+            *(bin_dir / "ffprobe.exe" for bin_dir in winget_ffmpeg_bins),
         ]
         python_candidates = (
             [root_dir / ".venv" / "Scripts" / "python.exe"]
