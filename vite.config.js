@@ -31,6 +31,11 @@ function makeProxyOptions(target) {
 export default defineConfig({
   plugins: [react()],
   server: {
+    // Bind IPv4 loopback explicitly. Node 17+ otherwise binds ::1 only, which
+    // refuses clients that resolve localhost to 127.0.0.1.
+    host: '127.0.0.1',
+    // Fail loudly instead of silently sliding to 5174 when 5173 is taken.
+    strictPort: true,
     proxy: {
       '/api': makeProxyOptions(apiTarget),
       '/media': makeProxyOptions(apiTarget),
