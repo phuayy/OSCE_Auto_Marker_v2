@@ -18,6 +18,14 @@ const pythonBin = process.env.PYTHON_BIN || 'python';
 const DEFAULT_API_PORT = Number(process.env.API_PORT || 8787);
 const PORT_SCAN_LIMIT = 20;
 
+// One dev process dying should not take the other down with it — a crashed API
+// on a bad import is a two-second fix, and killing Vite forces a full restart
+// (and a browser reload) for nothing. Restart it instead, and only give up when
+// it keeps dying immediately, which means it cannot start at all.
+const RESTART_DELAY_MS = 500;
+const RAPID_FAILURE_WINDOW_MS = 5000;
+const MAX_RAPID_FAILURES = 3;
+
 if (!existsSync(backendAppDir)) {
   console.error('Missing FastAPI backend directory: fastapi_backend');
   process.exit(1);
@@ -72,19 +80,40 @@ async function resolveApiPort() {
 }
 
 function launch(name, command, args, extraEnv = {}) {
-  const child = spawn(command, args, {
+  const entry = {
+    name,
+    command,
+    args,
+    extraEnv,
+    child: null,
+    startedAt: 0,
+    rapidFailures: 0,
+  };
+
+  children.push(entry);
+  spawnChild(entry);
+  return entry;
+}
+
+function spawnChild(entry) {
+  const child = spawn(entry.command, entry.args, {
     cwd: rootDir,
     stdio: 'inherit',
     env: {
       ...process.env,
-      ...extraEnv,
+      ...entry.extraEnv,
     },
     windowsHide: false,
   });
 
+  entry.child = child;
+  entry.startedAt = Date.now();
+
   child.on('error', (error) => {
+    // The command itself could not be run (missing binary, bad path). Retrying
+    // cannot help, so this is the one case that still stops everything.
     processExitCode = 1;
-    console.error(`[${name}] Failed to start: ${error.message}`);
+    console.error(`[${entry.name}] Failed to start: ${error.message}`);
     shutdownAll();
   });
 
@@ -93,15 +122,26 @@ function launch(name, command, args, extraEnv = {}) {
       return;
     }
 
-    if (code !== 0) {
+    const ranForMs = Date.now() - entry.startedAt;
+    entry.rapidFailures = ranForMs < RAPID_FAILURE_WINDOW_MS ? entry.rapidFailures + 1 : 0;
+
+    const reason = `code ${code}${signal ? ` (signal: ${signal})` : ''}`;
+
+    if (entry.rapidFailures > MAX_RAPID_FAILURES) {
       processExitCode = code || 1;
-      console.error(`[${name}] exited with code ${code}${signal ? ` (signal: ${signal})` : ''}`);
+      console.error(`[${entry.name}] exited with ${reason} and keeps failing on startup. Stopping.`);
+      shutdownAll(entry.name);
+      return;
     }
 
-    shutdownAll(name);
+    console.warn(`[${entry.name}] exited with ${reason}. Restarting...`);
+    setTimeout(() => {
+      if (!shuttingDown) {
+        spawnChild(entry);
+      }
+    }, RESTART_DELAY_MS);
   });
 
-  children.push({ name, child });
   return child;
 }
 
@@ -113,7 +153,7 @@ function shutdownAll(exceptName = null) {
   shuttingDown = true;
 
   for (const entry of children) {
-    if (entry.name === exceptName) {
+    if (entry.name === exceptName || entry.child === null) {
       continue;
     }
 
@@ -125,7 +165,7 @@ function shutdownAll(exceptName = null) {
   // Give child processes a brief moment to shut down gracefully.
   setTimeout(() => {
     for (const entry of children) {
-      if (entry.child.exitCode === null) {
+      if (entry.child !== null && entry.child.exitCode === null) {
         entry.child.kill('SIGKILL');
       }
     }
