@@ -175,11 +175,70 @@ class NotificationRecord(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Wire identifier from domain.notifications.NotificationType. Nullable, and
+    # backfilled to a legacy default by the additive migration, because rows
+    # written before webhooks existed have no type.
+    event_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     # Null = unread. Single-user system, so read state lives on the row itself.
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WebhookSubscriptionRecord(Base):
+    """An outbound HTTP endpoint that receives notification events.
+
+    The secret is stored in plaintext because it is not a credential *for* this
+    system — it is the shared key the subscriber uses to verify our HMAC
+    signature, and we must be able to re-sign every delivery with it. It is
+    never returned by the API after creation (only a masked preview is).
+    """
+
+    __tablename__ = "webhook_subscriptions"
+    __table_args__ = (Index("idx_webhook_subscriptions_active", "active"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    description: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    secret: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Event types this endpoint wants. Empty list or ["*"] = every type.
+    event_types: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    # Denormalised summary of the most recent delivery, so the management UI can
+    # show endpoint health without joining the (capped) delivery log.
+    last_delivery_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class WebhookDeliveryRecord(Base):
+    """One delivery attempt of one event to one subscription.
+
+    Kept for operator debugging ("did my endpoint get it, and what did it say?").
+    Pruned to a bounded number of rows per subscription — this is a log, not an
+    audit trail, and it must never grow without limit.
+    """
+
+    __tablename__ = "webhook_deliveries"
+    __table_args__ = (
+        Index("idx_webhook_deliveries_subscription", "subscription_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    subscription_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    notification_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # "succeeded" | "failed"
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 
 class CorpusRecord(Base):

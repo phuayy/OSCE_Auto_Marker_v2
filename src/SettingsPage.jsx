@@ -3,6 +3,7 @@ import { ArrowLeft, Loader2, Settings as SettingsIcon, Wand2 } from 'lucide-reac
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import CorporaManager from '@/CorporaManager.jsx';
+import WebhooksManager from '@/WebhooksManager.jsx';
 
 // Global application settings page (#/settings). Settings live in the backend
 // DB, so a toggle here applies immediately to every subsequent run — including
@@ -147,6 +148,8 @@ export default function SettingsPage({ onBack }) {
         </Card>
 
         <CorporaManager />
+
+        <WebhooksManager />
       </main>
     </div>
   );

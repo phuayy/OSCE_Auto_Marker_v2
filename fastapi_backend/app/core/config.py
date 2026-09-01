@@ -297,6 +297,23 @@ class Settings:
     # to isolate a suspected staleness bug: every read then goes to the
     # database, which is correct but materially slower under load.
     cache_enabled: bool = read_bool_env("CACHE_ENABLED", True)
+
+    # --- Outbound notification webhooks ---------------------------------
+    # Per-request timeout for one delivery attempt. Kept short: a webhook is a
+    # fire-and-forget announcement, not a transaction worth waiting on.
+    webhook_timeout_seconds: float = read_float_env("WEBHOOK_TIMEOUT_SECONDS", 10.0)
+    # Total attempts per event per subscription (1 = no retry). Only transport
+    # errors, 5xx, and 429 are retried; a 4xx is a refusal, not a hiccup.
+    webhook_max_attempts: int = read_int_env("WEBHOOK_MAX_ATTEMPTS", 3)
+    # Off by default so the safe behaviour needs no configuration: a webhook URL
+    # resolving to loopback/private space is refused, because the server making
+    # a caller-supplied request is a textbook SSRF primitive. Turn on to point a
+    # webhook at a listener on your own machine during development.
+    webhook_allow_private_urls: bool = read_bool_env("WEBHOOK_ALLOW_PRIVATE_URLS", False)
+    webhook_user_agent: str = (
+        os.getenv("WEBHOOK_USER_AGENT", "").strip() or "OSCE-AI-Marker-Webhook/1.0"
+    )
+
     ffmpeg_bin: str = ""
     ffprobe_bin: str = ""
     scorer_python_bin: str = ""

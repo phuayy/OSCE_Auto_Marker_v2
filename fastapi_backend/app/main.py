@@ -25,6 +25,7 @@ from app.api.routes import (
     sessions,
     settings as settings_routes,
     uploads,
+    webhooks,
 )
 from app.core.asyncio_compat import configure_windows_selector_event_loop_policy
 from app.core.config import Settings
@@ -142,5 +143,6 @@ app.include_router(jobs.router, prefix="/api")
 app.include_router(sessions.router, prefix="/api")
 app.include_router(analytics.router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
+app.include_router(webhooks.router, prefix="/api")
 app.include_router(corpora.router, prefix="/api")
 app.include_router(settings_routes.router, prefix="/api")
