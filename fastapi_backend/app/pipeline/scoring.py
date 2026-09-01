@@ -78,7 +78,7 @@ class ScoringPipeline:
         return not all(isinstance(summary.get(key), (int, float)) for key in ("total_score", "max_score", "pass_threshold"))
 
     def python_env(self, extra_env: dict[str, str] | None = None) -> dict[str, str]:
-        env = {"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+        env = self.settings.subprocess_env()
         if self.auth.runtime.nvidia_api_key:
             env["NVIDIA_API_KEY"] = self.auth.runtime.nvidia_api_key
         env.update(extra_env or {})

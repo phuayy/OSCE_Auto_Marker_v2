@@ -14,7 +14,12 @@ Install these first:
   stack fails to resolve, use Python 3.10 or 3.11 for the AI pipeline.
 - Node.js 20 LTS or newer.
 - FFmpeg and FFprobe available on `PATH`, or configured with `FFMPEG_BIN` and
-  `FFPROBE_BIN` in `.env`.
+  `FFPROBE_BIN` in `.env`. On Windows the backend also discovers winget and
+  chocolatey installs whose `bin` folder never reached `PATH`, and forwards that
+  folder to every child process it launches — WhisperX shells out to a bare
+  `ffmpeg` of its own, so it has to find one. A `FileNotFoundError: [WinError 2]`
+  inside `whisperx/audio.py` means no ffmpeg was found at all: install it, or
+  point `FFMPEG_BIN` at the binary.
 - Optional: Docker for local PostgreSQL or Hatchet Lite. Normal local
   development uses SQLite and does not require Docker.
 - Optional for full transcription/scoring: NVIDIA API key and Hugging Face token.

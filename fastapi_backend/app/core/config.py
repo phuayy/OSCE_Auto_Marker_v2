@@ -560,6 +560,50 @@ class Settings:
         raw = os.getenv("AUTO_CROP_SEGMENTATION", "bells").strip().lower()
         return raw if raw in {"bells", "person"} else "bells"
 
+    def media_tool_path_env(self) -> dict[str, str]:
+        """PATH override putting the resolved ffmpeg/ffprobe directories first.
+
+        ``Settings.load`` resolves those binaries to absolute paths (a winget
+        package directory, a chocolatey shim) that are routinely *not* on PATH.
+        Every command this backend launches itself is given the absolute path,
+        but the children launched by those children are not:
+
+        * WhisperX's ``load_audio`` spawns a bare ``ffmpeg`` and dies with
+          ``FileNotFoundError: [WinError 2]`` when it is not on PATH;
+        * torchcodec (loaded by pyannote) links FFmpeg's shared libraries at
+          import time and degrades to "Could not load libtorchcodec";
+        * librosa's audioread fallback shells out the same way.
+
+        Handing those processes an augmented PATH keeps the resolution rule in
+        one place instead of teaching each third-party tool a new setting.
+        Returns an empty mapping when the binaries are bare command names, which
+        means they were found on PATH already.
+        """
+        tool_dirs: list[str] = []
+        for binary in (self.ffmpeg_bin, self.ffprobe_bin):
+            value = str(binary or "").strip()
+            if not value or not any(separator in value for separator in ("/", "\\")):
+                continue
+            parent = str(Path(value).expanduser().parent)
+            if parent and parent not in tool_dirs:
+                tool_dirs.append(parent)
+        if not tool_dirs:
+            return {}
+        inherited = os.environ.get("PATH", "")
+        return {"PATH": os.pathsep.join([*tool_dirs, inherited] if inherited else tool_dirs)}
+
+    def subprocess_env(self, extra_env: dict[str, str] | None = None) -> dict[str, str]:
+        """Base environment for every child process the pipeline launches.
+
+        Unbuffered UTF-8 output (so streamed logs arrive line by line and
+        non-ASCII transcript text does not raise on Windows consoles) plus the
+        media-tool PATH. ``extra_env`` wins over both.
+        """
+        env = {"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+        env.update(self.media_tool_path_env())
+        env.update(extra_env or {})
+        return env
+
     def collect_runtime_warnings(self) -> list[str]:
         """Return human-readable warnings for insecure/permissive configuration.
 

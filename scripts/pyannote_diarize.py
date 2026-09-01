@@ -62,13 +62,63 @@ def speaker_bounds(args: argparse.Namespace) -> dict[str, int]:
     return bounds
 
 
+def load_pipeline(model: str, token: str | None) -> Any:
+    """Load the pipeline across the pyannote.audio 3.x/4.x argument change.
+
+    4.0 renamed ``use_auth_token`` to ``token`` and removed the old name, so a
+    single spelling raises TypeError on one of the two lines. Both are tried
+    rather than pinned, because WhisperX chooses the pyannote version in this
+    environment, not this script.
+    """
+    from pyannote.audio import Pipeline
+
+    try:
+        return Pipeline.from_pretrained(model, token=token)
+    except TypeError:
+        return Pipeline.from_pretrained(model, use_auth_token=token)
+
+
+def load_waveform(path: Path) -> dict[str, Any]:
+    """Read the audio ourselves and hand pyannote tensors, not a path.
+
+    pyannote 4 decodes files through torchcodec, which needs its own FFmpeg
+    shared libraries and fails to load on a plain Windows install. Feeding an
+    in-memory waveform — the fallback pyannote itself recommends — skips that
+    dependency entirely. The engine always passes the 16 kHz mono WAV it just
+    produced, so no resampling is needed here.
+    """
+    import soundfile
+    import torch
+
+    samples, sample_rate = soundfile.read(str(path), dtype="float32", always_2d=True)
+    # soundfile gives (time, channel); pyannote wants (channel, time), mono.
+    waveform = torch.from_numpy(samples).transpose(0, 1)
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+    return {"waveform": waveform, "sample_rate": int(sample_rate)}
+
+
+def as_annotation(output: Any) -> Any:
+    """Reduce a pipeline result to one ``Annotation`` of speaker turns.
+
+    pyannote 3 returned the Annotation directly; 4 returns a DiarizeOutput
+    carrying two of them. The exclusive one is the right pick here: it drops
+    overlapping speech, and the transcript merge assigns each segment the
+    single speaker it overlaps most.
+    """
+    for attribute in ("exclusive_speaker_diarization", "speaker_diarization"):
+        annotation = getattr(output, attribute, None)
+        if annotation is not None:
+            return annotation
+    return output
+
+
 def run(args: argparse.Namespace) -> int:
     import torch
-    from pyannote.audio import Pipeline
 
     token = os.getenv("HF_TOKEN") or os.getenv("WHISPERX_HF_TOKEN") or None
     print(f"Loading {args.model}...", flush=True)
-    pipeline = Pipeline.from_pretrained(args.model, use_auth_token=token)
+    pipeline = load_pipeline(args.model, token)
     if pipeline is None:
         print(
             f"Could not load '{args.model}'. The model is gated on HuggingFace: accept its "
@@ -80,7 +130,7 @@ def run(args: argparse.Namespace) -> int:
     device = resolve_device(args.device)
     pipeline.to(torch.device(device))
     print(f"Diarizing {args.audio.name} on {device}...", flush=True)
-    annotation = pipeline(str(args.audio), **speaker_bounds(args))
+    annotation = as_annotation(pipeline(load_waveform(args.audio), **speaker_bounds(args)))
 
     turns: list[dict[str, Any]] = [
         {"start": round(float(segment.start), 3), "end": round(float(segment.end), 3), "speaker": str(speaker)}

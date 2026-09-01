@@ -151,7 +151,10 @@ class PyannoteDiarizer:
         return list(turns) if isinstance(turns, list) else []
 
     def python_env(self) -> dict[str, str]:
-        env = {"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+        # pyannote reads audio through torchcodec, which dynamically links
+        # FFmpeg's shared libraries; without them on PATH it degrades to a
+        # "Could not load libtorchcodec" warning and a failed decode.
+        env = self.settings.subprocess_env()
         token = self.auth.runtime.whisperx_hf_token
         if token:
             # pyannote's models are gated on HuggingFace; the same token the

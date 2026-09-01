@@ -25,6 +25,11 @@
 #   pip install -r requirements-canary.txt \
 #     --constraint <(printf 'torch==2.8.0\ntorchaudio==2.8.0\ntorchvision==0.23.0\n')
 
+# NOTE (host RAM): the SALM loader builds the Qwen3 half in fp32 on the CPU
+# before moving it to the GPU — budget ~12 GB of free system RAM for the
+# transcription subprocess. A memory-starved host does not raise MemoryError;
+# the process dies with a Windows access violation (exit code 139).
+
 nemo_toolkit[asr]==3.0.0
 # nemo.collections.speechlm2 (the SALM path Canary-Qwen loads through) imports
 # peft at module import time, and the [asr] extra does not pull it in.

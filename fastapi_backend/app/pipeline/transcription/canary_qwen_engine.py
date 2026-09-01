@@ -201,7 +201,7 @@ class CanaryQwenEngine(TranscriptionEngine):
                 self.settings.scorer_python_bin,
                 [str(script_path), "--check"],
                 "Canary-Qwen availability check",
-                env={"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},
+                env=self.settings.subprocess_env(),
             )
         except Exception as error:  # a missing interpreter is an answer, not a crash
             return EngineAvailability(False, f"Could not run the availability check: {error}")
@@ -312,7 +312,7 @@ class CanaryQwenEngine(TranscriptionEngine):
             self.settings.scorer_python_bin,
             args,
             "Canary-Qwen transcription",
-            env={"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},
+            env=self.settings.subprocess_env(),
             on_output=self._build_output_handler(request),
         )
         if not output_path.exists():

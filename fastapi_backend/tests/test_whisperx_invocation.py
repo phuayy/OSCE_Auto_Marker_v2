@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -44,11 +45,13 @@ class FakeRunner:
     ) -> None:
         self.settings = settings
         self.calls: list[tuple[str, list[str], str]] = []
+        self.envs: list[dict[str, str]] = []
         self.whisperx_payload = TRANSCRIBED_SEGMENTS if whisperx_payload is None else whisperx_payload
         self.whisperx_stdout = list(whisperx_stdout or [])
 
     async def run(self, command: str, args: list[str], label: str, **kwargs: Any) -> CommandResult:
         self.calls.append((command, list(args), label))
+        self.envs.append(dict(kwargs.get("env") or {}))
         on_output = kwargs.get("on_output")
         if on_output is not None and command == self.settings.whisperx_bin:
             for line in self.whisperx_stdout:
@@ -67,6 +70,12 @@ class FakeRunner:
     def whisperx_args(self) -> list[str]:
         return next(args for command, args, _ in self.calls if command == self.settings.whisperx_bin)
 
+    def whisperx_env(self) -> dict[str, str]:
+        index = next(
+            position for position, (command, _, _) in enumerate(self.calls) if command == self.settings.whisperx_bin
+        )
+        return self.envs[index]
+
 
 def make_media(
     tmp_path: Path,
@@ -75,13 +84,15 @@ def make_media(
     **setting_overrides: Any,
 ) -> tuple[MediaPipeline, FakeRunner]:
     settings = Settings(
-        root_dir=tmp_path,
-        backend_root=tmp_path,
-        ffmpeg_bin="ffmpeg",
-        ffprobe_bin="ffprobe",
-        scorer_python_bin="python",
-        whisperx_device="cpu",
-        **setting_overrides,
+        **{
+            "root_dir": tmp_path,
+            "backend_root": tmp_path,
+            "ffmpeg_bin": "ffmpeg",
+            "ffprobe_bin": "ffprobe",
+            "scorer_python_bin": "python",
+            "whisperx_device": "cpu",
+            **setting_overrides,
+        }
     )
     runner = FakeRunner(settings, whisperx_stdout=whisperx_stdout)
     auth = SimpleNamespace(runtime=SimpleNamespace(whisperx_hf_token="hf-token"))
@@ -168,3 +179,26 @@ def test_build_hotwords_caps_prompt_budget() -> None:
     assert hotwords.startswith("term-000")  # earlier terms win the budget
     assert MediaPipeline.build_hotwords([]) == ""
     assert MediaPipeline.build_hotwords(["  ", None]) == ""
+
+
+def test_whisperx_env_carries_the_resolved_ffmpeg_directory(tmp_path: Path) -> None:
+    """WhisperX shells out to a bare "ffmpeg"; PATH is the only way to reach it.
+
+    Without this the run dies inside ``whisperx.audio.load_audio`` with
+    ``FileNotFoundError: [WinError 2]`` on any host where ffmpeg lives somewhere
+    the process PATH does not list (a winget package directory, for one).
+    """
+    ffmpeg_dir = tmp_path / "tools" / "ffmpeg" / "bin"
+    ffmpeg_dir.mkdir(parents=True)
+    media, runner = make_media(
+        tmp_path,
+        ffmpeg_bin=str(ffmpeg_dir / "ffmpeg.exe"),
+        ffprobe_bin=str(ffmpeg_dir / "ffprobe.exe"),
+    )
+    run_transcription(media, tmp_path)
+
+    path_entries = runner.whisperx_env()["PATH"].split(os.pathsep)
+    assert path_entries[0] == str(ffmpeg_dir)
+    # The inherited PATH is preserved, not replaced: the child still needs the
+    # interpreter and CUDA libraries it was going to find there.
+    assert path_entries[1:] == os.environ.get("PATH", "").split(os.pathsep)

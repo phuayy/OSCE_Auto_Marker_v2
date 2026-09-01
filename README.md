@@ -203,6 +203,31 @@ packaging 24.2) and does not choose a torch build. If you installed the CUDA
 wheels in 6.2, re-verify afterwards that `torch.cuda.is_available()` is still
 `True`.
 
+> **Host RAM:** loading Canary-Qwen builds its 1.7B-parameter Qwen3 half in
+> fp32 on the CPU *before* moving it to the GPU, so the transcription
+> subprocess needs roughly **12 GB of free system RAM** at load time (verified
+> here: it loads with ~16 GB free and dies with ~8 GB free). Windows reports
+> that failure as an access violation and the process exits with code 139 —
+> there is no "out of memory" message — so treat a 139 from
+> `canary_qwen_transcribe.py` as "close something and retry". It stays fp32 on
+> the GPU too: **~10.5 GB of VRAM**, against ~3 GB for WhisperX large-v3 at
+> float16.
+
+**Measured cost per run** (RTX 3090, 259 s of OSCE audio, warm model cache).
+Both engines run as a fresh subprocess per session, so the load column is paid
+on *every* transcription, including each clip of a long workflow:
+
+| Phase | WhisperX large-v3 float16 | Canary-Qwen 2.5B |
+|---|---|---|
+| Import + model load | 13 s | 46 s (16 s import, 28 s build, 3 s to GPU) |
+| Transcription | 6 s | 46 s (10 x 30 s windows, ~5 s each) |
+| Alignment (word timestamps) | 4 s | not produced |
+| Diarisation | 8 s (in-process) | 17 s (separate `pyannote_diarize.py` subprocess) |
+| **Total** | **~32 s** | **~110 s** |
+
+Canary is roughly **3.5x slower end to end** and produces no word timestamps.
+It is the accuracy option, not the throughput one.
+
 ### 6.4 Install ffmpeg (if not present)
 
 ```powershell

@@ -444,7 +444,7 @@ class MediaPipeline:
                 self.settings.scorer_python_bin,
                 args,
                 "Bell detection (python)",
-                env={"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},
+                env=self.settings.subprocess_env(),
             )
         finally:
             with contextlib.suppress(OSError):
@@ -536,14 +536,14 @@ class MediaPipeline:
             self.settings.scorer_python_bin,
             args,
             "Human detection (RT-DETR)",
-            env={
-                "PYTHONUNBUFFERED": "1",
-                "PYTHONIOENCODING": "utf-8",
-                # Pin the script to the binaries the backend already resolved
-                # (Windows PATH quirks are handled once, in Settings.load).
-                "FFMPEG_BIN": self.settings.ffmpeg_bin,
-                "FFPROBE_BIN": self.settings.ffprobe_bin,
-            },
+            env=self.settings.subprocess_env(
+                {
+                    # Pin the script to the binaries the backend already resolved
+                    # (Windows PATH quirks are handled once, in Settings.load).
+                    "FFMPEG_BIN": self.settings.ffmpeg_bin,
+                    "FFPROBE_BIN": self.settings.ffprobe_bin,
+                }
+            ),
             on_output=stream_progress if session_id else None,
         )
 
@@ -814,7 +814,9 @@ class MediaPipeline:
                 self.settings.whisperx_bin,
                 args,
                 "WhisperX transcription",
-                env={"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},
+                # WhisperX decodes its input by spawning a bare "ffmpeg", so the
+                # resolved binary has to reach it as PATH, not as an argument.
+                env=self.settings.subprocess_env(),
                 on_output=self._build_whisperx_output_handler(str(session["id"]), on_progress),
             )
         finally:
