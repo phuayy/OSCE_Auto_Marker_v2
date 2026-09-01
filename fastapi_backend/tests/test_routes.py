@@ -5,12 +5,23 @@ import json
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
 from app.api.dependencies import authorize_request
-from app.api.routes import async_uploads, auth, health, jobs, notifications, sessions, uploads
+from app.api.routes import (
+    async_uploads,
+    auth,
+    events as events_routes,
+    health,
+    jobs,
+    notifications,
+    sessions,
+    uploads,
+    webhooks,
+)
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.services.container import create_container
@@ -56,6 +67,15 @@ def build_test_client(tmp_path: Path) -> TestClient:
     async def _app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
         return JSONResponse(status_code=exc.status_code, content={"error": exc.message})
 
+    # Production maps a schema rejection to 400 + {"error": ...}; without the
+    # same handler here the tests would assert FastAPI's default 422 shape and
+    # stop reflecting what clients actually receive.
+    @app.exception_handler(RequestValidationError)
+    async def _validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        first_error = exc.errors()[0] if exc.errors() else {}
+        message = str(first_error.get("msg") or "Invalid request payload.")
+        return JSONResponse(status_code=400, content={"error": message})
+
     app.mount(
         "/media/scores",
         StaticFiles(directory=str(settings.paths.output_scores_dir), check_dir=False),
@@ -68,6 +88,8 @@ def build_test_client(tmp_path: Path) -> TestClient:
     app.include_router(jobs.router, prefix="/api")
     app.include_router(sessions.router, prefix="/api")
     app.include_router(notifications.router, prefix="/api")
+    app.include_router(events_routes.router, prefix="/api")
+    app.include_router(webhooks.router, prefix="/api")
     return TestClient(app)
 
 

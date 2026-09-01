@@ -156,15 +156,17 @@ def test_local_storage_assembles_parts_and_storage_ref(tmp_path) -> None:
     settings = Settings(root_dir=tmp_path, backend_root=tmp_path, upload_part_size_mb=1)
     storage = LocalObjectStorageService(settings)
     asyncio.run(storage.ensure_layout())
-    prepared = storage.prepare_upload_file(
-        upload_id="u1",
-        session_id="s1",
-        file_id="f1",
-        kind="video",
-        original_name="Station Video.mp4",
-        mime_type="video/mp4",
-        size_bytes=6,
-        checksum_sha256=None,
+    prepared = asyncio.run(
+        storage.prepare_upload_file(
+            upload_id="u1",
+            session_id="s1",
+            file_id="f1",
+            kind="video",
+            original_name="Station Video.mp4",
+            mime_type="video/mp4",
+            size_bytes=6,
+            checksum_sha256=None,
+        )
     )
     upload = {
         "id": "u1",
@@ -193,15 +195,17 @@ def test_local_storage_completion_reuses_existing_final_object(tmp_path) -> None
     settings = Settings(root_dir=tmp_path, backend_root=tmp_path, upload_part_size_mb=1)
     storage = LocalObjectStorageService(settings)
     asyncio.run(storage.ensure_layout())
-    prepared = storage.prepare_upload_file(
-        upload_id="u1",
-        session_id="s1",
-        file_id="f1",
-        kind="video",
-        original_name="Station Video.mp4",
-        mime_type="video/mp4",
-        size_bytes=6,
-        checksum_sha256=None,
+    prepared = asyncio.run(
+        storage.prepare_upload_file(
+            upload_id="u1",
+            session_id="s1",
+            file_id="f1",
+            kind="video",
+            original_name="Station Video.mp4",
+            mime_type="video/mp4",
+            size_bytes=6,
+            checksum_sha256=None,
+        )
     )
     file_record = {
         "fileId": "f1",

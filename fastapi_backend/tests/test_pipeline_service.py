@@ -58,6 +58,15 @@ def build_settings(tmp_path: Path, **overrides: Any) -> Settings:
     )
 
 
+# A non-empty transcript. The pipeline rejects a transcript with no speech
+# segments as a failed transcription (see test_empty_transcript_guard.py), so
+# fixtures exercising the cached/resume paths must carry real segment text.
+TRANSCRIPT_JSON = (
+    '{"schema": "whisperx-segments-v1", "segmentCount": 1, '
+    '"segments": [{"id": 1, "speaker": "SPEAKER_00", "start": 0.0, "end": 2.0, "text": "Good morning."}]}'
+)
+
+
 def build_session(tmp_path: Path) -> dict[str, Any]:
     return {
         "id": "session-1",
@@ -151,7 +160,7 @@ def test_parallel_scoring_persists_successful_branch_before_raising(tmp_path) ->
 
 def test_process_session_rejects_processing_session_without_worker_override(tmp_path) -> None:
     transcript_path = tmp_path / "transcript.json"
-    transcript_path.write_text('{"segments": []}', encoding="utf-8")
+    transcript_path.write_text(TRANSCRIPT_JSON, encoding="utf-8")
     session = build_session(tmp_path)
     session["status"] = "processing"
     session["outputs"]["transcript"]["absolutePath"] = str(transcript_path)
@@ -174,7 +183,7 @@ def test_process_session_rejects_processing_session_without_worker_override(tmp_
 
 def test_process_session_allows_claimed_worker_to_resume_processing_session(tmp_path) -> None:
     transcript_path = tmp_path / "transcript.json"
-    transcript_path.write_text('{"segments": []}', encoding="utf-8")
+    transcript_path.write_text(TRANSCRIPT_JSON, encoding="utf-8")
     session = build_session(tmp_path)
     session["status"] = "processing"
     session["outputs"]["transcript"]["absolutePath"] = str(transcript_path)
@@ -194,7 +203,7 @@ def test_process_session_allows_claimed_worker_to_resume_processing_session(tmp_
 
     result = asyncio.run(service.process_session_by_id("session-1", allow_processing=True))
 
-    assert result["transcript"] == {"segments": []}
+    assert result["transcript"]["segments"][0]["text"] == "Good morning."
     assert sessions.writes[-1]["status"] == "completed"
 
 
@@ -366,7 +375,7 @@ def test_media_reuses_existing_whisperx_json_before_cli(tmp_path) -> None:
     output_dir = settings.paths.output_whisperx_dir / "session-1"
     output_dir.mkdir(parents=True, exist_ok=True)
     whisperx_json = output_dir / "session-1.json"
-    whisperx_json.write_text('{"segments": []}\n', encoding="utf-8")
+    whisperx_json.write_text(TRANSCRIPT_JSON + "\n", encoding="utf-8")
 
     class NoRunRunner:
         async def run(self, *_args: Any, **_kwargs: Any) -> Any:
