@@ -43,6 +43,21 @@ then install WhisperX separately in the same virtual environment according to
 the PyTorch/CUDA version on your machine. The API can still start without
 running transcription, but processing a session needs a working `WHISPERX_BIN`.
 
+### Optional: the Canary-Qwen transcription engine
+
+WhisperX is the default and needs nothing more. To also offer **NVIDIA
+Canary-Qwen 2.5B** in *Settings -> Transcription*:
+
+```powershell
+python -m pip install -r requirements-canary.txt
+python scripts\canary_qwen_transcribe.py --check   # prints "nemo-ready"
+```
+
+The ~5 GB checkpoint downloads itself: the backend fetches it into the
+HuggingFace cache in the background at startup when Canary-Qwen is selected
+(`TRANSCRIPTION_PREFETCH_MODELS=true`, the default), and
+`python scripts\canary_qwen_transcribe.py --download` seeds the cache manually.
+
 ## 3. Install Frontend Dependencies
 
 ```powershell

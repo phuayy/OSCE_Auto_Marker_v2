@@ -38,6 +38,7 @@ from app.pipeline.transcription.base import (
     EngineDescriptor,
     ParameterSpec,
     ParameterType,
+    PrefetchResult,
     TranscriptionEngine,
     TranscriptionRequest,
     TranscriptionResult,
@@ -136,7 +137,9 @@ DESCRIPTOR = EngineDescriptor(
     ),
     requirements=(
         "Needs the optional NeMo toolkit in the backend environment: "
-        "pip install \"nemo_toolkit[asr]>=2.5\". First run downloads ~5 GB of weights."
+        "pip install -r requirements-canary.txt (or pip install \"nemo_toolkit[asr]>=2.5\"). "
+        "The ~5 GB checkpoint is downloaded into the HuggingFace cache at backend startup "
+        "when this engine is selected, and on first run otherwise."
     ),
 )
 
@@ -205,6 +208,34 @@ class CanaryQwenEngine(TranscriptionEngine):
         if "nemo-ready" in str(result.stdout or ""):
             return EngineAvailability(True)
         return EngineAvailability(False, "The NeMo toolkit is not installed in the backend environment.")
+
+    async def prefetch(self) -> PrefetchResult:
+        """Cache the checkpoint before anyone asks for a transcript.
+
+        Runs in the scorer interpreter, like every other Canary call, and only
+        downloads — the model is never constructed here, so startup claims no
+        GPU memory. Already-cached files make this a fast no-op, which is why
+        it can run on every boot.
+        """
+        availability = await self.availability()
+        if not availability.available:
+            return PrefetchResult(False, availability.reason)
+        model = self.settings.canary_model
+        try:
+            result = await self.runner.run(
+                self.settings.scorer_python_bin,
+                [str(self.settings.canary_script_path), "--download", "--model", model],
+                "Canary-Qwen weight download",
+                env=self.diarizer.python_env(),
+                # A cold ~5 GB download on a slow link outlasts the default
+                # watchdog, and killing it halfway wastes everything fetched.
+                timeout_seconds=None,
+            )
+        except Exception as error:
+            return PrefetchResult(False, f"Could not download {model}: {error}")
+        if "model-ready" in str(result.stdout or ""):
+            return PrefetchResult(True, f"{model} is cached and ready.")
+        return PrefetchResult(False, f"{model} was not cached; it will download on the first run.")
 
     async def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
         options = request.options

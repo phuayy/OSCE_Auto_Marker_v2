@@ -393,6 +393,11 @@ class Settings:
     # fallback when nothing is stored, and when a stored selection names an
     # engine this build no longer ships.
     transcription_engine: str = os.getenv("TRANSCRIPTION_ENGINE", "whisperx").strip() or "whisperx"
+    # Download the selected engine's weights at startup, in the background, so
+    # the first assessment of a deployment does not stall behind a multi-
+    # gigabyte fetch. Turn off for an air-gapped or metered host: the engine
+    # still downloads on demand when it is first run.
+    transcription_prefetch_models: bool = read_bool_env("TRANSCRIPTION_PREFETCH_MODELS", True)
 
     # --- Canary-Qwen (NVIDIA NeMo SALM) ---------------------------------
     canary_model: str = os.getenv("CANARY_MODEL", "nvidia/canary-qwen-2.5b").strip() or "nvidia/canary-qwen-2.5b"

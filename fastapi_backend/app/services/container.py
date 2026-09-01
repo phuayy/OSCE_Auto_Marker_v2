@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.core.config import Settings
 from app.core.logging_utils import log_context
 from app.core.process import CommandRunner
 from app.core.rate_limit import FixedWindowRateLimiter
+from app.core.tasks import BackgroundTaskRegistry
 from app.core.versioned_cache import VersionedCache
 from app.database import Database
 from app.database.change_tracking import install_change_tracking
@@ -80,6 +81,9 @@ class AppContainer:
     login_rate_limiter: FixedWindowRateLimiter
     changes: ChangeFeedService
     read_cache: VersionedCache
+    # Startup work that must not hold the boot: currently the transcription
+    # weight prefetch, which can run for minutes on a cold machine.
+    background: BackgroundTaskRegistry = field(default_factory=BackgroundTaskRegistry)
 
     async def startup(self, *, dispatch_queued_jobs: bool = True, recover_interrupted_jobs: bool | None = None) -> None:
         should_recover = (
@@ -119,8 +123,19 @@ class AppContainer:
         # clears dead session cards.
         await self.async_uploads.recover_expired_uploads()
         await self.jobs.startup(dispatch_queued=dispatch_queued_jobs, recover_interrupted=should_recover)
+        # Weights are fetched after the API is otherwise ready, never before:
+        # a deployment must serve requests while a multi-gigabyte checkpoint
+        # downloads, and the download is optional for correctness.
+        self.background.spawn(
+            self.transcription.prefetch_selected_engine(),
+            name="transcription-model-prefetch",
+        )
 
     async def shutdown(self) -> None:
+        # Cancelled rather than drained: a half-finished weight download is
+        # resumed by the HuggingFace cache on the next boot, and waiting for
+        # one would hang shutdown for minutes.
+        await self.background.cancel_all()
         await self.jobs.shutdown()
         # Before the change feed stops and the engine is disposed: in-flight
         # webhook deliveries still need to write their delivery-log rows.

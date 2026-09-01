@@ -150,7 +150,9 @@ AppContainer
  └── login_rate_limiter FixedWindowRateLimiter
 ```
 
-`startup()` runs: config warnings -> storage layout -> **alembic upgrade head** -> DB init -> ORM init -> additive migrations -> change-tracking triggers -> legacy session migration -> auth init -> rubric parse -> stale upload recovery -> job queue startup (recover + dispatch).
+`startup()` runs: config warnings -> storage layout -> **alembic upgrade head** -> DB init -> ORM init -> additive migrations -> change-tracking triggers -> legacy session migration -> auth init -> rubric parse -> stale upload recovery -> job queue startup (recover + dispatch) -> background transcription-model prefetch.
+
+The prefetch is the one startup step that is spawned rather than awaited: it downloads the selected engine's weights (Canary-Qwen's checkpoint is ~5 GB) so the first assessment does not pay for the fetch, and the API must serve requests while it runs. It is cancelled, not drained, on shutdown — the HuggingFace cache resumes a partial download on the next boot.
 
 Alembic owns the schema. It runs first, so `create_all` / `CREATE TABLE IF NOT EXISTS` / `apply_additive_migrations()` / `install_change_tracking()` all find nothing to do on a migrated database — they stay as the fallback for `DB_AUTO_MIGRATE=false` or an install without Alembic. A database built by the old `create_all` path is stamped at revision `0001` and then upgraded, never stamped straight at head (that would skip every later revision). See [alembic/README.md](fastapi_backend/alembic/README.md).
 
@@ -243,8 +245,18 @@ The export job deliberately does **not** own `session.status` (see
 clips are cut, and flipping the session to `processing` would eject them — the
 frontend refuses to open in-flight sessions. Progress lives on
 `session.clipExport` (`status`, `completed`, `total`, `error`, `jobId`), which
-the open workspace polls every 3s and the session-list projection exposes as
-`clipExportStatus` / `clipExportCompleted` / `clipExportTotal`.
+the session-list projection exposes as `clipExportStatus` /
+`clipExportCompleted` / `clipExportTotal`.
+
+While an export is in flight the open workspace watches it two ways: the change
+stream (every cut clip is a session write) and a 3s poll as a fallback. The
+watch starts when the export is *requested*, not when the response happens to
+carry a `clipExport` record, and it survives the last tick: when it ends the
+editor re-reads the session once — the final clip and the `completed` record
+are two separate writes — then selects the first exported clip, posts a notice
+and scrolls to the Clip Assessments card. Both watchers are gated on that
+in-flight window: refreshing the session at any other time would re-seed the
+timeline from the server and throw away separators the user is dragging.
 
 ---
 
@@ -388,7 +400,8 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 | Variable | Default | Purpose |
 |---|---|---|
 | `TRANSCRIPTION_ENGINE` | `whisperx` | Fallback engine when Settings has no stored selection (`whisperx` \| `canary-qwen`) |
-| `CANARY_MODEL` | `nvidia/canary-qwen-2.5b` | NeMo SALM checkpoint for the Canary engine (needs `nemo_toolkit[asr]>=2.5`) |
+| `CANARY_MODEL` | `nvidia/canary-qwen-2.5b` | NeMo SALM checkpoint for the Canary engine (install `requirements-canary.txt`) |
+| `TRANSCRIPTION_PREFETCH_MODELS` | `true` | Download the selected engine's weights in the background at startup; false = fetch on first run |
 | `CANARY_CHUNK_SECONDS` | `30` | Canary decodes in overlapping windows; the model was trained on ≤40 s |
 | `DIARIZATION_MODEL` | `pyannote/speaker-diarization-community-1` | Standalone diarisation for engines that cannot label speakers |
 | `WHISPERX_MIN_SPEAKERS` / `WHISPERX_MAX_SPEAKERS` | `2` / `2` | Known cast of an OSCE station; 0 lets clustering estimate |

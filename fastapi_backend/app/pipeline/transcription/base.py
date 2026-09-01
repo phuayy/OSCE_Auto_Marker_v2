@@ -192,6 +192,14 @@ class EngineAvailability:
         return {"available": self.available, "reason": self.reason}
 
 
+@dataclass(frozen=True)
+class PrefetchResult:
+    """Outcome of a weight download attempt, for the startup log."""
+
+    ready: bool
+    detail: str = ""
+
+
 @dataclass
 class TranscriptionRequest:
     """Everything an engine needs for one session's audio.
@@ -269,6 +277,20 @@ class TranscriptionEngine:
         resolved = dict(self.default_options())
         resolved.update(validate_options(self.descriptor, overrides))
         return resolved
+
+    async def prefetch(self) -> PrefetchResult:
+        """Download the engine's weights ahead of the first run.
+
+        Called at startup for the selected engine, in the background, so the
+        first assessment does not pay for a multi-gigabyte download while an
+        operator watches a progress bar. Engines whose weights are fetched by
+        the tool they shell out to (WhisperX caches its own checkpoints on
+        first use) need no implementation.
+
+        Never raises: a machine that is offline at boot must still start, and
+        the engine will download on demand when it is next run.
+        """
+        return PrefetchResult(True, "This engine downloads its own weights on first use.")
 
     async def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
         raise NotImplementedError

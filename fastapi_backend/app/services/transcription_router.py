@@ -124,6 +124,32 @@ class TranscriptionRouter:
             "defaultEngineId": self.default_engine_id(),
         }
 
+    # --- model prefetch ----------------------------------------------------
+
+    async def prefetch_selected_engine(self) -> None:
+        """Cache the selected engine's weights, logging what happened.
+
+        Startup calls this in the background: it can take many minutes on a
+        cold machine, and nothing in the API depends on its outcome — a run
+        that starts before the download finishes simply downloads then. It
+        never raises, so a boot on an offline host is unaffected.
+        """
+        if not self.settings.transcription_prefetch_models:
+            return
+        try:
+            engine_id, _ = await self.selection()
+            engine = self.engines[engine_id]
+            result = await engine.prefetch()
+        except Exception:
+            logger.exception("Transcription model prefetch failed.")
+            return
+        if result.ready:
+            logger.info("Transcription model ready for '%s'. %s", engine_id, result.detail)
+        else:
+            logger.warning(
+                "Transcription model for '%s' is not cached: %s", engine_id, result.detail
+            )
+
     # --- running -----------------------------------------------------------
 
     async def transcribe(

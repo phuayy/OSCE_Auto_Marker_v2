@@ -14,11 +14,13 @@ track that follow.
 Usage:
     python scripts/canary_qwen_transcribe.py --audio in.wav --output out.json
     python scripts/canary_qwen_transcribe.py --check      # dependency probe
+    python scripts/canary_qwen_transcribe.py --download   # cache the weights
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,11 @@ TARGET_SAMPLE_RATE = 16000
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Transcribe audio with NVIDIA Canary-Qwen.")
     parser.add_argument("--check", action="store_true", help="Report whether NeMo is importable, then exit.")
+    parser.add_argument(
+        "--download",
+        action="store_true",
+        help="Download the checkpoint into the HuggingFace cache, then exit. Already-cached files are reused.",
+    )
     parser.add_argument("--audio", type=Path, help="Input audio file (16 kHz mono WAV).")
     parser.add_argument("--output", type=Path, help="Where to write the segments JSON.")
     parser.add_argument("--model", default="nvidia/canary-qwen-2.5b")
@@ -46,6 +53,27 @@ def nemo_available() -> bool:
     import importlib.util
 
     return importlib.util.find_spec("nemo") is not None
+
+
+def download_model(model: str) -> int:
+    """Populate the HuggingFace cache with the checkpoint, then exit.
+
+    The backend calls this at startup so the first assessment does not stall
+    for a ~5 GB download. It deliberately does not construct the model: caching
+    the files is all that is needed, and instantiating a 2.5B-parameter SALM
+    would claim GPU memory the API process has no use for. NeMo's own
+    ``from_pretrained`` resolves the same cache, so the later run finds the
+    weights already on disk.
+    """
+    from huggingface_hub import snapshot_download
+
+    path = snapshot_download(
+        repo_id=model,
+        token=os.getenv("HF_TOKEN") or os.getenv("WHISPERX_HF_TOKEN") or None,
+    )
+    # The engine's prefetch greps for this exact token.
+    print(f"model-ready {path}", flush=True)
+    return 0
 
 
 def resolve_device(requested: str) -> str:
@@ -155,6 +183,17 @@ def main(argv: list[str] | None = None) -> int:
         # The engine's availability probe greps for this exact token.
         print("nemo-ready" if nemo_available() else "nemo-missing", flush=True)
         return 0
+    if args.download:
+        if not nemo_available():
+            print("nemo-missing", flush=True)
+            return 3
+        try:
+            return download_model(args.model)
+        except Exception as error:  # offline, gated repo, bad id
+            # Typed, because hub errors are sometimes raised with no message
+            # and "download failed:" on its own diagnoses nothing.
+            print(f"model-download-failed: {type(error).__name__}: {error}", file=sys.stderr)
+            return 4
     if args.audio is None or args.output is None:
         print("--audio and --output are required.", file=sys.stderr)
         return 2

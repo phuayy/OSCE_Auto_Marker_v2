@@ -127,6 +127,9 @@ const LONG_VIDEO_THRESHOLD_SECONDS = 300;
 // Faster than the 8s session-list poll because the user is watching this one
 // list fill in; each tick is a single lightweight session read.
 const CLIP_EXPORT_POLL_MS = 3000;
+// DOM id of the clip-assessment card, so a finished export can scroll the
+// workspace to the clips it just produced.
+const CLIP_ASSESSMENTS_ANCHOR_ID = 'clip-assessments';
 
 function downloadBlob(fileName, blob) {
   const objectUrl = URL.createObjectURL(blob);
@@ -425,8 +428,17 @@ export default function OSCEAiMarkerMockup({
   // without going through the server, since there is no parent session on disk.
   const [demoLongVideoSummaries, setDemoLongVideoSummaries] = useState(null);
 
+  // The session whose clip export we requested, held from the request until the
+  // job settles. The export runs in the queue, so the editor has to keep
+  // reading the session; without this the watcher would depend entirely on the
+  // clipExport record being present in the response that started it. Holding an
+  // id rather than a flag means switching sessions cannot inherit the watch.
+  const [awaitingClipExportFor, setAwaitingClipExportFor] = useState(null);
+  const [clipExportJustFinished, setClipExportJustFinished] = useState(false);
+
   const videoInputRef = useRef(null);
   const caseStudyInputRef = useRef(null);
+  const clipExportWasWatchedRef = useRef(false);
   const videoPlayerRef = useRef(null);
   const videoPlayerSectionRef = useRef(null);
   const timelineContainerRef = useRef(null);
@@ -518,7 +530,14 @@ export default function OSCEAiMarkerMockup({
   // in the job queue rather than inside the POST, so the clips arrive over time
   // and this record — not the response body — is what says when they are all in.
   const clipExport = session?.clipExport || null;
-  const isClipExportRunning = ['queued', 'running'].includes(String(clipExport?.status || ''));
+  const clipExportStatus = String(clipExport?.status || '');
+  const isClipExportRunning = ['queued', 'running'].includes(clipExportStatus);
+  // Watch a bit wider than "the record says running": an export we just
+  // requested counts too, so a response that never carried the clipExport
+  // record still leaves the editor watching for the clips instead of sitting
+  // on drafts until the user reloads the page.
+  const awaitingClipExport = Boolean(session?.id) && awaitingClipExportFor === session?.id;
+  const shouldWatchClipExport = isClipExportRunning || awaitingClipExport;
   // Batch-run selection derives from live run state: a clip that starts
   // running drops out of the selectable set (and the selected count) instead
   // of needing effect-based pruning when clips or statuses change.
@@ -898,7 +917,7 @@ export default function OSCEAiMarkerMockup({
   // session while it runs (the export does not move session.status), and the
   // list projection carries counters, not the clip rows this view renders.
   useEffect(() => {
-    if (!showWorkspace || !session?.id || !isClipExportRunning) {
+    if (!showWorkspace || !session?.id || !shouldWatchClipExport) {
       return undefined;
     }
 
@@ -906,21 +925,12 @@ export default function OSCEAiMarkerMockup({
     const sessionId = session.id;
 
     async function pollClipExport() {
-      try {
-        const response = await fetch(`/api/sessions/${sessionId}`);
-        if (!response.ok) {
-          return;
-        }
-        const body = await response.json().catch(() => ({}));
-        if (cancelled || !body?.session || String(body.session.id) !== String(sessionId)) {
-          return;
-        }
-        setSession((previous) => (previous?.id === sessionId ? body.session : previous));
-        if (String(body.session?.clipExport?.status) === 'failed') {
-          setError(body.session.clipExport.error || 'Clip export failed.');
-        }
-      } catch {
-        // Transient network failures are ignored; the next tick retries.
+      const fresh = await refreshOpenSession(sessionId);
+      if (cancelled || !fresh) {
+        return;
+      }
+      if (String(fresh?.clipExport?.status) === 'failed') {
+        setError(fresh.clipExport.error || 'Clip export failed.');
       }
     }
 
@@ -931,7 +941,87 @@ export default function OSCEAiMarkerMockup({
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [showWorkspace, session?.id, isClipExportRunning]);
+  }, [showWorkspace, session?.id, shouldWatchClipExport]);
+
+  // Push, alongside the interval above: every clip the export job cuts is a
+  // session write, so the change stream reports it the moment it lands and the
+  // clip rows fill in without waiting for the next tick. Gated on an export
+  // being watched — refreshing the session outside one would re-seed the
+  // timeline from the server and discard separators the user is dragging.
+  useChangeStream(() => {
+    if (!showWorkspace || !session?.id || !shouldWatchClipExport) {
+      return;
+    }
+    refreshOpenSession(session.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, ['sessions', 'jobs']);
+
+  // The export finishing is what used to need a manual reload. The job writes
+  // the last clip and the "completed" record separately, so once the watch
+  // ends, read the session once more, then hand the user the clip list.
+  useEffect(() => {
+    if (!showWorkspace || !session?.id) {
+      return undefined;
+    }
+    if (shouldWatchClipExport) {
+      clipExportWasWatchedRef.current = true;
+      return undefined;
+    }
+    if (!clipExportWasWatchedRef.current) {
+      return undefined;
+    }
+    clipExportWasWatchedRef.current = false;
+
+    let cancelled = false;
+    const sessionId = session.id;
+
+    (async () => {
+      const fresh = (await refreshOpenSession(sessionId)) || session;
+      if (cancelled) {
+        return;
+      }
+      const clips = Array.isArray(fresh?.outputs?.videoClips) ? fresh.outputs.videoClips : [];
+      const exported = clips.filter((clip) => clip.kind !== INTERMISSION_KIND && clip.url);
+      if (String(fresh?.clipExport?.status) === 'failed' || exported.length === 0) {
+        return;
+      }
+      setSelectedClipId((previous) =>
+        exported.some((clip) => String(clip.id) === String(previous)) ? previous : exported[0].id
+      );
+      setNotice(
+        `Exported ${exported.length} clip${exported.length === 1 ? '' : 's'} — ready to assess below.`
+      );
+      setClipExportJustFinished(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showWorkspace, session?.id, shouldWatchClipExport]);
+
+  // Drop the requested-export watch once the job records a terminal state, or
+  // as soon as the workspace closes.
+  useEffect(() => {
+    if (!awaitingClipExportFor) {
+      return;
+    }
+    if (!showWorkspace || clipExportStatus === 'completed' || clipExportStatus === 'failed') {
+      setAwaitingClipExportFor(null);
+    }
+  }, [awaitingClipExportFor, showWorkspace, clipExportStatus]);
+
+  // Scroll only once the clip panel is actually mounted — it renders off the
+  // refreshed session, one render after the export finishes.
+  useEffect(() => {
+    if (!clipExportJustFinished || !hasClipFiles) {
+      return;
+    }
+    document
+      .getElementById(CLIP_ASSESSMENTS_ANCHOR_ID)
+      ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setClipExportJustFinished(false);
+  }, [clipExportJustFinished, hasClipFiles]);
 
   useEffect(() => {
     if (!videoFile) {
@@ -1168,6 +1258,28 @@ export default function OSCEAiMarkerMockup({
       if (!silent) {
         setSessionIndexLoading(false);
       }
+    }
+  }
+
+  // Re-read the open session and adopt it, ignoring a response that arrived
+  // after the user moved on. Returns the fresh session so a caller can act on
+  // what it says; null on any failure, which the callers treat as "try again".
+  async function refreshOpenSession(sessionId) {
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}`);
+      if (!response.ok) {
+        return null;
+      }
+      const body = await response.json().catch(() => ({}));
+      const fresh = body?.session;
+      if (!fresh || String(fresh.id) !== String(sessionId)) {
+        return null;
+      }
+      setSession((previous) => (previous?.id === sessionId ? fresh : previous));
+      return fresh;
+    } catch {
+      // Transient network failures are ignored; the next tick or change event retries.
+      return null;
     }
   }
 
@@ -2629,6 +2741,10 @@ export default function OSCEAiMarkerMockup({
       // 202: the backend persisted the segmentation and queued an export job.
       // The draft clips come back immediately so the timeline re-renders, and
       // the MP4s land one at a time — watched by the clipExport poll below.
+      // Watch from here, not from the returned clipExport record: the job is
+      // queued either way, and the editor must reach the finished clips even if
+      // this response says nothing about the export.
+      setAwaitingClipExportFor(session.id);
       if (body?.session) {
         setSession(body.session);
         const nextClips = Array.isArray(body.session?.outputs?.videoClips) ? body.session.outputs.videoClips : [];
@@ -4372,7 +4488,7 @@ export default function OSCEAiMarkerMockup({
                 )} */}
 
                 {showClipAssessmentPanel ? (
-                  <Card className="border-slate-200 bg-white shadow-sm">
+                  <Card id={CLIP_ASSESSMENTS_ANCHOR_ID} className="border-slate-200 bg-white shadow-sm">
                     <CardHeader>
                       <CardTitle className="text-base">Clip Assessments</CardTitle>
                       <CardDescription>

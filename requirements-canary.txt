@@ -1,0 +1,31 @@
+# Optional transcription engine: NVIDIA Canary-Qwen 2.5B (NeMo SALM).
+# Reviewed on 2026-09-01 against the tested local venv (Python 3.12.13).
+#
+# Install into the SAME environment as requirements.txt, after it:
+#   pip install -r requirements.txt
+#   pip install -r requirements-canary.txt
+#
+# WhisperX stays the default engine and needs none of this. Install these only
+# for a deployment that wants Canary-Qwen selectable in Settings -> Transcription;
+# until they are present the settings screen reports the engine as unavailable.
+#
+# Weights (~5 GB) are NOT part of this file. The backend downloads them into the
+# HuggingFace cache at startup when Canary-Qwen is the selected engine
+# (TRANSCRIPTION_PREFETCH_MODELS=true, the default), and scripts/canary_qwen_transcribe.py
+# --download fetches them on demand for an image build or an offline host.
+#
+# NOTE (versions): nemo-toolkit 3.0.0 constrains parts of the shared stack —
+# it pulls lightning back to 2.4.x, omegaconf to 2.3.0, packaging to 24.2 and
+# fsspec to 2025.12.x. Those versions are what WhisperX, pyannote and the rest
+# of requirements.txt were re-verified against here, so install both files in
+# one environment rather than pinning them apart.
+#
+# NOTE (torch): NeMo does not choose a torch build. Keep the CUDA wheels named
+# in requirements.txt; installing this file must not swap them for CPU wheels:
+#   pip install -r requirements-canary.txt \
+#     --constraint <(printf 'torch==2.8.0\ntorchaudio==2.8.0\ntorchvision==0.23.0\n')
+
+nemo_toolkit[asr]==3.0.0
+# nemo.collections.speechlm2 (the SALM path Canary-Qwen loads through) imports
+# peft at module import time, and the [asr] extra does not pull it in.
+peft==0.20.0

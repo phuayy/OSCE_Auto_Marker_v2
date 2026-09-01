@@ -352,3 +352,67 @@ def test_the_cached_answer_expires(tmp_path: Path) -> None:
     engine._availability_expires_at = 0.0
 
     assert asyncio.run(engine.availability()).available is True
+
+
+class PrefetchRunner:
+    """Answers the availability probe, then the download call."""
+
+    def __init__(self, ready: bool = True, download_stdout: str = "model-ready C:/cache") -> None:
+        self.ready = ready
+        self.download_stdout = download_stdout
+        self.calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    async def run(self, _command: str, args: list[str], _label: str, **kwargs: Any) -> CommandResult:
+        self.calls.append((list(args), dict(kwargs)))
+        if "--check" in args:
+            return CommandResult(stdout="nemo-ready" if self.ready else "nemo-missing", stderr="")
+        return CommandResult(stdout=self.download_stdout, stderr="")
+
+    def download_call(self) -> tuple[list[str], dict[str, Any]]:
+        return next(call for call in self.calls if "--download" in call[0])
+
+
+def test_prefetch_downloads_the_configured_checkpoint(tmp_path: Path) -> None:
+    engine, _, _ = build(tmp_path, canary_model="nvidia/canary-qwen-2.5b")
+    runner = PrefetchRunner()
+    engine.runner = runner
+
+    result = asyncio.run(engine.prefetch())
+
+    args, kwargs = runner.download_call()
+    assert args[args.index("--model") + 1] == "nvidia/canary-qwen-2.5b"
+    # A cold multi-gigabyte fetch must outlive the subprocess watchdog.
+    assert kwargs["timeout_seconds"] is None
+    # The same HuggingFace token the diarisation pass uses authorises the fetch.
+    assert kwargs["env"]["HF_TOKEN"] == "hf-token"
+    assert result.ready is True
+
+
+def test_prefetch_is_skipped_when_nemo_is_missing(tmp_path: Path) -> None:
+    # Nothing to download into: the settings screen already reports why.
+    engine, _, _ = build(tmp_path)
+    runner = PrefetchRunner(ready=False)
+    engine.runner = runner
+
+    result = asyncio.run(engine.prefetch())
+
+    assert result.ready is False
+    assert all("--download" not in args for args, _ in runner.calls)
+
+
+def test_a_failed_download_is_reported_not_raised(tmp_path: Path) -> None:
+    # Startup calls this: an offline host must still boot.
+    engine, _, _ = build(tmp_path)
+
+    class FailingRunner(PrefetchRunner):
+        async def run(self, command: str, args: list[str], label: str, **kwargs: Any) -> CommandResult:
+            if "--download" in args:
+                raise RuntimeError("no route to host")
+            return await super().run(command, args, label, **kwargs)
+
+    engine.runner = FailingRunner()
+
+    result = asyncio.run(engine.prefetch())
+
+    assert result.ready is False
+    assert "no route to host" in result.detail

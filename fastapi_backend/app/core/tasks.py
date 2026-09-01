@@ -50,3 +50,16 @@ class BackgroundTaskRegistry:
         pending = list(self._tasks)
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+
+    async def cancel_all(self) -> None:
+        """Cancel every in-flight task and wait for it to unwind.
+
+        The counterpart to :meth:`drain` for work that must not delay shutdown
+        — a model download, say — where finishing is optional and the next boot
+        can resume it.
+        """
+        pending = list(self._tasks)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)

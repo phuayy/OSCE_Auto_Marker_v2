@@ -21,6 +21,7 @@ from app.pipeline.transcription.base import (
     EngineDescriptor,
     ParameterSpec,
     ParameterType,
+    PrefetchResult,
     TranscriptionEngine,
     TranscriptionRequest,
     TranscriptionResult,
@@ -264,3 +265,48 @@ def test_result_metadata_records_provenance(tmp_path: Path) -> None:
     assert described["model"] == "large-v3"
     assert described["diarized"] is True
     assert described["chunkSize"] == 20
+
+
+class PrefetchEngine(RecordingEngine):
+    """Records whether startup asked it to cache its weights."""
+
+    def __init__(self, ready: bool = True) -> None:
+        super().__init__()
+        self.ready = ready
+        self.prefetch_calls = 0
+
+    async def prefetch(self) -> PrefetchResult:
+        self.prefetch_calls += 1
+        if self.ready:
+            return PrefetchResult(True, "cached")
+        raise RuntimeError("the network is down")
+
+
+def test_startup_prefetches_the_selected_engine(tmp_path: Path) -> None:
+    router, _ = build_router(tmp_path, StubAppSettings(engine_id="recording"))
+    engine = PrefetchEngine()
+    router.engines["recording"] = engine
+
+    asyncio.run(router.prefetch_selected_engine())
+
+    assert engine.prefetch_calls == 1
+
+
+def test_a_prefetch_failure_does_not_break_startup(tmp_path: Path) -> None:
+    router, _ = build_router(tmp_path, StubAppSettings(engine_id="recording"))
+    router.engines["recording"] = PrefetchEngine(ready=False)
+
+    asyncio.run(router.prefetch_selected_engine())  # must not raise
+
+
+def test_prefetch_can_be_turned_off(tmp_path: Path) -> None:
+    # An air-gapped or metered host downloads on demand instead.
+    router, _ = build_router(
+        tmp_path, StubAppSettings(engine_id="recording"), transcription_prefetch_models=False
+    )
+    engine = PrefetchEngine()
+    router.engines["recording"] = engine
+
+    asyncio.run(router.prefetch_selected_engine())
+
+    assert engine.prefetch_calls == 0

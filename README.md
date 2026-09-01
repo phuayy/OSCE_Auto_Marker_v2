@@ -174,7 +174,36 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 > `WHISPERX_COMPUTE_TYPE=int8` (~1.5 GB, near-identical accuracy) in `.env` if it
 > does. If transcription is too slow, set `WHISPERX_MODEL=distil-large-v3`.
 
-### 6.3 Install ffmpeg (if not present)
+### 6.3 (Optional) Install the Canary-Qwen transcription engine
+
+WhisperX is the default engine and needs nothing extra. Install this only to make
+**NVIDIA Canary-Qwen 2.5B** selectable in *Settings -> Transcription*; until the
+NeMo toolkit is present the settings screen reports the engine as unavailable.
+
+```powershell
+pip install -r requirements-canary.txt
+
+# Verify (prints "nemo-ready")
+python scripts\canary_qwen_transcribe.py --check
+```
+
+The ~5 GB checkpoint is **not** part of that install. The backend downloads it
+into the HuggingFace cache in the background at startup whenever Canary-Qwen is
+the selected engine, so the first assessment does not wait for it. Set
+`TRANSCRIPTION_PREFETCH_MODELS=false` on a metered or air-gapped host — the
+engine then fetches the weights the first time it runs. To pre-seed the cache
+by hand (an image build, or a machine that will be offline later):
+
+```powershell
+python scripts\canary_qwen_transcribe.py --download
+```
+
+`nemo-toolkit` pins parts of the shared stack (lightning 2.4.x, omegaconf 2.3.0,
+packaging 24.2) and does not choose a torch build. If you installed the CUDA
+wheels in 6.2, re-verify afterwards that `torch.cuda.is_available()` is still
+`True`.
+
+### 6.4 Install ffmpeg (if not present)
 
 ```powershell
 winget install Gyan.FFmpeg
@@ -182,7 +211,7 @@ winget install Gyan.FFmpeg
 ffmpeg -version; ffprobe -version
 ```
 
-### 6.4 Install frontend dependencies
+### 6.5 Install frontend dependencies
 
 ```powershell
 npm install
