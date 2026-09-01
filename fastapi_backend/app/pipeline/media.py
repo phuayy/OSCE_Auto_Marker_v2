@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -12,8 +13,13 @@ from app.core.json_utils import extract_json_object
 from app.core.process import CommandRunner
 from app.core.utils import atomic_replace, clamp_number, format_timestamp, utc_now_iso
 from app.pipeline.whisperx_options import WhisperxRunOptions
+from app.pipeline.progress_tracker import ProgressTracker
 from app.services.auth_service import AuthService
 from app.services.event_service import EventService
+
+# Called with the WhisperX step's overall completion percentage (0-100) each
+# time it advances. Awaited, so a handler may persist the value.
+ProgressCallback = Callable[[float], Awaitable[None]]
 
 # Value of the raw transcript's "engine" marker for WhisperX. WhisperX writes
 # no such key, so its absence means WhisperX and any other value means the
@@ -786,11 +792,7 @@ class MediaPipeline:
                 args,
                 "WhisperX transcription",
                 env={"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},
-                on_output=lambda stream, text: self.events.publish(
-                    str(session["id"]),
-                    "log",
-                    {"source": f"whisperx-{stream}", "message": text},
-                ),
+                on_output=self._build_whisperx_output_handler(str(session["id"]), on_progress),
             )
         finally:
             task.cancel()
@@ -820,6 +822,39 @@ class MediaPipeline:
         if maximum:
             args.extend(["--max_speakers", str(maximum)])
         return args
+
+    def _build_whisperx_output_handler(
+        self,
+        session_id: str,
+        on_progress: ProgressCallback | None,
+    ) -> Callable[[str, str], Awaitable[None]]:
+        """Forward every WhisperX output line, lifting progress out of stdout.
+
+        Every line still reaches the log stream unchanged. Lines carrying a
+        ``Progress:`` reading additionally publish a ``progress`` event and
+        invoke ``on_progress`` — but only when the tracker says the step has
+        actually advanced, so a caller may persist each call.
+        """
+        tracker = ProgressTracker()
+
+        async def handle(stream: str, text: str) -> None:
+            await self.events.publish(
+                session_id,
+                "log",
+                {"source": f"whisperx-{stream}", "message": text},
+            )
+            percent = tracker.update(text)
+            if percent is None:
+                return
+            await self.events.publish(
+                session_id,
+                "progress",
+                {"step": "whisperx", "percent": percent},
+            )
+            if on_progress is not None:
+                await on_progress(percent)
+
+        return handle
 
     @staticmethod
     def build_hotwords(terms: list[Any], max_chars: int = 900) -> str:

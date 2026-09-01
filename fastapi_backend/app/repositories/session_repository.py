@@ -174,6 +174,7 @@ class SessionRepository:
             payload["workflow"].as_string().label("workflow"),
             payload["segmentation"].as_string().label("segmentation"),
             payload["pipeline", "currentStep"].as_string().label("current_step"),
+            payload["pipeline", "stepProgress"].as_float().label("step_progress"),
             payload["pipeline", "startedAt"].as_string().label("pipeline_started_at"),
             payload["outputs", "videoClips", 0, "id"].as_string().label("first_clip_id"),
         ).order_by(SessionRecord.created_at.desc())
@@ -198,6 +199,9 @@ class SessionRepository:
                     "clipSource": row.clip_source or None,
                     "hasVideoClips": row.first_clip_id is not None,
                     "currentStep": row.current_step or None,
+                    # Live completion of the current step (0-100), present only
+                    # while a step that reports progress is running.
+                    "stepProgress": _optional_float(row.step_progress),
                     "pipelineStartedAt": row.pipeline_started_at or None,
                 }
             )

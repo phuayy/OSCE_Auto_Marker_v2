@@ -18,6 +18,7 @@
     "db:reset:all": ".venv\\Scripts\\python scripts/reset_db.py --all",
     "db:check": ".venv\\Scripts\\python scripts/check_database.py",
     "test:api": ".venv\\Scripts\\python -m pytest fastapi_backend/tests",
+    "test:ui": "node --test \"test/*.test.mjs\"",
     "build": "vite build",
     "preview": "vite preview"
   },

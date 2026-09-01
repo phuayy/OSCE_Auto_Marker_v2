@@ -344,10 +344,17 @@ class PipelineService:
             raise AppError("No transcription engine is configured for this pipeline.", status_code=500)
 
         await self._mark_pipeline_step(session, TRANSCRIPTION_STEP, "running")
+        # Transcription is the longest step by far, and the only one that
+        # reports its own progress; the lock guards the session document
+        # against the output callbacks that carry those readings.
+        progress_lock = asyncio.Lock()
         try:
             transcription = await self.transcription.transcribe(
                 session,
                 audio_info,
+                on_progress=lambda percent: self._record_step_progress(
+                    session, TRANSCRIPTION_STEP, percent, lock=progress_lock
+                ),
             )
         except Exception as error:
             await self._mark_pipeline_step(session, TRANSCRIPTION_STEP, "failed", error=error)
@@ -521,6 +528,33 @@ class PipelineService:
                 await self.sessions.write(session)
         self._log_pipeline_step(session, step, status, error=error)
 
+    async def _record_step_progress(
+        self,
+        session: dict[str, Any],
+        step: str,
+        percent: float,
+        *,
+        lock: asyncio.Lock,
+    ) -> None:
+        """Persist a live completion percentage for a still-running step.
+
+        The session-list projection reads ``pipeline.stepProgress``, so this is
+        what turns the card's stage gauge from a fixed per-step fraction into a
+        moving one. Output callbacks are dispatched from the subprocess reader
+        threads, so the lock serialises what would otherwise be concurrent
+        writers of the same session document. A reading that arrives after the
+        step ended is dropped rather than resurrecting a finished step.
+        """
+        async with lock:
+            pipeline = session.setdefault("pipeline", {})
+            steps = pipeline.get("steps") if isinstance(pipeline.get("steps"), dict) else {}
+            state = steps.get(step)
+            if not isinstance(state, dict) or state.get("status") != "running":
+                return
+            state["progress"] = percent
+            pipeline["stepProgress"] = percent
+            await self.sessions.write(session)
+
     def _log_pipeline_step(
         self,
         session: dict[str, Any],
@@ -578,13 +612,18 @@ class PipelineService:
             current.setdefault("startedAt", now)
             current.pop("endedAt", None)
             current.pop("runtimeSeconds", None)
+            current.pop("progress", None)
             pipeline["currentStep"] = step
+            # A fresh step starts with no progress reading; a stale one from
+            # the previous step would otherwise be projected onto this one.
+            pipeline["stepProgress"] = None
         elif status in {"completed", "failed", "skipped"}:
             current.setdefault("startedAt", now)
             current["endedAt"] = now
             current["runtimeSeconds"] = self.runtime_seconds(str(current["startedAt"]), now)
             if pipeline.get("currentStep") == step:
                 pipeline["currentStep"] = None
+                pipeline["stepProgress"] = None
 
         if metadata is not None:
             current_metadata = current.get("metadata") if isinstance(current.get("metadata"), dict) else {}

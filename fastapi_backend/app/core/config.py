@@ -347,6 +347,10 @@ class Settings:
     # and one avg_logprob. 20 keeps confidence granularity useful and the texts
     # short enough for the aligner to place. 0 keeps the WhisperX default.
     whisperx_chunk_size: int = read_int_env("WHISPERX_CHUNK_SIZE", 20)
+    # --print_progress makes WhisperX emit "Progress: 42.10%..." lines that the
+    # pipeline parses into real step progress for the session cards. Turn off
+    # to restore quiet output (the elapsed-time heartbeat still runs).
+    whisperx_print_progress: bool = read_bool_env("WHISPERX_PRINT_PROGRESS", True)
     whisperx_output_format: str = os.getenv("WHISPERX_OUTPUT_FORMAT", "all").strip() or "all"
     whisperx_log_heartbeat_ms: int = read_int_env("WHISPERX_LOG_HEARTBEAT_MS", 5000)
     # ffmpeg -af chain for the dedicated WhisperX input WAV; "" disables the

@@ -3,6 +3,11 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { ensureStreamTicket, resolveMediaUrl } from '@/auth';
 import { useChangeStream } from '@/changeStream';
 import {
+  IN_FLIGHT_STATUSES,
+  describeProcessingStage,
+  formatProcessingStageLabel,
+} from '@/lib/processingStage';
+import {
   ArrowLeft,
   BarChart3,
   BellRing,
@@ -324,53 +329,6 @@ function buildLongDemoChildSession(rawSession, scoresPayload, communicationScore
     },
     error: null,
   };
-}
-
-// Statuses for which a session has live work in flight. In-flight sessions are
-// NOT enterable — the session card shows their stage until a terminal status
-// unlocks them.
-const IN_FLIGHT_STATUSES = new Set(['assembling', 'queued', 'processing']);
-
-// Ordered standard-pipeline steps used to gauge progress on the session cards.
-// Mirrors the backend's pipeline.steps keys (session_service list projection
-// exposes pipeline.currentStep as `currentStep`).
-const PIPELINE_STAGE_SEQUENCE = [
-  ['audio_extraction', 'Extracting audio'],
-  ['whisperx', 'Transcribing (WhisperX)'],
-  ['transcript_normalization', 'Normalizing transcript'],
-  ['llm_preprocess', 'Cleaning transcript (LLM)'],
-  ['audio_professionalism', 'Analyzing audio professionalism'],
-  ['communication_scoring', 'Scoring communication'],
-  ['content_scoring', 'Scoring content'],
-  ['assessment_persistence', 'Saving results'],
-];
-
-// Human-readable stage + rough completion fraction for an in-flight session,
-// derived from the lightweight list projection (status + workflow +
-// currentStep). This is what the session card shows while the session itself
-// is blocked from being opened.
-function describeProcessingStage(entry) {
-  const status = String(entry?.status || '').toLowerCase();
-  if (status === 'assembling') {
-    return { label: 'Assembling upload', fraction: 0.05 };
-  }
-  if (status === 'queued') {
-    return { label: 'Queued for processing', fraction: 0.1 };
-  }
-  if (status !== 'processing') {
-    return null;
-  }
-  if (entry?.workflow === 'long') {
-    return { label: 'Detecting student boundaries', fraction: 0.5 };
-  }
-  const stepIndex = PIPELINE_STAGE_SEQUENCE.findIndex(([step]) => step === entry?.currentStep);
-  if (stepIndex >= 0) {
-    return {
-      label: PIPELINE_STAGE_SEQUENCE[stepIndex][1],
-      fraction: (stepIndex + 1) / (PIPELINE_STAGE_SEQUENCE.length + 1),
-    };
-  }
-  return { label: 'Processing', fraction: 0.15 };
 }
 
 export default function OSCEAiMarkerMockup({
@@ -3514,7 +3472,10 @@ export default function OSCEAiMarkerMockup({
                               return (
                                 <div className="mt-2">
                                   <div className="flex items-center justify-between text-[11px] text-slate-600">
-                                    <span>{stage.label}…</span>
+                                    {/* The stage's own percentage when the step
+                                        streams one (WhisperX), next to the
+                                        overall run completion on the right. */}
+                                    <span>{formatProcessingStageLabel(stage)}…</span>
                                     <span>{Math.round(stage.fraction * 100)}%</span>
                                   </div>
                                   <Progress value={stage.fraction * 100} className="mt-1 h-1.5" />
@@ -4472,7 +4433,7 @@ export default function OSCEAiMarkerMockup({
                                       title="Available when this clip's assessment completes."
                                     >
                                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                      {stage ? `${stage.label}…` : 'Starting…'}
+                                      {stage ? `${formatProcessingStageLabel(stage)}…` : 'Starting…'}
                                     </Button>
                                   );
                                 }
