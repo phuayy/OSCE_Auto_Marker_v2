@@ -5,21 +5,25 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.core.exceptions import AppError
 from app.core.json_utils import extract_json_object, write_json_file
 from app.core.logging_utils import log_context
 from app.core.utils import utc_now_iso
+from app.domain.notifications import NotificationType
 from app.pipeline.llm_preprocess import TranscriptPreprocessor, diff_replacements, merge_corrected_segments
 from app.pipeline.media import MediaPipeline
 from app.pipeline.scoring import ScoringPipeline
 from app.pipeline.transcript_correction import apply_replacements_to_file, correct_segments
 from app.repositories.app_settings_repository import AppSettingsRepository
-from app.repositories.notification_repository import NotificationRepository
 from app.services.assessment_service import AssessmentService
 from app.services.event_service import EventService
 from app.services.session_service import SessionService
+from app.pipeline.transcription.base import TranscriptionResult
+from app.pipeline.transcription.registry import EngineDependencies
+if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+    from app.services.notification_service import NotificationService
 
 
 logger = logging.getLogger(__name__)
@@ -33,7 +37,7 @@ class PipelineService:
         media: MediaPipeline,
         scoring: ScoringPipeline,
         assessments: AssessmentService | None = None,
-        notifications: NotificationRepository | None = None,
+        notifications: "NotificationService | None" = None,
         preprocessor: TranscriptPreprocessor | None = None,
         app_settings: AppSettingsRepository | None = None,
     ) -> None:
@@ -50,11 +54,40 @@ class PipelineService:
         if self.notifications is None:
             return
         name = str(session.get("name") or session.get("id"))
-        await self.notifications.notify(
+        await self.notifications.emit(
+            NotificationType.SCORING_COMPLETED,
             "Scoring complete",
             f'Scoring is complete for "{name}". Results are ready to review.',
             session_id=str(session["id"]),
         )
+
+    async def _notify_session_failed(self, session_id: str, message: str, failed_step: str) -> None:
+        """Announce a failed run.
+
+        Without this a failure is only visible to someone already looking at the
+        session list — the very thing push notifications exist to avoid. Kept
+        best-effort: this runs inside the failure handler, so raising here would
+        mask the original error.
+        """
+        if self.notifications is None:
+            return
+        try:
+            name = await self._session_display_name(session_id)
+            await self.notifications.emit(
+                NotificationType.SESSION_FAILED,
+                "Processing failed",
+                f'"{name}" failed at {failed_step}: {message}',
+                session_id=session_id,
+            )
+        except Exception:
+            logger.exception("Could not raise failure notification for session %s.", session_id)
+
+    async def _session_display_name(self, session_id: str) -> str:
+        try:
+            session = await self.sessions.read(session_id)
+        except Exception:
+            return session_id
+        return str(session.get("name") or session_id)
 
     async def mark_session_failed(self, session_id: str, error: Exception) -> None:
         message = self._exception_message(error, "Processing failed.")
@@ -84,6 +117,7 @@ class PipelineService:
             "status",
             {"code": "failed", "message": message, "failedStep": failed_step},
         )
+        await self._notify_session_failed(session_id, message, failed_step)
 
     @staticmethod
     def _find_failed_step(session: dict[str, Any]) -> str | None:

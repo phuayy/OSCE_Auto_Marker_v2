@@ -2,11 +2,15 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Bell } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { useChangeStream } from '@/changeStream';
 
-const POLL_INTERVAL_MS = 8000;
-// When the backend is unreachable (dev restart, cold boot) the poll backs off
-// up to this ceiling instead of hammering the dead port every 8s.
-const MAX_POLL_INTERVAL_MS = 30000;
+// New notifications arrive pushed over the change stream, so this timer is only
+// a reconciliation net — it catches anything missed while the stream was down
+// and corrects the unread badge if a push was dropped under back-pressure.
+const SAFETY_POLL_INTERVAL_MS = 60000;
+// When the backend is unreachable (dev restart, cold boot) the safety poll backs
+// off up to this ceiling instead of hammering a dead port.
+const MAX_POLL_INTERVAL_MS = 120000;
 
 function timeAgo(iso) {
   const then = new Date(iso).getTime();
@@ -19,13 +23,14 @@ function timeAgo(iso) {
 }
 
 /**
- * Global notification state: polls the backend, exposes the history list,
- * unread badge count, and the single active toast (a newer arrival replaces
- * the current one). Mount ONCE (in AppShell) and pass down as props.
+ * Global notification state: exposes the history list, unread badge count, and
+ * the single active toast (a newer arrival replaces the current one). Mount
+ * ONCE (in AppShell) and pass down as props.
  *
- * `enabled` gates the poll on auth: nothing is fetched pre-login, polling
- * stops (and state resets) on logout/expiry, and the first poll after login
- * seeds silently — no toast replay of history.
+ * Refreshes are driven by the backend change stream, with a slow timer as a
+ * safety net. `enabled` gates everything on auth: nothing is fetched pre-login,
+ * refreshing stops (and state resets) on logout/expiry, and the first fetch
+ * after login seeds silently — no toast replay of history.
  */
 export function useNotifications(enabled) {
   const [items, setItems] = useState([]);
@@ -73,12 +78,12 @@ export function useNotifications(enabled) {
     }
     let cancelled = false;
     let timerId;
-    let delay = POLL_INTERVAL_MS;
+    let delay = SAFETY_POLL_INTERVAL_MS;
     async function tick() {
       const reachable = await refresh();
       if (cancelled) return;
       // Exponential backoff while the backend is down; snap back on success.
-      delay = reachable ? POLL_INTERVAL_MS : Math.min(delay * 2, MAX_POLL_INTERVAL_MS);
+      delay = reachable ? SAFETY_POLL_INTERVAL_MS : Math.min(delay * 2, MAX_POLL_INTERVAL_MS);
       timerId = setTimeout(tick, delay);
     }
     tick();
@@ -87,6 +92,54 @@ export function useNotifications(enabled) {
       clearTimeout(timerId);
     };
   }, [enabled, refresh]);
+
+  // The arrival path. The backend pushes the stored notification row itself, so
+  // a new notification needs no fetch at all — the toast is rendered straight
+  // from the pushed payload.
+  //
+  // `handlerRef` inside useChangeStream keeps this closure fresh, so it always
+  // sees the current `enabled`.
+  useChangeStream((event) => {
+    if (!enabled) return;
+
+    if (event.type === 'ready') {
+      // The stream just (re)connected. Anything raised while it was down was
+      // never pushed, so reconcile against the database once.
+      refresh();
+      return;
+    }
+
+    // Cross-process arrival. The direct push below is an in-process fan-out, so
+    // a notification raised by the Hatchet worker never reaches this browser
+    // that way — the API process only learns of it through the database change
+    // counter. Refetching here is what makes push work in worker deployments.
+    // When both paths fire (single-process mode) the refetch is harmless: the
+    // pushed id is already in knownIdsRef, so it cannot toast twice.
+    if (event.type === 'change' && event.table === 'notifications') {
+      refresh();
+      return;
+    }
+
+    if (event.type !== 'notification' || !event.notification) return;
+    const incoming = event.notification;
+
+    setItems((previous) =>
+      previous.some((item) => item.id === incoming.id)
+        ? previous
+        : [incoming, ...previous],
+    );
+    if (typeof event.unreadCount === 'number') {
+      setUnreadCount(event.unreadCount);
+    } else {
+      setUnreadCount((count) => count + 1);
+    }
+    // Before the first seed, history has not been established yet, so a push
+    // cannot be told apart from backlog — record it without popping a toast.
+    if (knownIdsRef.current === null) return;
+    if (knownIdsRef.current.has(incoming.id)) return;
+    knownIdsRef.current.add(incoming.id);
+    if (!incoming.read) setToast(incoming);
+  });
 
   const dismiss = useCallback(async (id) => {
     // Optimistic: badge and list update immediately, server call follows.

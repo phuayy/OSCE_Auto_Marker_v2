@@ -11,10 +11,13 @@ router = APIRouter(prefix="/notifications", tags=["notifications"])
 
 @router.get("")
 async def list_notifications(container: AppContainer = Depends(get_container)) -> dict[str, object]:
-    return {
-        "notifications": await container.notifications.list_rows(),
-        "unreadCount": await container.notifications.unread_count(),
-    }
+    """The feed and unread badge, served from cache while nothing has changed.
+
+    One cached payload rather than two queries: the browser fetches this on
+    every stream reconnect and change announcement, so under several open tabs
+    the uncached version multiplied database reads for data that had not moved.
+    """
+    return await container.notifications.feed()
 
 
 @router.post("/{notification_id}/read")

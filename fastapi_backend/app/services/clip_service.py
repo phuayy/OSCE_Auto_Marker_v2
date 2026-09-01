@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from app.core.exceptions import AppError
 from app.core.logging_utils import log_context
+from app.domain.notifications import NotificationType
 from app.pipeline.media import MediaPipeline
 from app.services.event_service import EventService
 from app.services.pipeline_service import PipelineService
@@ -95,6 +96,15 @@ class ClipService:
                 "status",
                 {"code": "failed", "message": f"Auto-crop failed: {failed['error']}"},
             )
+            # Auto-crop fails outside PipelineService.mark_session_failed, so it
+            # must raise its own notification or a failed crop stays silent.
+            if self.notifications is not None:
+                await self.notifications.emit(
+                    NotificationType.SESSION_FAILED,
+                    "Auto-crop failed",
+                    f'"{failed.get("name") or session_id}" could not be split into clips: {failed["error"]}',
+                    session_id=session_id,
+                )
             raise
         session.setdefault("outputs", {})["videoClips"] = clips
         session["status"] = "cropped"
@@ -105,7 +115,8 @@ class ClipService:
         session_count = sum(1 for clip in clips if clip.get("kind") != "intermission")
         intermission_count = len(clips) - session_count
         if self.notifications is not None:
-            await self.notifications.notify(
+            await self.notifications.emit(
+                NotificationType.CLIPS_READY,
                 "Clips ready",
                 f'"{session.get("name") or session_id}" has been split into '
                 f"{session_count} clip{'s' if session_count != 1 else ''} — ready for assessment.",

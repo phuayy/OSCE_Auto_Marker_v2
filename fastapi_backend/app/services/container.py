@@ -23,10 +23,13 @@ from app.repositories.job_repository import JobRepository
 from app.repositories.notification_repository import NotificationRepository
 from app.repositories.rubric_asset_repository import RubricAssetRepository
 from app.repositories.session_repository import SessionRepository
+from app.repositories.webhook_repository import WebhookRepository
 from app.repositories.upload_repository import UploadRepository
 from app.repositories.video_repository import VideoRepository
 from app.services.assessment_service import AssessmentService
 from app.services.change_feed_service import ChangeFeedService
+from app.services.notification_service import NotificationService
+from app.services.webhook_dispatcher import WebhookDispatcher
 from app.services.async_upload_service import AsyncUploadService
 from app.services.artifact_service import ArtifactService
 from app.services.auth_service import AuthService
@@ -64,7 +67,9 @@ class AppContainer:
     scoring: ScoringPipeline
     pipeline: PipelineService
     clips: ClipService
-    notifications: NotificationRepository
+    notifications: NotificationService
+    webhooks: WebhookRepository
+    webhook_dispatcher: WebhookDispatcher
     corpora: CorpusRepository
     app_settings: AppSettingsRepository
     videos: VideoRepository
@@ -114,6 +119,10 @@ class AppContainer:
 
     async def shutdown(self) -> None:
         await self.jobs.shutdown()
+        # Before the change feed stops and the engine is disposed: in-flight
+        # webhook deliveries still need to write their delivery-log rows.
+        await self.notifications.drain()
+        await self.changes.stop()
         await self.orm_database.shutdown()
         # Releases the raw-SQL layer's PostgreSQL pool; a no-op on SQLite.
         self.database.close()
@@ -156,7 +165,14 @@ def create_container(settings: Settings | None = None) -> AppContainer:
     rubrics = RubricService(active_settings, runner, artifacts, rubric_assets)
     media = MediaPipeline(active_settings, runner, events, auth)
     scoring = ScoringPipeline(active_settings, runner, events, auth, rubrics)
-    notifications = NotificationRepository(orm_database)
+    webhooks = WebhookRepository(orm_database)
+    webhook_dispatcher = WebhookDispatcher(active_settings, webhooks)
+    notifications = NotificationService(
+        NotificationRepository(orm_database),
+        changes=changes,
+        webhooks=webhook_dispatcher,
+        cache=read_cache,
+    )
     corpora = CorpusRepository(orm_database)
     app_settings = AppSettingsRepository(orm_database)
     preprocessor = TranscriptPreprocessor(active_settings, runner, events, auth)
@@ -217,6 +233,8 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         pipeline=pipeline,
         clips=clips,
         notifications=notifications,
+        webhooks=webhooks,
+        webhook_dispatcher=webhook_dispatcher,
         corpora=corpora,
         app_settings=app_settings,
         videos=videos,
