@@ -17,6 +17,7 @@ from app.api.routes import (
     async_uploads,
     auth,
     corpora,
+    events as events_routes,
     health,
     jobs,
     notifications,
@@ -132,6 +133,7 @@ app.mount("/media/clips", StaticFiles(directory=str(settings.paths.output_clips_
 app.mount("/media/source", StaticFiles(directory=str(settings.object_storage_root), check_dir=False), name="media-source")
 
 app.include_router(health.router, prefix="/api")
+app.include_router(events_routes.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(rubrics.router, prefix="/api")
 app.include_router(uploads.router, prefix="/api")

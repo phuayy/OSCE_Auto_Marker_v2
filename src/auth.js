@@ -265,6 +265,12 @@ export async function loginRequest(username, password) {
   setStoredAuth(body);
   // Warm a stream ticket so media/SSE URLs avoid the long-lived token.
   fetchStreamTicket();
+  // Announce the new session so listeners (the change stream) can connect.
+  // An event rather than a direct call: changeStream imports from here, so
+  // importing it back would create a module cycle.
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('osce:auth:login'));
+  }
   return body;
 }
 

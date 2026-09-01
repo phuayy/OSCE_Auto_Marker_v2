@@ -7,7 +7,9 @@ from app.core.config import Settings
 from app.core.logging_utils import log_context
 from app.core.process import CommandRunner
 from app.core.rate_limit import FixedWindowRateLimiter
+from app.core.versioned_cache import VersionedCache
 from app.database import Database
+from app.database.change_tracking import install_change_tracking
 from app.database.migration_runner import run_database_migrations
 from app.database.migrations import apply_additive_migrations
 from app.database.orm import OrmDatabase
@@ -24,6 +26,7 @@ from app.repositories.session_repository import SessionRepository
 from app.repositories.upload_repository import UploadRepository
 from app.repositories.video_repository import VideoRepository
 from app.services.assessment_service import AssessmentService
+from app.services.change_feed_service import ChangeFeedService
 from app.services.async_upload_service import AsyncUploadService
 from app.services.artifact_service import ArtifactService
 from app.services.auth_service import AuthService
@@ -67,6 +70,8 @@ class AppContainer:
     videos: VideoRepository
     session_maintenance: SessionMaintenanceService
     login_rate_limiter: FixedWindowRateLimiter
+    changes: ChangeFeedService
+    read_cache: VersionedCache
 
     async def startup(self, *, dispatch_queued_jobs: bool = True, recover_interrupted_jobs: bool | None = None) -> None:
         should_recover = (
@@ -89,6 +94,11 @@ class AppContainer:
         # create_all adds missing tables but never alters an existing one, so
         # columns introduced after a database was created need this pass.
         await apply_additive_migrations(self.orm_database.engine)
+        # Triggers span both schema layers (sessions/assessment_results from the
+        # ORM metadata, jobs from the raw-SQL schema), so they can only be
+        # attached once both initialisers have run.
+        push_enabled = await install_change_tracking(self.orm_database.engine)
+        await self.changes.start(push_enabled=push_enabled)
         await self.sessions.migrate_legacy_sessions()
         await self.corpora.seed_defaults()
         await self.auth.initialize()
@@ -117,9 +127,21 @@ def create_container(settings: Settings | None = None) -> AppContainer:
     artifacts = ArtifactService(active_settings)
     auth = AuthService(active_settings)
     events = EventService(active_settings)
+    changes = ChangeFeedService(orm_database)
+    read_cache = VersionedCache(enabled=active_settings.cache_enabled)
+    # The database announces a committed write; this hook turns that
+    # announcement into an eviction, so the cache is corrected by the write
+    # itself rather than by anyone polling to find out. Registered at
+    # construction (not startup) so a container built for tests behaves the
+    # same as one built by the app.
+    changes.add_change_observer(
+        lambda table, _version: read_cache.invalidate_tables((table,))
+    )
     sessions = SessionService(
         active_settings,
         SessionRepository(orm_database, legacy_sessions_dir=active_settings.paths.sessions_dir),
+        cache=read_cache,
+        changes=changes,
     )
     storage = create_storage_service(active_settings)
     jobs = JobQueueService(
@@ -200,4 +222,6 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         videos=videos,
         session_maintenance=session_maintenance,
         login_rate_limiter=login_rate_limiter,
+        changes=changes,
+        read_cache=read_cache,
     )

@@ -290,6 +290,13 @@ class Settings:
     # dispatch at enqueue time. 0 disables (startup-only recovery).
     hatchet_redispatch_interval_seconds: int = read_int_env("HATCHET_REDISPATCH_INTERVAL_SECONDS", 30)
 
+
+    # --- Read-through cache ---------------------------------------------
+    # Serves hot projections (the session index, the notification feed) from
+    # memory, and lets a database change announcement evict them. Disable only
+    # to isolate a suspected staleness bug: every read then goes to the
+    # database, which is correct but materially slower under load.
+    cache_enabled: bool = read_bool_env("CACHE_ENABLED", True)
     ffmpeg_bin: str = ""
     ffprobe_bin: str = ""
     scorer_python_bin: str = ""

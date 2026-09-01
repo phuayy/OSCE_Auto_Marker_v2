@@ -9,14 +9,30 @@ from typing import Any
 from app.core.config import Settings
 from app.core.json_utils import extract_json_object
 from app.core.utils import normalize_session_name, session_name_key
+from app.core.versioned_cache import VersionedCache
 from app.domain.constants import SESSION_NAME_ADJECTIVES, SESSION_NAME_NOUNS
 from app.repositories.session_repository import SessionEntry, SessionRepository
+from app.services.change_feed_service import ChangeFeedService
+
+
+SESSION_INDEX_CACHE_KEY = "session_index"
 
 
 class SessionService:
-    def __init__(self, settings: Settings, repository: SessionRepository) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        repository: SessionRepository,
+        *,
+        cache: VersionedCache | None = None,
+        changes: ChangeFeedService | None = None,
+    ) -> None:
         self.settings = settings
         self.repository = repository
+        # Both optional so a bare SessionService (tests, scripts) still works —
+        # it just rebuilds the index on every call, as it always did.
+        self.cache = cache
+        self.changes = changes
 
     async def migrate_legacy_sessions(self) -> int:
         return await self.repository.migrate_legacy()
@@ -84,30 +100,46 @@ class SessionService:
         return session
 
     async def list_sessions(self) -> list[dict[str, Any]]:
-        entries, _used = await self.ensure_names_for_index(await self.repository.read_all())
-        sessions: list[dict[str, Any]] = []
-        for session in (entry.session for entry in entries):
-            outputs = session.get("outputs") or {}
-            pipeline = session.get("pipeline") if isinstance(session.get("pipeline"), dict) else {}
-            sessions.append(
-                {
-                    "id": session.get("id"),
-                    "name": session.get("name") or None,
-                    "createdAt": session.get("createdAt") or None,
-                    "status": session.get("status") or None,
-                    "workflow": session.get("workflow") or None,
-                    "segmentation": session.get("segmentation") or None,
-                    "parentSessionId": session.get("parentSessionId") or None,
-                    "clipSource": session.get("clipSource") or None,
-                    "hasVideoClips": bool(outputs.get("videoClips")),
-                    # Lightweight progress for the session-list cards: the UI
-                    # gauges an in-flight session from its card instead of
-                    # opening it (in-flight sessions are not enterable).
-                    "currentStep": pipeline.get("currentStep") or None,
-                    "pipelineStartedAt": pipeline.get("startedAt") or None,
-                }
-            )
-        return sessions
+        """The session-list projection, served from cache while nothing changed.
+
+        This is the most-polled endpoint in the app, so it must not re-read every
+        session payload on each call. The cache is keyed on the ``sessions``
+        change counter, which a database trigger bumps — including for writes
+        made by the Hatchet worker process — so a hit is always current.
+        """
+        if self.cache is None or self.changes is None:
+            return await self._build_session_index()
+        token = await self.changes.token(("sessions",))
+        return await self.cache.get_or_build(
+            SESSION_INDEX_CACHE_KEY,
+            token,
+            self._build_session_index,
+            # Declaring the dependency lets a committed write to `sessions`
+            # evict this entry the moment the database announces it, instead of
+            # the staleness only being noticed on the next token comparison.
+            tables=("sessions",),
+        )
+
+    async def _build_session_index(self) -> list[dict[str, Any]]:
+        projections = await self.repository.read_index_projection()
+        if not self._needs_name_backfill(projections):
+            return projections
+
+        # Legacy rows without a (unique) name still need the naming pass, which
+        # reads and rewrites full payloads. It repairs every row in one go, so
+        # this branch stops being taken after the first call.
+        await self.ensure_names_for_index(await self.repository.read_all())
+        return await self.repository.read_index_projection()
+
+    @staticmethod
+    def _needs_name_backfill(projections: list[dict[str, Any]]) -> bool:
+        seen: set[str] = set()
+        for projection in projections:
+            key = session_name_key(projection.get("name"))
+            if not key or key in seen:
+                return True
+            seen.add(key)
+        return False
 
     async def rename_session(self, session_id: str, next_name: str) -> dict[str, Any]:
         next_name_raw = normalize_session_name(next_name)[: self.settings.session_name_max_length]

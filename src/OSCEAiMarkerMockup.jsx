@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ensureStreamTicket, resolveMediaUrl } from '@/auth';
+import { useChangeStream } from '@/changeStream';
 import {
   ArrowLeft,
   BarChart3,
@@ -1091,16 +1092,18 @@ export default function OSCEAiMarkerMockup({
     }
   }, [showWorkspace]);
 
-  // Auto-poll the session list while anything is in flight. Runs on the main
-  // page (drives the card stage gauges) AND inside a long-session workspace
-  // (drives the per-clip run states, which derive from the same index).
-  useEffect(() => {
-    const isActive = sessionIndex.some((s) => IN_FLIGHT_STATUSES.has(s.status));
-    if (!isActive) return;
-    const timer = setInterval(refreshSessionIndex, 8000);
-    return () => clearInterval(timer);
+  // Refresh the session list when the backend says it changed, instead of
+  // polling for it. Drives the card stage gauges on the main page AND the
+  // per-clip run states inside a long-session workspace (both derive from this
+  // index). `jobs` is included because a job status change is what moves a card
+  // between queued/processing/completed.
+  //
+  // A `ready` event means the stream just (re)connected, so anything could have
+  // happened while it was down — refetch unconditionally in that case.
+  useChangeStream(() => {
+    refreshSessionIndex({ silent: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionIndex]);
+  }, ['sessions', 'jobs']);
 
   async function refreshCorpora() {
     try {
@@ -1124,8 +1127,12 @@ export default function OSCEAiMarkerMockup({
     setSelectedCorpusId((previous) => (list.some((corpus) => corpus.id === previous) ? previous : ''));
   }
 
-  async function refreshSessionIndex() {
-    setSessionIndexLoading(true);
+  // `silent` refreshes are driven by the change stream rather than by the user,
+  // so they must not flash the list's loading state on every backend write.
+  async function refreshSessionIndex({ silent = false } = {}) {
+    if (!silent) {
+      setSessionIndexLoading(true);
+    }
     setSessionIndexError('');
     try {
       const response = await fetch('/api/sessions');
@@ -1148,7 +1155,11 @@ export default function OSCEAiMarkerMockup({
     } catch (error) {
       setSessionIndexError(error.message || 'Failed to load sessions.');
     } finally {
-      setSessionIndexLoading(false);
+      // Only the refresh that raised the flag may clear it, so a stream-driven
+      // refresh landing mid-flight cannot cancel a user-initiated spinner.
+      if (!silent) {
+        setSessionIndexLoading(false);
+      }
     }
   }
 

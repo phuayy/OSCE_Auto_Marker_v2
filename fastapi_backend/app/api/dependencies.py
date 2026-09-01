@@ -20,6 +20,12 @@ def is_session_events_path(path: str) -> bool:
     return path.startswith("/api/sessions/") and path.endswith("/events")
 
 
+def is_stream_path(path: str) -> bool:
+    """Endpoints consumed by ``EventSource``, which cannot send an Authorization
+    header and therefore also accept a short-lived stream ticket."""
+    return path == "/api/events" or is_session_events_path(path)
+
+
 def authorize_request(
     request: Request,
     container: AppContainer,
@@ -48,7 +54,7 @@ def authorize_request(
         return True, None
 
     payload = container.auth.verify_token(extract_bearer_token(request))
-    if payload is None and (is_media or is_session_events_path(path)):
+    if payload is None and (is_media or is_stream_path(path)):
         payload = container.auth.verify_stream_ticket(extract_stream_ticket(request))
     if not payload:
         return False, None

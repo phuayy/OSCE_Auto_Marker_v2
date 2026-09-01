@@ -44,6 +44,21 @@ def _version_token(updated_at: datetime | None) -> str | None:
     return dt.isoformat(timespec="microseconds")
 
 
+def _optional_float(value: Any) -> float | None:
+    """Coerce a JSON-extracted numeric to float, tolerating backend quirks.
+
+    ``as_float`` returns a real number on PostgreSQL, but SQLite hands back the
+    raw JSON scalar, which is a string for some driver/version combinations —
+    and a NULL either way when the key is absent.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _record_to_dict(record: SessionRecord) -> dict[str, Any]:
     result = dict(record.payload or {})
     result["id"] = record.id
@@ -135,6 +150,58 @@ class SessionRepository:
                 select(SessionRecord).order_by(SessionRecord.created_at.desc())
             )
             return [SessionEntry(session=_record_to_dict(r)) for r in result.scalars().all()]
+
+    async def read_index_projection(self) -> list[dict[str, Any]]:
+        """Read only the fields the session-list cards render.
+
+        ``read_all`` pulls every row's whole ``payload`` document — which embeds
+        the complete content/communication/audio-professionalism score payloads —
+        and deserialises all of it to produce ten shallow fields. This extracts
+        those fields inside the database instead, so a list rebuild transfers
+        bytes rather than megabytes.
+
+        ``hasVideoClips`` is answered by probing the first clip's id rather than
+        fetching the clip array: presence is all the caller needs.
+        """
+        payload = SessionRecord.payload
+        statement = select(
+            SessionRecord.id,
+            SessionRecord.name,
+            SessionRecord.status,
+            SessionRecord.parent_session_id,
+            SessionRecord.clip_source,
+            SessionRecord.created_at,
+            payload["workflow"].as_string().label("workflow"),
+            payload["segmentation"].as_string().label("segmentation"),
+            payload["pipeline", "currentStep"].as_string().label("current_step"),
+            payload["pipeline", "startedAt"].as_string().label("pipeline_started_at"),
+            payload["outputs", "videoClips", 0, "id"].as_string().label("first_clip_id"),
+        ).order_by(SessionRecord.created_at.desc())
+
+        async with self.database.session() as db_session:
+            rows = (await db_session.execute(statement)).all()
+
+        projections: list[dict[str, Any]] = []
+        for row in rows:
+            created_at = row.created_at
+            if created_at is not None and created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            projections.append(
+                {
+                    "id": row.id,
+                    "name": row.name or None,
+                    "createdAt": created_at.isoformat().replace("+00:00", "Z") if created_at else None,
+                    "status": row.status or None,
+                    "workflow": row.workflow or None,
+                    "segmentation": row.segmentation or None,
+                    "parentSessionId": row.parent_session_id or None,
+                    "clipSource": row.clip_source or None,
+                    "hasVideoClips": row.first_clip_id is not None,
+                    "currentStep": row.current_step or None,
+                    "pipelineStartedAt": row.pipeline_started_at or None,
+                }
+            )
+        return projections
 
     async def list_child_ids(self, parent_session_id: str) -> list[str]:
         """Ids of every session whose parent is ``parent_session_id`` (clip

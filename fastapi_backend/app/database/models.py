@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -229,4 +229,26 @@ class SessionRecord(Base):
     clip_source: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class TableVersionRecord(Base):
+    """Monotonic change counter per tracked table, bumped by a database trigger.
+
+    The API caches expensive projections (notably the session index) and needs a
+    *cheap* way to ask "has anything changed since I built this?". Reading one
+    small row per tracked table answers that in a single indexed query, instead
+    of re-reading and re-deserialising every ``sessions.payload`` JSON document
+    on each poll.
+
+    The counter lives in the database rather than in process memory because the
+    Hatchet worker writes sessions from a *separate process* — an in-process
+    cache would go stale with no way to learn about it. A trigger-maintained row
+    is visible to every process that shares the database.
+    """
+
+    __tablename__ = "table_versions"
+
+    table_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
