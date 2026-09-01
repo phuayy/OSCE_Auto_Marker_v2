@@ -10,9 +10,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI
-
 from env_loader import load_env_file
+from llm_bootstrap import (
+    ChatResponse,
+    LLMRouter,
+    build_chat_request,
+    build_router_from_env,
+    describe_routing,
+    validator_from,
+)
 from rubric_section import (
     diagnose_missing_rubric_section,
     split_case_study_context_and_rubric,
@@ -29,20 +35,15 @@ UPLOADED_CASE_STUDIES_DIR = STORAGE_DIR / "input" / "case_studies"
 FALLBACK_CASE_STUDIES_DIR = ROOT_DIR / "case_studies"
 SCORES_OUTPUT_DIR = STORAGE_DIR / "output" / "scores"
 
-NVIDIA_BASE_URL = (
-    os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").strip()
-    or "https://integrate.api.nvidia.com/v1"
-)
-
-# The API key is read exclusively from the environment. The local server loads
-# .env/platform secrets and forwards NVIDIA_API_KEY when spawning this script.
-MODEL_NAME = os.getenv("NVIDIA_MODEL_NAME", "nvidia/nemotron-3-super-120b-a12b").strip()
+# Which provider and model run is no longer decided here. The API resolves the
+# operator's primary/fallback choice from the settings database and passes it in
+# OSCE_LLM_ROUTING; running this script by hand with no routing variable falls
+# back to the legacy NVIDIA_MODEL_NAME / NVIDIA_FALLBACK_MODELS behaviour. See
+# scripts/llm_bootstrap.py and fastapi_backend/app/llm/.
 
 MAX_CASE_STUDY_CONTEXT_CHARS = 36_000
 MAX_RUBRIC_SECTION_CHARS = 48_000
 MAX_TRANSCRIPT_CHARS = 60_000
-MAX_COMPLETION_RETRIES_PER_MODE = 3
-RETRYABLE_PROVIDER_ERROR_CODES = {408, 409, 425, 429, 500, 502, 503, 504, 522, 524}
 # Empty/very short content (below this many characters) is treated as a truncated
 # response and triggers a retry instead of falling through to "default everything
 # to No / no evidence" in the validator.
@@ -51,8 +52,19 @@ CHECKPOINT_SCHEMA = "nvidia-osce-assessor-checkpoint-v1"
 
 
 class CheckpointMessage:
-    def __init__(self, content: str) -> None:
+    """A completion restored from disk after a crash.
+
+    Stands in for a live provider response, so the repair loop cannot tell the
+    difference between resuming and having just made the call. It records which
+    model produced the text as well: the output file names the model that
+    actually scored the student, and a resumed run must not relabel that as
+    whatever is configured today.
+    """
+
+    def __init__(self, content: str, model: str = "", provider_id: str = "") -> None:
         self.content = content
+        self.model = model
+        self.provider_id = provider_id
 
 
 def write_text_atomic(path: Path, text: str) -> None:
@@ -109,56 +121,17 @@ def checkpoint_file_signature(path: Path) -> dict[str, Any]:
     }
 
 
-def read_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return default
-
-
-def read_float_env(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return default
-
-
-def read_bool_env(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    token = str(raw).strip().lower()
-    if token in {"1", "true", "yes", "y", "on"}:
-        return True
-    if token in {"0", "false", "no", "n", "off"}:
-        return False
-    return default
-
-
-# Temperature was 1.0 which gave the model enough freedom to drift into ramblings
-# (and waste max_tokens) even with response_format=json_object. 0.2 is much more
-# stable for structured Yes/No scoring while leaving small room for natural prose
-# in the reason fields.
-NVIDIA_TEMPERATURE = read_float_env("NVIDIA_TEMPERATURE", 0.2)
-NVIDIA_TOP_P = read_float_env("NVIDIA_TOP_P", 0.9)
-# Bumped from 16384 to 24576 so the JSON output is never truncated for longer
-# rubrics. The non-reasoning Nemotron path needs the headroom for ~25 criteria.
-NVIDIA_MAX_TOKENS = read_int_env("NVIDIA_MAX_TOKENS", 24_576)
-NVIDIA_ENABLE_THINKING = read_bool_env("NVIDIA_ENABLE_THINKING", False)
-# When thinking is OFF we explicitly DROP `reasoning_budget` from the request body
-# below. Some Nemotron deployments still allocate a hidden reasoning trace when
-# `reasoning_budget` is set, which silently consumes the max_tokens budget and
-# leaves message.content empty. That manifested as the all-zero / no-evidence
-# content rubric output the user reported.
-NVIDIA_REASONING_BUDGET = read_int_env("NVIDIA_REASONING_BUDGET", 16384)
-# Nemotron routinely exceeds 180s on long transcripts + rubrics; override with NVIDIA_REQUEST_TIMEOUT_SECONDS.
-REQUEST_TIMEOUT_SECONDS = read_int_env("NVIDIA_REQUEST_TIMEOUT_SECONDS", 360)
+# Sampling knobs (temperature, top_p, max_tokens, request timeout, reasoning)
+# are read from the environment by app.llm.runtime.request_defaults_from_env, so
+# every LLM caller in this project honours the same variables. The historical
+# NVIDIA_* names still work; the vendor-neutral LLM_* names take precedence.
+#
+# The defaults that matter and why:
+#   temperature 0.2  — 1.0 let the model ramble past its token budget even with
+#                      response_format=json_object.
+#   max_tokens 24576 — headroom for ~25 rubric criteria without truncation.
+#   thinking off     — a hidden reasoning trace is billed against max_tokens and
+#                      returned empty content, which scored every criterion "No".
 
 
 def parse_args() -> argparse.Namespace:
@@ -193,17 +166,6 @@ def parse_args() -> argparse.Namespace:
         help="Print JSON to stdout and skip writing output file",
     )
     return parser.parse_args()
-
-
-def require_api_key() -> str:
-    key = os.getenv("NVIDIA_API_KEY", "").strip()
-    if not key or key == "<NVIDIA_API_KEY>":
-        raise RuntimeError(
-            "NVIDIA API key missing. The local server reads it from storage/auth/secrets.json "
-            "and passes it as the NVIDIA_API_KEY environment variable; set the key there or "
-            "export NVIDIA_API_KEY in your shell before running this script directly."
-        )
-    return key
 
 
 def newest_file(directory: Path, pattern: str) -> Path | None:
@@ -711,107 +673,6 @@ def format_response_content_for_log(content: str, max_chars: int = 4000) -> str:
     return f"{text[:max_chars]}... [truncated, total {len(text)} chars]"
 
 
-def extract_message_from_response(response: Any) -> Any:
-    response_error = getattr(response, "error", None)
-
-    if response_error is None:
-        try:
-            response_error = response.model_dump().get("error")
-        except Exception:
-            response_error = None
-
-    if response_error:
-        if isinstance(response_error, dict):
-            error_message = str(response_error.get("message", "Provider returned error")).strip()
-            error_code = str(response_error.get("code", "unknown")).strip()
-        else:
-            error_message = str(response_error).strip() or "Provider returned error"
-            error_code = "unknown"
-
-        raise RuntimeError(f"Model provider error (code={error_code}): {error_message}")
-
-    choices = getattr(response, "choices", None)
-    if not choices:
-        raise RuntimeError("Model response did not include any choices.")
-
-    first_choice = choices[0]
-    message = getattr(first_choice, "message", None)
-    if message is None:
-        raise RuntimeError("Model response did not include a message payload.")
-
-    finish_reason = str(getattr(first_choice, "finish_reason", "") or "").lower()
-    raw_content = str(getattr(message, "content", "") or "").strip()
-
-    # The model occasionally returns finish_reason="length" with empty/near-empty
-    # content when its hidden reasoning trace consumes the max_tokens budget. We
-    # treat this as a retryable error so the next mode (no reasoning, lower temp)
-    # gets a chance.
-    if finish_reason == "length" and len(raw_content) < MIN_VALID_CONTENT_CHARS:
-        raise RuntimeError(
-            "Model response truncated (finish_reason=length) before producing usable JSON. "
-            f"This is retryable. response_content={format_response_content_for_log(raw_content)!r}"
-        )
-
-    if not raw_content:
-        raise RuntimeError(
-            f"Model response had empty content (finish_reason={finish_reason or 'unknown'}). "
-            f"This is retryable. response_content={format_response_content_for_log(raw_content)!r}"
-        )
-
-    if len(raw_content) < MIN_VALID_CONTENT_CHARS:
-        raise RuntimeError(
-            f"Model response content was suspiciously short ({len(raw_content)} chars, "
-            f"finish_reason={finish_reason or 'unknown'}). This is retryable. "
-            f"response_content={format_response_content_for_log(raw_content)!r}"
-        )
-
-    return message
-
-
-def is_retryable_model_error(error: Exception) -> bool:
-    text = str(error or "").lower()
-
-    code_match = re.search(r"code\s*=\s*(\d{3})", text)
-    if code_match:
-        try:
-            code = int(code_match.group(1))
-            if code in RETRYABLE_PROVIDER_ERROR_CODES:
-                return True
-        except ValueError:
-            pass
-
-    retry_tokens = (
-        "provider returned error",
-        "timeout",
-        "timed out",
-        "temporarily unavailable",
-        "rate limit",
-        "rate-limit",
-        "rate_limit",
-        "too many requests",
-        "try again",
-        "service unavailable",
-        "bad gateway",
-        "gateway timeout",
-        "model response did not include any choices",
-        "truncated",
-        "finish_reason=length",
-        "empty content",
-        "suspiciously short",
-        "model response had empty",
-        "connection reset",
-        "connection error",
-        "ssl",
-        "read timeout",
-        "remote disconnected",
-        "missing or non-array field 'criteria'",
-        "incomplete criteria array",
-        "often a provider-side structured-output scaffolding bug",
-    )
-
-    return any(token in text for token in retry_tokens)
-
-
 def extract_primary_json_dict_from_model_output(raw_text: str) -> dict[str, Any]:
     """Prefer the richest JSON dict that contains `criteria` (fixes first-{ … last-}
     slicing when the assistant emits analysis text before / after JSON)."""
@@ -891,128 +752,34 @@ def enforce_expected_criteria_array_or_raise_retry(raw_content: str, expected_le
         )
 
 
-def resolve_model_candidates() -> list[str]:
-    configured_fallbacks = [
-        item.strip()
-        for item in str(os.getenv("NVIDIA_FALLBACK_MODELS", "") or "").split(",")
-        if item.strip()
-    ]
-
-    seen: set[str] = set()
-    ordered: list[str] = []
-
-    for candidate in [MODEL_NAME, *configured_fallbacks]:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        ordered.append(candidate)
-
-    return ordered
-
-
 def create_completion(
-    client: OpenAI,
+    router: LLMRouter,
     messages: list[dict[str, Any]],
     *,
     expected_rubric_items: int | None = None,
-) -> Any:
-    # Mode ladder: try the safest configuration first (no reasoning, strict JSON).
-    # Each successive mode loosens one constraint so we keep getting useful output
-    # from providers that reject one of those switches.
-    attempt_modes: list[tuple[str, dict[str, Any]]] = [
-        (
-            "no-reasoning+json",
-            {
-                "extra_body": {"reasoning": {"enabled": False}},
-                "response_format": {"type": "json_object"},
-            },
-        ),
-        (
-            "json_only",
-            {
-                "response_format": {"type": "json_object"},
-            },
-        ),
-        (
-            "plain",
-            {},
-        ),
-    ]
+) -> ChatResponse:
+    """One scored completion, across whichever providers are configured.
 
-    last_error: Exception | None = None
-    model_candidates = resolve_model_candidates()
+    Everything this function used to do by hand — the model fallback list, the
+    request-shape ladder, the backoff, the retryability rules — now lives in the
+    shared router, so the communication scorer and the transcript preprocessor
+    behave identically without a second copy of it.
 
-    # Build the base extra_body. We deliberately DO NOT include `reasoning_budget`
-    # when thinking is disabled: Nemotron-style deployments otherwise still
-    # allocate a hidden chain-of-thought trace inside the max_tokens budget,
-    # which truncates the visible content and produced the empty "all zeros"
-    # output reported by users.
-    extra_body: dict[str, Any] = {
-        "reasoning_effort": "none",
-        "chat_template_kwargs": {"enable_thinking": NVIDIA_ENABLE_THINKING},
-    }
-    if NVIDIA_ENABLE_THINKING:
-        extra_body["reasoning_effort"] = "high"
-        extra_body["reasoning_budget"] = NVIDIA_REASONING_BUDGET
+    What stays here is the part only this script knows: a response whose
+    ``criteria`` array is missing or short is a provider-side structured-output
+    bug, not a scoring result, and must be retried rather than validated into a
+    sheet of defaults.
+    """
 
-    for model_name in model_candidates:
-        for mode_name, mode_kwargs in attempt_modes:
-            mode_extra_body = mode_kwargs.get("extra_body") if isinstance(mode_kwargs, dict) else None
-            merged_extra_body = dict(extra_body)
-            if isinstance(mode_extra_body, dict):
-                merged_extra_body.update(mode_extra_body)
+    def check(content: str) -> None:
+        enforce_expected_criteria_array_or_raise_retry(content, expected_rubric_items)
 
-            mode_kwargs_no_extra: dict[str, Any] = {
-                key: value for key, value in mode_kwargs.items() if key != "extra_body"
-            }
-
-            for attempt_index in range(1, MAX_COMPLETION_RETRIES_PER_MODE + 1):
-                request_payload: dict[str, Any] = {
-                    "model": model_name,
-                    "messages": messages,
-                    "temperature": NVIDIA_TEMPERATURE,
-                    "top_p": NVIDIA_TOP_P,
-                    "max_tokens": NVIDIA_MAX_TOKENS,
-                    "timeout": REQUEST_TIMEOUT_SECONDS,
-                    "extra_body": merged_extra_body,
-                    **mode_kwargs_no_extra,
-                }
-
-                try:
-                    response = client.chat.completions.create(**request_payload)
-                    message = extract_message_from_response(response)
-                    enforce_expected_criteria_array_or_raise_retry(
-                        str(getattr(message, "content", "") or ""),
-                        expected_rubric_items,
-                    )
-                    return message
-                except Exception as error:
-                    last_error = error
-                    print(
-                        f"[nvidia_osce_assessor] attempt failed model={model_name} mode={mode_name} "
-                        f"attempt={attempt_index}/{MAX_COMPLETION_RETRIES_PER_MODE} error={error}",
-                        file=sys.stderr,
-                    )
-
-                    if not is_retryable_model_error(error):
-                        break
-
-                    if attempt_index >= MAX_COMPLETION_RETRIES_PER_MODE:
-                        break
-
-                    # Exponential backoff with jitter avoids hammering during a
-                    # rate-limit window.
-                    backoff_seconds = min(8.0, 1.5 * (2 ** (attempt_index - 1)))
-                    time.sleep(backoff_seconds)
-
-            # If mode failed due non-retryable request shape issue, continue to next mode.
-            # Keeping this mode fallback handles models/providers that reject reasoning or response_format.
-            continue
-
-    if last_error is None:
-        raise RuntimeError("NVIDIA completion failed without a captured error.")
-
-    raise RuntimeError(f"NVIDIA completion failed after retries and fallbacks: {last_error}")
+    request = build_chat_request(
+        messages,
+        label="content-scoring",
+        min_content_chars=MIN_VALID_CONTENT_CHARS,
+    )
+    return router.complete(request, validate=validator_from(check))
 
 
 def extract_json_from_text(raw_text: str) -> dict[str, Any]:
@@ -1297,7 +1064,9 @@ def parse_session_id(args: argparse.Namespace) -> str:
 
 def main() -> int:
     args = parse_args()
-    api_key = require_api_key()
+    router = build_router_from_env()
+    routing_summary = describe_routing(router)
+    print(f"[nvidia_osce_assessor] LLM routing: {routing_summary}", file=sys.stderr)
 
     session_id = parse_session_id(args)
     output_path = None if args.stdout_only else (
@@ -1326,7 +1095,10 @@ def main() -> int:
 
     checkpoint_context = {
         "session_id": session_id,
-        "model": MODEL_NAME,
+        # Part of the checkpoint fingerprint: changing the configured model
+        # must invalidate a half-finished run rather than silently splicing
+        # one model's output into another's.
+        "model": routing_summary,
         "transcript": checkpoint_file_signature(transcript_path),
         "case_study": checkpoint_file_signature(case_study_path),
         "rubric_criteria_count": len(rubric_criteria),
@@ -1362,7 +1134,6 @@ def main() -> int:
         {"role": "user", "content": user_prompt},
     ]
 
-    client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=api_key)
 
     def is_useful_payload(candidate: dict[str, Any], remaining_issues: list[str]) -> bool:
         """A scoring payload is only treated as 'useful' if at least one criterion
@@ -1392,7 +1163,11 @@ def main() -> int:
         normalized_payload = checkpoint_state.get("normalized_payload") or {}
         issues = checkpoint_state.get("issues") or []
         repair_attempts = int(checkpoint_state.get("repair_attempts") or 0)
-        last_message = CheckpointMessage(str(checkpoint_state.get("last_message_content") or ""))
+        last_message = CheckpointMessage(
+            str(checkpoint_state.get("last_message_content") or ""),
+            model=str(checkpoint_state.get("last_message_model") or ""),
+            provider_id=str(checkpoint_state.get("last_message_provider") or ""),
+        )
         if not last_message.content:
             checkpoint_state = None
         elif checkpoint_stage in {"first_completion_returned", "repair_completion_returned"}:
@@ -1407,6 +1182,8 @@ def main() -> int:
                     "stage": checkpoint_stage.replace("_returned", "_validated"),
                     "repair_attempts": repair_attempts,
                     "last_message_content": last_message.content,
+                "last_message_model": getattr(last_message, "model", ""),
+                "last_message_provider": getattr(last_message, "provider_id", ""),
                     "normalized_payload": normalized_payload,
                     "issues": issues,
                 },
@@ -1415,7 +1192,7 @@ def main() -> int:
             checkpoint_state = None
 
     if not checkpoint_state:
-        first_message = create_completion(client, base_messages, expected_rubric_items=len(rubric_criteria))
+        first_message = create_completion(router, base_messages, expected_rubric_items=len(rubric_criteria))
         write_checkpoint(
             checkpoint_path,
             checkpoint_context,
@@ -1423,6 +1200,8 @@ def main() -> int:
                 "stage": "first_completion_returned",
                 "repair_attempts": 0,
                 "last_message_content": first_message.content or "",
+                "last_message_model": first_message.model,
+                "last_message_provider": first_message.provider_id,
             },
         )
         first_payload, parse_error = safe_extract_payload(first_message.content or "")
@@ -1438,6 +1217,8 @@ def main() -> int:
                 "stage": "first_completion_validated",
                 "repair_attempts": repair_attempts,
                 "last_message_content": last_message.content or "",
+                "last_message_model": getattr(last_message, "model", ""),
+                "last_message_provider": getattr(last_message, "provider_id", ""),
                 "normalized_payload": normalized_payload,
                 "issues": issues,
             },
@@ -1447,7 +1228,7 @@ def main() -> int:
         repair_attempts += 1
         follow_up_messages = build_follow_up_messages(base_messages, last_message, issues)
         try:
-            next_message = create_completion(client, follow_up_messages, expected_rubric_items=len(rubric_criteria))
+            next_message = create_completion(router, follow_up_messages, expected_rubric_items=len(rubric_criteria))
         except Exception as repair_error:
             issues.append(f"Repair attempt {repair_attempts} failed: {repair_error}")
             print(
@@ -1464,6 +1245,8 @@ def main() -> int:
                 "stage": "repair_completion_returned",
                 "repair_attempts": repair_attempts,
                 "last_message_content": last_message.content or "",
+                "last_message_model": getattr(last_message, "model", ""),
+                "last_message_provider": getattr(last_message, "provider_id", ""),
                 "normalized_payload": normalized_payload,
                 "issues": issues,
             },
@@ -1481,6 +1264,8 @@ def main() -> int:
                 "stage": "repair_completion_validated",
                 "repair_attempts": repair_attempts,
                 "last_message_content": last_message.content or "",
+                "last_message_model": getattr(last_message, "model", ""),
+                "last_message_provider": getattr(last_message, "provider_id", ""),
                 "normalized_payload": normalized_payload,
                 "issues": issues,
             },
@@ -1512,7 +1297,10 @@ def main() -> int:
     normalized_payload["case_study_file"] = to_repo_relative(case_study_path)
     normalized_payload["rubric_file"] = "embedded_in_case_study_pdf"
     normalized_payload["rubric_source"] = f"{to_repo_relative(case_study_path)}#rubric-section"
-    normalized_payload["model"] = MODEL_NAME
+    # The model that actually produced these marks, which after a fallback is
+    # not necessarily the configured primary.
+    normalized_payload["model"] = getattr(last_message, "model", "") or routing_summary
+    normalized_payload["model_provider"] = getattr(last_message, "provider_id", "")
     normalized_payload["scoring_summary"] = compute_scoring_summary(normalized_payload["criteria"])
     normalized_payload["path_checks"] = {
         "transcript_folder_matches_file_stem": transcript_path.parent.name == transcript_path.stem

@@ -17,6 +17,12 @@ LLM_PREPROCESS_KEY = "llmTranscriptPreprocess"
 # not lose the tuning done for either.
 TRANSCRIPTION_ENGINE_KEY = "transcriptionEngine"
 TRANSCRIPTION_OPTIONS_KEY = "transcriptionEngineOptions"
+# The scoring model the operator picked, and the ordered list to try when it
+# fails. Each entry is {"providerId": ..., "model": ...}. API keys are NOT
+# stored here — they stay in the deployment's environment, because this table
+# is dumped verbatim to anyone who can open the settings screen.
+LLM_PRIMARY_KEY = "llmPrimary"
+LLM_FALLBACKS_KEY = "llmFallbacks"
 
 # Known settings and their defaults. GET merges stored rows over these so the
 # API response shape stays stable as settings are added. An empty engine id
@@ -25,6 +31,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     LLM_PREPROCESS_KEY: False,
     TRANSCRIPTION_ENGINE_KEY: "",
     TRANSCRIPTION_OPTIONS_KEY: {},
+    # An empty primary means "whatever this deployment's default provider is",
+    # which LLMSettingsService resolves. Written this way so a fresh install and
+    # an install that predates the LLM router behave identically.
+    LLM_PRIMARY_KEY: {},
+    LLM_FALLBACKS_KEY: [],
 }
 
 
@@ -72,6 +83,28 @@ class AppSettingsRepository:
         # engine that is — resolving options here against an empty id silently
         # discarded the operator's tuning for the engine that then ran.
         return engine_id, stored_options
+
+    async def llm_routing_selection(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Live read for the scoring pipeline: the primary target and its fallbacks.
+
+        Read on every run rather than cached, so switching model in the settings
+        screen takes effect on the next assessment in every process — including
+        clip children and the Hatchet worker — without a restart.
+
+        A read failure is *not* swallowed here. Unlike the preprocess toggle,
+        silently scoring with a different model than the operator selected
+        changes the marks a student receives; the caller decides what to do.
+        """
+        async with self.database.session() as db:
+            primary_record = await db.get(AppSettingRecord, LLM_PRIMARY_KEY)
+            fallbacks_record = await db.get(AppSettingRecord, LLM_FALLBACKS_KEY)
+        primary = primary_record.value if primary_record is not None else {}
+        fallbacks = fallbacks_record.value if fallbacks_record is not None else []
+        if not isinstance(primary, dict):
+            primary = {}
+        if not isinstance(fallbacks, list):
+            fallbacks = []
+        return primary, [item for item in fallbacks if isinstance(item, dict)]
 
     async def llm_preprocess_enabled(self) -> bool:
         """Live read for the pipeline. A read failure means 'off' — a settings

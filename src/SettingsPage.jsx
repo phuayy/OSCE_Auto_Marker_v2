@@ -3,6 +3,7 @@ import { ArrowLeft, Loader2, Settings as SettingsIcon, Wand2 } from 'lucide-reac
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import CorporaManager from '@/CorporaManager.jsx';
+import LlmRoutingSettings from '@/LlmRoutingSettings.jsx';
 import TranscriptionEngineSettings from '@/TranscriptionEngineSettings.jsx';
 import WebhooksManager from '@/WebhooksManager.jsx';
 
@@ -93,6 +94,8 @@ export default function SettingsPage({ onBack }) {
 
         <TranscriptionEngineSettings />
 
+        <LlmRoutingSettings />
+
         <Card className="border-slate-200 bg-white shadow-sm">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-lg">
@@ -100,10 +103,10 @@ export default function SettingsPage({ onBack }) {
               LLM Transcription Preprocess
             </CardTitle>
             <CardDescription>
-              After transcription and before scoring, an extra Nemotron pass corrects obvious
-              transcription errors (misheard words, garbled medical terms) using the clinical
-              context of the dialogue. Timestamps, speaker labels, and segmentation are never
-              altered. Applies to every future run, including each student clip.
+              After transcription and before scoring, an extra pass by the model selected above
+              corrects obvious transcription errors (misheard words, garbled medical terms) using
+              the clinical context of the dialogue. Timestamps, speaker labels, and segmentation
+              are never altered. Applies to every future run, including each student clip.
             </CardDescription>
           </CardHeader>
           <CardContent>

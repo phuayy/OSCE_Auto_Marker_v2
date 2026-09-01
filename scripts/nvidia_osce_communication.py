@@ -22,14 +22,21 @@ import math
 import os
 import re
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI
-
 from env_loader import load_env_file
+from llm_bootstrap import (
+    ChatResponse,
+    LLMRouter,
+    ReasoningPolicy,
+    RequestMode,
+    build_chat_request,
+    build_router_from_env,
+    describe_routing,
+    validator_from,
+)
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 load_env_file(ROOT_DIR)
@@ -41,23 +48,14 @@ COMM_SCORES_DIR = STORAGE_DIR / "output" / "communication_scores"
 AUTH_DIR = STORAGE_DIR / "auth"
 PARSED_RUBRIC_PATH = AUTH_DIR / "communication_rubric.json"
 
-NVIDIA_BASE_URL = (
-    os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").strip()
-    or "https://integrate.api.nvidia.com/v1"
-)
-
-MODEL_NAME = (
-    os.getenv("NVIDIA_COMM_MODEL_NAME")
-    or os.getenv("NVIDIA_MODEL_NAME", "nvidia/nemotron-3-super-120b-a12b")
-).strip()
+# Provider and model come from the settings-driven router (OSCE_LLM_ROUTING),
+# exactly as they do for the content scorer. See scripts/llm_bootstrap.py.
 
 MAX_TRANSCRIPT_CHARS = 60_000
 MAX_AUDIO_CONTEXT_CHARS = 24_000
 # Cap for the formatted OpenSMILE feature dump that gets injected separately
 # into the user prompt. Most eGeMAPSv02 dumps are well under 20 kB.
 MAX_OPEN_SMILE_CONTEXT_CHARS = 24_000
-MAX_COMPLETION_RETRIES_PER_MODE = 3
-RETRYABLE_PROVIDER_ERROR_CODES = {408, 409, 425, 429, 500, 502, 503, 504, 522, 524}
 # See nvidia_osce_assessor.py — same defensive minimum, same reasoning limits.
 MIN_VALID_CONTENT_CHARS = 40
 
@@ -90,16 +88,6 @@ def read_int_env(name: str, default: int) -> int:
         return default
 
 
-def read_float_env(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return default
-
-
 def read_bool_env(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None or str(raw).strip() == "":
@@ -112,14 +100,19 @@ def read_bool_env(name: str, default: bool) -> bool:
     return default
 
 
-# See nvidia_osce_assessor.py for the rationale behind these defaults.
-NVIDIA_TEMPERATURE = read_float_env("NVIDIA_TEMPERATURE", 0.2)
-NVIDIA_TOP_P = read_float_env("NVIDIA_TOP_P", 0.9)
-NVIDIA_MAX_TOKENS = read_int_env("NVIDIA_MAX_TOKENS", 24_576)
-# Communication scorer reasoning is independent of the clinical script's NVIDIA_ENABLE_THINKING.
-NVIDIA_COMMUNICATION_ENABLE_THINKING = read_bool_env("NVIDIA_COMMUNICATION_ENABLE_THINKING", True)
-NVIDIA_REASONING_BUDGET = read_int_env("NVIDIA_REASONING_BUDGET", 16384)
+# Temperature, top_p and max_tokens come from the shared environment defaults
+# (see app.llm.runtime.request_defaults_from_env). Only the settings this
+# scorer deliberately diverges on are read here.
+#
+# Reasoning is ON by default and independent of the clinical scorer's switch:
+# communication marking rewards judgement about tone and empathy, where the
+# extra deliberation measurably improves the evidence quotes.
+COMMUNICATION_ENABLE_THINKING = read_bool_env("NVIDIA_COMMUNICATION_ENABLE_THINKING", True)
+COMMUNICATION_REASONING_BUDGET = read_int_env("NVIDIA_REASONING_BUDGET", 16384)
+# Far longer than the clinical scorer's: reasoning plus an OpenSMILE feature
+# dump regularly pushes a single call past ten minutes.
 REQUEST_TIMEOUT_SECONDS = read_int_env("NVIDIA_REQUEST_TIMEOUT_SECONDS", 5000)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -155,17 +148,6 @@ def parse_args() -> argparse.Namespace:
         help="Print JSON to stdout and skip writing --output.",
     )
     return parser.parse_args()
-
-
-def require_api_key() -> str:
-    key = os.getenv("NVIDIA_API_KEY", "").strip()
-    if not key or key == "<NVIDIA_API_KEY>":
-        raise RuntimeError(
-            "NVIDIA API key missing. The local server reads it from storage/auth/secrets.json "
-            "and passes it as the NVIDIA_API_KEY environment variable; set the key there or "
-            "export NVIDIA_API_KEY in your shell before running this script directly."
-        )
-    return key
 
 
 def newest_file(directory: Path, pattern: str) -> Path | None:
@@ -439,25 +421,6 @@ def clip_text(value: str, max_chars: int, label: str) -> str:
     return f"{kept}\n\n[TRUNCATED {label}: original_length={len(text)} chars, kept={max_chars}]"
 
 
-def resolve_model_candidates() -> list[str]:
-    configured_fallbacks = [
-        item.strip()
-        for item in str(os.getenv("NVIDIA_FALLBACK_MODELS", "") or "").split(",")
-        if item.strip()
-    ]
-
-    seen: set[str] = set()
-    ordered: list[str] = []
-
-    for candidate in [MODEL_NAME, *configured_fallbacks]:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        ordered.append(candidate)
-
-    return ordered
-
-
 def format_response_content_for_log(content: str, max_chars: int = 4000) -> str:
     text = str(content or "")
     if not text:
@@ -547,200 +510,49 @@ def enforce_expected_communication_criteria_or_raise_retry(
         )
 
 
-def extract_message_from_response(response: Any) -> Any:
-    response_error = getattr(response, "error", None)
+def communication_mode_ladder() -> tuple[RequestMode, ...]:
+    """Request shapes to try, hardest-won detail first.
 
-    if response_error is None:
-        try:
-            response_error = response.model_dump().get("error")
-        except Exception:
-            response_error = None
-
-    if response_error:
-        if isinstance(response_error, dict):
-            error_message = str(response_error.get("message", "Provider returned error")).strip()
-            error_code = str(response_error.get("code", "unknown")).strip()
-        else:
-            error_message = str(response_error).strip() or "Provider returned error"
-            error_code = "unknown"
-
-        raise RuntimeError(f"Model provider error (code={error_code}): {error_message}")
-
-    choices = getattr(response, "choices", None)
-    if not choices:
-        raise RuntimeError("Model response did not include any choices.")
-
-    first_choice = choices[0]
-    message = getattr(first_choice, "message", None)
-    if message is None:
-        raise RuntimeError("Model response did not include a message payload.")
-
-    finish_reason = str(getattr(first_choice, "finish_reason", "") or "").lower()
-    raw_content = str(getattr(message, "content", "") or "").strip()
-
-    if finish_reason == "length" and len(raw_content) < MIN_VALID_CONTENT_CHARS:
-        raise RuntimeError(
-            "Model response truncated (finish_reason=length) before producing usable JSON. "
-            f"This is retryable. response_content={format_response_content_for_log(raw_content)!r}"
-        )
-
-    if not raw_content:
-        raise RuntimeError(
-            f"Model response had empty content (finish_reason={finish_reason or 'unknown'}). "
-            f"This is retryable. response_content={format_response_content_for_log(raw_content)!r}"
-        )
-
-    if len(raw_content) < MIN_VALID_CONTENT_CHARS:
-        raise RuntimeError(
-            f"Model response content was suspiciously short ({len(raw_content)} chars, "
-            f"finish_reason={finish_reason or 'unknown'}). This is retryable. "
-            f"response_content={format_response_content_for_log(raw_content)!r}"
-        )
-
-    return message
-
-
-def is_retryable_model_error(error: Exception) -> bool:
-    text = str(error or "").lower()
-
-    code_match = re.search(r"code\s*=\s*(\d{3})", text)
-    if code_match:
-        try:
-            code = int(code_match.group(1))
-            if code in RETRYABLE_PROVIDER_ERROR_CODES:
-                return True
-        except ValueError:
-            pass
-
-    retry_tokens = (
-        "provider returned error",
-        "timeout",
-        "timed out",
-        "temporarily unavailable",
-        "rate limit",
-        "rate-limit",
-        "rate_limit",
-        "too many requests",
-        "try again",
-        "service unavailable",
-        "bad gateway",
-        "gateway timeout",
-        "model response did not include any choices",
-        "truncated",
-        "finish_reason=length",
-        "empty content",
-        "suspiciously short",
-        "model response had empty",
-        "connection reset",
-        "connection error",
-        "ssl",
-        "read timeout",
-        "remote disconnected",
-        "missing or non-array field 'criteria'",
-        "incomplete criteria array",
-        "often a provider-side structured-output scaffolding bug",
-    )
-
-    return any(token in text for token in retry_tokens)
-
-
-def build_attempt_modes_communication() -> list[tuple[str, dict[str, Any]]]:
-    json_kwargs: dict[str, Any] = {"response_format": {"type": "json_object"}}
-
-    if NVIDIA_COMMUNICATION_ENABLE_THINKING:
-        # Plain text first avoids the provider emitting an empty `{}` / `{\"schema\":\"\"}`
-        # JSON scaffold while reasoning is enabled, then escalating to structured JSON fallbacks.
-        return [
-            ("reasoning+plain_first", {}),
-            ("reasoning+json", dict(json_kwargs)),
-            (
-                "no-reasoning+json",
-                {"extra_body": {"reasoning": {"enabled": False}}, **json_kwargs},
-            ),
-            ("json_only", dict(json_kwargs)),
-            ("plain_final", {}),
-        ]
-
-    return [
-        ("no-reasoning+json", {"extra_body": {"reasoning": {"enabled": False}}, **json_kwargs}),
-        ("json_only", dict(json_kwargs)),
-        ("plain", {}),
-    ]
+    With reasoning enabled, asking Nemotron for ``response_format=json_object``
+    on the very first attempt made it emit an empty ``{"schema": ""}`` scaffold
+    and burn a repair round; plain text first avoids that. With reasoning off,
+    the standard ladder applies.
+    """
+    if COMMUNICATION_ENABLE_THINKING:
+        return (RequestMode.PLAIN, RequestMode.STRUCTURED, RequestMode.JSON_ONLY)
+    return (RequestMode.STRUCTURED, RequestMode.JSON_ONLY, RequestMode.PLAIN)
 
 
 def create_completion(
-    client: OpenAI,
+    router: LLMRouter,
     messages: list[dict[str, Any]],
     *,
     expected_criteria_items: int | None = None,
-) -> Any:
-    attempt_modes = build_attempt_modes_communication()
+) -> ChatResponse:
+    """One communication-scoring completion, across every configured provider.
 
-    last_error: Exception | None = None
-    model_candidates = resolve_model_candidates()
+    Model fallback, the mode ladder, backoff and retryability all live in the
+    shared router. What is specific to this scorer stays here: its own reasoning
+    switch (independent of the clinical scorer's), its longer timeout, and the
+    check that the model actually returned a full criteria array.
+    """
 
-    extra_body: dict[str, Any] = {
-        "reasoning_effort": "none",
-        "chat_template_kwargs": {"enable_thinking": NVIDIA_COMMUNICATION_ENABLE_THINKING},
-    }
-    if NVIDIA_COMMUNICATION_ENABLE_THINKING:
-        extra_body["reasoning_effort"] = "low"
-        extra_body["reasoning_budget"] = NVIDIA_REASONING_BUDGET
+    def check(content: str) -> None:
+        enforce_expected_communication_criteria_or_raise_retry(content, expected_criteria_items)
 
-    for model_name in model_candidates:
-        for mode_name, mode_kwargs in attempt_modes:
-            mode_extra_body = mode_kwargs.get("extra_body") if isinstance(mode_kwargs, dict) else None
-            merged_extra_body = dict(extra_body)
-            if isinstance(mode_extra_body, dict):
-                merged_extra_body.update(mode_extra_body)
-
-            mode_kwargs_no_extra: dict[str, Any] = {
-                key: value for key, value in mode_kwargs.items() if key != "extra_body"
-            }
-
-            for attempt_index in range(1, MAX_COMPLETION_RETRIES_PER_MODE + 1):
-                request_payload: dict[str, Any] = {
-                    "model": model_name,
-                    "messages": messages,
-                    "temperature": NVIDIA_TEMPERATURE,
-                    "top_p": NVIDIA_TOP_P,
-                    "max_tokens": NVIDIA_MAX_TOKENS,
-                    "timeout": REQUEST_TIMEOUT_SECONDS,
-                    "extra_body": merged_extra_body,
-                    **mode_kwargs_no_extra,
-                }
-
-                try:
-                    response = client.chat.completions.create(**request_payload)
-                    message = extract_message_from_response(response)
-                    enforce_expected_communication_criteria_or_raise_retry(
-                        str(getattr(message, "content", "") or ""),
-                        expected_criteria_items,
-                    )
-                    return message
-                except Exception as error:
-                    last_error = error
-                    print(
-                        f"[nvidia_osce_communication] attempt failed model={model_name} mode={mode_name} "
-                        f"attempt={attempt_index}/{MAX_COMPLETION_RETRIES_PER_MODE} error={error}",
-                        file=sys.stderr,
-                    )
-
-                    if not is_retryable_model_error(error):
-                        break
-
-                    if attempt_index >= MAX_COMPLETION_RETRIES_PER_MODE:
-                        break
-
-                    backoff_seconds = min(8.0, 1.5 * (2 ** (attempt_index - 1)))
-                    time.sleep(backoff_seconds)
-
-            continue
-
-    if last_error is None:
-        raise RuntimeError("NVIDIA completion failed without a captured error.")
-
-    raise RuntimeError(f"NVIDIA completion failed after retries and fallbacks: {last_error}")
+    request = build_chat_request(
+        messages,
+        label="communication-scoring",
+        min_content_chars=MIN_VALID_CONTENT_CHARS,
+        timeout_seconds=REQUEST_TIMEOUT_SECONDS,
+        reasoning=ReasoningPolicy(
+            enabled=COMMUNICATION_ENABLE_THINKING,
+            effort="high" if COMMUNICATION_ENABLE_THINKING else "none",
+            budget_tokens=COMMUNICATION_REASONING_BUDGET,
+        ),
+        mode_ladder=communication_mode_ladder(),
+    )
+    return router.complete(request, validate=validator_from(check))
 
 
 def extract_json_from_text(raw_text: str) -> dict[str, Any]:
@@ -1117,11 +929,12 @@ def build_repair_prompt(issues: list[str], raw_output: str, expected_count: int)
 
 def main() -> int:
     args = parse_args()
-    api_key = require_api_key()
+    router = build_router_from_env()
+    routing_summary = describe_routing(router)
 
     print(
-        f"[nvidia_osce_communication] reasoning="
-        f"{'on' if NVIDIA_COMMUNICATION_ENABLE_THINKING else 'off'}"
+        f"[nvidia_osce_communication] routing={routing_summary} reasoning="
+        f"{'on' if COMMUNICATION_ENABLE_THINKING else 'off'}"
         f" timeout_s={REQUEST_TIMEOUT_SECONDS}",
         file=sys.stderr,
     )
@@ -1166,7 +979,6 @@ def main() -> int:
         {"role": "user", "content": user_prompt},
     ]
 
-    client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=api_key)
 
     def is_useful_communication_payload(candidate: dict[str, Any], remaining_issues: list[str]) -> bool:
         """The validator falls back to score_label='None', evidence='Insufficient
@@ -1190,7 +1002,7 @@ def main() -> int:
         return any_useful
 
     first_message = create_completion(
-        client, base_messages, expected_criteria_items=communication_criteria_expected
+        router, base_messages, expected_criteria_items=communication_criteria_expected
     )
     first_payload, parse_error = safe_extract_payload(first_message.content or "")
     normalized_payload, issues = validate_output(first_payload, rubric)
@@ -1214,7 +1026,7 @@ def main() -> int:
         ]
         try:
             next_message = create_completion(
-                client, follow_up_messages, expected_criteria_items=communication_criteria_expected
+                router, follow_up_messages, expected_criteria_items=communication_criteria_expected
             )
         except Exception as repair_error:
             issues.append(f"Repair attempt {repair_attempts} failed: {repair_error}")
@@ -1253,7 +1065,10 @@ def main() -> int:
     normalized_payload["transcript_file"] = str(transcript_path)
     normalized_payload["audio_professionalism_file"] = str(audio_prof_path) if audio_prof_path else None
     normalized_payload["rubric_source"] = str(parsed_rubric_path)
-    normalized_payload["model"] = MODEL_NAME
+    # The model that actually produced these marks, which after a fallback is
+    # not necessarily the configured primary.
+    normalized_payload["model"] = getattr(last_message, "model", "") or routing_summary
+    normalized_payload["model_provider"] = getattr(last_message, "provider_id", "")
     normalized_payload["generated_at"] = datetime.utcnow().isoformat() + "Z"
 
     output_json = json.dumps(normalized_payload, indent=2, ensure_ascii=False)

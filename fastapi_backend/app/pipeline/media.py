@@ -87,17 +87,22 @@ class MediaPipeline:
                 text = str(raw_segment.get("text") or "").strip()
                 if not text:
                     continue
-                segments.append(
-                    {
-                        "id": index + 1,
-                        "speaker": self.infer_speaker(raw_segment),
-                        "start": start,
-                        "end": end,
-                        "startLabel": format_timestamp(start),
-                        "endLabel": format_timestamp(end),
-                        "text": text,
-                    }
-                )
+                segment: dict[str, Any] = {
+                    "id": index + 1,
+                    "speaker": self.infer_speaker(raw_segment),
+                    "start": start,
+                    "end": end,
+                    "startLabel": format_timestamp(start),
+                    "endLabel": format_timestamp(end),
+                    "text": text,
+                }
+                # Carried through so hallucination screening can use the
+                # decoder's own confidence. Engines that report none (Canary-
+                # Qwen) simply omit the field and are screened on text alone.
+                avg_logprob = raw_segment.get("avg_logprob")
+                if isinstance(avg_logprob, (int, float)) and not isinstance(avg_logprob, bool):
+                    segment["avgLogprob"] = float(avg_logprob)
+                segments.append(segment)
 
         return {
             "schema": "whisperx-segments-v1",

@@ -386,6 +386,43 @@ class Settings:
     # Optional register-priming sentence passed as --initial_prompt ("" = off).
     whisperx_initial_prompt: str = os.getenv("WHISPERX_INITIAL_PROMPT", "").strip()
     transcript_correction_min_ratio: float = read_float_env("TRANSCRIPT_CORRECTION_MIN_RATIO", 0.84)
+    # Phonetic (Double Metaphone) matching channel. An ASR model does not
+    # misspell a drug name by a character or two — it emits ordinary words that
+    # sound like it ("para set a mole"), which no edit-distance threshold can
+    # reach. The phonetic channel matches on pronunciation and across word
+    # boundaries; these bounds keep it from swapping merely similar-sounding
+    # vocabulary.
+    transcript_correction_phonetic: bool = read_bool_env("TRANSCRIPT_CORRECTION_PHONETIC", True)
+    transcript_correction_min_phonetic_ratio: float = read_float_env(
+        "TRANSCRIPT_CORRECTION_MIN_PHONETIC_RATIO", 0.90
+    )
+    transcript_correction_min_phonetic_char_ratio: float = read_float_env(
+        "TRANSCRIPT_CORRECTION_MIN_PHONETIC_CHAR_RATIO", 0.5
+    )
+    transcript_correction_max_extra_span_words: int = read_int_env(
+        "TRANSCRIPT_CORRECTION_MAX_EXTRA_SPAN_WORDS", 3
+    )
+
+    # --- hallucination screening ----------------------------------------
+    # The WhisperX CLI is invoked without --logprob_threshold /
+    # --compression_ratio_threshold, and Canary-Qwen has no equivalent, so the
+    # classic Whisper hallucination signature is checked after normalization
+    # instead. Flagging is the default; dropping removes the segment before any
+    # scorer reads it, which matters most for the communication branch, where a
+    # hallucinated "I understand, that must be difficult for you" reads as
+    # empathy the student never showed. Either way every hit is recorded in the
+    # transcript's "hallucinations" block.
+    transcript_hallucination_filter: bool = read_bool_env("TRANSCRIPT_HALLUCINATION_FILTER", True)
+    transcript_hallucination_drop: bool = read_bool_env("TRANSCRIPT_HALLUCINATION_DROP", False)
+    transcript_hallucination_min_avg_logprob: float = read_float_env(
+        "TRANSCRIPT_HALLUCINATION_MIN_AVG_LOGPROB", -1.0
+    )
+    transcript_hallucination_max_compression_ratio: float = read_float_env(
+        "TRANSCRIPT_HALLUCINATION_MAX_COMPRESSION_RATIO", 2.4
+    )
+    transcript_hallucination_max_ngram_repeats: int = read_int_env(
+        "TRANSCRIPT_HALLUCINATION_MAX_NGRAM_REPEATS", 2
+    )
 
     # --- transcription engine selection ---------------------------------
     # Deployment-wide default engine. The settings screen stores an operator

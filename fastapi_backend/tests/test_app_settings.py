@@ -21,8 +21,12 @@ def test_settings_repository_roundtrip(tmp_path: Path) -> None:
         # "" = use whichever engine this deployment configured.
         "transcriptionEngine": "",
         "transcriptionEngineOptions": {},
+        # {} / [] = use this deployment's default scoring provider, no fallback.
+        "llmPrimary": {},
+        "llmFallbacks": [],
     }
     assert asyncio.run(repository.llm_preprocess_enabled()) is False
+    assert asyncio.run(repository.llm_routing_selection()) == ({}, [])
 
     updated = asyncio.run(repository.set_values({"llmTranscriptPreprocess": True}))
     assert updated["llmTranscriptPreprocess"] is True
@@ -61,6 +65,8 @@ def test_settings_routes_get_put_and_reject_unknown_keys(tmp_path: Path) -> None
         "llmTranscriptPreprocess": False,
         "transcriptionEngine": "",
         "transcriptionEngineOptions": {},
+        "llmPrimary": {},
+        "llmFallbacks": [],
     }
 
     updated = client.put("/api/settings", json={"llmTranscriptPreprocess": True})

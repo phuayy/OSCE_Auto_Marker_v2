@@ -13,7 +13,7 @@ Final-year project (FYP) that automatically marks OSCE (Objective Structured Cli
 | Frontend | React 18 + Vite, Tailwind CSS, shadcn/ui, plain JS (no TypeScript) |
 | Backend | FastAPI (Python 3.11+), uvicorn, SQLAlchemy async |
 | Databases | **Dual**: raw aiosqlite (`Database`) for jobs; SQLAlchemy ORM (`OrmDatabase`) for sessions/assessments/rubric assets/videos — same SQLite or PostgreSQL file |
-| AI scoring | NVIDIA Nemotron (content), OpenRouter (communication), librosa (audio professionalism) — all run as **subprocesses** via `scripts/` |
+| AI scoring | Pluggable LLM providers behind a router (NVIDIA, OpenAI, Anthropic, DeepSeek, Gemini, OpenRouter) for content + communication; librosa for audio professionalism — all run as **subprocesses** via `scripts/`. Primary and fallback model chosen in Settings, stored in `app_settings`, read live per run |
 | Transcription | Pluggable engines behind a router: **WhisperX** (default, diarises) or **NVIDIA Canary-Qwen 2.5B** (optional, NeMo; text-only + separate pyannote pass). Chosen in Settings, stored in `app_settings`, read live per run |
 | Job queue | **local** asyncio (default) or **Hatchet** (optional distributed queue) |
 | Auth | HS256 JWT bearer tokens; short-lived stream tickets for SSE/media |
@@ -65,6 +65,7 @@ OSCE-AI-FYP/
 │       ├── services/
 │       │   ├── container.py             # AppContainer + create_container() — DI root
 │       │   ├── transcription_router.py  # Picks + runs the selected engine per run
+│       │   ├── llm_settings_service.py  # Resolves the primary/fallback model choice; subprocess env
 │       │   ├── session_service.py
 │       │   ├── pipeline_service.py      # Orchestrates full assessment pipeline
 │       │   ├── clip_service.py          # Auto-crop, clip export planning/execution, clip assessment
@@ -83,6 +84,15 @@ OSCE-AI-FYP/
 │       │   ├── local.py            # LocalObjectStorageService (parts relayed through this API)
 │       │   ├── gcs.py              # GcsObjectStorageService (resumable session URIs + object cache)
 │       │   └── factory.py          # create_storage_service() — switches on STORAGE_BACKEND
+│       ├── llm/                # Pluggable scoring LLMs: one contract, many vendors
+│       │   ├── base.py             # Provider contract, ChatRequest/Response, error taxonomy
+│       │   ├── registry.py         # Providers this build ships (add one line per provider)
+│       │   ├── routing.py          # LLMTarget / RetryPolicy / RoutingConfig (+ env codec)
+│       │   ├── retry.py            # Jittered backoff + per-provider circuit breaker
+│       │   ├── router.py           # LLMRouter: targets x modes x attempts
+│       │   ├── credentials.py      # Per-provider key/base-URL resolution from env
+│       │   ├── runtime.py          # build_router_from_env() — the subprocess entry point
+│       │   └── providers/          # openai_compatible.py + one module per vendor
 │       ├── pipeline/
 │       │   ├── transcription/  # Pluggable ASR engines
 │       │   │   ├── base.py             # Engine contract: descriptor, ParameterSpec, request/result
@@ -111,7 +121,8 @@ OSCE-AI-FYP/
 │           └── hatchet_tasks.py     # @hatchet.task definitions
 ├── scripts/
 │   ├── run_api.py                   # Entry point: uvicorn launcher
-│   ├── nvidia_osce_assessor.py      # Content scoring subprocess (NVIDIA Nemotron)
+│   ├── llm_bootstrap.py             # Puts fastapi_backend on sys.path; re-exports the LLM router
+│   ├── nvidia_osce_assessor.py      # Content scoring subprocess (provider chosen in Settings)
 │   ├── nvidia_osce_communication_assessor.py  # Communication scoring subprocess
 │   ├── nvidia_osce_audio_professionalism.py   # Audio professionalism subprocess
 │   ├── bell_detector.py             # Bell-sound clip segmentation
@@ -143,7 +154,8 @@ AppContainer
  ├── assessments       AssessmentService -> AssessmentRepository(orm_database)
  ├── rubrics           RubricService
  ├── media             MediaPipeline(settings, runner, events, auth)
- ├── scoring           ScoringPipeline(settings, runner, events, auth, rubrics)
+ ├── llm_settings      LLMSettingsService(app_settings, key_overrides=lambda: nvidia key)
+ ├── scoring           ScoringPipeline(settings, runner, events, auth, rubrics, llm_settings)
  ├── pipeline          PipelineService(sessions, events, media, scoring, assessments)
  ├── clips             ClipService(sessions, events, media, pipeline, jobs)
  ├── async_uploads     AsyncUploadService(settings, repo, sessions, storage, jobs, media, events, rubric_assets, videos)
@@ -173,6 +185,10 @@ Step 2: transcription  (engine selected in Settings; step key "transcription",
 
 Step 3: transcript_normalization
   normalize_whisperx_transcript() -> schema "whisperx-segments-v1"
+  hallucination screening (app/pipeline/hallucination_filter.py) -> transcript["hallucinations"]
+  corpus term correction (app/pipeline/transcript_correction.py) -> transcript["corrections"]
+    two channels: orthographic (difflib) + phonetic (Double Metaphone, app/pipeline/phonetics.py)
+    the phonetic channel spans word boundaries: "para set a mole" -> "paracetamol"
   -> storage/output/transcripts/<session_id>.json
   SSE milestone: transcription_complete
 
@@ -193,7 +209,7 @@ Then asyncio.gather over TWO branches (PARALLEL_SCORING env var, default true):
     Step 6: content_scoring
       scripts/nvidia_osce_assessor.py
       reads: transcript + case-study PDF rubric
-      calls: NVIDIA Nemotron API
+      calls: the primary LLM provider, falling back per app/llm/router.py
       checkpoint/repair: saves after each LLM call, up to 2 repair passes
       -> storage/output/scores/<session_id>.json
 
@@ -402,6 +418,16 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 | `TRANSCRIPTION_ENGINE` | `whisperx` | Fallback engine when Settings has no stored selection (`whisperx` \| `canary-qwen`) |
 | `CANARY_MODEL` | `nvidia/canary-qwen-2.5b` | NeMo SALM checkpoint for the Canary engine (install `requirements-canary.txt`) |
 | `TRANSCRIPTION_PREFETCH_MODELS` | `true` | Download the selected engine's weights in the background at startup; false = fetch on first run |
+| `TRANSCRIPT_CORRECTION_MIN_RATIO` | `0.84` | Orthographic (difflib) threshold for corpus-term correction |
+| `TRANSCRIPT_CORRECTION_PHONETIC` | `true` | Double Metaphone matching channel — corrects ASR renderings that sound right but are spelled as other words |
+| `TRANSCRIPT_CORRECTION_MIN_PHONETIC_RATIO` | `0.90` | Minimum phonetic-key similarity; identical keys always match |
+| `TRANSCRIPT_CORRECTION_MIN_PHONETIC_CHAR_RATIO` | `0.5` | Written-form floor a phonetic hit must still clear |
+| `TRANSCRIPT_CORRECTION_MAX_EXTRA_SPAN_WORDS` | `3` | Extra words a match may span beyond the term's own word count |
+| `TRANSCRIPT_HALLUCINATION_FILTER` | `true` | Screen normalized segments for the classic Whisper hallucination signature (low `avg_logprob`, high gzip ratio, repeated n-gram, known filler phrase) |
+| `TRANSCRIPT_HALLUCINATION_DROP` | `false` | Also remove flagged segments before scoring; `false` records them and keeps them |
+| `TRANSCRIPT_HALLUCINATION_MIN_AVG_LOGPROB` | `-1.0` | Segments below this decoder confidence are flagged (only engines that report one) |
+| `TRANSCRIPT_HALLUCINATION_MAX_COMPRESSION_RATIO` | `2.4` | gzip ratio above this = verbatim repetition |
+| `TRANSCRIPT_HALLUCINATION_MAX_NGRAM_REPEATS` | `2` | Consecutive repeats of one n-gram tolerated before flagging |
 | `CANARY_CHUNK_SECONDS` | `30` | Canary decodes in overlapping windows; the model was trained on ≤40 s |
 | `DIARIZATION_MODEL` | `pyannote/speaker-diarization-community-1` | Standalone diarisation for engines that cannot label speakers |
 | `WHISPERX_MIN_SPEAKERS` / `WHISPERX_MAX_SPEAKERS` | `2` / `2` | Known cast of an OSCE station; 0 lets clustering estimate |
@@ -419,7 +445,13 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 | `GCS_SIGNED_URL_TTL_SECONDS` | `3600` | Lifetime of V4 signed playback URLs |
 | `DATABASE_URL` | SQLite in storage/ | PostgreSQL or SQLite URL |
 | `DB_AUTO_MIGRATE` | `true` | Run `alembic upgrade head` at startup; false = migrate as a deploy step |
-| `NVIDIA_API_KEY` | — | For content + communication scorers |
+| `NVIDIA_API_KEY` | — | Credentials for the NVIDIA scoring provider (also the default when nothing is selected) |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` / `OPENROUTER_API_KEY` | — | Credentials for the other scoring providers. A provider with no key is shown as unavailable in Settings and dropped from routing |
+| `<PROVIDER>_BASE_URL` | vendor default | Endpoint override per provider (proxy, gateway, regional endpoint) |
+| `LLM_MAX_ATTEMPTS_PER_MODE` | `3` | Attempts per request shape before the router degrades the shape |
+| `LLM_INITIAL_BACKOFF_SECONDS` / `LLM_MAX_BACKOFF_SECONDS` / `LLM_BACKOFF_JITTER_RATIO` | `1.5` / `8` / `0.25` | Retry backoff. Jitter keeps the parallel content and communication branches from retrying in lockstep |
+| `LLM_CIRCUIT_FAILURE_THRESHOLD` / `LLM_CIRCUIT_COOLDOWN_SECONDS` | `6` / `60` | Consecutive failures before a provider is skipped, and for how long |
+| `LLM_TEMPERATURE` / `LLM_TOP_P` / `LLM_MAX_TOKENS` / `LLM_REQUEST_TIMEOUT_SECONDS` | `0.2` / `0.9` / `24576` / `360` | Sampling, shared by all providers. The `NVIDIA_*` spellings still work |
 | `WHISPERX_HF_TOKEN` | — | HuggingFace token for pyannote diarisation |
 | `PROTECT_MEDIA_ENDPOINTS` | `true` | Auth-gate `/media/*` |
 | `LOG_LEVEL` | `INFO` | App logger level |
@@ -469,3 +501,66 @@ All three scorers are independent Python subprocesses. Read from disk, write JSO
 Communication scorer takes audio professionalism as optional input — must run after it. Content scorer is independent, runs parallel to the whole communication branch.
 
 Content scorer has checkpoint/repair: saves after each LLM call, up to 2 repair passes on bad JSON output, resumes from checkpoint on crash.
+
+---
+
+## LLM Provider Layer
+
+The vendor is a **runtime** choice, not a build-time one. `app/llm/` holds one
+provider contract and six implementations (NVIDIA, OpenAI, Anthropic, DeepSeek,
+Gemini, OpenRouter); the operator picks a primary and a fallback in
+Settings → Scoring model. Adding a provider is a module plus one line in
+`app/llm/registry.py` — the settings API, request validation and the router all
+read that registry, so the dropdowns pick it up with no frontend change.
+
+Five providers speak the OpenAI wire format and share
+`providers/openai_compatible.py`; only Anthropic has a native adapter (httpx, no
+extra dependency). Vendor-specific request switches — Nemotron's
+`chat_template_kwargs`, OpenRouter's `reasoning` object — are isolated in each
+provider's `extra_body()`, because plain OpenAI 400s on both.
+
+**`LLMRouter.complete()` is three nested loops, each recovering from a
+different failure:**
+
+| Loop | Recovers from | Behaviour |
+|---|---|---|
+| targets | vendor outage, revoked key, deprecated checkpoint | primary, then each fallback |
+| modes | a provider that rejects `response_format` or a reasoning switch | `structured` → `json_only` → `plain` |
+| attempts | rate limits, 5xx, socket resets, truncated bodies | equal-jitter exponential backoff, honouring `Retry-After` |
+
+Anything terminal short-circuits: a 401 skips straight to the next target
+instead of burning nine attempts proving the key is still bad. A provider that
+fails `LLM_CIRCUIT_FAILURE_THRESHOLD` times in a row is skipped for a cooldown —
+but never when it is the only target left, so a stale breaker cannot be the
+reason an assessment dies.
+
+**Selection is read live per run.** `LLMSettingsService.routing()` reads
+`llmPrimary` / `llmFallbacks` from `app_settings` on every scoring call, the
+same contract the transcription engine uses, so a model changed mid-queue
+applies to the next run in every process. It also filters: a provider this build
+dropped, or one with no API key on this machine, is removed and the first usable
+fallback is promoted. If filtering would empty the list the raw selection is
+kept, so the failure names the missing credential instead of saying "no target".
+
+**Keys never enter the database.** `app_settings` is dumped verbatim to anyone
+who can open the settings screen and ends up in backups; it stores *which*
+provider, while the deployment's environment stores how to authenticate. The
+serialised routing blob is therefore safe to log.
+
+**Subprocesses get the same answer.** `ScoringPipeline.scoring_env()` and
+`TranscriptPreprocessor.preprocess_env()` serialise the resolved routing into
+`OSCE_LLM_ROUTING` and forward only the credentials that routing needs.
+`scripts/llm_bootstrap.py` puts `fastapi_backend` on `sys.path` and re-exports
+the router, so the scorers and the API can never disagree about which model ran.
+Running a scorer by hand with no `OSCE_LLM_ROUTING` falls back to the legacy
+`NVIDIA_MODEL_NAME` / `NVIDIA_FALLBACK_MODELS` behaviour unchanged.
+
+Each score file records the model **that actually produced it** (`model`,
+`model_provider`) rather than the configured primary — after a fallback those
+differ, and the content scorer's crash checkpoint carries the same provenance so
+a resumed run does not relabel a half-finished sheet.
+
+`POST /api/settings/llm-providers/test` makes one small live call to a single
+target (no fallback — the operator is asking about *that* provider) so a bad key
+surfaces in the settings screen rather than forty minutes into a run. It always
+returns 200: a failed probe is a result the screen renders, not an API error.

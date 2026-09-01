@@ -17,9 +17,11 @@ def test_multi_word_near_miss_is_corrected() -> None:
     corrections = correct_segments([segment], TERMS)
 
     assert segment["text"] == "I have a nasal block since yesterday."
-    assert corrections == [
-        {"segmentId": 1, "original": "nasal blog", "corrected": "nasal block", "ratio": corrections[0]["ratio"]}
-    ]
+    assert len(corrections) == 1
+    assert corrections[0]["segmentId"] == 1
+    assert corrections[0]["original"] == "nasal blog"
+    assert corrections[0]["corrected"] == "nasal block"
+    assert corrections[0]["method"] == "orthographic"
     assert corrections[0]["ratio"] >= 0.84
 
 

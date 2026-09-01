@@ -19,6 +19,7 @@ from app.pipeline.media import MediaPipeline
 from app.pipeline.transcription.registry import EngineDependencies
 from app.pipeline.scoring import ScoringPipeline
 from app.repositories.app_settings_repository import AppSettingsRepository
+from app.services.llm_settings_service import LLMSettingsService
 from app.repositories.assessment_repository import AssessmentRepository
 from app.repositories.corpus_repository import CorpusRepository
 from app.repositories.job_repository import JobRepository
@@ -76,6 +77,7 @@ class AppContainer:
     webhook_dispatcher: WebhookDispatcher
     corpora: CorpusRepository
     app_settings: AppSettingsRepository
+    llm_settings: LLMSettingsService
     videos: VideoRepository
     session_maintenance: SessionMaintenanceService
     login_rate_limiter: FixedWindowRateLimiter
@@ -185,7 +187,15 @@ def create_container(settings: Settings | None = None) -> AppContainer:
     assessments = AssessmentService(AssessmentRepository(orm_database))
     rubrics = RubricService(active_settings, runner, artifacts, rubric_assets)
     media = MediaPipeline(active_settings, runner, events, auth)
-    scoring = ScoringPipeline(active_settings, runner, events, auth, rubrics)
+    app_settings = AppSettingsRepository(orm_database)
+    # The NVIDIA key can arrive from the platform secrets file rather than
+    # os.environ, and AuthService only reads it during startup() — after this
+    # container is built. Passing a callable defers the lookup to call time.
+    llm_settings = LLMSettingsService(
+        app_settings,
+        key_overrides=lambda: {"nvidia": auth.runtime.nvidia_api_key},
+    )
+    scoring = ScoringPipeline(active_settings, runner, events, auth, rubrics, llm_settings=llm_settings)
     webhooks = WebhookRepository(orm_database)
     webhook_dispatcher = WebhookDispatcher(active_settings, webhooks)
     notifications = NotificationService(
@@ -195,8 +205,7 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         cache=read_cache,
     )
     corpora = CorpusRepository(orm_database)
-    app_settings = AppSettingsRepository(orm_database)
-    preprocessor = TranscriptPreprocessor(active_settings, runner, events, auth)
+    preprocessor = TranscriptPreprocessor(active_settings, runner, events, auth, llm_settings=llm_settings)
     transcription = TranscriptionRouter(
         active_settings,
         events,
@@ -266,6 +275,7 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         webhook_dispatcher=webhook_dispatcher,
         corpora=corpora,
         app_settings=app_settings,
+        llm_settings=llm_settings,
         videos=videos,
         session_maintenance=session_maintenance,
         login_rate_limiter=login_rate_limiter,

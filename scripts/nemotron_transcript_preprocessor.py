@@ -19,27 +19,25 @@ import argparse
 import json
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI
-
 from env_loader import load_env_file
+from llm_bootstrap import (
+    ChatResponse,
+    LLMRouter,
+    build_chat_request,
+    build_router_from_env,
+    describe_routing,
+    validator_from,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 load_env_file(ROOT_DIR)
 
-NVIDIA_BASE_URL = (
-    os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").strip()
-    or "https://integrate.api.nvidia.com/v1"
-)
-MODEL_NAME = (
-    os.getenv("NVIDIA_PREPROCESS_MODEL", "").strip()
-    or os.getenv("NVIDIA_MODEL_NAME", "").strip()
-    or "nvidia/nemotron-3-super-120b-a12b"
-)
+# Provider and model come from the settings-driven router, the same selection
+# the scorers use. See scripts/llm_bootstrap.py.
 
 
 def read_int_env(name: str, default: int) -> int:
@@ -63,7 +61,9 @@ def read_float_env(name: str, default: float) -> float:
 
 
 REQUEST_TIMEOUT_SECONDS = read_int_env("NVIDIA_REQUEST_TIMEOUT_SECONDS", 360)
-MAX_RETRIES = read_int_env("NVIDIA_PREPROCESS_MAX_RETRIES", 3)
+# Retry count and backoff are the router's policy (LLM_MAX_ATTEMPTS_PER_MODE),
+# shared with the scorers so all three behave the same under a rate limit.
+
 # Low temperature: this is a constrained editing task, not generation.
 TEMPERATURE = read_float_env("NVIDIA_PREPROCESS_TEMPERATURE", 0.1)
 MAX_TOKENS = read_int_env("NVIDIA_PREPROCESS_MAX_TOKENS", 24_576)
@@ -81,15 +81,6 @@ Strict rules:
 2. Never merge, split, reorder, add, or remove segments. Return every input `id` exactly once, with only its corrected `text`.
 3. If a segment needs no correction, return its text unchanged.
 4. Output ONLY a JSON object of the form {"segments": [{"id": <id>, "text": "<corrected text>"}]} — no explanations, no markdown fences."""
-
-
-def require_api_key() -> str:
-    key = os.getenv("NVIDIA_API_KEY", "").strip()
-    if not key or key == "<NVIDIA_API_KEY>":
-        raise RuntimeError(
-            "NVIDIA_API_KEY is not configured. Set it in the environment or .env before enabling LLM preprocess."
-        )
-    return key
 
 
 def extract_json_object(raw_text: str) -> dict[str, Any]:
@@ -135,43 +126,37 @@ def validate_segments(payload: dict[str, Any], expected_ids: list[Any]) -> list[
     return [{"id": identifier, "text": returned[str(identifier)]} for identifier in expected_ids]
 
 
-def request_corrections(client: OpenAI, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def request_corrections(router: LLMRouter, items: list[dict[str, Any]]) -> ChatResponse:
+    """Ask the configured model to correct every segment, and insist it did.
+
+    The id check is the whole safety property of this step: a reply that drops
+    or invents ids would merge one segment's correction onto another's
+    timestamps. Raising from the validator makes that a retry inside the
+    router — across fallback providers too — rather than a merge of bad data.
+    """
     user_prompt = (
         "Correct the following transcription segments. Remember: return every id exactly once.\n\n"
         + json.dumps({"segments": items}, ensure_ascii=False)
     )
     expected_ids = [item["id"] for item in items]
-    last_error: Exception | None = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=TEMPERATURE,
-                top_p=0.9,
-                max_tokens=MAX_TOKENS,
-                response_format={"type": "json_object"},
-                # Reasoning traces silently consume the token budget on some
-                # Nemotron deployments (see nvidia_osce_assessor.py) — keep
-                # thinking off for this mechanical editing task.
-                extra_body={"reasoning_effort": "none", "chat_template_kwargs": {"enable_thinking": False}},
-            )
-            choices = getattr(response, "choices", None) or []
-            content = str(getattr(getattr(choices[0], "message", None), "content", "") or "") if choices else ""
-            payload = extract_json_object(content)
-            return validate_segments(payload, expected_ids)
-        except Exception as error:  # noqa: BLE001 — every failure mode retries the same way
-            last_error = error
-            print(
-                f"[nemotron_transcript_preprocessor] attempt {attempt}/{MAX_RETRIES} failed: {error}",
-                file=sys.stderr,
-            )
-            if attempt < MAX_RETRIES:
-                time.sleep(min(30, 2**attempt))
-    raise RuntimeError(f"LLM preprocess failed after {MAX_RETRIES} attempts: {last_error}")
+
+    def check(content: str) -> None:
+        validate_segments(extract_json_object(content), expected_ids)
+
+    request = build_chat_request(
+        [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        label="transcript-preprocess",
+        temperature=TEMPERATURE,
+        max_tokens=MAX_TOKENS,
+        timeout_seconds=REQUEST_TIMEOUT_SECONDS,
+        # A single corrected word is a legitimate reply for a one-segment
+        # transcript, so the scorers' 40-character floor does not apply here.
+        min_content_chars=1,
+    )
+    return router.complete(request, validate=validator_from(check))
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -225,7 +210,7 @@ def main() -> int:
     ]
     output_path = Path(args.output)
     if not items:
-        write_json_atomic(output_path, {"schema": "llm-preprocess-v1", "model": MODEL_NAME, "segments": []})
+        write_json_atomic(output_path, {"schema": "llm-preprocess-v1", "model": "", "segments": []})
         print("No non-empty segments to preprocess; wrote empty output.")
         return 0
 
@@ -237,10 +222,14 @@ def main() -> int:
             "or disable LLM preprocess for this run."
         )
 
-    client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=require_api_key(), timeout=REQUEST_TIMEOUT_SECONDS)
-    print(f"Preprocessing {len(items)} segment(s) with {MODEL_NAME}...")
-    corrected = request_corrections(client, items)
-    write_json_atomic(output_path, {"schema": "llm-preprocess-v1", "model": MODEL_NAME, "segments": corrected})
+    router = build_router_from_env()
+    print(f"Preprocessing {len(items)} segment(s) with {describe_routing(router)}...")
+    response = request_corrections(router, items)
+    corrected = validate_segments(extract_json_object(response.content), [item["id"] for item in items])
+    write_json_atomic(
+        output_path,
+        {"schema": "llm-preprocess-v1", "model": response.model, "segments": corrected},
+    )
     changed = sum(
         1 for item, original in zip(corrected, items) if str(item["text"]).strip() != str(original["text"]).strip()
     )

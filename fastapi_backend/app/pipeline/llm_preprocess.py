@@ -9,6 +9,7 @@ module owns the merge/validation that applies the corrected texts by id.
 from __future__ import annotations
 
 import asyncio
+import logging
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,8 @@ from app.core.process import CommandRunner
 from app.services.auth_service import AuthService
 from app.services.event_service import EventService
 
+
+logger = logging.getLogger(__name__)
 
 LLM_PREPROCESS_SCHEMA = "llm-preprocess-v1"
 
@@ -92,16 +95,32 @@ class TranscriptPreprocessor:
         runner: CommandRunner,
         events: EventService,
         auth: AuthService,
+        llm_settings: Any | None = None,
     ) -> None:
         self.settings = settings
         self.runner = runner
         self.events = events
         self.auth = auth
+        # Same routing the scorers get, so a model chosen in Settings applies to
+        # the cleanup pass too rather than only to marking.
+        self.llm_settings = llm_settings
 
     def python_env(self) -> dict[str, str]:
         env = {"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
         if self.auth.runtime.nvidia_api_key:
             env["NVIDIA_API_KEY"] = self.auth.runtime.nvidia_api_key
+        return env
+
+    async def preprocess_env(self) -> dict[str, str]:
+        env = self.python_env()
+        if self.llm_settings is None:
+            return env
+        try:
+            env.update(await self.llm_settings.subprocess_env())
+        except Exception:
+            logger.exception(
+                "Failed to resolve LLM routing for transcript preprocess; using environment defaults."
+            )
         return env
 
     async def run(self, session: dict[str, Any], transcript_path: Path) -> dict[str, Any]:
@@ -126,7 +145,7 @@ class TranscriptPreprocessor:
             self.settings.scorer_python_bin,
             args,
             "LLM transcript preprocess",
-            env=self.python_env(),
+            env=await self.preprocess_env(),
             on_output=lambda stream, text: self.events.publish(
                 str(session["id"]),
                 "log",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,8 @@ from app.core.process import CommandRunner
 from app.services.auth_service import AuthService
 from app.services.event_service import EventService
 
+logger = logging.getLogger(__name__)
+
 
 class ScoringPipeline:
     def __init__(
@@ -20,12 +23,17 @@ class ScoringPipeline:
         events: EventService,
         auth: AuthService,
         rubric_service: Any,
+        llm_settings: Any | None = None,
     ) -> None:
         self.settings = settings
         self.runner = runner
         self.events = events
         self.auth = auth
         self.rubric_service = rubric_service
+        # Resolves the operator's primary/fallback model choice into the
+        # environment the scorer subprocesses read. Optional so tests can build
+        # a ScoringPipeline without a database.
+        self.llm_settings = llm_settings
 
     @staticmethod
     def should_refresh_score_payload(payload: Any) -> bool:
@@ -84,6 +92,24 @@ class ScoringPipeline:
         env.update(extra_env or {})
         return env
 
+    async def scoring_env(self, extra_env: dict[str, str] | None = None) -> dict[str, str]:
+        """``python_env`` plus the resolved LLM routing for this run.
+
+        Read per run, not per process: the operator can change the primary model
+        while a long job queue is draining, and the next scorer to start must
+        pick it up. A failure to resolve routing is logged and skipped rather
+        than raised — the subprocess then falls back to its own environment
+        variables, which is exactly the pre-router behaviour.
+        """
+        env = self.python_env(extra_env)
+        if self.llm_settings is None:
+            return env
+        try:
+            env.update(await self.llm_settings.subprocess_env())
+        except Exception:
+            logger.exception("Failed to resolve LLM routing; the scorer will use its environment defaults.")
+        return env
+
     async def run_content_scoring(self, session: dict[str, Any]) -> dict[str, Any]:
         if not self.settings.scorer_script_path.exists():
             raise RuntimeError(f"Scorer script not found at {self.settings.scorer_script_path}")
@@ -101,7 +127,7 @@ class ScoringPipeline:
             self.settings.scorer_python_bin,
             args,
             "OpenRouter scoring",
-            env=self.python_env(),
+            env=await self.scoring_env(),
             on_output=lambda stream, text: self.events.publish(
                 str(session["id"]),
                 "log",
@@ -156,7 +182,7 @@ class ScoringPipeline:
             self.settings.scorer_python_bin,
             args,
             "Audio professionalism extraction",
-            env=self.python_env({"FFMPEG_BIN": self.settings.ffmpeg_bin}),
+            env=await self.scoring_env({"FFMPEG_BIN": self.settings.ffmpeg_bin}),
             on_output=lambda stream, text: self.events.publish(
                 str(session["id"]),
                 "log",
@@ -216,7 +242,7 @@ class ScoringPipeline:
             self.settings.scorer_python_bin,
             args,
             "Communication scoring",
-            env=self.python_env(),
+            env=await self.scoring_env(),
             on_output=lambda stream, text: self.events.publish(
                 str(session["id"]),
                 "log",

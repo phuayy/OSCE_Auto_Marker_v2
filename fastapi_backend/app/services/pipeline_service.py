@@ -15,7 +15,12 @@ from app.domain.notifications import NotificationType
 from app.pipeline.llm_preprocess import TranscriptPreprocessor, diff_replacements, merge_corrected_segments
 from app.pipeline.media import MediaPipeline
 from app.pipeline.scoring import ScoringPipeline
-from app.pipeline.transcript_correction import apply_replacements_to_file, correct_segments
+from app.pipeline.hallucination_filter import screen_segments
+from app.pipeline.transcript_correction import (
+    CorrectionPolicy,
+    apply_replacements_to_file,
+    correct_segments,
+)
 from app.repositories.app_settings_repository import AppSettingsRepository
 from app.services.assessment_service import AssessmentService
 from app.services.event_service import EventService
@@ -263,6 +268,64 @@ class PipelineService:
             "scores": scoring_outputs.get("scores"),
         }
 
+    async def _screen_hallucinations(
+        self,
+        session: dict[str, Any],
+        transcript: dict[str, Any],
+    ) -> None:
+        """Check the classic Whisper hallucination signature on the normalized
+        transcript and record every hit in ``transcript["hallucinations"]``.
+
+        Runs before corpus correction so a hallucinated segment is never
+        "corrected" into a plausible-looking clinical sentence. Best-effort by
+        the same policy as the corrections: a screening failure never fails the
+        pipeline, and the unscreened transcript proceeds."""
+        settings = self.media.settings
+        transcript["hallucinations"] = []
+        if not settings.transcript_hallucination_filter:
+            return
+        try:
+            kept, flags = screen_segments(
+                transcript.get("segments") or [],
+                drop=settings.transcript_hallucination_drop,
+                min_avg_logprob=settings.transcript_hallucination_min_avg_logprob,
+                max_compression_ratio=settings.transcript_hallucination_max_compression_ratio,
+                max_ngram_repeats_allowed=settings.transcript_hallucination_max_ngram_repeats,
+            )
+            transcript["hallucinations"] = flags
+            if not flags:
+                return
+            transcript["segments"] = kept
+            transcript["segmentCount"] = len(kept)
+            dropped = sum(1 for flag in flags if flag.get("action") == "dropped")
+            await self.events.publish(
+                str(session["id"]),
+                "log",
+                {
+                    "source": "hallucination-filter",
+                    "message": (
+                        f"Flagged {len(flags)} suspected hallucinated segment(s); "
+                        f"{dropped} removed before scoring."
+                    ),
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Hallucination screening failed for session %s; using the unscreened transcript.",
+                session.get("id"),
+            )
+
+    def _correction_policy(self) -> CorrectionPolicy:
+        """Corpus-correction thresholds from Settings, read per run."""
+        settings = self.media.settings
+        return CorrectionPolicy(
+            min_ratio=settings.transcript_correction_min_ratio,
+            phonetic_enabled=settings.transcript_correction_phonetic,
+            min_phonetic_ratio=settings.transcript_correction_min_phonetic_ratio,
+            min_phonetic_char_ratio=settings.transcript_correction_min_phonetic_char_ratio,
+            max_extra_span_words=settings.transcript_correction_max_extra_span_words,
+        )
+
     async def _apply_corpus_corrections(
         self,
         session: dict[str, Any],
@@ -283,7 +346,7 @@ class PipelineService:
             corrections = correct_segments(
                 transcript.get("segments") or [],
                 terms,
-                self.media.settings.transcript_correction_min_ratio,
+                self._correction_policy(),
             )
             transcript["corrections"] = corrections
             if not corrections:
@@ -416,6 +479,7 @@ class PipelineService:
         except EmptyTranscriptError as error:
             await self._mark_pipeline_step(session, "transcript_normalization", "failed", error=error)
             raise
+        await self._screen_hallucinations(session, normalized_transcript)
         await self._apply_corpus_corrections(session, normalized_transcript, whisperx_outputs)
 
         transcript_file_name = f"{session_id}.json"
