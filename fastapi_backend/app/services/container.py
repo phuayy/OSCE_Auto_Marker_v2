@@ -8,6 +8,8 @@ from app.core.logging_utils import log_context
 from app.core.process import CommandRunner
 from app.core.rate_limit import FixedWindowRateLimiter
 from app.database import Database
+from app.database.migration_runner import run_database_migrations
+from app.database.migrations import apply_additive_migrations
 from app.database.orm import OrmDatabase
 from app.pipeline.llm_preprocess import TranscriptPreprocessor
 from app.pipeline.media import MediaPipeline
@@ -76,8 +78,17 @@ class AppContainer:
             logger.warning("Configuration warning: %s", warning, extra=log_context("startup", "config_validation"))
         await self.artifacts.ensure_storage_layout()
         await self.storage.ensure_layout()
+        # Alembic owns the schema: it creates it, upgrades it, and adopts a
+        # database built by the older create_all path. Everything below is then
+        # a no-op on a migrated database, and kept because it is what still
+        # builds the schema when DB_AUTO_MIGRATE is off or Alembic is absent.
+        if self.settings.db_auto_migrate:
+            await run_database_migrations(self.settings.resolved_database_source)
         await self.database.initialize()
         await self.orm_database.initialize()
+        # create_all adds missing tables but never alters an existing one, so
+        # columns introduced after a database was created need this pass.
+        await apply_additive_migrations(self.orm_database.engine)
         await self.sessions.migrate_legacy_sessions()
         await self.corpora.seed_defaults()
         await self.auth.initialize()

@@ -274,6 +274,12 @@ class Settings:
     recover_running_jobs_on_startup: bool = read_bool_env("RECOVER_RUNNING_JOBS_ON_STARTUP", True)
     app_database_url: str = os.getenv("APP_DATABASE_URL", "").strip()
     database_url: str = os.getenv("DATABASE_URL", "").strip()
+    # Run "alembic upgrade head" during startup so a single command still brings
+    # the app up on a fresh machine. Set false where migrations are applied
+    # deliberately as a deploy step (`cd fastapi_backend && alembic upgrade
+    # head`) — notably when several processes boot at once and only one of them
+    # should be touching the schema.
+    db_auto_migrate: bool = read_bool_env("DB_AUTO_MIGRATE", True)
     hatchet_worker_name: str = os.getenv("HATCHET_WORKER_NAME", "osce-ai-marker-worker").strip() or "osce-ai-marker-worker"
     hatchet_job_retries: int = read_int_env("HATCHET_JOB_RETRIES", 2)
     hatchet_job_schedule_timeout_minutes: int = read_int_env("HATCHET_JOB_SCHEDULE_TIMEOUT_MINUTES", 60)

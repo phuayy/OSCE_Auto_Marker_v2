@@ -22,6 +22,11 @@ httpx==0.28.1
 # Durable queue support. Local development can use SQLite plus in-process
 # workers; production uses Hatchet backed by PostgreSQL.
 SQLAlchemy==2.0.50
+# Schema migrations for both database layers (ORM tables and the raw-SQL jobs
+# tables). Run with "cd fastapi_backend && alembic upgrade head"; the app also
+# applies them at startup unless DB_AUTO_MIGRATE=false. See
+# fastapi_backend/alembic/README.md.
+alembic==1.19.1
 aiosqlite==0.22.0
 hatchet-sdk==1.33.7
 psycopg[binary]==3.3.4

@@ -33,6 +33,14 @@ OSCE-AI-FYP/
 │   │   └── useHashRoute.js     # React hook for URL <-> state sync
 │   └── auth.js                 # fetchStreamTicket, resolveMediaUrl helpers
 ├── fastapi_backend/
+│   ├── alembic.ini             # Alembic config; URL comes from Settings, not this file
+│   ├── alembic/
+│   │   ├── env.py              # Resolves the DB URL from Settings; filters raw-SQL jobs tables
+│   │   ├── README.md           # Migration workflow, revision table, startup behaviour
+│   │   └── versions/
+│   │       ├── 0001_initial_schema.py            # Baseline: ORM tables + raw-SQL jobs tables
+│   │       ├── 0002_notification_event_type.py   # notifications.event_type + backfill
+│   │       └── 0003_change_tracking_triggers.py  # table_versions triggers (+ pg_notify)
 │   └── app/
 │       ├── main.py             # FastAPI app, middleware, startup/shutdown
 │       ├── core/
@@ -45,7 +53,8 @@ OSCE-AI-FYP/
 │       ├── database/
 │       │   ├── connection.py   # Database — raw aiosqlite (jobs layer)
 │       │   ├── orm.py          # OrmDatabase — SQLAlchemy async engine
-│       │   └── models.py       # SQLAlchemy models (see DB Models section)
+│       │   ├── models.py       # SQLAlchemy models (see DB Models section)
+│       │   └── migration_runner.py  # Runs "alembic upgrade head" at startup
 │       ├── repositories/
 │       │   ├── session_repository.py    # SessionRecord CRUD + legacy JSON migration
 │       │   ├── job_repository.py        # Raw SQL jobs store
@@ -297,6 +306,7 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 | `PARALLEL_SCORING` | `true` | Run content branch parallel to communication branch |
 | `JOB_QUEUE_BACKEND` | `local` | `local` or `hatchet` |
 | `DATABASE_URL` | SQLite in storage/ | PostgreSQL or SQLite URL |
+| `DB_AUTO_MIGRATE` | `true` | Run `alembic upgrade head` at startup; false = migrate as a deploy step |
 | `NVIDIA_API_KEY` | — | For content + communication scorers |
 | `WHISPERX_HF_TOKEN` | — | HuggingFace token for pyannote diarisation |
 | `PROTECT_MEDIA_ENDPOINTS` | `true` | Auth-gate `/media/*` |
@@ -316,8 +326,14 @@ npm run dev:api
 # Backend with reload (one instance only — SSE streams block graceful shutdown)
 python scripts/run_api.py --reload
 
-# Tests (80 passing)
+# Tests
 cd fastapi_backend && pytest
+
+# Migrations (the app also applies these at startup unless DB_AUTO_MIGRATE=false)
+cd fastapi_backend && alembic upgrade head
+cd fastapi_backend && alembic current           # what this database is stamped at
+cd fastapi_backend && alembic revision --autogenerate -m "add x"
+cd fastapi_backend && alembic check             # models vs. migrations are in sync
 
 # Hatchet worker (only when JOB_QUEUE_BACKEND=hatchet)
 python -m app.queue.hatchet_worker
