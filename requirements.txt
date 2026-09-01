@@ -44,6 +44,11 @@ librosa==0.11.0
 soundfile==0.14.0
 opensmile==2.6.0
 
+# Optional transcription engine: NVIDIA Canary-Qwen runs through NeMo. Left
+# uninstalled by default — it pulls a large training stack and ~5 GB of weights,
+# and the settings screen reports the engine as unavailable until it is present:
+#   pip install "nemo_toolkit[asr]>=2.5"
+
 # WhisperX CLI used by WHISPERX_BIN for transcription/diarization.
 # If this conflicts with your CUDA/PyTorch stack, install WhisperX separately
 # in the same environment using your GPU-specific PyTorch/WhisperX instructions.

@@ -14,6 +14,19 @@ async def get_settings(container: AppContainer = Depends(get_container)) -> dict
     return {"settings": await container.app_settings.get_all()}
 
 
+@router.get("/transcription-engines")
+async def get_transcription_engines(
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Engines this build ships, their option schemas, this deployment's
+    defaults for each, and whether each one can actually run here.
+
+    The settings screen renders its controls from this response, so shipping a
+    new engine needs no frontend change.
+    """
+    return await container.transcription.describe()
+
+
 @router.put("")
 async def update_settings(
     payload: UpdateSettingsRequest,

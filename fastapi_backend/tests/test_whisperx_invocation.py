@@ -18,20 +18,48 @@ class CapturingEvents:
         self.items.append((session_id, event_name, payload))
 
 
-class FakeRunner:
-    """Records every command; fabricates the output files each tool would write."""
+# A minimal but *usable* WhisperX artifact. It must carry real segment text:
+# an empty-segment document is rejected as a failed transcription (see
+# test_empty_transcript_guard.py), so using one here would mask arg assertions
+# behind an EmptyTranscriptError.
+TRANSCRIBED_SEGMENTS = {
+    "language": "en",
+    "segments": [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00", "text": "Good morning."}],
+}
 
-    def __init__(self, settings: Settings) -> None:
+
+class FakeRunner:
+    """Records every command; fabricates the output files each tool would write.
+
+    ``whisperx_stdout`` replays lines through the caller's ``on_output`` hook
+    the way the real runner streams a subprocess's output, which is how the
+    progress-parsing path is exercised without launching WhisperX.
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        whisperx_payload: dict[str, Any] | None = None,
+        whisperx_stdout: list[str] | None = None,
+    ) -> None:
         self.settings = settings
         self.calls: list[tuple[str, list[str], str]] = []
+        self.whisperx_payload = TRANSCRIBED_SEGMENTS if whisperx_payload is None else whisperx_payload
+        self.whisperx_stdout = list(whisperx_stdout or [])
 
-    async def run(self, command: str, args: list[str], label: str, **_kwargs: Any) -> CommandResult:
+    async def run(self, command: str, args: list[str], label: str, **kwargs: Any) -> CommandResult:
         self.calls.append((command, list(args), label))
+        on_output = kwargs.get("on_output")
+        if on_output is not None and command == self.settings.whisperx_bin:
+            for line in self.whisperx_stdout:
+                result = on_output("stdout", line)
+                if asyncio.iscoroutine(result):
+                    await result
         if command == self.settings.whisperx_bin:
             output_dir = Path(args[args.index("--output_dir") + 1])
             output_dir.mkdir(parents=True, exist_ok=True)
             base = Path(args[0]).stem
-            (output_dir / f"{base}.json").write_text(json.dumps({"segments": []}), encoding="utf-8")
+            (output_dir / f"{base}.json").write_text(json.dumps(self.whisperx_payload), encoding="utf-8")
         elif command == self.settings.ffmpeg_bin:
             Path(args[-1]).write_bytes(b"fake-audio")
         return CommandResult(stdout="", stderr="")
@@ -40,7 +68,12 @@ class FakeRunner:
         return next(args for command, args, _ in self.calls if command == self.settings.whisperx_bin)
 
 
-def make_media(tmp_path: Path, **setting_overrides: Any) -> tuple[MediaPipeline, FakeRunner]:
+def make_media(
+    tmp_path: Path,
+    *,
+    whisperx_stdout: list[str] | None = None,
+    **setting_overrides: Any,
+) -> tuple[MediaPipeline, FakeRunner]:
     settings = Settings(
         root_dir=tmp_path,
         backend_root=tmp_path,
@@ -50,17 +83,24 @@ def make_media(tmp_path: Path, **setting_overrides: Any) -> tuple[MediaPipeline,
         whisperx_device="cpu",
         **setting_overrides,
     )
-    runner = FakeRunner(settings)
+    runner = FakeRunner(settings, whisperx_stdout=whisperx_stdout)
     auth = SimpleNamespace(runtime=SimpleNamespace(whisperx_hf_token="hf-token"))
     media = MediaPipeline(settings, runner=runner, events=CapturingEvents(), auth=auth)
     return media, runner
 
 
-def run_transcription(media: MediaPipeline, tmp_path: Path, session: dict[str, Any] | None = None) -> dict[str, Any]:
+def run_transcription(
+    media: MediaPipeline,
+    tmp_path: Path,
+    session: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
     mp3_path = tmp_path / "session-1.mp3"
     mp3_path.write_bytes(b"fake-mp3")
     audio_info = {"fileName": mp3_path.name, "absolutePath": str(mp3_path)}
-    return asyncio.run(media.run_whisperx_transcription(session or {"id": "session-1"}, audio_info))
+    return asyncio.run(
+        media.run_whisperx_transcription(session or {"id": "session-1"}, audio_info, **kwargs)
+    )
 
 
 def test_whisperx_args_pass_configured_model(tmp_path: Path) -> None:

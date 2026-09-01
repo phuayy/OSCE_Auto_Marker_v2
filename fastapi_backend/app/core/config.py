@@ -332,6 +332,21 @@ class Settings:
     # WhisperX CLI defaults to 8, which OOMs large-v3 on <=6GB cards once the
     # pyannote diarisation models share the device. Raise if you get a bigger GPU.
     whisperx_batch_size: int = read_int_env("WHISPERX_BATCH_SIZE", 1)
+    # An OSCE encounter has a known cast — one student and one simulated
+    # patient — so the diarisation clustering is told the count instead of
+    # inferring it. Left unconstrained, pyannote routinely splits one person
+    # across two labels mid-consultation, which reads to the scorer as the
+    # student never having asked the question. Raise the maximum for stations
+    # that also record an examiner; 0 on either bound omits that flag and
+    # restores WhisperX's own speaker-count estimation.
+    whisperx_min_speakers: int = read_int_env("WHISPERX_MIN_SPEAKERS", 2)
+    whisperx_max_speakers: int = read_int_env("WHISPERX_MAX_SPEAKERS", 2)
+    # WhisperX merges VAD segments up to this many seconds before a single
+    # decode. The CLI default of 30 spans four or five speaker turns in a
+    # consultation, and every word in the chunk then shares one decode context
+    # and one avg_logprob. 20 keeps confidence granularity useful and the texts
+    # short enough for the aligner to place. 0 keeps the WhisperX default.
+    whisperx_chunk_size: int = read_int_env("WHISPERX_CHUNK_SIZE", 20)
     whisperx_output_format: str = os.getenv("WHISPERX_OUTPUT_FORMAT", "all").strip() or "all"
     whisperx_log_heartbeat_ms: int = read_int_env("WHISPERX_LOG_HEARTBEAT_MS", 5000)
     # ffmpeg -af chain for the dedicated WhisperX input WAV; "" disables the
@@ -340,6 +355,34 @@ class Settings:
     # Optional register-priming sentence passed as --initial_prompt ("" = off).
     whisperx_initial_prompt: str = os.getenv("WHISPERX_INITIAL_PROMPT", "").strip()
     transcript_correction_min_ratio: float = read_float_env("TRANSCRIPT_CORRECTION_MIN_RATIO", 0.84)
+
+    # --- transcription engine selection ---------------------------------
+    # Deployment-wide default engine. The settings screen stores an operator
+    # selection in the database that overrides this per run; this value is the
+    # fallback when nothing is stored, and when a stored selection names an
+    # engine this build no longer ships.
+    transcription_engine: str = os.getenv("TRANSCRIPTION_ENGINE", "whisperx").strip() or "whisperx"
+
+    # --- Canary-Qwen (NVIDIA NeMo SALM) ---------------------------------
+    canary_model: str = os.getenv("CANARY_MODEL", "nvidia/canary-qwen-2.5b").strip() or "nvidia/canary-qwen-2.5b"
+    # The model was trained on segments of at most 40 s; longer chunks degrade
+    # accuracy, so long recordings are decoded in overlapping windows.
+    canary_chunk_seconds: float = read_float_env("CANARY_CHUNK_SECONDS", 30.0)
+    canary_overlap_seconds: float = read_float_env("CANARY_OVERLAP_SECONDS", 2.0)
+    canary_batch_size: int = read_int_env("CANARY_BATCH_SIZE", 1)
+    canary_device: str = os.getenv("CANARY_DEVICE", "auto").strip() or "auto"
+    # Canary returns text only. Diarisation is on by default because the
+    # scorers read speaker-tagged dialogue.
+    canary_diarize: bool = read_bool_env("CANARY_DIARIZE", True)
+    canary_prompt: str = os.getenv("CANARY_PROMPT", "Transcribe the following:").strip() or "Transcribe the following:"
+    canary_audio_filters: str = os.getenv("CANARY_AUDIO_FILTERS", "highpass=f=80").strip()
+
+    # --- standalone diarisation (engines that cannot label speakers) -----
+    diarization_model: str = (
+        os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1").strip()
+        or "pyannote/speaker-diarization-community-1"
+    )
+    diarization_device: str = os.getenv("DIARIZATION_DEVICE", "auto").strip() or "auto"
 
     audio_mp3_sample_rate: str = os.getenv("AUDIO_MP3_SAMPLE_RATE", "48000").strip() or "48000"
     audio_mp3_vbr_quality: str = os.getenv("AUDIO_MP3_VBR_QUALITY", "0").strip() or "0"
@@ -459,6 +502,14 @@ class Settings:
     @property
     def human_detector_script_path(self) -> Path:
         return self.root_dir / "scripts" / "detect_human_segments.py"
+
+    @property
+    def canary_script_path(self) -> Path:
+        return self.root_dir / "scripts" / "canary_qwen_transcribe.py"
+
+    @property
+    def diarization_script_path(self) -> Path:
+        return self.root_dir / "scripts" / "pyannote_diarize.py"
 
     @property
     def auto_crop_segmentation_default(self) -> str:

@@ -22,11 +22,20 @@ from app.services.event_service import EventService
 from app.services.session_service import SessionService
 from app.pipeline.transcription.base import TranscriptionResult
 from app.pipeline.transcription.registry import EngineDependencies
+from app.services.transcription_router import TranscriptionRouter
+
+
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard
     from app.services.notification_service import NotificationService
 
 
 logger = logging.getLogger(__name__)
+
+# Pipeline step key for transcription. Named for the job rather than the tool
+# because the engine behind it is operator-selectable; sessions recorded before
+# the router shipped carry the older "whisperx" key, which the frontend stage
+# gauge still recognises.
+TRANSCRIPTION_STEP = "transcription"
 
 
 class PipelineService:
@@ -40,6 +49,7 @@ class PipelineService:
         notifications: "NotificationService | None" = None,
         preprocessor: TranscriptPreprocessor | None = None,
         app_settings: AppSettingsRepository | None = None,
+        transcription: TranscriptionRouter | None = None,
     ) -> None:
         self.sessions = sessions
         self.events = events
@@ -49,6 +59,38 @@ class PipelineService:
         self.notifications = notifications
         self.preprocessor = preprocessor
         self.app_settings = app_settings
+        self.transcription = transcription or self._default_transcription_router(events, media, app_settings)
+
+    @staticmethod
+    def _default_transcription_router(
+        events: EventService,
+        media: MediaPipeline,
+        app_settings: AppSettingsRepository | None,
+    ) -> TranscriptionRouter | None:
+        """Assemble a router from the media pipeline when the caller supplied none.
+
+        Production always injects one from the container; this keeps every
+        other construction site (and the scoring-only test doubles) working. A
+        media double that carries no runner or auth cannot transcribe anyway,
+        so it simply gets no router.
+        """
+        runner = getattr(media, "runner", None)
+        auth = getattr(media, "auth", None)
+        settings = getattr(media, "settings", None)
+        if runner is None or auth is None or settings is None:
+            return None
+        return TranscriptionRouter(
+            settings,
+            events,
+            EngineDependencies(settings, runner, events, auth, media),
+            app_settings=app_settings,
+        )
+
+    def _describe_transcription(self, result: TranscriptionResult) -> dict[str, Any]:
+        """Engine provenance recorded on the session and the pipeline step."""
+        engine = self.transcription.engines.get(result.engine_id) if self.transcription else None
+        label = engine.descriptor.label if engine is not None else result.engine_id
+        return TranscriptionRouter.result_metadata(result, label)
 
     async def _notify_scoring_complete(self, session: dict[str, Any]) -> None:
         if self.notifications is None:
@@ -298,13 +340,24 @@ class PipelineService:
 
         audio_info = await self._ensure_audio_output(session)
 
-        await self._mark_pipeline_step(session, "whisperx", "running")
+        if self.transcription is None:
+            raise AppError("No transcription engine is configured for this pipeline.", status_code=500)
+
+        await self._mark_pipeline_step(session, TRANSCRIPTION_STEP, "running")
         try:
-            whisperx_outputs = await self.media.run_whisperx_transcription(session, audio_info)
+            transcription = await self.transcription.transcribe(
+                session,
+                audio_info,
+            )
         except Exception as error:
-            await self._mark_pipeline_step(session, "whisperx", "failed", error=error)
+            await self._mark_pipeline_step(session, TRANSCRIPTION_STEP, "failed", error=error)
             raise
-        await self._mark_pipeline_step(session, "whisperx", "completed")
+        whisperx_outputs = transcription.to_outputs()
+        engine_metadata = self._describe_transcription(transcription)
+        session["transcription"] = engine_metadata
+        await self._mark_pipeline_step(
+            session, TRANSCRIPTION_STEP, "completed", metadata=engine_metadata
+        )
 
         await self._mark_pipeline_step(session, "transcript_normalization", "running")
         whisperx_raw = await self._read_json(Path(str(whisperx_outputs["jsonAbsolutePath"])))

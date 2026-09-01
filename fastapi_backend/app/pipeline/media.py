@@ -10,9 +10,15 @@ from uuid import uuid4
 from app.core.config import Settings
 from app.core.json_utils import extract_json_object
 from app.core.process import CommandRunner
-from app.core.utils import clamp_number, format_timestamp, utc_now_iso
+from app.core.utils import atomic_replace, clamp_number, format_timestamp, utc_now_iso
+from app.pipeline.whisperx_options import WhisperxRunOptions
 from app.services.auth_service import AuthService
 from app.services.event_service import EventService
+
+# Value of the raw transcript's "engine" marker for WhisperX. WhisperX writes
+# no such key, so its absence means WhisperX and any other value means the
+# artifact belongs to a different engine.
+ENGINE_MARKER_WHISPERX = "whisperx"
 
 
 class MediaPipeline:
@@ -678,7 +684,21 @@ class MediaPipeline:
             clips.append(clip)
         return clips
 
-    async def run_whisperx_transcription(self, session: dict[str, Any], audio_info: dict[str, Any]) -> dict[str, Path | None]:
+    async def run_whisperx_transcription(
+        self,
+        session: dict[str, Any],
+        audio_info: dict[str, Any],
+        *,
+        on_progress: ProgressCallback | None = None,
+        options: WhisperxRunOptions | None = None,
+    ) -> dict[str, Path | None]:
+        """Transcribe one session's audio with the WhisperX CLI.
+
+        ``options`` carries the per-run configuration so two sessions can be
+        transcribed concurrently with different models; omitting it uses this
+        deployment's environment-variable defaults unchanged.
+        """
+        run_options = options or WhisperxRunOptions.from_settings(self.settings)
         output_dir = self.settings.paths.output_whisperx_dir / str(session["id"])
         output_dir.mkdir(parents=True, exist_ok=True)
         existing_outputs = await self.find_existing_whisperx_outputs(session, audio_info)
@@ -694,36 +714,41 @@ class MediaPipeline:
             return existing_outputs
 
         output_base_name = Path(str(audio_info["fileName"])).stem
-        transcription_input_path = await self._prepare_whisperx_audio(audio_info)
+        transcription_input_path = await self.prepare_transcription_wav(audio_info, run_options.audio_filters)
         hf_token = self.auth.runtime.whisperx_hf_token
         whisperx_device = await self._resolve_whisperx_device(str(session["id"]))
-        whisperx_compute_type = self._resolve_whisperx_compute_type(whisperx_device)
+        whisperx_compute_type = self._resolve_whisperx_compute_type(whisperx_device, run_options.compute_type)
         args = [
             str(transcription_input_path),
             "--model",
-            self.settings.whisperx_model,
+            run_options.model,
             "--device",
             whisperx_device,
             "--compute_type",
             whisperx_compute_type,
             "--batch_size",
-            str(self.settings.whisperx_batch_size),
+            str(run_options.batch_size),
             "--diarize",
             "--hf_token",
             hf_token,
             "--language",
-            self.settings.whisperx_language,
+            run_options.language,
             "--output_dir",
             str(output_dir),
             "--output_format",
-            self.settings.whisperx_output_format,
+            run_options.output_format,
         ]
+        args.extend(self._diarization_bounds_args(run_options.min_speakers, run_options.max_speakers))
+        if run_options.chunk_size > 0:
+            args.extend(["--chunk_size", str(run_options.chunk_size)])
+        if run_options.print_progress:
+            args.extend(["--print_progress", "True"])
         corpus_terms = (session.get("corpus") or {}).get("terms") or []
         hotwords = self.build_hotwords(corpus_terms)
         if hotwords:
             args.extend(["--hotwords", hotwords])
-        if self.settings.whisperx_initial_prompt:
-            args.extend(["--initial_prompt", self.settings.whisperx_initial_prompt])
+        if run_options.initial_prompt:
+            args.extend(["--initial_prompt", run_options.initial_prompt])
         visible_args = ["***" if index > 0 and args[index - 1] == "--hf_token" else arg for index, arg in enumerate(args)]
         await self.events.publish(
             str(session["id"]),
@@ -777,6 +802,25 @@ class MediaPipeline:
             raise RuntimeError("WhisperX completed but no JSON output file was found.")
         return completed_outputs
 
+    def _diarization_bounds_args(self, min_speakers: int, max_speakers: int) -> list[str]:
+        """``--min_speakers``/``--max_speakers`` for a station's known cast.
+
+        Either bound at 0 (or below) is "unknown", and that flag is omitted so
+        WhisperX estimates the count as before. A minimum above the maximum is
+        a misconfiguration the CLI would reject after the model has already
+        loaded, so it is clamped here instead.
+        """
+        minimum = max(int(min_speakers), 0)
+        maximum = max(int(max_speakers), 0)
+        if minimum and maximum:
+            minimum = min(minimum, maximum)
+        args: list[str] = []
+        if minimum:
+            args.extend(["--min_speakers", str(minimum)])
+        if maximum:
+            args.extend(["--max_speakers", str(maximum)])
+        return args
+
     @staticmethod
     def build_hotwords(terms: list[Any], max_chars: int = 900) -> str:
         """Comma-joined hotwords string capped to roughly Whisper's 224-token
@@ -794,16 +838,20 @@ class MediaPipeline:
             total += added
         return ", ".join(parts)
 
-    async def _prepare_whisperx_audio(self, audio_info: dict[str, Any]) -> Path:
-        """Derive the dedicated WhisperX input WAV (16 kHz mono, filtered).
+    async def prepare_transcription_wav(self, audio_info: dict[str, Any], filters: str | None = None) -> Path:
+        """Derive the dedicated ASR input WAV (16 kHz mono, filtered).
+
+        Shared by every engine: WhisperX, Canary-Qwen and the standalone
+        diarisation pass all want 16 kHz mono, and deriving it once per session
+        means a second engine never re-transcodes the same audio.
 
         The extracted MP3 must stay untouched — the audio-professionalism scorer
         measures loudness on it, and normalizing it would corrupt that signal.
-        The WAV keeps the MP3's stem so WhisperX's output artifacts keep the
+        The WAV keeps the MP3's stem so the engine's output artifacts keep the
         base name the artifact cache looks up.
         """
         source_path = Path(str(audio_info["absolutePath"]))
-        filters = self.settings.whisperx_audio_filters
+        filters = self.settings.whisperx_audio_filters if filters is None else filters
         if not filters:
             return source_path
         wav_path = source_path.with_suffix(".wav")
@@ -841,8 +889,8 @@ class MediaPipeline:
             return "cpu"
         return requested
 
-    def _resolve_whisperx_compute_type(self, device: str) -> str:
-        requested = str(self.settings.whisperx_compute_type or "float16").strip().lower()
+    def _resolve_whisperx_compute_type(self, device: str, compute_type: str | None = None) -> str:
+        requested = str(compute_type or self.settings.whisperx_compute_type or "float16").strip().lower()
         # CTranslate2 on CPU does not support float16; downgrade to a CPU-safe type
         # so a cuda->cpu fallback never crashes the run.
         if str(device).lower() == "cpu" and requested in {"float16", "fp16", "half", "int8_float16"}:

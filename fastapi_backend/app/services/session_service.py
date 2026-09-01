@@ -246,6 +246,10 @@ class SessionService:
             "pipeline": session.get("pipeline"),
             "parentSessionId": session.get("parentSessionId"),
             "clipSource": session.get("clipSource"),
+            # Which engine produced this session's transcript, and whether it
+            # labelled speakers. Recorded per run because the engine is
+            # operator-selectable, so two sessions in one list may differ.
+            "transcription": session.get("transcription") or None,
             # Transcription-corpus snapshot chosen at upload (or None). New
             # payload fields must be whitelisted here or the browser never sees
             # them (see the videoClips "kind" lesson).

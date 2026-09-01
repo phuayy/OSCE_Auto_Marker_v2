@@ -16,7 +16,12 @@ from app.services.container import create_container
 def test_settings_repository_roundtrip(tmp_path: Path) -> None:
     repository = AppSettingsRepository(OrmDatabase(tmp_path / "settings.sqlite3"))
 
-    assert asyncio.run(repository.get_all()) == {"llmTranscriptPreprocess": False}
+    assert asyncio.run(repository.get_all()) == {
+        "llmTranscriptPreprocess": False,
+        # "" = use whichever engine this deployment configured.
+        "transcriptionEngine": "",
+        "transcriptionEngineOptions": {},
+    }
     assert asyncio.run(repository.llm_preprocess_enabled()) is False
 
     updated = asyncio.run(repository.set_values({"llmTranscriptPreprocess": True}))
@@ -52,7 +57,11 @@ def test_settings_routes_get_put_and_reject_unknown_keys(tmp_path: Path) -> None
 
     fetched = client.get("/api/settings")
     assert fetched.status_code == 200
-    assert fetched.json()["settings"] == {"llmTranscriptPreprocess": False}
+    assert fetched.json()["settings"] == {
+        "llmTranscriptPreprocess": False,
+        "transcriptionEngine": "",
+        "transcriptionEngineOptions": {},
+    }
 
     updated = client.put("/api/settings", json={"llmTranscriptPreprocess": True})
     assert updated.status_code == 200

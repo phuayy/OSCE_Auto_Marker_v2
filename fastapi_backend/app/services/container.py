@@ -15,6 +15,7 @@ from app.database.migrations import apply_additive_migrations
 from app.database.orm import OrmDatabase
 from app.pipeline.llm_preprocess import TranscriptPreprocessor
 from app.pipeline.media import MediaPipeline
+from app.pipeline.transcription.registry import EngineDependencies
 from app.pipeline.scoring import ScoringPipeline
 from app.repositories.app_settings_repository import AppSettingsRepository
 from app.repositories.assessment_repository import AssessmentRepository
@@ -42,6 +43,7 @@ from app.services.rubric_service import RubricService
 from app.services.session_maintenance_service import SessionMaintenanceService
 from app.services.session_service import SessionService
 from app.services.storage_service import LocalObjectStorageService, create_storage_service
+from app.services.transcription_router import TranscriptionRouter
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,7 @@ class AppContainer:
     rubrics: RubricService
     async_uploads: AsyncUploadService
     media: MediaPipeline
+    transcription: TranscriptionRouter
     scoring: ScoringPipeline
     pipeline: PipelineService
     clips: ClipService
@@ -176,6 +179,12 @@ def create_container(settings: Settings | None = None) -> AppContainer:
     corpora = CorpusRepository(orm_database)
     app_settings = AppSettingsRepository(orm_database)
     preprocessor = TranscriptPreprocessor(active_settings, runner, events, auth)
+    transcription = TranscriptionRouter(
+        active_settings,
+        events,
+        EngineDependencies(active_settings, runner, events, auth, media),
+        app_settings=app_settings,
+    )
     pipeline = PipelineService(
         sessions,
         events,
@@ -185,6 +194,7 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         notifications,
         preprocessor=preprocessor,
         app_settings=app_settings,
+        transcription=transcription,
     )
     clips = ClipService(sessions, events, media, pipeline, jobs, notifications)
     jobs.bind_handlers(pipeline=pipeline, clips=clips)
@@ -229,6 +239,7 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         rubrics=rubrics,
         async_uploads=async_uploads,
         media=media,
+        transcription=transcription,
         scoring=scoring,
         pipeline=pipeline,
         clips=clips,

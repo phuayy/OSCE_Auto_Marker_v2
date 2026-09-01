@@ -14,7 +14,7 @@ Final-year project (FYP) that automatically marks OSCE (Objective Structured Cli
 | Backend | FastAPI (Python 3.11+), uvicorn, SQLAlchemy async |
 | Databases | **Dual**: raw aiosqlite (`Database`) for jobs; SQLAlchemy ORM (`OrmDatabase`) for sessions/assessments/rubric assets/videos — same SQLite or PostgreSQL file |
 | AI scoring | NVIDIA Nemotron (content), OpenRouter (communication), librosa (audio professionalism) — all run as **subprocesses** via `scripts/` |
-| Transcription | WhisperX (local GPU/CPU) — subprocess via `whisperx` CLI |
+| Transcription | Pluggable engines behind a router: **WhisperX** (default, diarises) or **NVIDIA Canary-Qwen 2.5B** (optional, NeMo; text-only + separate pyannote pass). Chosen in Settings, stored in `app_settings`, read live per run |
 | Job queue | **local** asyncio (default) or **Hatchet** (optional distributed queue) |
 | Auth | HS256 JWT bearer tokens; short-lived stream tickets for SSE/media |
 | Video processing | ffmpeg / ffprobe |
@@ -64,6 +64,7 @@ OSCE-AI-FYP/
 │       │   └── video_repository.py
 │       ├── services/
 │       │   ├── container.py             # AppContainer + create_container() — DI root
+│       │   ├── transcription_router.py  # Picks + runs the selected engine per run
 │       │   ├── session_service.py
 │       │   ├── pipeline_service.py      # Orchestrates full assessment pipeline
 │       │   ├── clip_service.py          # Auto-crop, manual clips, clip assessment
@@ -77,6 +78,13 @@ OSCE-AI-FYP/
 │       │   ├── artifact_service.py      # Storage layout init, PDF validation
 │       │   └── storage_service.py       # Local object storage (pluggable)
 │       ├── pipeline/
+│       │   ├── transcription/  # Pluggable ASR engines
+│       │   │   ├── base.py             # Engine contract: descriptor, ParameterSpec, request/result
+│       │   │   ├── registry.py         # Engines this build ships (add one line per engine)
+│       │   │   ├── whisperx_engine.py  # Default engine (adapter over MediaPipeline)
+│       │   │   ├── canary_qwen_engine.py  # NVIDIA Canary-Qwen via scripts/canary_qwen_transcribe.py
+│       │   │   ├── diarization.py      # pyannote pass + overlap-based speaker assignment
+│       │   │   └── subtitles.py        # SRT/VTT rendering for engines that write none
 │       │   ├── media.py        # MediaPipeline — ffmpeg, WhisperX, bell detection, clip crop
 │       │   └── scoring.py      # ScoringPipeline — wraps the three scorer subprocesses
 │       ├── api/
@@ -148,7 +156,8 @@ Steps tracked in `session.pipeline.steps`. Resumable — cached artifacts reused
 Step 1: audio_extraction
   ffmpeg: video -> <session_id>.mp3
 
-Step 2: whisperx
+Step 2: transcription  (engine selected in Settings; step key "transcription",
+                        legacy sessions carry "whisperx")
   WhisperX CLI: mp3 -> raw JSON + SRT + VTT (speaker-diarised)
   SSE heartbeat every ~1s (GPU warmup = 30-90s on RTX 3050)
 
@@ -299,6 +308,12 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `TRANSCRIPTION_ENGINE` | `whisperx` | Fallback engine when Settings has no stored selection (`whisperx` \| `canary-qwen`) |
+| `CANARY_MODEL` | `nvidia/canary-qwen-2.5b` | NeMo SALM checkpoint for the Canary engine (needs `nemo_toolkit[asr]>=2.5`) |
+| `CANARY_CHUNK_SECONDS` | `30` | Canary decodes in overlapping windows; the model was trained on ≤40 s |
+| `DIARIZATION_MODEL` | `pyannote/speaker-diarization-community-1` | Standalone diarisation for engines that cannot label speakers |
+| `WHISPERX_MIN_SPEAKERS` / `WHISPERX_MAX_SPEAKERS` | `2` / `2` | Known cast of an OSCE station; 0 lets clustering estimate |
+| `WHISPERX_CHUNK_SIZE` | `20` | Seconds of VAD audio merged into one decode |
 | `WHISPERX_DEVICE` | `cuda` | `cuda` or `cpu` |
 | `WHISPERX_MODEL` | `large-v3` | Whisper checkpoint; `distil-large-v3` for lower latency |
 | `WHISPERX_COMPUTE_TYPE` | `float16` | Native large-v3 precision; set `int8` on <=4 GB cards; auto-downgrades to `int8` on CPU |
