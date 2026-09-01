@@ -256,6 +256,14 @@ class Settings:
     login_rate_limit_max_attempts: int = read_int_env("LOGIN_RATE_LIMIT_MAX_ATTEMPTS", 10)
     login_rate_limit_window_seconds: int = read_int_env("LOGIN_RATE_LIMIT_WINDOW_SECONDS", 60)
     cors_allow_origins: tuple[str, ...] = read_csv_env("CORS_ALLOW_ORIGINS", ("*",))
+    # Number of reverse proxies in front of the app. 0 (the default) means the
+    # socket address is the client. Behind a proxy the socket address is the
+    # *proxy's*, so every login attempt shares one rate-limit key: ten bad
+    # passwords from anyone would lock out everybody, and a real attacker is
+    # never throttled. Set this to the hop count and X-Forwarded-For is trusted
+    # to exactly that depth — never further, because the header is client-
+    # supplied and anything beyond your own proxies is forgeable.
+    trusted_proxy_count: int = read_int_env("TRUSTED_PROXY_COUNT", 0)
     session_event_history_limit: int = read_int_env("SESSION_EVENT_HISTORY_LIMIT", 500)
     # Max events buffered per connected SSE client before the oldest is dropped
     # (bounds memory when a consumer stalls). 0 disables the bound.

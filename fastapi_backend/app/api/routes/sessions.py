@@ -4,22 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import get_container
+from app.api.errors import http_error
 from app.core.exceptions import AppError
 from app.schemas.sessions import ManualClipsRequest, RecropClipRequest, RenameClipRequest, RenameSessionRequest
 from app.services.container import AppContainer
 
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
-
-
-def _http_error(error: Exception, fallback_status: int = 500, fallback_message: str = "Unexpected server error.") -> HTTPException:
-    if isinstance(error, AppError):
-        return HTTPException(status_code=error.status_code, detail=error.message)
-    if isinstance(error, FileNotFoundError):
-        return HTTPException(status_code=404, detail=str(error) or "Session not found.")
-    if isinstance(error, ValueError):
-        return HTTPException(status_code=400, detail=str(error))
-    return HTTPException(status_code=fallback_status, detail=str(error) or fallback_message)
 
 
 @router.get("")
@@ -39,7 +30,7 @@ async def rename_session(
     except FileExistsError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     except Exception as error:
-        raise _http_error(error, fallback_message="Failed to rename session.") from error
+        raise http_error(error, fallback_message="Failed to rename session.", not_found_message="Session not found.") from error
 
 
 @router.get("/{session_id}")
@@ -59,7 +50,7 @@ async def get_session(session_id: str, container: AppContainer = Depends(get_con
     except Exception as error:
         # A subtitle-generation or serialization failure is NOT a missing
         # session — masking it as 404 sends the client down the wrong path.
-        raise _http_error(error, fallback_message="Failed to load session.") from error
+        raise http_error(error, fallback_message="Failed to load session.", not_found_message="Session not found.") from error
 
 
 @router.delete("/{session_id}")
@@ -69,7 +60,7 @@ async def delete_session(session_id: str, container: AppContainer = Depends(get_
     except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail="Session not found.") from error
     except Exception as error:
-        raise _http_error(error, fallback_message="Failed to delete session.") from error
+        raise http_error(error, fallback_message="Failed to delete session.", not_found_message="Session not found.") from error
 
 
 @router.post("/{session_id}/rerun")
@@ -79,7 +70,7 @@ async def rerun_session(session_id: str, container: AppContainer = Depends(get_c
     except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail="Session not found.") from error
     except Exception as error:
-        raise _http_error(error, fallback_message="Failed to re-run session.") from error
+        raise http_error(error, fallback_message="Failed to re-run session.", not_found_message="Session not found.") from error
 
 
 @router.get("/{session_id}/transcript")
@@ -131,7 +122,7 @@ async def get_clip_summaries(session_id: str, container: AppContainer = Depends(
     try:
         return await container.clips.clip_summaries(session_id)
     except Exception as error:
-        raise _http_error(error, fallback_message="Failed to aggregate clip summaries.") from error
+        raise http_error(error, fallback_message="Failed to aggregate clip summaries.", not_found_message="Session not found.") from error
 
 
 @router.get("/{session_id}/events")
@@ -153,7 +144,7 @@ async def auto_crop_session(session_id: str, container: AppContainer = Depends(g
     try:
         return await container.clips.auto_crop_session_by_id(session_id)
     except Exception as error:
-        raise _http_error(error, fallback_message="Auto-crop failed.") from error
+        raise http_error(error, fallback_message="Auto-crop failed.", not_found_message="Session not found.") from error
 
 
 @router.post("/{session_id}/process")
@@ -185,7 +176,7 @@ async def create_manual_clips(
             session_id, payload.boundaries, payload.labels, payload.kinds
         )
     except Exception as error:
-        raise _http_error(error, fallback_message="Manual clip split failed.") from error
+        raise http_error(error, fallback_message="Manual clip split failed.", not_found_message="Session not found.") from error
 
 
 @router.post("/{session_id}/clips/{clip_id}/recrop")
@@ -198,7 +189,7 @@ async def recrop_clip(
     try:
         return await container.clips.recrop_clip(session_id, clip_id, payload.start, payload.end)
     except Exception as error:
-        raise _http_error(error, fallback_message="Recrop failed.") from error
+        raise http_error(error, fallback_message="Recrop failed.", not_found_message="Session not found.") from error
 
 
 @router.post("/{session_id}/clips/{clip_id}/assess")
@@ -212,7 +203,7 @@ async def assess_clip(
     try:
         return await container.clips.assess_clip(session_id, clip_id, defer_enabled)
     except Exception as error:
-        raise _http_error(error, fallback_message="Clip assessment failed.") from error
+        raise http_error(error, fallback_message="Clip assessment failed.", not_found_message="Session not found.") from error
 
 
 @router.patch("/{session_id}/clips/{clip_id}")
@@ -225,4 +216,4 @@ async def rename_clip(
     try:
         return await container.clips.rename_clip(session_id, clip_id, payload.label)
     except Exception as error:
-        raise _http_error(error, fallback_message="Failed to rename clip.") from error
+        raise http_error(error, fallback_message="Failed to rename clip.", not_found_message="Session not found.") from error
