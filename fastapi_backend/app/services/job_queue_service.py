@@ -4,6 +4,7 @@ import asyncio
 import logging
 import random
 import socket
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -16,7 +17,8 @@ from app.domain.jobs import ACTIVE_JOB_STATUSES
 from app.repositories.job_repository import JobRepository
 from app.services.event_service import EventService
 from app.services.session_service import SessionService
-from app.services.storage_service import LocalObjectStorageService
+from app.services.job_tasks import get_task_spec, queue_owns_session_status
+from app.storage import ObjectStorage
 
 
 logger = logging.getLogger(__name__)
@@ -46,6 +48,38 @@ def compute_retry_backoff_seconds(
     return round(half + random.uniform(0, half), 3)
 
 
+def is_retryable_failure(error: BaseException) -> bool:
+    """Whether a failed job execution is worth running again.
+
+    An :class:`AppError` below 500 is a deliberate, caller-visible rejection —
+    an unsupported task type, a missing source file, a transcript with no
+    speech. Re-running it burns the job's remaining attempts and delays the
+    error the user needs to see. Everything else (subprocess crash, upstream
+    5xx, GPU OOM, transient I/O) is treated as transient and retried.
+    """
+    if isinstance(error, AppError):
+        return error.status_code >= 500
+    return True
+
+
+@dataclass(frozen=True)
+class JobRunResult:
+    """Outcome of a single job execution attempt.
+
+    Returned by :meth:`JobQueueService.run_job` so the *scheduler* — not the
+    executor — decides whether to run the job again. Keeping that decision out
+    of ``_execute_job`` is what lets the local runner retry while the Hatchet
+    path (which owns its own retry policy) is left untouched.
+    """
+
+    job: dict[str, Any] | None = None
+    error: Exception | None = None
+
+    @property
+    def failed(self) -> bool:
+        return self.error is not None
+
+
 class JobQueueService:
     def __init__(
         self,
@@ -53,7 +87,7 @@ class JobQueueService:
         repository: JobRepository,
         events: EventService,
         sessions: SessionService,
-        storage: LocalObjectStorageService,
+        storage: ObjectStorage,
     ) -> None:
         self.settings = settings
         self.repository = repository
@@ -255,11 +289,11 @@ class JobQueueService:
             return max(1, self.settings.hatchet_job_retries + 1)
         return 3
 
-    async def run_job(self, job_id: str, *, raise_on_error: bool = False) -> None:
+    async def run_job(self, job_id: str, *, raise_on_error: bool = False) -> JobRunResult:
         if self._semaphore is None:
             self._semaphore = asyncio.Semaphore(max(1, self.settings.job_worker_concurrency))
         async with self._semaphore:
-            await self._execute_job(job_id, raise_on_error=raise_on_error)
+            return await self._execute_job(job_id, raise_on_error=raise_on_error)
 
     async def prepare_hatchet_retry_attempt(self, job_id: str, retry_count: int) -> None:
         if retry_count <= 0:
@@ -442,30 +476,123 @@ class JobQueueService:
         return None
 
     async def _run_local(self, job_id: str, attempt: int = 1) -> None:
+        """Execute a job in-process, retrying transient failures.
+
+        The retry loop lives in the runner rather than in ``_execute_job``
+        because re-running a job is a scheduling concern: Hatchet applies its
+        own retry policy, so only the local backend re-runs here. Looping also
+        sidesteps the ``_tasks`` in-flight guard in ``_schedule_local``, which
+        would silently drop a re-dispatch issued from inside this very task.
+        """
         try:
-            backoff_seconds = compute_retry_backoff_seconds(attempt)
-            if backoff_seconds > 0:
-                logger.info(
-                    "Delaying local retry of job %s by %.3fs.",
-                    job_id,
-                    backoff_seconds,
-                    extra=log_context(job_id, "job_retry_backoff", attempt=attempt),
-                )
-                await asyncio.sleep(backoff_seconds)
-            await self.run_job(job_id)
+            current_attempt = attempt
+            while True:
+                backoff_seconds = compute_retry_backoff_seconds(current_attempt)
+                if backoff_seconds > 0:
+                    logger.info(
+                        "Delaying local retry of job %s by %.3fs.",
+                        job_id,
+                        backoff_seconds,
+                        extra=log_context(job_id, "job_retry_backoff", attempt=current_attempt),
+                    )
+                    await asyncio.sleep(backoff_seconds)
+                result = await self.run_job(job_id)
+                if not await self._arm_local_retry(result):
+                    return
+                current_attempt += 1
         finally:
             self._tasks.pop(job_id, None)
 
-    async def _execute_job(self, job_id: str, *, raise_on_error: bool = False) -> None:
+    def _local_retry_available(self, job: dict[str, Any], error: Exception) -> bool:
+        """Whether the local runner will re-run this just-failed job.
+
+        A pure predicate with no side effects: ``_execute_job`` consults it to
+        decide whether to leave the session in a terminal ``failed`` state, and
+        ``_arm_local_retry`` re-checks it before performing the transition.
+        """
+        if self.settings.job_queue_backend != "local":
+            return False
+        if not self.settings.local_job_auto_start:
+            return False
+        if not is_retryable_failure(error):
+            return False
+        return int(job.get("attempts") or 0) < int(job.get("maxAttempts") or 1)
+
+    async def _arm_local_retry(self, result: JobRunResult) -> bool:
+        """Return a failed job to ``queued`` so the runner can execute it again.
+
+        Returns True only when the repository actually moved the row back to
+        ``queued``. Anything else is terminal, and the session — which
+        ``_execute_job`` deliberately left non-terminal in anticipation of a
+        retry — is failed here so it can never be stranded mid-flight.
+        """
+        job = result.job
+        error = result.error
+        if job is None or error is None:
+            return False
+
+        job_id = str(job["id"])
+        session_id = str(job.get("sessionId"))
+        task_type = str(job.get("taskType"))
+        attempts = int(job.get("attempts") or 0)
+        max_attempts = int(job.get("maxAttempts") or 1)
+        message = self._exception_message(error, "Job failed.")
+
+        if not self._local_retry_available(job, error):
+            reason = (
+                f"Permanent failure ({message}); not retrying."
+                if not is_retryable_failure(error)
+                else f"Retries exhausted after {attempts}/{max_attempts} attempt(s): {message}"
+            )
+            await self.repository.append_event(job_id, "retry_skipped", reason, {"sessionId": session_id})
+            return False
+
+        requeued = await self.repository.prepare_retry_attempt(
+            job_id,
+            f"Retrying after failure: {message}",
+        )
+        if str(requeued.get("status")) != "queued":
+            # The row moved on (cancelled, or attempts exhausted concurrently);
+            # honour that and finish failing the session.
+            await self._fail_session(session_id, error, message)
+            return False
+
+        next_attempt = attempts + 1
+        logger.info(
+            "Retrying job %s locally (attempt %d/%d) after failure: %s",
+            job_id,
+            next_attempt,
+            max_attempts,
+            message,
+            extra=log_context(session_id, "job_retry", job_id=job_id, task_type=task_type, attempt=next_attempt),
+        )
+        await self.repository.append_event(
+            job_id,
+            "retry_scheduled",
+            f"Attempt {next_attempt}/{max_attempts} scheduled after failure: {message}",
+            {"sessionId": session_id, "attempt": next_attempt},
+        )
+        await self._sync_session_job(requeued)
+        await self.events.publish(
+            session_id,
+            "status",
+            {
+                "code": "queued",
+                "message": f"{task_type} failed; retry {next_attempt}/{max_attempts} queued.",
+            },
+        )
+        return True
+
+    async def _execute_job(self, job_id: str, *, raise_on_error: bool = False) -> JobRunResult:
         job = await self.repository.claim_queued(job_id, self._worker_id)
         if job is None:
             if raise_on_error:
                 current = await self.repository.read(job_id)
                 status = str(current.get("status") or "")
                 if status in {"succeeded", "cancelled"}:
-                    return
+                    return JobRunResult()
                 raise RuntimeError(f"Job {job_id} could not be claimed for execution (status={status or 'unknown'}).")
-            return
+            return JobRunResult()
 
         session_id = str(job.get("sessionId"))
         task_type = str(job.get("taskType"))
@@ -483,18 +610,16 @@ class JobQueueService:
             session = await self.storage.prepare_session_sources(session)
             await self.sessions.write(session)
 
-            if task_type == "process_session":
-                await self.pipeline.process_session_by_id(session_id, allow_processing=True)
-            elif task_type == "auto_crop":
-                await self.clips.auto_crop_session_by_id(session_id, allow_processing=True)
-            else:
-                raise AppError(f"Unsupported job task type: {task_type}", status_code=500)
+            spec = get_task_spec(task_type)
+            payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+            await spec.run(self.pipeline, self.clips, session_id, payload)
 
             finished = await self.repository.mark_succeeded(job_id)
             logger.info("Job succeeded: %s", task_type, extra=job_context)
             await self.repository.append_event(job_id, "succeeded", f"{task_type} succeeded", {"sessionId": session_id})
             await self._sync_session_job(finished)
             await self.events.publish(session_id, "status", {"code": "succeeded", "message": f"{task_type} succeeded"})
+            return JobRunResult(job=finished)
         except asyncio.CancelledError:
             requeued = await self.repository.requeue_interrupted_job(
                 job_id,
@@ -520,16 +645,24 @@ class JobQueueService:
             failed = await self.repository.mark_failed(job_id, message)
             await self.repository.append_event(job_id, "failed", message, {"sessionId": session_id})
             await self._sync_session_job(failed)
-            if self.pipeline is not None:
-                await self.pipeline.mark_session_failed(session_id, error)
-            else:
-                await self.events.publish(
-                    session_id,
-                    "status",
-                    {"code": "failed", "message": message},
-                )
+            # When the local runner will re-run this job, the session must stay
+            # non-terminal — marking it failed here would surface a dead session
+            # to the user while a retry is still pending. ``_arm_local_retry``
+            # fails the session itself if the requeue does not take.
+            if (raise_on_error or not self._local_retry_available(failed, error)) and queue_owns_session_status(
+                task_type
+            ):
+                await self._fail_session(session_id, error, message)
             if raise_on_error:
                 raise
+            return JobRunResult(job=failed, error=error)
+
+    async def _fail_session(self, session_id: str, error: Exception, message: str) -> None:
+        """Put a session into its terminal failed state for a failed job."""
+        if self.pipeline is not None:
+            await self.pipeline.mark_session_failed(session_id, error)
+            return
+        await self.events.publish(session_id, "status", {"code": "failed", "message": message})
 
     async def _sync_session_job(self, job: dict[str, Any]) -> None:
         try:
@@ -537,6 +670,12 @@ class JobQueueService:
         except Exception:
             return
         session["job"] = self.public_job(job)
+        if not queue_owns_session_status(str(job.get("taskType") or "")):
+            # The handler reports its own progress (see app.services.job_tasks).
+            # Overwriting status here would eject a user from a session they are
+            # actively working in.
+            await self.sessions.write(session)
+            return
         job_status = str(job.get("status") or "")
         if job_status == "running":
             session["status"] = "processing"

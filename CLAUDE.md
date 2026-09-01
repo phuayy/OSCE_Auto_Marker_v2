@@ -70,6 +70,7 @@ OSCE-AI-FYP/
 │       │   ├── clip_service.py          # Auto-crop, manual clips, clip assessment
 │       │   ├── async_upload_service.py  # Chunked multipart upload + assembly
 │       │   ├── job_queue_service.py     # Local asyncio + Hatchet dispatch
+│       │   ├── job_tasks.py             # Job task-type registry (handler + status ownership)
 │       │   ├── event_service.py         # In-process SSE pub/sub
 │       │   ├── auth_service.py          # JWT issue/verify/revoke
 │       │   ├── rubric_service.py        # Communication rubric parse/upload
