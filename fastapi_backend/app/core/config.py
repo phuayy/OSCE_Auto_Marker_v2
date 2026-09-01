@@ -313,6 +313,10 @@ class Settings:
     # dispatch at enqueue time. 0 disables (startup-only recovery).
     hatchet_redispatch_interval_seconds: int = read_int_env("HATCHET_REDISPATCH_INTERVAL_SECONDS", 30)
 
+    # Watchdog for external commands (ffmpeg, WhisperX, the scorers). Generous
+    # by design: it exists to end a *hung* child, not to bound a slow one. A CPU
+    # WhisperX run on a long recording can legitimately take hours. 0 disables.
+    subprocess_timeout_seconds: int = read_int_env("SUBPROCESS_TIMEOUT_SECONDS", 4 * 60 * 60)
 
     # --- Read-through cache ---------------------------------------------
     # Serves hot projections (the session index, the notification feed) from

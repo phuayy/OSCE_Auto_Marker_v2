@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,16 @@ _DEFAULT_MAX_CAPTURE_CHARS = 5_000_000
 # during the run instead of accumulating one-per-line until the process exits.
 _DEFAULT_MAX_PENDING_CALLBACKS = 2_000
 
+# Watchdog for a child that never exits. Deliberately generous — a CPU WhisperX
+# run on a long recording legitimately takes hours — because its job is to end
+# a *hung* process, not to bound a slow one. Without it a stuck child pins the
+# job in "running" forever: no error, no retry, no recovery short of a restart.
+_DEFAULT_TIMEOUT_SECONDS = 4 * 60 * 60
+
+# Sentinel distinguishing "caller passed nothing" (use the default) from an
+# explicit ``timeout_seconds=None`` (this command has no watchdog).
+_UNSET_TIMEOUT: Any = object()
+
 
 @dataclass(frozen=True)
 class CommandResult:
@@ -41,10 +52,16 @@ class CommandRunner:
         *,
         max_capture_chars: int = _DEFAULT_MAX_CAPTURE_CHARS,
         max_pending_callbacks: int = _DEFAULT_MAX_PENDING_CALLBACKS,
+        default_timeout_seconds: float | None = _DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         self.cwd = cwd
         self.max_capture_chars = max(1, max_capture_chars)
         self.max_pending_callbacks = max(1, max_pending_callbacks)
+        # None disables the watchdog entirely; anything <= 0 is read as None so
+        # a misconfigured "0" cannot make every command time out instantly.
+        self.default_timeout_seconds = (
+            default_timeout_seconds if (default_timeout_seconds or 0) > 0 else None
+        )
 
     async def run(
         self,
@@ -54,6 +71,7 @@ class CommandRunner:
         *,
         env: dict[str, str] | None = None,
         on_output: OutputCallback | None = None,
+        timeout_seconds: float | None = _UNSET_TIMEOUT,
     ) -> CommandResult:
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
@@ -130,9 +148,32 @@ class CommandRunner:
                 thread.join()
             return exit_code
 
+        timeout = (
+            self.default_timeout_seconds
+            if timeout_seconds is _UNSET_TIMEOUT
+            else (timeout_seconds if (timeout_seconds or 0) > 0 else None)
+        )
         run_task = asyncio.create_task(asyncio.to_thread(run_blocking))
         try:
-            exit_code = await run_task
+            exit_code = await (asyncio.wait_for(run_task, timeout) if timeout else run_task)
+        except asyncio.TimeoutError:
+            # A hung child is the failure mode with no other recovery: the job
+            # would sit in "running" forever, holding a worker slot, with no
+            # error to retry or report. Kill it and surface a real failure so
+            # the queue's retry/fail path can take over.
+            proc = process_holder.get("process")
+            if proc is not None:
+                await asyncio.to_thread(self._terminate_process, proc)
+            # to_thread cannot be cancelled; terminating the child is what lets
+            # the drain threads finish and the task complete.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await run_task
+            elapsed = time.monotonic() - started_at
+            logger.error("✗ %s — timed out after %.1fs", label, elapsed)
+            raise RuntimeError(
+                f"{label} timed out after {timeout:.0f}s and was terminated. "
+                "Raise SUBPROCESS_TIMEOUT_SECONDS if this workload legitimately runs longer."
+            ) from None
         except asyncio.CancelledError:
             proc = process_holder.get("process")
             if proc is not None:

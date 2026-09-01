@@ -135,7 +135,10 @@ def create_container(settings: Settings | None = None) -> AppContainer:
     active_settings = settings or Settings.load()
     database = Database(active_settings.resolved_database_source)
     orm_database = OrmDatabase(active_settings.resolved_database_source)
-    runner = CommandRunner(active_settings.root_dir)
+    runner = CommandRunner(
+        active_settings.root_dir,
+        default_timeout_seconds=active_settings.subprocess_timeout_seconds,
+    )
     artifacts = ArtifactService(active_settings)
     auth = AuthService(active_settings)
     events = EventService(active_settings)
