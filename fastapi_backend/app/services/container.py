@@ -42,7 +42,7 @@ from app.services.rubric_asset_service import RubricAssetService
 from app.services.rubric_service import RubricService
 from app.services.session_maintenance_service import SessionMaintenanceService
 from app.services.session_service import SessionService
-from app.services.storage_service import LocalObjectStorageService, create_storage_service
+from app.storage import ObjectStorage, create_storage_service
 from app.services.transcription_router import TranscriptionRouter
 
 
@@ -59,7 +59,7 @@ class AppContainer:
     auth: AuthService
     events: EventService
     sessions: SessionService
-    storage: LocalObjectStorageService
+    storage: ObjectStorage
     jobs: JobQueueService
     rubric_assets: RubricAssetService
     assessments: AssessmentService

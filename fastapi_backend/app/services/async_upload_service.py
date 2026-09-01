@@ -21,7 +21,7 @@ from app.repositories.video_repository import VideoRepository
 from app.services.rubric_asset_service import RubricAssetService
 from app.services.session_service import SessionService
 from app.core.utils import utc_now_iso
-from app.services.storage_service import LocalObjectStorageService
+from app.storage import ObjectStorage
 
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ class AsyncUploadService:
         settings: Settings,
         repository: UploadRepository,
         sessions: SessionService,
-        storage: LocalObjectStorageService,
+        storage: ObjectStorage,
         jobs: JobQueueService,
         media: MediaPipeline,
         events: EventService,
@@ -72,7 +72,7 @@ class AsyncUploadService:
         upload_files = []
         for item in payload.files:
             file_id = str(uuid4())
-            prepared = self.storage.prepare_upload_file(
+            prepared = await self.storage.prepare_upload_file(
                 upload_id=upload_id,
                 session_id=session_id,
                 file_id=file_id,
@@ -316,13 +316,11 @@ class AsyncUploadService:
                 raise AppError("Both video and caseStudy uploads must be completed.", status_code=400)
 
             await self._validate_committed_video(video_ref)
-            self._validate_committed_case_study(case_study_ref)
+            await self._validate_committed_case_study(case_study_ref)
 
             video_file_record = self._file_by_kind(upload.get("files") or [], "video")
             case_study_record = self._file_by_kind(upload.get("files") or [], "caseStudy")
-            public_url = None
-            if isinstance(self.storage, LocalObjectStorageService):
-                public_url = self.storage.public_url_for_key(str(case_study_ref.get("key") or ""))
+            public_url = self.storage.public_url_for_key(str(case_study_ref.get("key") or ""))
             (
                 case_study_ref,
                 case_study_asset,
@@ -705,11 +703,13 @@ class AsyncUploadService:
                     raise AppError("caseStudy MIME type must be application/pdf.", status_code=400)
 
     async def _validate_committed_video(self, storage_ref: dict[str, Any]) -> None:
-        local_path = storage_ref.get("localPath")
-        if not local_path:
-            raise AppError("Committed video is not available to the local worker.", status_code=500)
+        # ffprobe needs a path. `materialize` is a no-op existence check on the
+        # local backend and a cached download on a cloud one, so this validates
+        # the bytes that were actually stored either way.
+        local_path = await self.storage.materialize(storage_ref)
+        storage_ref["localPath"] = str(local_path)
         try:
-            await self.media.get_video_duration_seconds(Path(str(local_path)))
+            await self.media.get_video_duration_seconds(local_path)
         except RuntimeError as error:
             message = str(error) or "Video validation failed."
             if "was not found in PATH" in message:
@@ -719,11 +719,10 @@ class AsyncUploadService:
                 status_code=400,
             ) from error
 
-    @staticmethod
-    def _validate_committed_case_study(storage_ref: dict[str, Any]) -> None:
-        local_path = storage_ref.get("localPath")
-        path = Path(str(local_path or ""))
-        if not local_path or path.suffix.lower() != ".pdf" or not path.exists():
+    async def _validate_committed_case_study(self, storage_ref: dict[str, Any]) -> None:
+        path = await self.storage.materialize(storage_ref)
+        storage_ref["localPath"] = str(path)
+        if path.suffix.lower() != ".pdf":
             raise AppError("Committed caseStudy is not a PDF file.", status_code=400)
 
     def _committed_file_meta(
@@ -744,8 +743,7 @@ class AsyncUploadService:
             "storageRef": storage_ref,
         }
         if kind == "video":
-            if isinstance(self.storage, LocalObjectStorageService):
-                meta["url"] = self.storage.public_url_for_key(str(storage_ref.get("key") or ""))
+            meta["url"] = self.storage.public_url_for_key(str(storage_ref.get("key") or ""))
         if rubric_asset:
             meta["rubricAssetId"] = rubric_asset["id"]
             meta["rubricDeduplicated"] = rubric_deduplicated

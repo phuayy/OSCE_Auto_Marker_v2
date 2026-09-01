@@ -266,6 +266,21 @@ class Settings:
     session_name_max_length: int = 80
     storage_backend: str = os.getenv("STORAGE_BACKEND", "local").strip().lower() or "local"
     object_prefix: str = os.getenv("OBJECT_PREFIX", "").strip().strip("/")
+    # --- Google Cloud Storage backend (STORAGE_BACKEND=gcs) -----------------
+    # Bucket that holds every uploaded source object. Required for the GCS
+    # backend; the factory refuses to build one without it rather than failing
+    # later on the first upload.
+    gcs_bucket: str = os.getenv("GCS_BUCKET", "").strip()
+    gcs_project: str = os.getenv("GCS_PROJECT", "").strip()
+    # Origin allowed to PUT directly at a resumable session URI. Browsers are
+    # blocked by CORS without it, so it must match the site serving the SPA.
+    gcs_upload_origin: str = os.getenv("GCS_UPLOAD_ORIGIN", "").strip()
+    # Lifetime of the V4 signed URLs handed out for playback/download.
+    gcs_signed_url_ttl_seconds: int = read_int_env("GCS_SIGNED_URL_TTL_SECONDS", 3600)
+    # Where a worker keeps its local copy of a bucket object. ffmpeg, WhisperX
+    # and the scorers are all path-based, so every remote source is materialised
+    # here once and reused across jobs and retries.
+    gcs_cache_root_override: str = os.getenv("GCS_CACHE_ROOT", "").strip()
     upload_part_size_mb: int = read_int_env("UPLOAD_PART_SIZE_MB", 8)
     upload_session_ttl_hours: int = read_int_env("UPLOAD_SESSION_TTL_HOURS", 24)
     job_queue_backend: str = os.getenv("JOB_QUEUE_BACKEND", "local").strip().lower() or "local"
@@ -427,6 +442,13 @@ class Settings:
         raw = os.getenv("STORAGE_ROOT", "").strip()
         override = Path(raw).expanduser() if raw else None
         return StoragePaths(root_dir=self.root_dir, storage_root_override=override)
+
+    @property
+    def gcs_cache_root(self) -> Path:
+        """Local scratch directory holding materialised copies of bucket objects."""
+        if self.gcs_cache_root_override:
+            return Path(self.gcs_cache_root_override).expanduser()
+        return self.paths.storage_root / "cache" / "objects"
 
     @property
     def object_storage_root(self) -> Path:

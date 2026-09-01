@@ -1691,9 +1691,72 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
+  // Direct-to-bucket upload against a resumable session URI the backend minted
+  // at initiate. The bytes never touch the API process, so restarting or
+  // redeploying the API mid-upload no longer kills the transfer, and a chunk
+  // that fails is retried against the offset the bucket reports rather than
+  // restarting the whole file.
+  async function uploadFileToResumableSession(file, fileUpload, onProgress) {
+    if (!fileUpload.uploadUrl) {
+      throw new Error('Upload plan did not include a resumable session URL.');
+    }
+    const chunkSize = Number(fileUpload.partSizeBytes || 0);
+    if (!Number.isFinite(chunkSize) || chunkSize <= 0) {
+      throw new Error('Upload plan did not include a valid chunk size.');
+    }
+
+    let offset = 0;
+    while (offset < file.size) {
+      const end = Math.min(offset + chunkSize, file.size);
+      const chunk = file.slice(offset, end);
+      const delays = [1000, 2000];
+      let response;
+      let lastError;
+
+      for (let attempt = 0; attempt <= delays.length; attempt++) {
+        try {
+          response = await fetch(fileUpload.uploadUrl, {
+            method: 'PUT',
+            headers: {
+              'Content-Range': `bytes ${offset}-${end - 1}/${file.size}`,
+            },
+            body: chunk,
+          });
+          lastError = null;
+          break;
+        } catch (networkErr) {
+          lastError = networkErr;
+          if (attempt < delays.length) {
+            await new Promise((r) => setTimeout(r, delays[attempt]));
+          }
+        }
+      }
+      if (lastError) throw lastError;
+
+      // 308 means "chunk stored, send more" and carries the byte range the
+      // bucket actually holds. Trusting that Range header over a local counter
+      // is what makes a partially-accepted chunk resume correctly.
+      if (response.status === 308) {
+        const range = response.headers.get('Range');
+        const lastByte = range ? Number(range.split('-').pop()) : NaN;
+        offset = Number.isFinite(lastByte) ? lastByte + 1 : end;
+      } else if (response.ok) {
+        offset = file.size;
+      } else {
+        throw new Error(`Upload failed at byte ${offset} (HTTP ${response.status}).`);
+      }
+      onProgress?.(offset, file.size, fileUpload);
+    }
+  }
+
   async function uploadFileParts(file, fileUpload, onProgress) {
+    // The backend picks the transport at initiate: parts relayed through this
+    // API on a local deployment, straight at the bucket on a cloud one.
+    if (fileUpload.strategy === 'gcs_resumable') {
+      return uploadFileToResumableSession(file, fileUpload, onProgress);
+    }
     if (fileUpload.strategy !== 'local_multipart') {
-      throw new Error(`${fileUpload.strategy || 'Cloud'} uploads are not enabled in this frontend build yet.`);
+      throw new Error(`Unsupported upload strategy: ${fileUpload.strategy || 'unknown'}.`);
     }
     if (!fileUpload.partUrlTemplate) {
       throw new Error('Upload plan did not include a part URL template.');

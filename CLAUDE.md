@@ -76,7 +76,12 @@ OSCE-AI-FYP/
 │       │   ├── rubric_asset_service.py
 │       │   ├── assessment_service.py
 │       │   ├── artifact_service.py      # Storage layout init, PDF validation
-│       │   └── storage_service.py       # Local object storage (pluggable)
+│       │   └── storage_service.py       # Compatibility re-exports of app/storage/
+│       ├── storage/            # Object storage: one contract, one backend per deployment
+│       │   ├── base.py             # ObjectStorage Protocol, PreparedUploadFile, storage-ref helpers
+│       │   ├── local.py            # LocalObjectStorageService (parts relayed through this API)
+│       │   ├── gcs.py              # GcsObjectStorageService (resumable session URIs + object cache)
+│       │   └── factory.py          # create_storage_service() — switches on STORAGE_BACKEND
 │       ├── pipeline/
 │       │   ├── transcription/  # Pluggable ASR engines
 │       │   │   ├── base.py             # Engine contract: descriptor, ParameterSpec, request/result
@@ -320,6 +325,11 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 | `WHISPERX_BATCH_SIZE` | `1` | Raise on GPUs with more than 6 GB VRAM |
 | `PARALLEL_SCORING` | `true` | Run content branch parallel to communication branch |
 | `JOB_QUEUE_BACKEND` | `local` | `local` or `hatchet` |
+| `STORAGE_BACKEND` | `local` | `local` (parts through the API) or `gcs` (direct-to-bucket resumable uploads) |
+| `GCS_BUCKET` | — | Required when `STORAGE_BACKEND=gcs`; the factory refuses to start without it |
+| `GCS_UPLOAD_ORIGIN` | — | Origin allowed to PUT at the resumable session URI (browser CORS) |
+| `GCS_CACHE_ROOT` | `storage/cache/objects` | Worker-local cache of materialised bucket objects |
+| `GCS_SIGNED_URL_TTL_SECONDS` | `3600` | Lifetime of V4 signed playback URLs |
 | `DATABASE_URL` | SQLite in storage/ | PostgreSQL or SQLite URL |
 | `DB_AUTO_MIGRATE` | `true` | Run `alembic upgrade head` at startup; false = migrate as a deploy step |
 | `NVIDIA_API_KEY` | — | For content + communication scorers |
