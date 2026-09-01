@@ -123,6 +123,11 @@ const LONG_DEMO_CHILD_IDS = [
 /** Recordings at or above this length use bell/hybrid auto-split in the pipeline and show the Auto-split UI tab. */
 const LONG_VIDEO_THRESHOLD_SECONDS = 300;
 
+// How often the open workspace re-reads a session while its clip export runs.
+// Faster than the 8s session-list poll because the user is watching this one
+// list fill in; each tick is a single lightweight session read.
+const CLIP_EXPORT_POLL_MS = 3000;
+
 function downloadBlob(fileName, blob) {
   const objectUrl = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
@@ -509,6 +514,11 @@ export default function OSCEAiMarkerMockup({
 
   const hasClipFiles = useMemo(() => videoClips.some((clip) => Boolean(clip?.url)), [videoClips]);
   const hasDraftClips = videoClips.length > 0 && !hasClipFiles;
+  // Progress of the durable clip-export job. Exporting cuts one MP4 per student
+  // in the job queue rather than inside the POST, so the clips arrive over time
+  // and this record — not the response body — is what says when they are all in.
+  const clipExport = session?.clipExport || null;
+  const isClipExportRunning = ['queued', 'running'].includes(String(clipExport?.status || ''));
   // Batch-run selection derives from live run state: a clip that starts
   // running drops out of the selectable set (and the selected count) instead
   // of needing effect-based pruning when clips or statuses change.
@@ -882,6 +892,46 @@ export default function OSCEAiMarkerMockup({
   const currentSubtitleUrl = resolveMediaUrl(session?.outputs?.subtitleTrack?.url) || null;
   const isPipelineActive = isUploading || isProcessing;
   const currentModeLabel = String(session?.pipeline?.mode || 'gpu').toUpperCase();
+
+  // Clip export runs as a queued job, so the open workspace has to poll for its
+  // clips. Deliberately not the session-list poll: the user stays inside this
+  // session while it runs (the export does not move session.status), and the
+  // list projection carries counters, not the clip rows this view renders.
+  useEffect(() => {
+    if (!showWorkspace || !session?.id || !isClipExportRunning) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const sessionId = session.id;
+
+    async function pollClipExport() {
+      try {
+        const response = await fetch(`/api/sessions/${sessionId}`);
+        if (!response.ok) {
+          return;
+        }
+        const body = await response.json().catch(() => ({}));
+        if (cancelled || !body?.session || String(body.session.id) !== String(sessionId)) {
+          return;
+        }
+        setSession((previous) => (previous?.id === sessionId ? body.session : previous));
+        if (String(body.session?.clipExport?.status) === 'failed') {
+          setError(body.session.clipExport.error || 'Clip export failed.');
+        }
+      } catch {
+        // Transient network failures are ignored; the next tick retries.
+      }
+    }
+
+    const intervalId = window.setInterval(pollClipExport, CLIP_EXPORT_POLL_MS);
+    pollClipExport();
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [showWorkspace, session?.id, isClipExportRunning]);
 
   useEffect(() => {
     if (!videoFile) {
@@ -2576,6 +2626,9 @@ export default function OSCEAiMarkerMockup({
       if (!response.ok) {
         throw new Error(body.error || 'Failed to save manual segments.');
       }
+      // 202: the backend persisted the segmentation and queued an export job.
+      // The draft clips come back immediately so the timeline re-renders, and
+      // the MP4s land one at a time — watched by the clipExport poll below.
       if (body?.session) {
         setSession(body.session);
         const nextClips = Array.isArray(body.session?.outputs?.videoClips) ? body.session.outputs.videoClips : [];
@@ -2943,12 +2996,32 @@ export default function OSCEAiMarkerMockup({
             size="sm"
             className="bg-gradient-to-r from-cyan-600 to-blue-700 text-white hover:from-cyan-700 hover:to-blue-800"
             onClick={saveManualSegments}
-            disabled={!session?.id || !videoDurationSeconds || isSavingManualSegments}
+            disabled={!session?.id || !videoDurationSeconds || isSavingManualSegments || isClipExportRunning}
           >
-            {isSavingManualSegments ? 'Saving…' : 'Export clips'}
+            {isSavingManualSegments || isClipExportRunning
+              ? `Exporting ${Number(clipExport?.completed || 0)}/${Number(clipExport?.total || 0)}…`
+              : 'Export clips'}
           </Button>
         </div>
       </div>
+
+      {isClipExportRunning ? (
+        <div className="mb-3 rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs text-cyan-900">
+          Cutting clips in the background:{' '}
+          <span className="font-semibold">
+            {Number(clipExport?.completed || 0)}/{Number(clipExport?.total || 0)}
+          </span>{' '}
+          exported. Clips become assessable as they land — this survives a page reload or a server
+          restart, and resumes where it stopped.
+        </div>
+      ) : null}
+
+      {clipExport?.status === 'failed' ? (
+        <div className="mb-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-900">
+          Clip export failed after {Number(clipExport?.completed || 0)}/{Number(clipExport?.total || 0)} clips:{' '}
+          {clipExport?.error || 'unknown error'}. Export again to resume — finished clips are reused.
+        </div>
+      ) : null}
 
       {hasDraftClips ? (
         <div className="mb-3 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-900">

@@ -67,7 +67,7 @@ OSCE-AI-FYP/
 │       │   ├── transcription_router.py  # Picks + runs the selected engine per run
 │       │   ├── session_service.py
 │       │   ├── pipeline_service.py      # Orchestrates full assessment pipeline
-│       │   ├── clip_service.py          # Auto-crop, manual clips, clip assessment
+│       │   ├── clip_service.py          # Auto-crop, clip export planning/execution, clip assessment
 │       │   ├── async_upload_service.py  # Chunked multipart upload + assembly
 │       │   ├── job_queue_service.py     # Local asyncio + Hatchet dispatch
 │       │   ├── job_tasks.py             # Job task-type registry (handler + status ownership)
@@ -213,25 +213,78 @@ Key files:
 
 ## Long-Video Workflow (Auto-Crop)
 
-When `workflow == "long"` the job type is `auto_crop` instead of `process_session`:
+When `workflow == "long"` the job type is `auto_crop` instead of `process_session`.
 
-1. Bell detector (`scripts/bell_detector.py`) identifies student-exam segment boundaries.
-2. `ClipService` crops one video clip per student (`ffmpeg stream-copy` -> re-encode fallback).
-3. Session status -> `cropped`; clip list exposed as `session.outputs.videoClips`.
+**Segmentation is planning; export is execution.** Neither `auto_crop` nor the
+manual timeline split cuts MP4s in the request. Both produce *draft* clips —
+ranges with `isDraft: true` and no file — which the timeline renders immediately.
+
+1. Segmentation (`auto_crop` job): bell detector (`scripts/bell_detector.py`) or
+   person detector (RT-DETR) proposes ranges. `build_clip_drafts_from_ranges`
+   records them; no ffmpeg runs. Session status -> `cropped`.
+2. The user adjusts boundaries in the timeline editor and hits **Export clips**:
+   `POST /sessions/{id}/clips/manual` -> `ClipService.request_clip_export`.
+   Persists the plan (each clip gets a stable `exportIndex`) plus a
+   `session.clipExport` progress record, enqueues an **`export_clips` job**, and
+   returns **202** immediately.
+3. The `export_clips` job runs `ClipService.export_clips_by_id`, cutting one MP4
+   per clip (`ffmpeg stream-copy` -> re-encode fallback) and **writing the
+   session after every clip**. Resumable twice over: a killed run loses at most
+   the clip in flight, and `materialize_clip` adopts any MP4 already at the
+   expected path instead of re-cutting it. Crops publish atomically (temp name +
+   rename), so an existing file is by definition a finished one.
 4. Each clip individually assessed via `POST /sessions/{id}/clips/{clipId}/assess?defer=1`.
 5. Each clip assessment creates a **child** session (`parentSessionId` set), runs full pipeline.
+
+The export job deliberately does **not** own `session.status` (see
+`app/services/job_tasks.py`). The user sits inside the timeline editor while
+clips are cut, and flipping the session to `processing` would eject them — the
+frontend refuses to open in-flight sessions. Progress lives on
+`session.clipExport` (`status`, `completed`, `total`, `error`, `jobId`), which
+the open workspace polls every 3s and the session-list projection exposes as
+`clipExportStatus` / `clipExportCompleted` / `clipExportTotal`.
 
 ---
 
 ## Upload Flow (Chunked)
 
+`STORAGE_BACKEND` decides where the bytes go. The API contract is identical
+either way; `initiate` tells the client which transport to use via `strategy`.
+
+**`local` (default) — parts relayed through this API:**
+
 ```
-POST /api/uploads/initiate          -> reserve session + job, get fileUpload URLs
+POST /api/uploads/initiate          -> reserve session + job, get partUrlTemplate
 PUT  /api/uploads/{id}/parts/{n}    -> upload each chunk
 POST /api/uploads/{id}/complete     -> fire-and-forget _assemble_and_dispatch()
                                        (concatenate parts, SHA-256, ffprobe duration check)
                                        -> enqueue job -> start job
 ```
+
+**`gcs` — direct to bucket:**
+
+```
+POST /api/uploads/initiate          -> server mints the object key and a GCS
+                                       resumable upload session URI (uploadUrl)
+PUT  <uploadUrl>                    -> browser sends chunks straight to GCS with
+                                       Content-Range; 308 responses carry the
+                                       committed offset, so a broken transfer
+                                       resumes instead of restarting
+POST /api/uploads/{id}/complete     -> server re-reads the object BY ITS OWN KEY,
+                                       verifies size + SHA-256, caches it locally
+                                       -> enqueue job -> start job
+```
+
+The client never supplies a URL or path for the server to fetch — it only says
+"I finished", and the server resolves the key it minted itself. Accepting a
+caller-supplied `source_url` here would be a server-side request forgery
+primitive; the key round-trip gives the same workflow without one.
+
+Because ffmpeg, WhisperX and the scorers are path-based, every job execution
+calls `storage.prepare_session_sources(session)` before the handler runs. That
+is a no-op path fixup on `local` and a checksum-verified, cached download on
+`gcs`, so a job retried on a worker that has never seen the session fetches what
+it needs, and a retry on the same worker reuses the cache.
 
 Assembly runs as background asyncio task tracked by `BackgroundTaskRegistry` so HTTP handler returns in < 1s. Session state: `waiting_for_upload -> assembling -> uploaded -> queued -> processing -> completed`.
 

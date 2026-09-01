@@ -44,6 +44,12 @@ def _version_token(updated_at: datetime | None) -> str | None:
     return dt.isoformat(timespec="microseconds")
 
 
+def _optional_int(value: Any) -> int | None:
+    """Integer form of :func:`_optional_float`, for JSON-extracted counters."""
+    number = _optional_float(value)
+    return None if number is None else int(number)
+
+
 def _optional_float(value: Any) -> float | None:
     """Coerce a JSON-extracted numeric to float, tolerating backend quirks.
 
@@ -177,6 +183,9 @@ class SessionRepository:
             payload["pipeline", "stepProgress"].as_float().label("step_progress"),
             payload["pipeline", "startedAt"].as_string().label("pipeline_started_at"),
             payload["outputs", "videoClips", 0, "id"].as_string().label("first_clip_id"),
+            payload["clipExport", "status"].as_string().label("clip_export_status"),
+            payload["clipExport", "completed"].as_float().label("clip_export_completed"),
+            payload["clipExport", "total"].as_float().label("clip_export_total"),
         ).order_by(SessionRecord.created_at.desc())
 
         async with self.database.session() as db_session:
@@ -203,6 +212,12 @@ class SessionRepository:
                     # while a step that reports progress is running.
                     "stepProgress": _optional_float(row.step_progress),
                     "pipelineStartedAt": row.pipeline_started_at or None,
+                    # Clip-export progress. Unlike the pipeline the export does
+                    # not move session.status, so the list poll needs these to
+                    # render its gauge.
+                    "clipExportStatus": row.clip_export_status or None,
+                    "clipExportCompleted": _optional_int(row.clip_export_completed),
+                    "clipExportTotal": _optional_int(row.clip_export_total),
                 }
             )
         return projections

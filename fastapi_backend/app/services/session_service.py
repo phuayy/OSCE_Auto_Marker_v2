@@ -246,6 +246,9 @@ class SessionService:
             "pipeline": session.get("pipeline"),
             "parentSessionId": session.get("parentSessionId"),
             "clipSource": session.get("clipSource"),
+            # Progress of the durable clip-export job, or None when this session
+            # has never been split. Drives the timeline editor's export gauge.
+            "clipExport": session.get("clipExport") or None,
             # Which engine produced this session's transcript, and whether it
             # labelled speakers. Recorded per run because the engine is
             # operator-selectable, so two sessions in one list may differ.
@@ -307,6 +310,9 @@ class SessionService:
                         "fileName": clip.get("fileName"),
                         "url": clip.get("url"),
                         "sizeBytes": int(clip.get("sizeBytes") or 0),
+                        # A draft has a range but no MP4 yet: the export job has
+                        # not reached it. Assessment is refused until it has.
+                        "isDraft": bool(clip.get("isDraft")),
                     }
                     for clip in clips
                 ]

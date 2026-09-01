@@ -292,6 +292,11 @@ class MediaPipeline:
             raise ValueError(f"Refusing to crop too-short segment ({duration_seconds}s).")
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        # ffmpeg is given a temp name and the result is renamed into place, so a
+        # crop killed halfway (process restart, cancelled job) cannot leave a
+        # truncated MP4 at the final path. Anything that exists there is a clip
+        # that finished, which is what lets a retried export skip it.
+        staging_path = output_path.with_name(f".{output_path.name}.{uuid4().hex[:8]}.partial{output_path.suffix}")
         args_copy = [
             "-y",
             "-hide_banner",
@@ -307,13 +312,14 @@ class MediaPipeline:
             "copy",
             "-map",
             "0",
-            str(output_path),
+            str(staging_path),
         ]
         try:
             await self.runner.run(self.settings.ffmpeg_bin, args_copy, "Video clip crop (stream copy)")
+            await asyncio.to_thread(atomic_replace, staging_path, output_path)
             return True
         except RuntimeError:
-            pass
+            await asyncio.to_thread(staging_path.unlink, True)
 
         args_reencode = [
             "-y",
@@ -341,9 +347,14 @@ class MediaPipeline:
             "-movflags",
             "+faststart",
             "-shortest",
-            str(output_path),
+            str(staging_path),
         ]
-        await self.runner.run(self.settings.ffmpeg_bin, args_reencode, "Video clip crop (re-encode)")
+        try:
+            await self.runner.run(self.settings.ffmpeg_bin, args_reencode, "Video clip crop (re-encode)")
+        except Exception:
+            await asyncio.to_thread(staging_path.unlink, True)
+            raise
+        await asyncio.to_thread(atomic_replace, staging_path, output_path)
         return True
 
     def normalize_clip_ranges(self, clip_ranges: list[dict[str, Any]], video_duration_seconds: float) -> list[dict[str, float]]:
@@ -612,71 +623,54 @@ class MediaPipeline:
         kind = str(clip_range.get("kind") or "").strip().lower()
         return kind if kind == "intermission" else "session"
 
-    async def write_video_clips_from_ranges(
+    async def materialize_clip(
         self,
-        session: dict[str, Any],
-        clip_ranges: list[dict[str, Any]],
-        source_meta: dict[str, Any],
-        label_overrides: list[str] | None = None,
-    ) -> list[dict[str, Any]]:
-        video_path = Path(str(session["files"]["video"]["absolutePath"]))
-        video_duration_seconds = await self.get_video_duration_seconds(video_path)
-        session_clip_dir = self.settings.paths.output_clips_dir / str(session["id"])
-        session_clip_dir.mkdir(parents=True, exist_ok=True)
-        overrides = label_overrides or []
-        clips: list[dict[str, Any]] = []
-        student_index = 0
-        for index, clip_range in enumerate(clip_ranges):
-            start = clamp_number(clip_range["start"], 0, video_duration_seconds)
-            end = clamp_number(clip_range["end"], 0, video_duration_seconds)
-            if end - start < self.settings.auto_crop_min_clip_seconds:
-                continue
-            kind = self._clip_kind(clip_range)
-            override = overrides[index] if index < len(overrides) else None
-            clip: dict[str, Any] = {
-                "id": str(uuid4()),
-                "start": start,
-                "end": end,
-                "kind": kind,
-                "createdAt": utc_now_iso(),
-                "source": source_meta,
+        *,
+        session_id: str,
+        clip: dict[str, Any],
+        video_path: Path,
+    ) -> dict[str, Any]:
+        """Cut one draft clip out of the source video, in place on ``clip``.
+
+        Deliberately one clip per call: exporting ten students is ten of these,
+        each one durably recorded, so a crash or a retry resumes at the clip it
+        stopped on instead of re-cutting the whole recording.
+
+        Idempotent. ``crop_video_segment`` publishes its output atomically, so an
+        MP4 already sitting at the expected path is by definition a finished
+        crop and is adopted rather than repeated. The file name is derived from
+        the clip's ``exportIndex``, which is fixed when the export plan is
+        written, so the same clip resolves to the same path on every attempt.
+        """
+        export_index = int(clip.get("exportIndex") or 0)
+        file_name = f"{session_id}-clip-{export_index + 1}.mp4"
+        output_path = self.settings.paths.output_clips_dir / str(session_id) / file_name
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        reused = await asyncio.to_thread(self._is_finished_clip_file, output_path)
+        if not reused:
+            await self.crop_video_segment(
+                input_path=video_path,
+                start_seconds=float(clip["start"]),
+                end_seconds=float(clip["end"]),
+                output_path=output_path,
+            )
+
+        stats = output_path.stat()
+        clip.update(
+            {
+                "fileName": file_name,
+                "url": f"/media/clips/{session_id}/{file_name}",
+                "absolutePath": str(output_path),
+                "sizeBytes": stats.st_size,
+                "isDraft": False,
             }
-            if isinstance(clip_range.get("personCount"), (int, float)):
-                clip["personCount"] = int(clip_range["personCount"])
-            if kind == "intermission":
-                # Timeline marker only — never cropped to a file, never assessable.
-                clip.update(
-                    {
-                        "label": self.sanitize_clip_label(override, "Intermission"),
-                        "fileName": None,
-                        "url": None,
-                        "absolutePath": None,
-                        "sizeBytes": 0,
-                    }
-                )
-            else:
-                student_index += 1
-                file_name = f"{session['id']}-clip-{index + 1}.mp4"
-                output_path = session_clip_dir / file_name
-                await self.crop_video_segment(
-                    input_path=video_path,
-                    start_seconds=start,
-                    end_seconds=end,
-                    output_path=output_path,
-                )
-                stats = output_path.stat()
-                clip.update(
-                    {
-                        "label": self.sanitize_clip_label(override, f"Student {student_index}"),
-                        "fileName": file_name,
-                        "url": f"/media/clips/{session['id']}/{file_name}",
-                        "absolutePath": str(output_path),
-                        "sizeBytes": stats.st_size,
-                    }
-                )
-            clips.append(clip)
-        session.setdefault("outputs", {})["videoClips"] = clips
-        return clips
+        )
+        return {"clip": clip, "reused": reused}
+
+    @staticmethod
+    def _is_finished_clip_file(output_path: Path) -> bool:
+        return output_path.is_file() and output_path.stat().st_size > 0
 
     def build_clip_drafts_from_ranges(
         self,

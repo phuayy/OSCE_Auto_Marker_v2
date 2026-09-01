@@ -167,14 +167,23 @@ async def process_session(session_id: str, container: AppContainer = Depends(get
         raise HTTPException(status_code=500, detail=str(error) or "Processing failed.") from error
 
 
-@router.post("/{session_id}/clips/manual")
+@router.post("/{session_id}/clips/manual", status_code=202)
 async def create_manual_clips(
     session_id: str,
     payload: ManualClipsRequest,
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
+    """Record a clip-export plan and queue the export job.
+
+    202, not 200: the response carries the draft segmentation and a job id, and
+    the MP4s are cut afterwards. Cutting them here would hold the connection for
+    minutes on a long recording and lose everything on a restart. Poll the
+    session's ``clipExport`` for progress.
+    """
     try:
-        return await container.clips.manual_clips(session_id, payload.boundaries, payload.labels, payload.kinds)
+        return await container.clips.request_clip_export(
+            session_id, payload.boundaries, payload.labels, payload.kinds
+        )
     except Exception as error:
         raise _http_error(error, fallback_message="Manual clip split failed.") from error
 

@@ -206,14 +206,41 @@ class ClipService:
             sample_rate=self.media.settings.bell_detector_sample_rate,
         )
 
-    async def manual_clips(
+    # ------------------------------------------------------------------
+    # Manual clip export
+    #
+    # Split into a request half and an execution half. Cutting N students out
+    # of a two-hour recording is N ffmpeg passes — minutes of work that used to
+    # run inline in the POST, holding the connection open with no job row, no
+    # progress, and nothing to resume from if the process died on clip seven.
+    # The request now records a durable plan and hands it to the job queue,
+    # which already owns retries, backoff and restart recovery.
+    # ------------------------------------------------------------------
+
+    async def request_clip_export(
         self,
         session_id: str,
         boundaries: list[float],
         labels: list[str],
         kinds: list[str] | None = None,
     ) -> dict[str, Any]:
+        """Record a clip-export plan and queue the job that carries it out.
+
+        Returns as soon as the plan is persisted. The draft clips are visible on
+        the session immediately, so the timeline renders the new segmentation
+        while the MP4s are still being cut.
+        """
         session = await self.sessions.read(session_id)
+        if session.get("status") == "processing":
+            raise AppError("This session is already being processed.", status_code=409)
+        if self.jobs is None:
+            raise RuntimeError("Durable job queue is not configured for clip export.")
+        if await self._has_live_export(session):
+            raise AppError(
+                "A clip export is already running for this session. Wait for it to finish before re-splitting.",
+                status_code=409,
+            )
+
         video_path = Path(str(((session.get("files") or {}).get("video") or {}).get("absolutePath") or ""))
         if not video_path.exists():
             raise RuntimeError("Video file is missing for this session.")
@@ -221,6 +248,7 @@ class ClipService:
         clip_ranges = self.media.build_manual_clip_ranges(video_duration, boundaries)
         if not clip_ranges:
             raise AppError("Manual separators did not produce valid clip ranges.", status_code=400)
+
         # Kinds and labels are positional per SEGMENT (as the client sees them).
         # Ranges carry their pre-filter segmentIndex, so a sub-minimum sliver
         # dropped by build_manual_clip_ranges cannot shift the mapping of every
@@ -240,14 +268,210 @@ class ClipService:
             "labelsProvided": len(labels or []) > 0,
             "bellEndOffsetSeconds": self.media.settings.bell_end_offset_seconds,
         }
-        clips = await self.media.write_video_clips_from_ranges(session, clip_ranges, source, aligned_labels)
+        clips = self.media.build_clip_drafts_from_ranges(clip_ranges, video_duration, source, aligned_labels)
+        # exportIndex fixes each clip's output file name for the life of the
+        # plan. It has to survive retries unchanged, or a resumed export would
+        # look for its finished clips under different names and cut them again.
+        pending_total = 0
+        for index, clip in enumerate(clips):
+            clip["exportIndex"] = index
+            if clip.get("kind") != "intermission":
+                pending_total += 1
+
+        session.setdefault("outputs", {})["videoClips"] = clips
+        session["clipExport"] = {
+            "status": "queued",
+            "total": pending_total,
+            "completed": 0,
+            "requestedAt": self.pipeline.now_iso(),
+            "startedAt": None,
+            "endedAt": None,
+            "error": None,
+            "jobId": None,
+        }
         await self.sessions.write(session)
-        session_count = sum(1 for clip in clips if clip.get("kind") != "intermission")
+
+        job = await self.jobs.enqueue(session_id, "export_clips", {"clipCount": pending_total})
+        # Re-read: enqueue writes the job projection onto the session, so the
+        # in-memory copy above is already stale.
+        session = await self.sessions.read(session_id)
+        export = session.setdefault("clipExport", {})
+        export["jobId"] = job.get("id")
+        await self.sessions.write(session)
+
         return {
             "session": self.sessions.public_session(session),
-            "clipCount": session_count,
-            "intermissionCount": len(clips) - session_count,
+            "clipCount": pending_total,
+            "intermissionCount": len(clips) - pending_total,
+            "clipExport": dict(export),
+            "job": self.jobs.public_job(job),
         }
+
+    async def export_clips_by_id(self, session_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Cut every session clip in the stored plan. The ``export_clips`` job.
+
+        Resumable in two senses. Each finished clip is written to the session
+        before the next crop starts, so an interrupted run loses at most the one
+        clip in flight; and a clip whose MP4 is already on disk is adopted
+        rather than re-cut, so a retry costs only the work that never completed.
+
+        This handler owns the session's status field — the queue deliberately
+        does not touch it (see app.services.job_tasks). The user sits in this
+        session's timeline editor while the export runs, and a session flipped
+        to "processing" would be closed underneath them.
+        """
+        _ = payload
+        session = await self.sessions.read(session_id)
+        clips = (session.get("outputs") or {}).get("videoClips")
+        if not isinstance(clips, list) or not clips:
+            raise AppError("This session has no clip export plan to run.", status_code=400)
+        video_path = Path(str(((session.get("files") or {}).get("video") or {}).get("absolutePath") or ""))
+        if not video_path.exists():
+            raise RuntimeError("Video file is missing for this session.")
+
+        # Intermissions are timeline markers: no MP4 is cut and none is counted.
+        pending = [clip for clip in clips if str(clip.get("kind") or "session") != "intermission"]
+        total = len(pending)
+        export = session.setdefault("clipExport", {})
+        export.update(
+            {
+                "status": "running",
+                "total": total,
+                "completed": sum(1 for clip in pending if not clip.get("isDraft")),
+                "startedAt": export.get("startedAt") or self.pipeline.now_iso(),
+                "endedAt": None,
+                "error": None,
+            }
+        )
+        await self.sessions.write(session)
+        await self.events.publish(
+            session_id,
+            "milestone",
+            {"code": "clip_export_started", "message": f"cutting {total} clip(s) from the recording"},
+        )
+
+        try:
+            for position, clip in enumerate(pending, start=1):
+                result = await self.media.materialize_clip(
+                    session_id=session_id,
+                    clip=clip,
+                    video_path=video_path,
+                )
+                # Persist after every clip: this is the checkpoint an interrupted
+                # or retried run resumes from.
+                session.setdefault("outputs", {})["videoClips"] = clips
+                session["clipExport"]["completed"] = position
+                await self.sessions.write(session)
+                logger.info(
+                    "Clip export %d/%d %s for session %s.",
+                    position,
+                    total,
+                    "reused an existing file" if result.get("reused") else "cut a new file",
+                    session_id,
+                    extra=log_context(session_id, "clip_export_progress", clip_id=str(clip.get("id"))),
+                )
+                await self.events.publish(
+                    session_id,
+                    "progress",
+                    {
+                        "code": "clip_export_progress",
+                        "message": f"exported {position}/{total} clips",
+                        "completed": position,
+                        "total": total,
+                    },
+                )
+        except Exception as error:
+            # Terminal for the export only. The session keeps its status and its
+            # clip list: the drafts are still a valid segmentation, and whatever
+            # was already cut stays usable.
+            failed = await self.sessions.read(session_id)
+            failed_export = failed.setdefault("clipExport", {})
+            failed_export.update(
+                {
+                    "status": "failed",
+                    "endedAt": self.pipeline.now_iso(),
+                    "error": str(error) or type(error).__name__,
+                }
+            )
+            await self.sessions.write(failed)
+            await self.events.publish(
+                session_id,
+                "status",
+                {"code": "clip_export_failed", "message": f"Clip export failed: {failed_export['error']}"},
+            )
+            if self.notifications is not None:
+                await self.notifications.emit(
+                    NotificationType.SESSION_FAILED,
+                    "Clip export failed",
+                    f"\"{failed.get('name') or session_id}\" could not be split into clips: {failed_export['error']}",
+                    session_id=session_id,
+                )
+            raise
+
+        session = await self.sessions.read(session_id)
+        session.setdefault("clipExport", {}).update(
+            {
+                "status": "completed",
+                "completed": total,
+                "endedAt": self.pipeline.now_iso(),
+                "error": None,
+            }
+        )
+        # A session mid-assessment keeps the status it earned; only a session
+        # still sitting on its upload is promoted to "cropped".
+        if session.get("status") not in {"completed", "processing"}:
+            session["status"] = "cropped"
+        await self.sessions.write(session)
+
+        if self.notifications is not None:
+            plural = "s" if total != 1 else ""
+            await self.notifications.emit(
+                NotificationType.CLIPS_READY,
+                "Clips ready",
+                f"\"{session.get('name') or session_id}\" has been split into "
+                f"{total} clip{plural} — ready for assessment.",
+                session_id=session_id,
+            )
+        await self.events.publish(
+            session_id,
+            "milestone",
+            {"code": "clip_export_complete", "message": f"exported {total} clip(s)"},
+        )
+        return {
+            "session": self.sessions.public_session(session),
+            "clipCount": total,
+            "intermissionCount": len(clips) - total,
+        }
+
+    @staticmethod
+    def _active_export(session: dict[str, Any]) -> dict[str, Any] | None:
+        """The clip export this session believes is in flight, if any."""
+        export = session.get("clipExport")
+        if isinstance(export, dict) and str(export.get("status")) in {"queued", "running"}:
+            return export
+        return None
+
+    async def _has_live_export(self, session: dict[str, Any]) -> bool:
+        """Whether an export is genuinely still running for this session.
+
+        The session's own record is only a claim. A worker killed between
+        starting a clip and finishing one leaves ``clipExport`` reading
+        "running" forever, and trusting that alone would lock the user out of
+        re-exporting with a 409 they can never clear. The job row is the
+        authority: an export whose job has reached a terminal state (or vanished)
+        is stale, and a fresh request is allowed to replace it.
+        """
+        export = self._active_export(session)
+        if export is None:
+            return False
+        job_id = str(export.get("jobId") or "")
+        if not job_id:
+            return True
+        try:
+            job = await self.jobs.repository.read(job_id)
+        except Exception:
+            return False
+        return str(job.get("status") or "") in {"waiting_for_upload", "queued", "running"}
 
     async def recrop_clip(self, session_id: str, clip_id: str, start: float, end: float) -> dict[str, Any]:
         session = await self.sessions.read(session_id)
@@ -286,6 +510,7 @@ class ClipService:
                 "url": f"/media/clips/{session_id}/{new_file_name}",
                 "sizeBytes": stats.st_size,
                 "createdAt": self.pipeline.now_iso(),
+                "isDraft": False,
             }
         )
         session.setdefault("outputs", {})["videoClips"] = clips
@@ -517,6 +742,9 @@ class ClipService:
             "fileName": clip.get("fileName"),
             "url": clip.get("url"),
             "sizeBytes": clip.get("sizeBytes"),
+            # True until the export job has cut this clip's MP4. The timeline
+            # renders drafts, but nothing can be assessed until they land.
+            "isDraft": bool(clip.get("isDraft")),
         }
 
     @staticmethod
