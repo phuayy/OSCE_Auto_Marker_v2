@@ -150,7 +150,9 @@ AppContainer
  └── login_rate_limiter FixedWindowRateLimiter
 ```
 
-`startup()` runs: config warnings -> storage layout -> DB init -> ORM init -> legacy session migration -> auth init -> rubric parse -> stale upload recovery -> job queue startup (recover + dispatch).
+`startup()` runs: config warnings -> storage layout -> **alembic upgrade head** -> DB init -> ORM init -> additive migrations -> change-tracking triggers -> legacy session migration -> auth init -> rubric parse -> stale upload recovery -> job queue startup (recover + dispatch).
+
+Alembic owns the schema. It runs first, so `create_all` / `CREATE TABLE IF NOT EXISTS` / `apply_additive_migrations()` / `install_change_tracking()` all find nothing to do on a migrated database — they stay as the fallback for `DB_AUTO_MIGRATE=false` or an install without Alembic. A database built by the old `create_all` path is stamped at revision `0001` and then upgraded, never stamped straight at head (that would skip every later revision). See [alembic/README.md](fastapi_backend/alembic/README.md).
 
 ---
 
@@ -317,6 +319,24 @@ Jobs table (`jobs`, `job_events`) managed by raw SQL via `JobRepository` / `Data
 - **`local`** (default): asyncio tasks in API process, bounded by `JOB_WORKER_CONCURRENCY` semaphore.
 - **`hatchet`**: gRPC dispatch to separate `hatchet_worker.py` process. Worker runs `_redispatch_loop` every `HATCHET_REDISPATCH_INTERVAL_SECONDS` (default 30s) to recover jobs API failed to dispatch.
 
+Task types are declared once in [job_tasks.py](fastapi_backend/app/services/job_tasks.py) —
+the executor has no per-type branches. Each entry names its handler and answers
+one policy question: does the queue drive `session.status`?
+
+| Task type | Handler | Queue owns session status |
+|---|---|---|
+| `process_session` | `PipelineService.process_session_by_id` | yes |
+| `auto_crop` | `ClipService.auto_crop_session_by_id` | yes |
+| `export_clips` | `ClipService.export_clips_by_id` | **no** — the handler reports on `session.clipExport` |
+
+"Queue owns session status" also governs failure: for an owned task, exhausted
+retries mark the session terminally failed. `export_clips` opts out because a
+failed export must not bury a session whose clip list is still perfectly good.
+
+Jobs carry a `payload_json` and get retries with equal-jitter exponential
+backoff, interrupted-job requeue on restart, and Hatchet-side retry accounting.
+Any long multi-step operation belongs here rather than in a request handler.
+
 ---
 
 ## Authentication
@@ -402,7 +422,8 @@ npm run dev
 # Backend (port 8787, no auto-reload)
 npm run dev:api
 
-# Backend with reload (one instance only — SSE streams block graceful shutdown)
+# Backend with reload (watchfiles restarts the server on .py changes under
+# fastapi_backend/app and scripts/; one instance only)
 python scripts/run_api.py --reload
 
 # Tests
@@ -418,7 +439,7 @@ cd fastapi_backend && alembic check             # models vs. migrations are in s
 python -m app.queue.hatchet_worker
 ```
 
-**Windows:** `run_api.py` sets `loop="none"` in non-reload mode to keep `WindowsSelectorEventLoopPolicy` for async psycopg. Never run two API instances on same port.
+**Windows:** `run_api.py` always sets `loop="none"` so uvicorn keeps the `WindowsSelectorEventLoopPolicy` that async psycopg needs. `--reload` is driven by `watchfiles.run_process`, not uvicorn's own reloader: uvicorn restarts its worker with `os.kill(pid, CTRL_C_EVENT)`, and Windows delivers a console control event to *every* process on the console — under `npm run dev` that killed node, vite and npm too, which looked like the server shutting itself down on save. Never run two API instances on same port.
 
 ---
 
