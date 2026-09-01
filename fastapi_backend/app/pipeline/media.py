@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.core.config import Settings
+from app.core.exceptions import EmptyTranscriptError
 from app.core.json_utils import extract_json_object
 from app.core.process import CommandRunner
 from app.core.utils import atomic_replace, clamp_number, format_timestamp, utc_now_iso
@@ -39,6 +40,28 @@ class MediaPipeline:
         self.runner = runner
         self.events = events
         self.auth = auth
+
+    @staticmethod
+    def count_usable_segments(payload: Any) -> int:
+        """Number of WhisperX segments carrying non-empty text.
+
+        Applies exactly the rule ``normalize_whisperx_transcript`` uses to keep
+        a segment, so a payload this reports as usable cannot normalize down to
+        an empty transcript. A syntactically valid JSON document is *not*
+        evidence of a usable transcription: WhisperX writes
+        ``{"segments": []}`` for silent or failed audio, and that artifact would
+        otherwise be cached and scored as if it were a real transcript.
+        """
+        if not isinstance(payload, dict):
+            return 0
+        segments = payload.get("segments")
+        if not isinstance(segments, list):
+            return 0
+        return sum(
+            1
+            for segment in segments
+            if isinstance(segment, dict) and str(segment.get("text") or "").strip()
+        )
 
     @staticmethod
     def infer_speaker(segment: dict[str, Any]) -> str:
@@ -167,14 +190,20 @@ class MediaPipeline:
         if not json_path:
             return None
 
-        def _is_valid_json(path: Path) -> bool:
+        def _has_usable_transcript(path: Path) -> bool:
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
                 return False
-            return isinstance(payload, dict)
+            # Engines share this artifact directory, so an artifact another
+            # engine wrote must not be served as a WhisperX resume — switching
+            # engines and re-running would silently reuse the old transcript.
+            # WhisperX's own output carries no marker, hence the empty default.
+            if str((payload or {}).get("engine") or ENGINE_MARKER_WHISPERX) != ENGINE_MARKER_WHISPERX:
+                return False
+            return MediaPipeline.count_usable_segments(payload) > 0
 
-        if not await asyncio.to_thread(_is_valid_json, json_path):
+        if not await asyncio.to_thread(_has_usable_transcript, json_path):
             return None
 
         srt_path = await self.find_latest_output_file(output_dir, "srt", output_base_name)
@@ -801,7 +830,7 @@ class MediaPipeline:
 
         completed_outputs = await self.find_existing_whisperx_outputs(session, audio_info)
         if not completed_outputs:
-            raise RuntimeError("WhisperX completed but no JSON output file was found.")
+            raise await self._describe_unusable_whisperx_output(output_dir, output_base_name)
         return completed_outputs
 
     def _diarization_bounds_args(self, min_speakers: int, max_speakers: int) -> list[str]:
@@ -855,6 +884,21 @@ class MediaPipeline:
                 await on_progress(percent)
 
         return handle
+
+    async def _describe_unusable_whisperx_output(self, output_dir: Path, output_base_name: str) -> Exception:
+        """Explain why a completed WhisperX run yielded nothing usable.
+
+        The artifact lookup rejects both a missing JSON file and one holding no
+        speech segments; those are different faults with different fixes, so
+        report them separately instead of collapsing both into "no output file".
+        """
+        produced_json = await self.find_latest_output_file(output_dir, "json", output_base_name)
+        if produced_json is None:
+            return RuntimeError("WhisperX completed but no JSON output file was found.")
+        return EmptyTranscriptError(
+            f"WhisperX produced no usable speech segments in {produced_json.name}. "
+            "The recording may be silent or speechless, or its audio track failed to extract."
+        )
 
     @staticmethod
     def build_hotwords(terms: list[Any], max_chars: int = 900) -> str:

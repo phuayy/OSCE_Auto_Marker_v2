@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from app.core.exceptions import AppError
+from app.core.exceptions import AppError, EmptyTranscriptError
 from app.core.json_utils import extract_json_object, write_json_file
 from app.core.logging_utils import log_context
 from app.core.utils import utc_now_iso
@@ -183,11 +183,52 @@ class PipelineService:
         if session.get("status") == "processing" and not allow_processing:
             raise AppError("This session is already being processed.", status_code=409)
 
-        outputs = session.get("outputs") or {}
-        transcript_path_raw = (outputs.get("transcript") or {}).get("absolutePath")
-        if transcript_path_raw:
+        if self._has_cached_transcript_artifact(session):
             return await self._process_cached_transcript(session)
         return await self._process_from_video(session)
+
+    @staticmethod
+    def _has_cached_transcript_artifact(session: dict[str, Any]) -> bool:
+        """True when the session's recorded transcript still exists on disk.
+
+        The recorded path alone is not proof the artifact is there: it can be
+        removed out from under a session by manual cleanup, a wiped storage
+        volume, or a partially-applied re-run. Branching on the string alone
+        sent every subsequent run down the cached path, where the first read
+        raised ``FileNotFoundError`` and the session could never recover. A
+        dangling reference is dropped from ``outputs`` so the caller falls back
+        to full transcription and the session record stops advertising an
+        artifact that is gone.
+        """
+        transcript = (session.get("outputs") or {}).get("transcript")
+        raw_path = transcript.get("absolutePath") if isinstance(transcript, dict) else None
+        if not raw_path:
+            return False
+        if Path(str(raw_path)).is_file():
+            return True
+        logger.warning(
+            "Recorded transcript artifact is missing from disk; falling back to full transcription.",
+            extra=log_context(str(session.get("id") or ""), "transcript_cache_check", path=str(raw_path)),
+        )
+        session.setdefault("outputs", {})["transcript"] = None
+        return False
+
+    @staticmethod
+    def _assert_transcript_has_segments(transcript: dict[str, Any], source: str) -> None:
+        """Fail the run when ``transcript`` holds no speech segments.
+
+        Every scorer reads only the transcript, so an empty one does not produce
+        an empty result — it produces a full, confident-looking assessment of
+        nothing. This is the last gate before the scoring branches, and it
+        guards both the fresh and cached paths.
+        """
+        segments = transcript.get("segments")
+        if isinstance(segments, list) and segments:
+            return
+        raise EmptyTranscriptError(
+            f"{source} contains no usable speech segments, so there is nothing to score. "
+            "Check that the recording contains audible speech and that audio extraction succeeded."
+        )
 
     async def _process_cached_transcript(self, session: dict[str, Any]) -> dict[str, Any]:
         session_id = str(session["id"])
@@ -195,6 +236,7 @@ class PipelineService:
             await self.sessions.write(session)
         transcript_path = Path(str(session["outputs"]["transcript"]["absolutePath"]))
         transcript = await self._read_json(transcript_path)
+        self._assert_transcript_has_segments(transcript, f"Cached transcript {transcript_path.name}")
 
         if self.media.settings.enable_audio_professionalism:
             await self._ensure_audio_output(session)
@@ -369,6 +411,11 @@ class PipelineService:
         await self._mark_pipeline_step(session, "transcript_normalization", "running")
         whisperx_raw = await self._read_json(Path(str(whisperx_outputs["jsonAbsolutePath"])))
         normalized_transcript = self.media.normalize_whisperx_transcript(whisperx_raw)
+        try:
+            self._assert_transcript_has_segments(normalized_transcript, "The normalized transcript")
+        except EmptyTranscriptError as error:
+            await self._mark_pipeline_step(session, "transcript_normalization", "failed", error=error)
+            raise
         await self._apply_corpus_corrections(session, normalized_transcript, whisperx_outputs)
 
         transcript_file_name = f"{session_id}.json"
