@@ -91,7 +91,49 @@ test('a long-workflow session shows boundary detection, not a step gauge', () =>
   const stage = describeProcessingStage(processing({ workflow: 'long', currentStep: 'transcription', stepProgress: 90 }));
 
   assert.equal(stage.label, 'Detecting student boundaries');
+  // A reading that belongs to some other step must not be borrowed: a bar fed
+  // from a stale value would sit still for the whole run and look like a hang.
   assert.equal(stage.stepPercent, null);
+  assert.equal(stage.fraction, 0.5);
+});
+
+test('a running detector moves the long-workflow bar', () => {
+  const stage = describeProcessingStage(
+    processing({ workflow: 'long', currentStep: 'person_detection', stepProgress: 50 }),
+  );
+
+  assert.equal(stage.label, 'Detecting student boundaries');
+  assert.equal(stage.stepPercent, 50);
+  // Halfway along the span the segmentation step owns: 0.15 -> 0.95.
+  assert.ok(Math.abs(stage.fraction - 0.55) < 1e-9, `unexpected ${stage.fraction}`);
+});
+
+test('the long-workflow bar starts above empty and stops short of full', () => {
+  const start = describeProcessingStage(
+    processing({ workflow: 'long', currentStep: 'bell_detection', stepProgress: 0 }),
+  );
+  const end = describeProcessingStage(
+    processing({ workflow: 'long', currentStep: 'bell_detection', stepProgress: 100 }),
+  );
+
+  assert.equal(start.label, 'Detecting bell boundaries');
+  assert.ok(start.fraction > 0 && start.fraction < 0.2, `unexpected ${start.fraction}`);
+  // Writing the clip list and flipping the status still follow the last frame.
+  assert.ok(end.fraction > 0.9 && end.fraction < 1, `unexpected ${end.fraction}`);
+});
+
+test('a detector that has not reported yet falls back to the fixed midpoint', () => {
+  const stage = describeProcessingStage(processing({ workflow: 'long', currentStep: 'person_detection' }));
+
+  assert.equal(stage.stepPercent, null);
+  assert.equal(stage.fraction, 0.5);
+});
+
+test('the long-workflow gauge survives a session with no step recorded', () => {
+  const stage = describeProcessingStage(processing({ workflow: 'long' }));
+
+  assert.equal(stage.label, 'Detecting student boundaries');
+  assert.equal(stage.fraction, 0.5);
 });
 
 test('an unrecognised step falls back to a generic stage', () => {

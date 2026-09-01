@@ -28,6 +28,49 @@ from typing import Any
 SCHEMA = "canary-segments-v1"
 TARGET_SAMPLE_RATE = 16000
 
+# Exit codes: 2 bad arguments, 3 NeMo missing, 4 download failed, 5 the host
+# could not give the checkpoint the memory it needs.
+EXIT_INSUFFICIENT_MEMORY = 5
+# The engine greps stderr for this token and turns the run into a typed,
+# non-retryable failure instead of a 200-line traceback.
+INSUFFICIENT_MEMORY_TOKEN = "canary-insufficient-memory:"
+
+# Substrings every allocator failure this script must survive prints somewhere
+# in its message. Windows reports a commit-limit refusal as OS error 1455 with
+# the "paging file" wording; Linux raises ENOMEM; torch has its own two.
+_MEMORY_ERROR_SIGNATURES = (
+    "paging file is too small",
+    "os error 1455",
+    "winerror 1455",
+    "cannot allocate memory",
+    "not enough memory",
+    "out of memory",
+    "insufficient memory",
+    "bad_alloc",
+)
+
+
+class InsufficientMemory(RuntimeError):
+    """The checkpoint could not be loaded on this machine, on any device."""
+
+
+def is_memory_exhaustion(error: BaseException) -> bool:
+    """Whether ``error`` is the host running out of memory rather than a bug.
+
+    Matched by signature, not by type: safetensors surfaces the Windows commit
+    limit as a bare ``OSError``, torch raises ``RuntimeError`` for both CUDA and
+    CPU allocator failures, and the C++ allocator raises ``MemoryError``. What
+    they share is the wording, so that is what is checked — plus the two error
+    numbers that carry no wording at all (WinError 1455, ENOMEM).
+    """
+    if isinstance(error, MemoryError):
+        return True
+    if isinstance(error, OSError):
+        if getattr(error, "winerror", None) == 1455 or error.errno == 12:
+            return True
+    text = f"{type(error).__name__}: {error}".lower()
+    return any(signature in text for signature in _MEMORY_ERROR_SIGNATURES)
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Transcribe audio with NVIDIA Canary-Qwen.")
@@ -117,6 +160,74 @@ def load_audio(path: Path) -> tuple[Any, int]:
     return samples, int(sample_rate)
 
 
+def supports_map_location(loader: Any) -> bool:
+    """Whether ``from_pretrained`` takes ``map_location`` as a real parameter.
+
+    Checked rather than assumed: huggingface_hub's mixin declares it, but an
+    older or patched NeMo would swallow the keyword into ``**model_kwargs`` and
+    forward it to the model constructor, where it fails as something that reads
+    nothing like a loading problem.
+    """
+    import inspect
+
+    try:
+        parameters = inspect.signature(loader).parameters
+    except (TypeError, ValueError):
+        return False
+    return "map_location" in parameters
+
+
+def load_salm(salm_class: Any, model_id: str, device: str) -> tuple[Any, str]:
+    """Load the checkpoint for ``device``, degrading rather than dying.
+
+    Two things here are the difference between a working run and OS error 1455
+    on a machine with a small pagefile:
+
+    * the weights are read **straight onto the target device**. The default
+      loads all ~5 GB into host memory first and only then copies to the GPU,
+      so a CUDA run needed the host commit it was trying to avoid;
+    * a CUDA load that still exhausts memory retries on CPU. Slow beats failed:
+      the alternative is a dead session, and the operator can switch engines
+      afterwards knowing the transcript exists.
+
+    Returns the model and the device it actually loaded on. Raises
+    :class:`InsufficientMemory` only when no device could hold it.
+    """
+    attempts = [device] if device == "cpu" else [device, "cpu"]
+    last_error: BaseException | None = None
+    for attempt_device in attempts:
+        kwargs = {"map_location": attempt_device} if supports_map_location(salm_class.from_pretrained) else {}
+        try:
+            model = salm_class.from_pretrained(model_id, **kwargs)
+        except BaseException as error:  # noqa: BLE001 - re-raised below unless it is exhaustion
+            if not is_memory_exhaustion(error):
+                raise
+            last_error = error
+            print(
+                f"Loading {model_id} on {attempt_device} ran out of memory ({type(error).__name__}: {error}).",
+                file=sys.stderr,
+                flush=True,
+            )
+            free_memory()
+            continue
+        return model, attempt_device
+    raise InsufficientMemory(str(last_error) if last_error is not None else "unknown allocation failure")
+
+
+def free_memory() -> None:
+    """Return whatever the failed attempt claimed before trying a smaller one."""
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # torch missing or a driver that dislikes being asked
+        pass
+
+
 def transcribe_window(model: Any, audio_path: Path, prompt: str) -> str:
     """One SALM generation call for one window of audio."""
     answer_ids = model.generate(
@@ -139,7 +250,7 @@ def run(args: argparse.Namespace) -> int:
 
     device = resolve_device(args.device)
     print(f"Loading {args.model} on {device} for {duration:.1f}s of audio in {len(windows)} window(s).", flush=True)
-    model = SALM.from_pretrained(args.model)
+    model, device = load_salm(SALM, args.model, device)
     if hasattr(model, "to"):
         model = model.to(device)
     if hasattr(model, "eval"):
@@ -203,7 +314,21 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 3
-    return run(args)
+    try:
+        return run(args)
+    except InsufficientMemory as error:
+        # One line, one token, no traceback: the engine turns this into a typed
+        # failure the queue will not waste attempts re-running.
+        print(f"{INSUFFICIENT_MEMORY_TOKEN} {error}", file=sys.stderr, flush=True)
+        return EXIT_INSUFFICIENT_MEMORY
+    except BaseException as error:  # noqa: BLE001 - classified, then re-raised
+        if not is_memory_exhaustion(error):
+            raise
+        # Exhaustion outside the load — a decode window, or an allocation NeMo
+        # makes on its own — reads the same to the operator and is just as
+        # permanent on this host.
+        print(f"{INSUFFICIENT_MEMORY_TOKEN} {type(error).__name__}: {error}", file=sys.stderr, flush=True)
+        return EXIT_INSUFFICIENT_MEMORY
 
 
 if __name__ == "__main__":

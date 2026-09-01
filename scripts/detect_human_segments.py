@@ -904,7 +904,13 @@ def detect_counts_single(
                 batch = []
                 if len(counts) % 120 < detector_config.batch_size:
                     done_pct = min(100.0, 100.0 * len(counts) / max(1, expected_samples))
-                    log(f"Analysed {len(counts)} frames (~{done_pct:.0f}%).")
+                    # "Progress: N%" is the wire format every long-running step
+                    # in this pipeline reports in (WhisperX prints it natively;
+                    # app/pipeline/progress_tracker.py parses it). Emitting it
+                    # here is what turns the session card's fixed midpoint into
+                    # a moving bar during a detection run that can last many
+                    # minutes without any other sign of life.
+                    log(f"Analysed {len(counts)} frames — Progress: {done_pct:.1f}%")
         if batch:
             inference_started = time.perf_counter()
             counts.extend(counter.count_people(batch, stats))

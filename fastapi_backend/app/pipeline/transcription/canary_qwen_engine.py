@@ -27,7 +27,7 @@ from time import monotonic
 from typing import Any
 
 from app.core.config import Settings
-from app.core.exceptions import EmptyTranscriptError
+from app.core.exceptions import EmptyTranscriptError, TranscriptionResourceError
 from app.core.json_utils import extract_json_object
 from app.core.process import CommandRunner
 from app.pipeline.media import MediaPipeline
@@ -54,6 +54,22 @@ TRANSCRIBE_SCHEMA = "canary-segments-v1"
 # diarisation and subtitle work this engine does afterwards.
 TRANSCRIBE_PROGRESS_SPAN = ((0.0, 80.0),)
 DIARIZATION_PROGRESS = 90.0
+
+# Printed by scripts/canary_qwen_transcribe.py when the checkpoint would not
+# fit on any device. The raw signatures below are the safety net for an
+# exhaustion that kills the interpreter before it reaches that handler — a
+# native allocator abort, or a NeMo import that dies loading its own weights.
+INSUFFICIENT_MEMORY_TOKEN = "canary-insufficient-memory:"
+_MEMORY_ERROR_SIGNATURES = (
+    INSUFFICIENT_MEMORY_TOKEN,
+    "paging file is too small",
+    "os error 1455",
+    "winerror 1455",
+    "cannot allocate memory",
+    "not enough memory",
+    "out of memory",
+    "bad_alloc",
+)
 
 # How long an availability answer is reused. Long enough that polling the
 # settings screen does not start an interpreter per request, short enough that
@@ -142,6 +158,45 @@ DESCRIPTOR = EngineDescriptor(
         "when this engine is selected, and on first run otherwise."
     ),
 )
+
+
+def is_memory_exhaustion(text: str) -> bool:
+    """Whether a failed subprocess died of memory rather than of anything else.
+
+    The subprocess normally classifies itself and prints one token; this reads
+    the whole captured output so an unclassified crash — the allocator aborting
+    inside a C++ extension, a traceback the script never got to catch — is still
+    recognised for what it is.
+    """
+    lowered = str(text or "").lower()
+    return any(signature in lowered for signature in _MEMORY_ERROR_SIGNATURES)
+
+
+def memory_failure_message(model: str, text: str) -> str:
+    """One operator-facing sentence, plus the line that actually diagnosed it.
+
+    The raw failure is a hundred lines of NeMo, huggingface_hub and safetensors
+    frames ending in one meaningful ``OSError``. That line is kept; the frames
+    are not, because they name nothing the operator can change.
+    """
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    cause = next(
+        (
+            line.split(INSUFFICIENT_MEMORY_TOKEN, 1)[-1].strip() if INSUFFICIENT_MEMORY_TOKEN in line else line
+            for line in reversed(lines)
+            if is_memory_exhaustion(line)
+        ),
+        "",
+    )
+    detail = f" ({cause})" if cause else ""
+    return (
+        f"This machine does not have enough memory to load {model}{detail}. "
+        "The 2.5B-parameter checkpoint needs roughly 6 GB of free RAM or VRAM to read; on Windows "
+        "the pagefile must be large enough to back it (a fixed or small pagefile fails with "
+        "'The paging file is too small for this operation to complete'). "
+        "Raise the pagefile, free memory, or select the WhisperX engine in Settings, "
+        "which loads a much smaller model."
+    )
 
 
 class CanaryQwenEngine(TranscriptionEngine):
@@ -308,13 +363,23 @@ class CanaryQwenEngine(TranscriptionEngine):
             "log",
             {"source": ENGINE_ID, "message": f"{self.settings.scorer_python_bin} {' '.join(args)}"},
         )
-        await self.runner.run(
-            self.settings.scorer_python_bin,
-            args,
-            "Canary-Qwen transcription",
-            env=self.settings.subprocess_env(),
-            on_output=self._build_output_handler(request),
-        )
+        model = str(options.get("model") or self.settings.canary_model)
+        try:
+            await self.runner.run(
+                self.settings.scorer_python_bin,
+                args,
+                "Canary-Qwen transcription",
+                env=self.settings.subprocess_env(),
+                on_output=self._build_output_handler(request),
+            )
+        except Exception as error:
+            # A host that cannot hold the checkpoint fails the same way on every
+            # attempt, so it is raised as a typed, non-retryable error the queue
+            # will not spend the job's remaining attempts on. Everything else
+            # keeps its original exception and its retry.
+            if is_memory_exhaustion(str(error)):
+                raise TranscriptionResourceError(memory_failure_message(model, str(error))) from error
+            raise
         if not output_path.exists():
             raise RuntimeError("Canary-Qwen transcription produced no output file.")
         payload = await asyncio.to_thread(

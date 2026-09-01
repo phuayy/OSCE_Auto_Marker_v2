@@ -498,6 +498,7 @@ class MediaPipeline:
         video_duration_seconds: float,
         *,
         session_id: str | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> dict[str, Any]:
         """Detect student clip ranges from person presence (RT-DETR).
 
@@ -505,6 +506,12 @@ class MediaPipeline:
         contract as the bell detector: stderr = progress, stdout = one JSON
         document). The subprocess owns the model lifecycle, so its VRAM is
         fully released on exit — WhisperX never shares the GPU with it.
+
+        ``on_progress`` receives the run's overall completion percentage as it
+        advances. This is the longest step a long-workflow session has, and the
+        only thing it writes for minutes at a time, so a caller that persists
+        these readings is also what keeps the session's change stream alive
+        while it runs.
         """
         if not self.settings.enable_human_detector:
             raise RuntimeError("Human detector is disabled (ENABLE_HUMAN_DETECTOR=false).")
@@ -527,6 +534,11 @@ class MediaPipeline:
             str(max(1, self.settings.human_detector_workers)),
         ]
 
+        # The detector counts once, straight through, so a single span — unlike
+        # WhisperX's two loops. It stops at 95: the segmentation maths and the
+        # clip-list write that follow the last frame are not free.
+        tracker = ProgressTracker(phase_spans=((0.0, 95.0),))
+
         async def stream_progress(stream: str, text: str) -> None:
             # Model download/load and analysis progress land in the live log so
             # the operator can see the detector starting up, not a silent stall.
@@ -536,7 +548,22 @@ class MediaPipeline:
                     "log",
                     {"source": "human-detector", "message": text.strip()},
                 )
+            if stream != "stderr":
+                return
+            percent = tracker.update(text)
+            if percent is None:
+                return
+            if session_id:
+                await self.events.publish(
+                    session_id,
+                    "progress",
+                    {"step": "person_detection", "percent": percent},
+                )
+            if on_progress is not None:
+                await on_progress(percent)
 
+        # The handler is worth installing for the progress readings alone, so it
+        # is no longer conditional on there being a session to log against.
         result = await self.runner.run(
             self.settings.scorer_python_bin,
             args,
@@ -549,7 +576,7 @@ class MediaPipeline:
                     "FFPROBE_BIN": self.settings.ffprobe_bin,
                 }
             ),
-            on_output=stream_progress if session_id else None,
+            on_output=stream_progress,
         )
 
         payload = extract_json_object(result.stdout)

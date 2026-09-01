@@ -11,15 +11,21 @@ Two rules keep a bad selection from costing a run:
 * a stored selection naming an engine this build does not ship falls back to
   the default engine and says so in the run log;
 * stored options that no longer validate are dropped rather than failing the
-  run — the engine's own defaults are always a valid configuration.
+  run — the engine's own defaults are always a valid configuration;
+* an engine that cannot run on this host at all — a checkpoint too large for
+  the machine's memory — hands the run to the default engine once, loudly,
+  rather than failing a session over a hardware limit the recording had
+  nothing to do with.
 """
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings
+from app.core.exceptions import TranscriptionResourceError
 from app.pipeline.transcription import registry
 from app.pipeline.transcription.base import (
     ProgressCallback,
@@ -91,6 +97,24 @@ class TranscriptionRouter:
             return engine_id, {}
         options = options_by_engine.get(engine_id)
         return engine_id, options if isinstance(options, dict) else {}
+
+    async def stored_options(self, engine_id: str) -> dict[str, Any]:
+        """The saved option bag for one engine, whether or not it is selected.
+
+        The fallback path needs this: an engine standing in for a failed one
+        should still run with the tuning the operator saved for it.
+        """
+        if self.app_settings is None:
+            return {}
+        try:
+            _, options_by_engine = await self.app_settings.transcription_selection()
+        except Exception:
+            logger.exception("Failed to read stored options for engine '%s'; using its defaults.", engine_id)
+            return {}
+        if not isinstance(options_by_engine, dict):
+            return {}
+        options = options_by_engine.get(engine_id)
+        return options if isinstance(options, dict) else {}
 
     def safe_options(self, engine: TranscriptionEngine, stored: dict[str, Any] | None) -> dict[str, Any]:
         """Stored overrides layered on the engine defaults, ignoring any that
@@ -184,7 +208,10 @@ class TranscriptionRouter:
                 "message": f"Transcribing with {engine.descriptor.label} ({engine_id}).",
             },
         )
-        result = await engine.transcribe(request)
+        try:
+            result = await engine.transcribe(request)
+        except TranscriptionResourceError as error:
+            result = await self._transcribe_with_fallback_engine(engine_id, request, error)
         if not result.diarized:
             # Loud, because unlabelled dialogue changes what the scorers can
             # conclude — not a silent quality regression.
@@ -199,6 +226,73 @@ class TranscriptionRouter:
                     ),
                 },
             )
+        return result
+
+    async def _transcribe_with_fallback_engine(
+        self,
+        failed_engine_id: str,
+        request: TranscriptionRequest,
+        error: TranscriptionResourceError,
+    ) -> TranscriptionResult:
+        """Run the default engine when the selected one cannot run on this host.
+
+        A resource failure says nothing about the recording — the machine is too
+        small for that model, and will be just as small on every retry. The
+        deployment default (WhisperX) loads a far smaller model, so trying it
+        turns a dead session into a transcript instead of an error the operator
+        only sees the next morning.
+
+        Deliberately narrow: only this one error class, only the default engine,
+        only when that engine reports itself runnable, and never a second hop.
+        The substitution is announced in the run log and recorded on the step
+        metadata, because a transcript produced by an engine nobody selected
+        must never look like the selected engine's work. If nothing can stand
+        in, the original failure is raised untouched.
+        """
+        session_id = request.session_id
+        fallback_id = self.default_engine_id()
+        await self.events.publish(
+            session_id,
+            "log",
+            {"source": "transcription", "message": f"{failed_engine_id} could not run here: {error.message}"},
+        )
+        if fallback_id == failed_engine_id:
+            raise error
+
+        fallback = self.engines[fallback_id]
+        availability = await fallback.availability()
+        if not availability.available:
+            logger.error(
+                "Engine '%s' failed on resources and the fallback '%s' is unavailable: %s",
+                failed_engine_id,
+                fallback_id,
+                availability.reason,
+            )
+            raise error
+
+        logger.warning(
+            "Engine '%s' ran out of memory; transcribing with '%s' instead.", failed_engine_id, fallback_id
+        )
+        await self.events.publish(
+            session_id,
+            "log",
+            {
+                "source": "transcription",
+                "message": (
+                    f"Falling back to {fallback.descriptor.label} ({fallback_id}) for this run. "
+                    "The engine selection in Settings is unchanged."
+                ),
+            },
+        )
+        fallback_request = replace(
+            request, options=self.safe_options(fallback, await self.stored_options(fallback_id))
+        )
+        result = await fallback.transcribe(fallback_request)
+        result.metadata = {
+            **result.metadata,
+            "fallbackFrom": failed_engine_id,
+            "fallbackReason": error.message,
+        }
         return result
 
     def describe_result(self, result: TranscriptionResult) -> dict[str, Any]:

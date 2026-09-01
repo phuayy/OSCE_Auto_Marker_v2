@@ -19,6 +19,18 @@ from app.services.session_service import SessionService
 
 logger = logging.getLogger(__name__)
 
+# Step names auto-crop reports under. They are not part of the standard
+# pipeline sequence — a long-workflow session only ever splits a recording —
+# so the frontend gauges them separately (src/lib/processingStage.js keeps the
+# matching list). Keep the two in step.
+PERSON_DETECTION_STEP = "person_detection"
+BELL_DETECTION_STEP = "bell_detection"
+SEGMENTATION_STEPS = frozenset({PERSON_DETECTION_STEP, BELL_DETECTION_STEP})
+SEGMENTATION_STEP_BY_METHOD = {
+    "person": PERSON_DETECTION_STEP,
+    "bells": BELL_DETECTION_STEP,
+}
+
 
 class ClipService:
     def __init__(
@@ -58,10 +70,21 @@ class ClipService:
         # and gate it (in-flight sessions are not enterable). Without this the
         # legacy fire-and-forget /auto-crop path stays "uploaded" during the
         # crop and the session opens with an empty clip list.
+        # Defaulted rather than indexed: a method this map has not caught up
+        # with must cost the run its progress bar, not the run itself.
+        segmentation_step = SEGMENTATION_STEP_BY_METHOD.get(method, BELL_DETECTION_STEP)
+        # Name the running step in the durable payload. The session-list
+        # projection exposes it as `currentStep`, and the card's stage gauge
+        # only trusts a `stepProgress` reading that belongs to the step it is
+        # currently naming — otherwise a value left over from some other run
+        # would render as a bar that never moves.
+        pipeline = session.setdefault("pipeline", {})
+        pipeline["currentStep"] = segmentation_step
+        pipeline["stepProgress"] = None
         if session.get("status") != "processing":
             session["status"] = "processing"
             session["error"] = None
-            await self.sessions.write(session)
+        await self.sessions.write(session)
         await self.events.publish(
             session_id,
             "milestone",
@@ -76,7 +99,7 @@ class ClipService:
         )
         try:
             video_duration = await self.media.get_video_duration_seconds(video_path)
-            detection = await self._run_segmentation(session_id, method, video_path, video_duration)
+            detection = await self._run_segmentation(session, method, video_path, video_duration)
             # The person detector partitions the WHOLE timeline (sessions +
             # greyed intermissions); the bell detector only emits sessions.
             clips = self.media.build_clip_drafts_from_ranges(
@@ -90,6 +113,7 @@ class ClipService:
             failed = await self.sessions.read(session_id)
             failed["status"] = "failed"
             failed["error"] = str(error) or type(error).__name__
+            self._clear_segmentation_progress(failed)
             await self.sessions.write(failed)
             await self.events.publish(
                 session_id,
@@ -109,6 +133,7 @@ class ClipService:
         session.setdefault("outputs", {})["videoClips"] = clips
         session["status"] = "cropped"
         session["error"] = None
+        self._clear_segmentation_progress(session)
         await self.sessions.write(session)
         # Counts are session clips only — intermissions are greyed timeline
         # markers, not student clips.
@@ -143,7 +168,7 @@ class ClipService:
 
     async def _run_segmentation(
         self,
-        session_id: str,
+        session: dict[str, Any],
         method: str,
         video_path: Path,
         video_duration: float,
@@ -154,18 +179,29 @@ class ClipService:
         frames) degrades to bell detection instead of failing the whole
         auto-crop job; the fallback is surfaced in the SSE log AND recorded on
         ``source.fallbackFrom`` so the run stays auditable.
+
+        Takes the session document rather than just its id because the person
+        detector reports progress, and that progress has to be persisted: see
+        ``_record_segmentation_progress``.
         """
+        session_id = str(session.get("id") or "")
         if method == "person":
             await self.events.publish(
                 session_id,
                 "log",
                 {"source": "autocrop", "message": "Sampling frames and detecting people (RT-DETR)..."},
             )
+            # Readings arrive from the subprocess reader threads; the lock makes
+            # the session document a single-writer resource for their duration.
+            progress_lock = asyncio.Lock()
             try:
                 return await self.media.detect_person_clip_ranges_with_python(
                     video_path,
                     video_duration,
                     session_id=session_id,
+                    on_progress=lambda percent: self._record_segmentation_progress(
+                        session, PERSON_DETECTION_STEP, percent, lock=progress_lock
+                    ),
                 )
             except Exception as error:  # noqa: BLE001 — degrade to bells, keep the job alive
                 reason = str(error) or type(error).__name__
@@ -183,11 +219,64 @@ class ClipService:
                         "message": f"Human detection failed ({reason[:300]}). Falling back to bell detection...",
                     },
                 )
+                # The card must stop gauging a step that is no longer running:
+                # the bar would otherwise freeze wherever the failed detector
+                # left it, for the whole of the bell pass.
+                async with progress_lock:
+                    pipeline = session.setdefault("pipeline", {})
+                    pipeline["currentStep"] = BELL_DETECTION_STEP
+                    pipeline["stepProgress"] = None
+                    await self.sessions.write(session)
                 detection = await self._run_bell_segmentation(session_id, video_path, video_duration)
                 detection["source"]["fallbackFrom"] = f"person_detection_failed: {reason[:500]}"
                 return detection
 
         return await self._run_bell_segmentation(session_id, video_path, video_duration)
+
+    async def _record_segmentation_progress(
+        self,
+        session: dict[str, Any],
+        step: str,
+        percent: float,
+        *,
+        lock: asyncio.Lock,
+    ) -> None:
+        """Persist a live completion percentage for the running detector.
+
+        Two jobs in one write, and the second is the less obvious one:
+
+        * The session-list projection reads ``pipeline.stepProgress``, so this
+          is what turns the long-workflow card's fixed midpoint into a bar that
+          moves.
+        * It is the *only* thing auto-crop writes between "started" and
+          "finished". Without it a detection run leaves the sessions table
+          untouched for minutes, the change stream has nothing to announce, and
+          any dashboard whose refresh failed in that window has no signal left
+          to recover on.
+
+        A reading for a step that is no longer the current one is dropped
+        rather than resurrecting a finished step.
+        """
+        async with lock:
+            pipeline = session.setdefault("pipeline", {})
+            if pipeline.get("currentStep") != step:
+                return
+            pipeline["stepProgress"] = percent
+            await self.sessions.write(session)
+
+    @staticmethod
+    def _clear_segmentation_progress(session: dict[str, Any]) -> None:
+        """Drop the running-step markers once segmentation is over.
+
+        Leaving them behind would let a terminal session carry a half-finished
+        percentage into whatever reads it next.
+        """
+        pipeline = session.get("pipeline")
+        if not isinstance(pipeline, dict):
+            return
+        if pipeline.get("currentStep") in SEGMENTATION_STEPS:
+            pipeline["currentStep"] = None
+        pipeline["stepProgress"] = None
 
     async def _run_bell_segmentation(
         self,

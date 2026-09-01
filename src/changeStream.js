@@ -12,6 +12,8 @@
 import { useEffect, useRef } from 'react';
 
 import { ensureStreamTicket, withStreamTicket, getStoredAuth } from './auth';
+import { apiJson } from './lib/apiFetch';
+import { reportReachable, reportUnreachable, resetConnectionStatus } from './lib/connectionStatus';
 
 const STREAM_URL = '/api/events';
 
@@ -81,15 +83,21 @@ function closeSource() {
   }
 }
 
-/** Poll the counters endpoint — used only when SSE cannot be established. */
+/**
+ * Poll the counters endpoint — used only when SSE cannot be established.
+ *
+ * Retries are disabled: this *is* a retry loop, and a nested one would only
+ * blur the reachability signal it exists to produce. `apiJson` reports the
+ * outcome to the connection store either way, which is how a browser that
+ * cannot hold an EventSource open still drives an accurate indicator.
+ */
 async function pollVersionsOnce() {
   try {
-    const response = await fetch('/api/events/versions');
-    if (!response.ok) return;
-    const body = await response.json();
+    const body = await apiJson('/api/events/versions', { retries: 0 });
     diffVersions(body?.versions);
   } catch {
-    // Backend unreachable; the next tick retries.
+    // Backend unreachable; the next tick retries. The connection store has
+    // already recorded the failure, so nothing more to do here.
   }
 }
 
@@ -127,6 +135,10 @@ async function connect() {
     stream.addEventListener('ready', (message) => {
       consecutiveFailures = 0;
       reconnectDelay = RECONNECT_MIN_MS;
+      // The stream is the app's most sensitive reachability probe: it notices a
+      // backend going away within a socket's lifetime, long before any request
+      // is due to be sent.
+      reportReachable();
       if (fallbackTimer) {
         clearInterval(fallbackTimer);
         fallbackTimer = null;
@@ -173,6 +185,7 @@ async function connect() {
       // drive reconnection explicitly with a freshly minted one.
       closeSource();
       consecutiveFailures += 1;
+      reportUnreachable('Live updates disconnected.');
       if (consecutiveFailures >= FALLBACK_AFTER_FAILURES) {
         startFallbackPolling();
       }
@@ -181,6 +194,7 @@ async function connect() {
   } catch (error) {
     console.warn('Could not open change stream:', error);
     consecutiveFailures += 1;
+    reportUnreachable('Live updates disconnected.');
     if (consecutiveFailures >= FALLBACK_AFTER_FAILURES) startFallbackPolling();
     scheduleReconnect();
   } finally {
@@ -216,6 +230,10 @@ export function resetChangeStream() {
   lastVersions = {};
   reconnectDelay = RECONNECT_MIN_MS;
   consecutiveFailures = 0;
+  // A deliberate teardown is not an outage. Without this, logging out while
+  // the stream happened to be reconnecting would strand the login screen
+  // behind a "server unreachable" warning that nothing would ever clear.
+  resetConnectionStatus();
 }
 
 // Auth transitions are delivered as window events (rather than imported

@@ -2,6 +2,9 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ensureStreamTicket, resolveMediaUrl } from '@/auth';
 import { useChangeStream } from '@/changeStream';
+import { apiJson } from '@/lib/apiFetch';
+import { CONNECTION_STATUS, useConnectionStatus } from '@/lib/connectionStatus';
+import { ConnectionBadge, ConnectionNotice } from '@/components/ConnectionStatus';
 import {
   IN_FLIGHT_STATUSES,
   describeProcessingStage,
@@ -127,6 +130,19 @@ const LONG_VIDEO_THRESHOLD_SECONDS = 300;
 // Faster than the 8s session-list poll because the user is watching this one
 // list fill in; each tick is a single lightweight session read.
 const CLIP_EXPORT_POLL_MS = 3000;
+
+// Floor under the change stream, active only while a session has work in
+// flight.
+//
+// The list is normally push-driven: the backend announces a write and the app
+// refetches. But a long step can run for minutes without writing anything —
+// auto-crop's person detection is the extreme case — so a refresh that failed
+// during that silence had nothing to trigger the retry that would have healed
+// it, and the stale card sat there behind an error. This interval guarantees
+// a recovery attempt regardless of what the backend has to say, and costs
+// almost nothing: the session-index endpoint is served from a change-token
+// cache, so a tick that finds no change is a dictionary lookup.
+const IN_FLIGHT_HEARTBEAT_MS = 12000;
 // DOM id of the clip-assessment card, so a finished export can scroll the
 // workspace to the clips it just produced.
 const CLIP_ASSESSMENTS_ANCHOR_ID = 'clip-assessments';
@@ -373,7 +389,12 @@ export default function OSCEAiMarkerMockup({
 
   const [sessionIndex, setSessionIndex] = useState([]);
   const [sessionIndexLoading, setSessionIndexLoading] = useState(false);
+  // Reserved for failures of an action the user took (open, rename, delete, a
+  // manual refresh). Background refreshes report to `connection` instead — see
+  // refreshSessionIndex.
   const [sessionIndexError, setSessionIndexError] = useState('');
+  // Shared reachability state, fed by every API call and by the change stream.
+  const connection = useConnectionStatus();
   const [sessionNameDrafts, setSessionNameDrafts] = useState({});
   const [renamingSessionId, setRenamingSessionId] = useState(null);
   const [deletingSessionId, setDeletingSessionId] = useState(null);
@@ -1203,6 +1224,50 @@ export default function OSCEAiMarkerMockup({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, ['sessions', 'jobs']);
 
+  // Heartbeat floor for in-flight work. See IN_FLIGHT_HEARTBEAT_MS: the change
+  // stream is the primary signal, but it can only announce writes, and a
+  // session can legitimately go minutes without one (auto-crop's person
+  // detection, a long transcription). Recovery must not depend on the same
+  // channel that just went quiet.
+  const hasInFlightSessions = useMemo(
+    () => sessionIndex.some((entry) => IN_FLIGHT_STATUSES.has(String(entry?.status))),
+    [sessionIndex],
+  );
+
+  useEffect(() => {
+    if (!hasInFlightSessions) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const isHidden = () =>
+      typeof document !== 'undefined' && document.visibilityState === 'hidden';
+
+    function tick() {
+      // A background tab has nobody to show the result to, and browsers throttle
+      // its timers anyway. Skip the work and catch up on the way back.
+      if (cancelled || isHidden()) {
+        return;
+      }
+      refreshSessionIndex({ silent: true });
+    }
+
+    const intervalId = window.setInterval(tick, IN_FLIGHT_HEARTBEAT_MS);
+    const onVisibilityChange = () => {
+      if (!isHidden()) {
+        tick();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasInFlightSessions]);
+
   async function refreshCorpora() {
     try {
       const response = await fetch('/api/corpora');
@@ -1225,19 +1290,17 @@ export default function OSCEAiMarkerMockup({
     setSelectedCorpusId((previous) => (list.some((corpus) => corpus.id === previous) ? previous : ''));
   }
 
-  // `silent` refreshes are driven by the change stream rather than by the user,
-  // so they must not flash the list's loading state on every backend write.
+  // `silent` refreshes are driven by the change stream or the in-flight
+  // heartbeat rather than by the user, so they must neither flash the list's
+  // loading state on every backend write nor claim its error slot.
   async function refreshSessionIndex({ silent = false } = {}) {
     if (!silent) {
       setSessionIndexLoading(true);
     }
-    setSessionIndexError('');
     try {
-      const response = await fetch('/api/sessions');
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to load sessions.');
-      }
+      const body = await apiJson('/api/sessions', {
+        fallbackMessage: 'Failed to load sessions.',
+      });
 
       const sessions = Array.isArray(body.sessions) ? body.sessions : [];
       setSessionIndex(sessions);
@@ -1250,8 +1313,21 @@ export default function OSCEAiMarkerMockup({
         });
         return next;
       });
+      // Cleared on success rather than on entry: clearing up front made the
+      // banner flicker on every background write, and left a real error
+      // looking resolved for as long as the next request took.
+      setSessionIndexError('');
+      return sessions;
     } catch (error) {
-      setSessionIndexError(error.message || 'Failed to load sessions.');
+      // A background refresh nobody asked for must not commandeer the page's
+      // error slot. If it failed because the backend is unreachable, that is a
+      // connectivity fact — already recorded by apiJson, and rendered by the
+      // connection indicator, which knows the difference between a blip and an
+      // outage. Only a refresh the user actually triggered writes the banner.
+      if (!silent) {
+        setSessionIndexError(error.message || 'Failed to load sessions.');
+      }
+      return null;
     } finally {
       // Only the refresh that raised the flag may clear it, so a stream-driven
       // refresh landing mid-flight cannot cancel a user-initiated spinner.
@@ -1266,11 +1342,7 @@ export default function OSCEAiMarkerMockup({
   // what it says; null on any failure, which the callers treat as "try again".
   async function refreshOpenSession(sessionId) {
     try {
-      const response = await fetch(`/api/sessions/${sessionId}`);
-      if (!response.ok) {
-        return null;
-      }
-      const body = await response.json().catch(() => ({}));
+      const body = await apiJson(`/api/sessions/${sessionId}`);
       const fresh = body?.session;
       if (!fresh || String(fresh.id) !== String(sessionId)) {
         return null;
@@ -1284,11 +1356,9 @@ export default function OSCEAiMarkerMockup({
   }
 
   async function loadSessionWorkspace(sessionId) {
-    const sessionResponse = await fetch(`/api/sessions/${sessionId}`);
-    const sessionBody = await sessionResponse.json().catch(() => ({}));
-    if (!sessionResponse.ok) {
-      throw new Error(sessionBody.error || 'Session not found.');
-    }
+    const sessionBody = await apiJson(`/api/sessions/${sessionId}`, {
+      fallbackMessage: 'Session not found.',
+    });
 
     const sessionPayload = sessionBody.session;
     let transcriptPayload = { segments: [] };
@@ -3410,6 +3480,7 @@ export default function OSCEAiMarkerMockup({
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+            <ConnectionBadge status={connection.status} />
             <Badge className="bg-slate-100 text-slate-700">Local API</Badge>
             {isDemoFallback ? (
               <Badge className="bg-amber-100 text-amber-700">Demo Workspace</Badge>
@@ -3642,7 +3713,20 @@ export default function OSCEAiMarkerMockup({
                     </div>
                   ) : null}
 
-                  {sessionIndexError ? (
+                  {/* Stale data needs an explanation where the stale data is.
+                      The header chip says the connection is down; this says
+                      what that means for this list, and offers the one useful
+                      action. */}
+                  <ConnectionNotice
+                    status={connection.status}
+                    message={connection.message}
+                    onRetry={() => refreshSessionIndex()}
+                    retrying={sessionIndexLoading}
+                  />
+
+                  {/* Suppressed while offline: the notice above already
+                      explains the same failure, and better. */}
+                  {sessionIndexError && connection.status === CONNECTION_STATUS.ONLINE ? (
                     <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
                       {sessionIndexError}
                     </div>

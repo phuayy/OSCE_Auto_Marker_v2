@@ -35,6 +35,23 @@ const STAGE_SLICES = PIPELINE_STAGE_SEQUENCE.length + 1;
 // their payload, and their cards must keep gauging correctly.
 const LEGACY_STEP_ALIASES = { whisperx: 'transcription' };
 
+// The long workflow's own steps. It never runs the pipeline sequence above —
+// its single job is to split the recording — so it is gauged separately.
+// Keyed rather than inferred, because a long session's payload may still carry
+// a stepProgress left over from an unrelated step, and a stale reading is
+// worse than no reading: it would show a bar that never moves.
+export const SEGMENTATION_STEPS = new Map([
+  ['person_detection', 'Detecting student boundaries'],
+  ['bell_detection', 'Detecting bell boundaries'],
+]);
+
+const DEFAULT_SEGMENTATION_LABEL = 'Detecting student boundaries';
+
+// Where a segmentation run's own 0-100% is placed on the card's bar. It starts
+// above zero (the job is demonstrably under way) and stops below one (writing
+// the clip list and flipping the status is still to come).
+const SEGMENTATION_SPAN = [0.15, 0.95];
+
 export function canonicalStepId(step) {
   const id = String(step || '');
   return LEGACY_STEP_ALIASES[id] || id;
@@ -65,7 +82,21 @@ export function describeProcessingStage(entry) {
     return null;
   }
   if (entry?.workflow === 'long') {
-    return { label: 'Detecting student boundaries', fraction: 0.5, stepPercent: null };
+    const segmentationStep = canonicalStepId(entry?.currentStep);
+    const label = SEGMENTATION_STEPS.get(segmentationStep) || DEFAULT_SEGMENTATION_LABEL;
+    // Only a recognised segmentation step may contribute a reading.
+    const percent = SEGMENTATION_STEPS.has(segmentationStep) ? readStepPercent(entry) : null;
+    if (percent === null) {
+      // No reading: the historical fixed midpoint. Honest about the one thing
+      // that is known — it is running — and about the one that is not.
+      return { label, fraction: 0.5, stepPercent: null };
+    }
+    const [floor, ceiling] = SEGMENTATION_SPAN;
+    return {
+      label,
+      fraction: floor + (ceiling - floor) * (percent / 100),
+      stepPercent: Math.round(percent),
+    };
   }
   const currentStep = canonicalStepId(entry?.currentStep);
   const stepIndex = PIPELINE_STAGE_SEQUENCE.findIndex(([step]) => step === currentStep);

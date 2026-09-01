@@ -42,11 +42,23 @@ class FakeSessions:
 
 
 class FakeMedia:
-    """Records which detector ran; configurable person-detector failure."""
+    """Records which detector ran; configurable person-detector failure.
 
-    def __init__(self, settings: Settings, *, person_error: Exception | None = None) -> None:
+    ``person_progress`` is the sequence of percentages the fake detector
+    reports before returning — how the tests drive the progress plumbing
+    without a subprocess.
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        person_error: Exception | None = None,
+        person_progress: tuple[float, ...] = (),
+    ) -> None:
         self.settings = settings
         self.person_error = person_error
+        self.person_progress = person_progress
         self.person_calls: list[dict[str, Any]] = []
         self.bell_calls: list[dict[str, Any]] = []
 
@@ -59,8 +71,12 @@ class FakeMedia:
         video_duration_seconds: float,
         *,
         session_id: str | None = None,
+        on_progress: Any | None = None,
     ) -> dict[str, Any]:
         self.person_calls.append({"path": source_path, "sessionId": session_id})
+        for percent in self.person_progress:
+            if on_progress is not None:
+                await on_progress(percent)
         if self.person_error is not None:
             raise self.person_error
         return {
@@ -134,13 +150,39 @@ def build_long_session(tmp_path: Path, segmentation: str | None) -> dict[str, An
     }
 
 
-def build_clip_service(tmp_path: Path, segmentation: str | None, *, person_error: Exception | None = None):
+def build_clip_service(
+    tmp_path: Path,
+    segmentation: str | None,
+    *,
+    person_error: Exception | None = None,
+    person_progress: tuple[float, ...] = (),
+):
     settings = build_settings(tmp_path)
-    media = FakeMedia(settings, person_error=person_error)
+    media = FakeMedia(settings, person_error=person_error, person_progress=person_progress)
     sessions = FakeSessions(build_long_session(tmp_path, segmentation))
     events = FakeEvents()
     service = ClipService(sessions=sessions, events=events, media=media, pipeline=None, jobs=None)
     return service, media, sessions, events
+
+
+class RecordingSessions(FakeSessions):
+    """FakeSessions that keeps every write, not just the last one.
+
+    Auto-crop's progress reports exist as much to keep the change stream alive
+    as to move a bar, so "how many times was the session written, and what did
+    each write say" is exactly what needs asserting.
+    """
+
+    def __init__(self, initial_session: dict[str, Any]) -> None:
+        super().__init__(initial_session)
+        self.writes: list[dict[str, Any]] = []
+
+    async def write(self, session: dict[str, Any]) -> None:
+        await super().write(session)
+        self.writes.append(copy.deepcopy(session))
+
+    def progress_readings(self) -> list[Any]:
+        return [(write.get("pipeline") or {}).get("stepProgress") for write in self.writes]
 
 
 def test_auto_crop_uses_person_detector_when_selected(tmp_path) -> None:
@@ -194,6 +236,128 @@ def test_auto_crop_person_failure_falls_back_to_bells(tmp_path) -> None:
     # The fallback is surfaced in the live log, not silent.
     log_messages = [payload.get("message", "") for _sid, kind, payload in events.items if kind == "log"]
     assert any("Falling back to bell detection" in message for message in log_messages)
+
+
+def build_recording_clip_service(
+    tmp_path: Path,
+    segmentation: str,
+    *,
+    person_error: Exception | None = None,
+    person_progress: tuple[float, ...] = (),
+):
+    settings = build_settings(tmp_path)
+    media = FakeMedia(settings, person_error=person_error, person_progress=person_progress)
+    sessions = RecordingSessions(build_long_session(tmp_path, segmentation))
+    service = ClipService(
+        sessions=sessions, events=FakeEvents(), media=media, pipeline=None, jobs=None
+    )
+    return service, media, sessions
+
+
+def test_auto_crop_names_the_running_detector_step(tmp_path) -> None:
+    """The card's gauge only trusts a reading that belongs to the step the
+    session is currently naming, so the step has to be named before it runs."""
+    service, _media, sessions = build_recording_clip_service(tmp_path, "person")
+    asyncio.run(service.auto_crop_session_by_id("session-long-1"))
+
+    first_write = sessions.writes[0]
+    assert first_write["status"] == "processing"
+    assert first_write["pipeline"]["currentStep"] == "person_detection"
+    assert first_write["pipeline"]["stepProgress"] is None
+
+
+def test_auto_crop_defaults_name_the_bell_step(tmp_path) -> None:
+    service, _media, sessions = build_recording_clip_service(tmp_path, "bells")
+    asyncio.run(service.auto_crop_session_by_id("session-long-1"))
+
+    assert sessions.writes[0]["pipeline"]["currentStep"] == "bell_detection"
+
+
+def test_detector_progress_is_persisted_for_the_session_card(tmp_path) -> None:
+    service, _media, sessions = build_recording_clip_service(
+        tmp_path, "person", person_progress=(10.0, 55.0, 95.0)
+    )
+    asyncio.run(service.auto_crop_session_by_id("session-long-1"))
+
+    readings = sessions.progress_readings()
+    # Every reading reached the durable payload, in order. Each of those writes
+    # is also a change-stream event, which is what stops a long detection run
+    # from leaving the sessions table untouched for minutes.
+    assert [value for value in readings if value is not None] == [10.0, 55.0, 95.0]
+
+
+def test_finished_auto_crop_leaves_no_stale_progress(tmp_path) -> None:
+    service, _media, sessions = build_recording_clip_service(
+        tmp_path, "person", person_progress=(40.0,)
+    )
+    asyncio.run(service.auto_crop_session_by_id("session-long-1"))
+
+    assert sessions.current["status"] == "cropped"
+    assert sessions.current["pipeline"]["stepProgress"] is None
+    assert sessions.current["pipeline"]["currentStep"] is None
+
+
+def test_failed_auto_crop_leaves_no_stale_progress(tmp_path) -> None:
+    # Person detection failing degrades to bells; make that fail too so the
+    # whole job ends terminally and the failure path is the one exercised.
+    service, media, sessions = build_recording_clip_service(
+        tmp_path, "person", person_error=RuntimeError("weights gone"), person_progress=(30.0,)
+    )
+
+    async def failing_bells(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("no audio track")
+
+    media.detect_bell_clip_ranges_with_python = failing_bells
+
+    try:
+        asyncio.run(service.auto_crop_session_by_id("session-long-1"))
+    except RuntimeError:
+        pass
+
+    assert sessions.current["status"] == "failed"
+    assert sessions.current["pipeline"]["stepProgress"] is None
+    assert sessions.current["pipeline"]["currentStep"] is None
+
+
+def test_fallback_to_bells_stops_gauging_the_dead_detector(tmp_path) -> None:
+    """A frozen bar is worse than none: when person detection dies the card
+    must stop reporting its last percentage for the whole bell pass."""
+    service, _media, sessions = build_recording_clip_service(
+        tmp_path,
+        "person",
+        person_error=RuntimeError("weights gone"),
+        person_progress=(70.0,),
+    )
+    asyncio.run(service.auto_crop_session_by_id("session-long-1"))
+
+    # Between the failure and the finish, the session was rewritten naming the
+    # bell step with no reading carried over.
+    handover = [
+        write
+        for write in sessions.writes
+        if (write.get("pipeline") or {}).get("currentStep") == "bell_detection"
+    ]
+    assert handover, "the fallback must re-name the running step"
+    assert handover[0]["pipeline"]["stepProgress"] is None
+    assert sessions.current["status"] == "cropped"
+
+
+def test_progress_for_a_step_that_is_no_longer_running_is_dropped(tmp_path) -> None:
+    """A late reading from a subprocess reader thread must not resurrect a
+    step that has already ended."""
+    service, _media, sessions = build_recording_clip_service(tmp_path, "person")
+    asyncio.run(service.auto_crop_session_by_id("session-long-1"))
+    writes_before = len(sessions.writes)
+
+    session = sessions.current
+    asyncio.run(
+        service._record_segmentation_progress(  # noqa: SLF001 — the rule is the unit under test
+            session, "person_detection", 88.0, lock=asyncio.Lock()
+        )
+    )
+
+    assert len(sessions.writes) == writes_before
+    assert sessions.current["pipeline"]["stepProgress"] is None
 
 
 def test_public_session_projects_clip_kinds() -> None:
