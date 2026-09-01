@@ -29,7 +29,7 @@ SQLAlchemy==2.0.50
 alembic==1.19.1
 aiosqlite==0.22.0
 hatchet-sdk==1.33.7
-psycopg[binary]==3.3.4
+psycopg[binary,pool]==3.3.4
 
 # OpenAI-compatible client used by NVIDIA/OpenRouter scoring scripts.
 openai==2.41.1

@@ -105,6 +105,8 @@ class AppContainer:
     async def shutdown(self) -> None:
         await self.jobs.shutdown()
         await self.orm_database.shutdown()
+        # Releases the raw-SQL layer's PostgreSQL pool; a no-op on SQLite.
+        self.database.close()
 
 
 def create_container(settings: Settings | None = None) -> AppContainer:

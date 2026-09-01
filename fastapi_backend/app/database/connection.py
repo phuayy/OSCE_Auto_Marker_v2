@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 import sqlite3
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
@@ -10,12 +13,31 @@ from urllib.parse import urlparse
 from app.database.schema import POSTGRES_SCHEMA_STATEMENTS, SQLITE_SCHEMA_STATEMENTS, SCHEMA_VERSION
 
 
+logger = logging.getLogger(__name__)
+
 T = TypeVar("T")
+
+# Pool bounds for the raw-SQL jobs layer. Small on purpose: this layer issues
+# short single-statement operations, and the SQLAlchemy engine keeps its own
+# separate pool for the ORM side.
+_DEFAULT_POOL_MIN_SIZE = 1
+_DEFAULT_POOL_MAX_SIZE = 8
 
 
 class Database:
-    def __init__(self, database_url_or_path: Path | str) -> None:
+    def __init__(
+        self,
+        database_url_or_path: Path | str,
+        *,
+        pool_min_size: int = _DEFAULT_POOL_MIN_SIZE,
+        pool_max_size: int = _DEFAULT_POOL_MAX_SIZE,
+    ) -> None:
         self.database_url_or_path = database_url_or_path
+        self.pool_min_size = max(0, pool_min_size)
+        self.pool_max_size = max(1, pool_max_size)
+        self._pool: Any | None = None
+        self._pool_unavailable = False
+        self._pool_lock = threading.Lock()
         self.database_url = self._normalize_url(database_url_or_path)
         self.backend = self._detect_backend(database_url_or_path)
         self.database_path = self._sqlite_path(database_url_or_path) if self.backend == "sqlite" else None
@@ -79,15 +101,75 @@ class Database:
             )
 
     def _run_sqlite(self, operation: Callable[[sqlite3.Connection], T], *, write: bool) -> T:
-        with self._connect() as connection:
-            if write:
-                connection.execute("BEGIN IMMEDIATE")
-            return operation(connection)
+        connection = self._connect()
+        try:
+            # sqlite3's context manager commits or rolls back — it does **not**
+            # close. Relying on it alone leaked a file handle (and the three
+            # PRAGMAs' worth of setup) per operation, reclaimed only whenever the
+            # garbage collector happened to run.
+            with connection:
+                if write:
+                    connection.execute("BEGIN IMMEDIATE")
+                return operation(connection)
+        finally:
+            connection.close()
 
     def _run_postgres(self, operation: Callable[[Any], T]) -> T:
-        psycopg, dict_row = self._load_psycopg()
-        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
-            return operation(PostgresConnectionAdapter(connection))
+        pool = self._postgres_pool()
+        if pool is None:
+            # No pool available: one connection per operation. Correct, but each
+            # call pays a full TCP + TLS + auth handshake, so install
+            # ``psycopg[pool]`` for any deployment under real load.
+            psycopg, dict_row = self._load_psycopg()
+            with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+                return operation(PostgresConnectionAdapter(connection))
+        with pool.connection() as connection:
+            with connection.transaction():
+                return operation(PostgresConnectionAdapter(connection))
+
+    def _postgres_pool(self) -> Any | None:
+        """A lazily-created connection pool, or None when pooling is unavailable.
+
+        The jobs layer runs a query per claim, per event append and per status
+        transition, so connecting per operation makes the handshake the dominant
+        cost and walks the server's ``max_connections`` up under concurrency.
+        Pooling is therefore the production path; the unpooled fallback exists so
+        a deployment without ``psycopg_pool`` still works rather than failing to
+        start.
+        """
+        if self._pool is not None or self._pool_unavailable:
+            return self._pool
+        with self._pool_lock:
+            if self._pool is not None or self._pool_unavailable:
+                return self._pool
+            try:
+                from psycopg.rows import dict_row
+                from psycopg_pool import ConnectionPool
+
+                self._pool = ConnectionPool(
+                    self.database_url,
+                    min_size=self.pool_min_size,
+                    max_size=self.pool_max_size,
+                    kwargs={"row_factory": dict_row},
+                    open=True,
+                )
+            except Exception:
+                self._pool_unavailable = True
+                logger.warning(
+                    "psycopg_pool is unavailable; opening a new PostgreSQL connection per "
+                    "operation. Install 'psycopg[binary,pool]' for pooled connections.",
+                    exc_info=True,
+                )
+                return None
+        return self._pool
+
+    def close(self) -> None:
+        """Release the pool. Safe to call when one was never created."""
+        pool = self._pool
+        self._pool = None
+        if pool is not None:
+            with contextlib.suppress(Exception):
+                pool.close()
 
     @staticmethod
     def _detect_backend(database_url_or_path: Path | str) -> str:
