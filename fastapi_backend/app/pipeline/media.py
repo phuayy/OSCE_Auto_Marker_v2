@@ -399,6 +399,34 @@ class MediaPipeline:
         normalized.sort(key=lambda item: item["start"])
         return normalized
 
+    def _enforce_clip_count_bounds(self, detector_label: str, clip_ranges: list[dict[str, float]]) -> None:
+        """Reject a detection that produced an unusable number of clips.
+
+        Both detectors share these bounds because both answer the same
+        question: how many students are on this tape. The count is a property
+        of the session, not of the detector, so a cohort of 30 is as valid as a
+        cohort of 3 — ``PYTHON_BELL_MAX_CLIPS <= 0`` (the default) means no
+        upper bound at all. An over-eager detector is recoverable: every range
+        lands in the timeline editor as a draft the operator can merge or
+        delete before any MP4 is cut. Failing the job instead leaves them with
+        nothing to edit.
+
+        Zero clips is the one genuinely fatal case, so the minimum stays.
+        """
+        minimum = self.settings.python_bell_min_clips
+        maximum = self.settings.python_bell_max_clips
+        if not clip_ranges:
+            raise RuntimeError(f"{detector_label} did not produce any valid clip ranges.")
+        if len(clip_ranges) < minimum:
+            raise RuntimeError(
+                f"{detector_label} produced {len(clip_ranges)} clips, fewer than the minimum {minimum}."
+            )
+        if maximum > 0 and len(clip_ranges) > maximum:
+            raise RuntimeError(
+                f"{detector_label} produced {len(clip_ranges)} clips, more than the maximum {maximum} "
+                "(raise or clear PYTHON_BELL_MAX_CLIPS to allow larger cohorts)."
+            )
+
     async def detect_bell_clip_ranges_with_python(
         self,
         source_path: Path,
@@ -457,13 +485,7 @@ class MediaPipeline:
 
         payload = extract_json_object(result.stdout)
         clip_ranges = self.normalize_clip_ranges(payload.get("clip_ranges") or [], video_duration_seconds)
-        if len(clip_ranges) < self.settings.python_bell_min_clips or len(clip_ranges) > self.settings.python_bell_max_clips:
-            raise RuntimeError(
-                f"Bell detector produced {len(clip_ranges)} clips outside allowed range "
-                f"[{self.settings.python_bell_min_clips}, {self.settings.python_bell_max_clips}]."
-            )
-        if not clip_ranges:
-            raise RuntimeError("Bell detector did not produce any valid clip ranges.")
+        self._enforce_clip_count_bounds("Bell detector", clip_ranges)
 
         bell_timestamps: list[float] = []
         for value in payload.get("bell_timestamps") or []:
@@ -581,13 +603,7 @@ class MediaPipeline:
 
         payload = extract_json_object(result.stdout)
         clip_ranges = self.normalize_clip_ranges(payload.get("clip_ranges") or [], video_duration_seconds)
-        if len(clip_ranges) < self.settings.python_bell_min_clips or len(clip_ranges) > self.settings.python_bell_max_clips:
-            raise RuntimeError(
-                f"Human detector produced {len(clip_ranges)} clips outside allowed range "
-                f"[{self.settings.python_bell_min_clips}, {self.settings.python_bell_max_clips}]."
-            )
-        if not clip_ranges:
-            raise RuntimeError("Human detector did not produce any valid clip ranges.")
+        self._enforce_clip_count_bounds("Human detector", clip_ranges)
 
         debug = payload.get("debug") if isinstance(payload.get("debug"), dict) else {}
         return {

@@ -470,7 +470,10 @@ class Settings:
     enable_python_bell_detector: bool = read_bool_env("ENABLE_PYTHON_BELL_DETECTOR", True)
     python_bell_min_gap_seconds: float = read_float_env("PYTHON_BELL_MIN_GAP_SECONDS", 240.0)
     python_bell_min_clips: int = read_int_env("PYTHON_BELL_MIN_CLIPS", 1)
-    python_bell_max_clips: int = read_int_env("PYTHON_BELL_MAX_CLIPS", 16)
+    # 0 (the default) = no upper bound: cohort size is a property of the tape,
+    # not something the detector may veto. Set a positive value only to make an
+    # obviously runaway detection fail loudly.
+    python_bell_max_clips: int = read_int_env("PYTHON_BELL_MAX_CLIPS", 0)
     python_bell_expected_count: int = read_int_env("PYTHON_BELL_EXPECTED_COUNT", 0)
     bell_detector_sample_rate: int = read_int_env("BELL_DETECTOR_SAMPLE_RATE", 22050)
     bell_detector_chunk_seconds: float = read_float_env("BELL_DETECTOR_CHUNK_SECONDS", 60.0)
