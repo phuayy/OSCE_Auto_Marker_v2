@@ -11,8 +11,8 @@ server restart.
 Run from this directory:
 
 ```bash
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8787
+uv sync                 # from the project root; dependencies live in pyproject.toml
+uv run uvicorn app.main:app --reload --port 8787
 ```
 
 Environment variables are loaded from the project root `.env` file when present,

@@ -289,7 +289,7 @@ def read_pdf_text(path: Path) -> str:
         from pypdf import PdfReader
     except ImportError as error:
         raise RuntimeError(
-            "Missing dependency 'pypdf'. Install it with `pip install pypdf` to score from case-study PDFs."
+            "Missing dependency 'pypdf'. Install it with `uv sync` to score from case-study PDFs."
         ) from error
 
     parts: list[str] = []

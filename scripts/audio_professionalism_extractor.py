@@ -341,7 +341,7 @@ def extract_opensmile_features(audio_path: Path) -> dict[str, Any]:
         import opensmile
     except ImportError as error:  # pragma: no cover - dependency guard
         raise RuntimeError(
-            "Missing dependency 'opensmile'. Install it with `pip install opensmile`."
+            "Missing dependency 'opensmile'. Install it with `uv sync`."
         ) from error
 
     smile = opensmile.Smile(

@@ -209,7 +209,7 @@ class Database:
         except Exception as error:
             raise RuntimeError(
                 "PostgreSQL database support requires psycopg. "
-                "Install project dependencies from requirements.txt."
+                "Install project dependencies with 'uv sync'."
             ) from error
         return psycopg, dict_row
 

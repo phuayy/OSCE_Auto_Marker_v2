@@ -1,0 +1,143 @@
+# Canonical Python dependency manifest for the FastAPI/Hatchet backend and AI
+# pipeline. Managed with uv: the resolution is pinned in uv.lock, which is
+# committed, so every machine installs byte-identical wheels.
+#
+#   uv sync                      # base + dev (the normal developer install)
+#   uv sync --group canary       # ...plus the optional Canary-Qwen engine
+#   uv sync --no-dev             # deployment install, no test tooling
+#
+# Supported target: Python 3.10-3.13.
+# - Python 3.12 is the tested runtime and is pinned in .python-version.
+# - Python 3.14 is intentionally excluded because WhisperX 3.8.6 declares
+#   Python <3.14 support.
+# - NumPy uses environment markers so Python 3.10 receives the latest
+#   Python-3.10-compatible line while Python 3.11+ gets the current fastest line.
+
+[project]
+name = "osce-ai-marker"
+version = "0.1.0"
+description = "Automated OSCE video marking: transcription, diarisation and LLM scoring"
+requires-python = ">=3.10,<3.14"
+
+dependencies = [
+    # FastAPI application server and request parsing.
+    "fastapi==0.136.3",
+    "uvicorn[standard]==0.49.0",
+    # Dev-server file watching. Ships with uvicorn[standard], but
+    # scripts/run_api.py imports it directly to drive --reload itself:
+    # uvicorn's own Windows reloader restarts via a console-wide
+    # CTRL_C_EVENT, which also kills npm/node/vite.
+    "watchfiles==1.2.0",
+    "python-multipart==0.0.32",
+    "pydantic==2.13.4",
+
+    # Authentication.
+    "bcrypt==5.0.0",
+
+    # Durable queue support. Local development can use SQLite plus in-process
+    # workers; production uses Hatchet backed by PostgreSQL.
+    "SQLAlchemy==2.0.50",
+    # Schema migrations for both database layers (ORM tables and the raw-SQL
+    # jobs tables). Run with "cd fastapi_backend && uv run alembic upgrade
+    # head"; the app also applies them at startup unless DB_AUTO_MIGRATE=false.
+    # See fastapi_backend/alembic/README.md.
+    "alembic==1.19.1",
+    "aiosqlite==0.22.0",
+    "hatchet-sdk==1.33.7",
+    "psycopg[binary,pool]==3.3.4",
+
+    # OpenAI-compatible client used by NVIDIA/OpenRouter scoring scripts.
+    "openai==2.41.1",
+
+    # Rubric parsing and audio/bell-analysis pipeline scripts.
+    "pypdf==6.13.2",
+    "numpy==2.2.6; python_version == '3.10'",
+    # 2.4.4 (not 2.4.6) is what the CUDA torch 2.8.0+cu128 stack was installed
+    # and tested against locally; keep the two moving in lockstep.
+    "numpy==2.4.4; python_version >= '3.11'",
+    "librosa==0.11.0",
+    "soundfile==0.14.0",
+    "opensmile==2.6.0",
+
+    # WhisperX CLI used by WHISPERX_BIN for transcription/diarization.
+    "whisperx==3.8.6",
+
+    # WhisperX-compatible ML stack constraints. These prevent slow resolver
+    # backtracking and keep ASR/diarization installs reproducible.
+    # GPU: [tool.uv.sources] below routes these three to the CUDA 12.8 index
+    # instead of PyPI's CPU-only wheels — no manual reinstall step, and no way
+    # for a later group install to quietly swap them back.
+    "torch==2.8.0",
+    "torchaudio==2.8.0",
+    "torchvision==0.23.0",
+    "transformers==4.57.6",
+    "tokenizers==0.22.2",
+
+    # Person-presence auto-crop segmentation
+    # (scripts/detect_human_segments.py): RT-DETR runs through the transformers
+    # stack above; Pillow is required by transformers' image processors at
+    # runtime (frames are decoded via ffmpeg, so no OpenCV dependency).
+    "pillow==12.2.0",
+
+    # Google Cloud Storage upload backend (STORAGE_BACKEND=gcs only). Imported
+    # lazily, so a local-storage deployment never touches it.
+    "google-cloud-storage==2.19.0",
+]
+
+[dependency-groups]
+# Installed by default by "uv sync". Skip with "uv sync --no-dev".
+dev = [
+    "pytest==9.0.3",
+    "httpx==0.28.1",
+]
+
+# Optional transcription engine: NVIDIA Canary-Qwen 2.5B (NeMo SALM).
+# WhisperX stays the default engine and needs none of this. Install with
+# "uv sync --group canary" only for a deployment that wants Canary-Qwen
+# selectable in Settings -> Transcription; until these are present the settings
+# screen reports the engine as unavailable.
+#
+# Weights (~5 GB) are NOT part of this group. The backend downloads them into
+# the HuggingFace cache at startup when Canary-Qwen is the selected engine
+# (TRANSCRIPTION_PREFETCH_MODELS=true, the default), and
+# scripts/canary_qwen_transcribe.py --download fetches them on demand for an
+# image build or an offline host.
+#
+# NOTE (versions): nemo-toolkit 3.0.0 constrains parts of the shared stack —
+# it pulls lightning back to 2.4.x, omegaconf to 2.3.0, packaging to 24.2 and
+# fsspec to 2025.12.x. uv resolves this group together with the base
+# dependencies into a single uv.lock, so those constraints are already
+# reflected in the pins the base install gets.
+#
+# NOTE (host RAM): the SALM loader builds the Qwen3 half in fp32 on the CPU
+# before moving it to the GPU — budget ~12 GB of free system RAM for the
+# transcription subprocess. A memory-starved host does not raise MemoryError;
+# the process dies with a Windows access violation (exit code 139).
+canary = [
+    "nemo_toolkit[asr]==3.0.0",
+    # nemo.collections.speechlm2 (the SALM path Canary-Qwen loads through)
+    # imports peft at module import time, and the [asr] extra does not pull it in.
+    "peft==0.20.0",
+]
+
+[tool.uv]
+required-version = ">=0.6.0"
+# This repository is an application, not a distributable package: the backend
+# lives on sys.path via scripts/run_api.py and fastapi_backend/pytest.ini.
+# Nothing to build, so uv manages only the environment.
+package = false
+
+[tool.uv.sources]
+# PyPI serves CPU-only torch wheels. Pull the CUDA 12.8 builds from PyTorch's
+# own index instead — same versions, so every pin above is still satisfied.
+# For a CPU-only host, delete this table and re-run "uv lock".
+torch = [{ index = "pytorch-cu128" }]
+torchaudio = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+# "explicit" keeps every other package coming from PyPI; only the three named
+# in [tool.uv.sources] are resolved here.
+explicit = true

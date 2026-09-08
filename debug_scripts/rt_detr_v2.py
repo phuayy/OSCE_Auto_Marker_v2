@@ -29,7 +29,7 @@ rt_detr.py run first — N cold workers racing the same download is untested.
 
 Run (same interpreter as rt_detr.py):
 
-    OSCE-AI-FYP/.venv/Scripts/python.exe debug_scripts/rt_detr_v2.py \
+    uv run python debug_scripts/rt_detr_v2.py \
         --video "C:/Users/.../Common Cold_Session 1.mp4" --workers 2
 
     python debug_scripts/rt_detr_v2.py --self-check   # split-math sanity check

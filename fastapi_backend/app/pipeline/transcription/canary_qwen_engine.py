@@ -176,7 +176,7 @@ DESCRIPTOR = EngineDescriptor(
     ),
     requirements=(
         "Needs the optional NeMo toolkit in the backend environment: "
-        "pip install -r requirements-canary.txt (or pip install \"nemo_toolkit[asr]>=2.5\"). "
+        "uv sync --group canary. "
         "The ~5 GB checkpoint is downloaded into the HuggingFace cache at backend startup "
         "when this engine is selected, and on first run otherwise."
     ),

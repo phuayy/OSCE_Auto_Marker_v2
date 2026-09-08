@@ -12,7 +12,7 @@ emitting clip ranges as JSON it ALSO:
 
 Run (uses the project's .venv which has torch+cuda+transformers):
 
-    OSCE-AI-FYP/.venv/Scripts/python.exe debug_scripts/rt_detr.py \
+    uv run python debug_scripts/rt_detr.py \
         --video "C:/Users/.../Common Cold_Session 1.mp4"
 
 Defaults point at the requested output locations:

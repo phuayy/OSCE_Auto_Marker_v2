@@ -829,7 +829,7 @@ def main() -> int:
             )
     except ImportError as error:
         raise RuntimeError(
-            "Missing bell detector dependencies. Install with: pip install librosa numpy"
+            "Missing bell detector dependencies. Install with: uv sync"
         ) from error
 
     used_trigger = detector_mode

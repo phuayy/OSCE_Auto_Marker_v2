@@ -428,7 +428,7 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 | Variable | Default | Purpose |
 |---|---|---|
 | `TRANSCRIPTION_ENGINE` | `whisperx` | Fallback engine when Settings has no stored selection (`whisperx` \| `canary-qwen`) |
-| `CANARY_MODEL` | `nvidia/canary-qwen-2.5b` | NeMo SALM checkpoint for the Canary engine (install `requirements-canary.txt`) |
+| `CANARY_MODEL` | `nvidia/canary-qwen-2.5b` | NeMo SALM checkpoint for the Canary engine (`uv sync --group canary`) |
 | `TRANSCRIPTION_PREFETCH_MODELS` | `true` | Download the selected engine's weights in the background at startup; false = fetch on first run |
 | `TRANSCRIPT_CORRECTION_MIN_RATIO` | `0.84` | Orthographic (difflib) threshold for corpus-term correction |
 | `TRANSCRIPT_CORRECTION_PHONETIC` | `true` | Double Metaphone matching channel — corrects ASR renderings that sound right but are spelled as other words |
@@ -473,6 +473,13 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 ## Development
 
 ```bash
+# Python environment (uv owns it; pip is not used anywhere)
+uv sync                          # base + dev, exactly as pinned in uv.lock
+uv sync --group canary           # ...plus the optional Canary-Qwen/NeMo engine
+uv sync --no-dev                 # deployment install, no test tooling
+uv lock                          # re-resolve after editing pyproject.toml
+uv add <pkg> / uv remove <pkg>   # edit pyproject.toml and the lock together
+
 # Frontend (port 5173)
 npm run dev
 
@@ -481,20 +488,37 @@ npm run dev:api
 
 # Backend with reload (watchfiles restarts the server on .py changes under
 # fastapi_backend/app and scripts/; one instance only)
-python scripts/run_api.py --reload
+uv run python scripts/run_api.py --reload
 
 # Tests
-cd fastapi_backend && pytest
+cd fastapi_backend && uv run pytest
 
 # Migrations (the app also applies these at startup unless DB_AUTO_MIGRATE=false)
-cd fastapi_backend && alembic upgrade head
-cd fastapi_backend && alembic current           # what this database is stamped at
-cd fastapi_backend && alembic revision --autogenerate -m "add x"
-cd fastapi_backend && alembic check             # models vs. migrations are in sync
+cd fastapi_backend && uv run alembic upgrade head
+cd fastapi_backend && uv run alembic current    # what this database is stamped at
+cd fastapi_backend && uv run alembic revision --autogenerate -m "add x"
+cd fastapi_backend && uv run alembic check      # models vs. migrations are in sync
 
 # Hatchet worker (only when JOB_QUEUE_BACKEND=hatchet)
-python -m app.queue.hatchet_worker
+uv run python -m app.queue.hatchet_worker
 ```
+
+**Dependencies:** `pyproject.toml` + `uv.lock` (both committed) are the single
+source of truth; the old `requirements.txt` / `requirements-canary.txt` /
+`fastapi_backend/requirements.txt` files are gone. `.python-version` pins 3.12,
+which uv downloads if the machine lacks it. `[tool.uv.sources]` routes
+`torch`/`torchaudio`/`torchvision` to PyTorch's cu128 index, so `uv sync`
+installs the CUDA builds directly — the pip-era "reinstall torch from the CUDA
+index afterwards" step is gone, and no later group install can swap them for
+CPU wheels. uv creates `.venv` in the project root, so the `SCORER_PYTHON_BIN`
+and `WHISPERX_BIN` auto-detection in `config.py` is unchanged.
+
+Every npm script and `scripts/dev.mjs` invoke `uv run --no-sync`, never a bare
+`uv run`. A bare `uv run` syncs first, and a sync without `--group canary`
+*removes* NeMo — starting the dev server would quietly uninstall the optional
+transcription engine on a host that had it. Syncing stays an explicit step
+(`npm run py:sync` / `py:sync:canary`). `PYTHON_BIN` still overrides the
+interpreter in `dev.mjs` for a hand-managed environment.
 
 **Windows:** `run_api.py` always sets `loop="none"` so uvicorn keeps the `WindowsSelectorEventLoopPolicy` that async psycopg needs. `--reload` is driven by `watchfiles.run_process`, not uvicorn's own reloader: uvicorn restarts its worker with `os.kill(pid, CTRL_C_EVENT)`, and Windows delivers a console control event to *every* process on the console — under `npm run dev` that killed node, vite and npm too, which looked like the server shutting itself down on save. Never run two API instances on same port.
 

@@ -20,7 +20,7 @@ configure_windows_selector_event_loop_policy()
 
 # Directories whose Python files should trigger a reload. Scoped deliberately:
 # watching the repository root (uvicorn's default) means walking .venv,
-# node_modules and storage/ on every scan, and a pip install or a pipeline
+# node_modules and storage/ on every scan, and a "uv sync" or a pipeline
 # artifact write then restarts the server for no reason.
 RELOAD_DIRS = (BACKEND_DIR / "app", ROOT_DIR / "scripts")
 

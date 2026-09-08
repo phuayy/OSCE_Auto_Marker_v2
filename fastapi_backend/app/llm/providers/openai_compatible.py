@@ -62,7 +62,7 @@ class OpenAICompatibleProvider(LLMProvider):
         except ImportError as error:  # pragma: no cover - dependency is pinned
             raise LLMConfigError(
                 "The 'openai' package is required for OpenAI-compatible providers. "
-                "Install it with: pip install -r requirements.txt",
+                "Install it with: uv sync",
                 provider_id=self.descriptor.id,
             ) from error
         return OpenAI(

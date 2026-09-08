@@ -118,7 +118,9 @@ OSCE-AI-FYP/
 ├── storage/                      # Runtime data (gitignored): inputs, outputs, DB, auth secrets
 ├── docker-compose.postgres.yml   # Optional: app PostgreSQL
 ├── docker-compose.hatchet.yml    # Optional: app PG + Hatchet PG + hatchet-lite server
-├── requirements.txt              # Pinned Python deps (tested lockstep)
+├── pyproject.toml                # Python deps (uv): base, dev group, canary group
+├── uv.lock                       # Exact resolved versions — committed, reproducible
+├── .python-version               # Interpreter uv provisions for this project (3.12)
 ├── package.json                  # npm scripts (dev, dev:api, dev:worker, db:*, test:api)
 └── .env.example                  # Copy to .env — every knob documented
 ```
@@ -130,7 +132,8 @@ OSCE-AI-FYP/
 | Requirement | Notes |
 | --- | --- |
 | **Windows 10/11** (primary target) | Linux/macOS work; PowerShell commands below |
-| **Python 3.10–3.13** | 3.12 is the tested runtime. 3.14 excluded (WhisperX constraint) |
+| **[uv](https://docs.astral.sh/uv/) 0.6+** | Manages the Python environment. `winget install --id=astral-sh.uv` |
+| **Python 3.10–3.13** | 3.12 is the tested runtime. 3.14 excluded (WhisperX constraint). uv downloads it for you if it is missing |
 | **Node.js 18+** | Frontend + dev orchestration |
 | **ffmpeg + ffprobe** | On PATH, or auto-detected at `C:\ffmpeg\bin\` etc., or set `FFMPEG_BIN`/`FFPROBE_BIN` |
 | **NVIDIA GPU (optional)** | 4 GB+ VRAM (RTX 3050 tested). CPU works — slower transcription |
@@ -142,31 +145,42 @@ OSCE-AI-FYP/
 
 ### 6.1 Clone and create the Python environment
 
+Python dependencies are managed with [uv](https://docs.astral.sh/uv/). Install it
+once (`winget install --id=astral-sh.uv`, or `irm https://astral.sh/uv/install.ps1 | iex`),
+then:
+
 ```powershell
 cd "C:\Users\<you>\Downloads\OSCE Auto Marker\OSCE-AI-FYP"
 
-# Create and activate a virtual environment
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
-# Install all pinned Python dependencies
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+# Creates .venv with the interpreter named in .python-version (3.12) and
+# installs the exact versions locked in uv.lock. No manual venv, no activation.
+uv sync
 ```
 
-### 6.2 (GPU only) Swap in CUDA PyTorch
+`uv sync` is also how you *update* an environment: run it again after pulling and
+it adds, removes and downgrades packages until `.venv` matches `uv.lock` exactly.
+Change a pin in `pyproject.toml`, then `uv lock` to re-resolve.
 
-PyPI serves CPU-only torch wheels. For an NVIDIA GPU install the CUDA 12.8 builds
-(same versions — they satisfy the pins in `requirements.txt`):
+Prefix commands with `uv run` to use that environment without activating it
+(`uv run python ...`, `uv run pytest`, `uv run alembic upgrade head`). If you
+prefer an activated shell, `.\.venv\Scripts\Activate.ps1` still works — uv builds
+an ordinary virtual environment in the usual place.
+
+### 6.2 (GPU) CUDA PyTorch
+
+Nothing to do. PyPI serves CPU-only torch wheels, so `pyproject.toml` routes
+`torch`, `torchaudio` and `torchvision` to PyTorch's CUDA 12.8 index via
+`[tool.uv.sources]`. `uv sync` installs the GPU builds directly, and no later
+install can silently swap them back for CPU wheels:
 
 ```powershell
-pip install torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128
-pip install "setuptools>=77.0.1"   # the reinstall downgrades setuptools; restore it
-
 # Verify
-python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 # expect: 2.8.0+cu128 True
 ```
+
+On a CPU-only host, delete the `[tool.uv.sources]` and `[[tool.uv.index]]` tables
+from `pyproject.toml` and re-run `uv lock`.
 
 > **4 GB VRAM note:** the defaults are `large-v3` at `WHISPERX_COMPUTE_TYPE=float16`
 > (~3 GB, the native weight precision) with `WHISPERX_BATCH_SIZE=1`. On a 4 GB card
@@ -181,11 +195,16 @@ WhisperX is the default engine and needs nothing extra. Install this only to mak
 NeMo toolkit is present the settings screen reports the engine as unavailable.
 
 ```powershell
-pip install -r requirements-canary.txt
+uv sync --group canary
 
 # Verify (prints "nemo-ready")
-python scripts\canary_qwen_transcribe.py --check
+uv run python scripts\canary_qwen_transcribe.py --check
 ```
+
+The `canary` group is not installed by a plain `uv sync`, and a plain `uv sync`
+run afterwards **removes** it again — pass `--group canary` every time on a host
+that wants the engine. Its pins are resolved together with the base dependencies
+into the one `uv.lock`, so adding it never re-resolves the rest of the stack.
 
 The ~5 GB checkpoint is **not** part of that install. The backend downloads it
 into the HuggingFace cache in the background at startup whenever Canary-Qwen is
@@ -195,7 +214,7 @@ engine then fetches the weights the first time it runs. To pre-seed the cache
 by hand (an image build, or a machine that will be offline later):
 
 ```powershell
-python scripts\canary_qwen_transcribe.py --download
+uv run python scripts\canary_qwen_transcribe.py --download
 ```
 
 `nemo-toolkit` pins parts of the shared stack (lightning 2.4.x, omegaconf 2.3.0,
@@ -405,7 +424,7 @@ HUMAN_SEGMENTS_DEVICE=auto              # cuda when available
 Standalone experimentation (writes per-second person counts for threshold tuning):
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\detect_human_segments.py `
+uv run python scripts\detect_human_segments.py `
   --video "storage\input\videos\<file>.mp4" --video-duration 3600 `
   --dump-samples tuning.json
 ```

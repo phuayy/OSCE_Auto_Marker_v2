@@ -688,8 +688,8 @@ class Settings:
         if missing:
             warnings.append(
                 "Human-detection segmentation is enabled but its dependencies are "
-                f"missing ({', '.join(missing)}). Install them (pip install torch "
-                "transformers) or set ENABLE_HUMAN_DETECTOR=false; long uploads "
+                f"missing ({', '.join(missing)}). Install them with 'uv sync' "
+                "or set ENABLE_HUMAN_DETECTOR=false; long uploads "
                 "selecting 'Human detection' will fall back to bell detection."
             )
         return warnings

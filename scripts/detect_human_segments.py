@@ -383,7 +383,7 @@ class PersonCounter:
         except ImportError as error:
             raise RuntimeError(
                 "Missing detector dependencies. Install with: "
-                "pip install torch transformers pillow numpy"
+                "uv sync"
             ) from error
 
         if self.config.device == "auto":

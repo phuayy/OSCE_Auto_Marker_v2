@@ -9,7 +9,7 @@ must still confirm as ONE session, anchored to the first 2-person sample.
 A genuine short blip must NOT confirm. The same tolerance must apply
 symmetrically at the end (clip cut-off) boundary.
 
-Run: OSCE-AI-FYP/.venv/Scripts/python.exe debug_scripts/test_segmentation_tuning.py
+Run: uv run python debug_scripts/test_segmentation_tuning.py
 """
 
 from __future__ import annotations

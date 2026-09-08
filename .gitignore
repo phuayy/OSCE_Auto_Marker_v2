@@ -24,6 +24,9 @@ venv/
 Thumbs.db
 *.log
 *.lock
+# uv.lock is the pinned Python resolution and must be committed, or an install
+# on another machine is no longer reproducible.
+!uv.lock
 
 # ============================================================
 # Environment files — keep real secrets private

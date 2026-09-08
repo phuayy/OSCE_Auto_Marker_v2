@@ -14,7 +14,14 @@ loadEnvFile(rootDir);
 
 const backendAppDir = path.join(rootDir, 'fastapi_backend');
 const viteBin = path.join(rootDir, 'node_modules', 'vite', 'bin', 'vite.js');
-const pythonBin = process.env.PYTHON_BIN || 'python';
+// uv owns the Python environment. "uv run" resolves the project's .venv itself,
+// so the dev server does not depend on an activated shell or on whichever
+// interpreter happens to be first on PATH — a bare "python" here picked up the
+// system install and started the API against the wrong dependency set.
+// PYTHON_BIN still overrides it for a hand-managed interpreter.
+const pythonOverride = process.env.PYTHON_BIN;
+const apiCommand = pythonOverride || (process.platform === 'win32' ? 'uv.exe' : 'uv');
+const apiCommandPrefix = pythonOverride ? [] : ['run', '--no-sync', 'python'];
 const DEFAULT_API_PORT = Number(process.env.API_PORT || 8787);
 const PORT_SCAN_LIMIT = 20;
 
@@ -196,8 +203,9 @@ async function startDevProcesses() {
 
   launch(
     'api',
-    pythonBin,
+    apiCommand,
     [
+      ...apiCommandPrefix,
       'scripts/run_api.py',
       '--reload',
       '--port',

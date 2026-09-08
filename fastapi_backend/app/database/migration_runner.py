@@ -130,7 +130,7 @@ async def run_database_migrations(database_source: Path | str) -> str | None:
         logger.warning(
             "Alembic is not installed, so migrations were skipped; the schema will "
             "fall back to create_all plus the additive-migration pass. Install it "
-            "with 'pip install alembic' to manage the schema properly."
+            "with 'uv sync' to manage the schema properly."
         )
         return None
 

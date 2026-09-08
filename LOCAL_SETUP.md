@@ -28,40 +28,60 @@ Install these first:
 
 From the project root:
 
+Dependencies are managed with [uv](https://docs.astral.sh/uv/). Install uv first
+(`winget install --id=astral-sh.uv`), then from the project root:
+
 ```powershell
 cd "C:\Users\yeeye\Downloads\OSCE Auto Marker\OSCE-AI-FYP"
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+uv sync
 ```
 
-If PowerShell blocks activation:
+That single command provisions Python 3.12 (the version in `.python-version`,
+downloading it if the machine does not have it), creates `.venv`, and installs
+the exact set pinned in `uv.lock`. There is no venv to create by hand and no
+activation step — prefix commands with `uv run` instead:
+
+```powershell
+uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+# expect: 2.8.0+cu128 True
+```
+
+The CUDA torch build is part of the lock (`[tool.uv.sources]` in
+`pyproject.toml` points `torch`/`torchaudio`/`torchvision` at PyTorch's cu128
+index), so there is no separate GPU reinstall step and no way for a later
+install to swap in CPU wheels. Likewise, WhisperX no longer needs installing
+apart from the rest: uv resolves it together with the torch pins, so the
+CUDA/PyTorch conflict that used to break `pip install -r requirements.txt`
+cannot occur. The API can still start without a working transcription stack, but
+processing a session needs a working `WHISPERX_BIN`.
+
+If you prefer an activated shell, `.\.venv\Scripts\Activate.ps1` still works —
+uv builds an ordinary virtual environment. If PowerShell blocks activation:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\Activate.ps1
 ```
 
-If `whisperx` fails because of a CUDA/PyTorch conflict, install the rest first,
-then install WhisperX separately in the same virtual environment according to
-the PyTorch/CUDA version on your machine. The API can still start without
-running transcription, but processing a session needs a working `WHISPERX_BIN`.
-
 ### Optional: the Canary-Qwen transcription engine
 
 WhisperX is the default and needs nothing more. To also offer **NVIDIA
-Canary-Qwen 2.5B** in *Settings -> Transcription*:
+Canary-Qwen 2.5B** in *Settings -> Transcription*, sync with the `canary`
+dependency group:
 
 ```powershell
-python -m pip install -r requirements-canary.txt
-python scripts\canary_qwen_transcribe.py --check   # prints "nemo-ready"
+uv sync --group canary
+uv run python scripts\canary_qwen_transcribe.py --check   # prints "nemo-ready"
 ```
+
+Pass `--group canary` on every later `uv sync` on that machine: a plain
+`uv sync` prunes the environment back to base + dev and removes NeMo again.
 
 The ~5 GB checkpoint downloads itself: the backend fetches it into the
 HuggingFace cache in the background at startup when Canary-Qwen is selected
 (`TRANSCRIPTION_PREFETCH_MODELS=true`, the default), and
-`python scripts\canary_qwen_transcribe.py --download` seeds the cache manually.
+`uv run python scripts\canary_qwen_transcribe.py --download` seeds the cache
+manually.
 
 ## 3. Install Frontend Dependencies
 
@@ -154,8 +174,7 @@ Manual two-terminal mode:
 
 ```powershell
 # Terminal 1
-.\.venv\Scripts\Activate.ps1
-python -m uvicorn app.main:app --app-dir fastapi_backend --reload --port 8787
+uv run python -m uvicorn app.main:app --app-dir fastapi_backend --reload --port 8787
 
 # Terminal 2
 npm run dev:client
@@ -318,15 +337,13 @@ APP_DATABASE_URL=postgresql://osce_app:osce_app_dev_password@localhost:5432/osce
 Run the API:
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-python -m uvicorn app.main:app --app-dir fastapi_backend --reload --port 8787
+uv run python -m uvicorn app.main:app --app-dir fastapi_backend --reload --port 8787
 ```
 
 Run the worker in another terminal:
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-python scripts\run_hatchet_worker.py
+uv run python scripts\run_hatchet_worker.py
 ```
 
 If running the module directly instead of the project-level helper, start it
@@ -376,8 +393,13 @@ python -c "import sys; sys.path.insert(0, 'fastapi_backend'); from app.queue.hat
 
 ## 9. Python Dependency Rationale
 
-The root `requirements.txt` is the canonical Python dependency file. The backend
-file `fastapi_backend/requirements.txt` points back to it to avoid drift.
+The root `pyproject.toml` is the canonical Python dependency file, and `uv.lock`
+is the exact resolution it produced. Both are committed; there is no separate
+backend requirements file to drift out of step. Three sets are declared there:
+the base `dependencies`, the `dev` group (`pytest`, `httpx` — installed by
+default, skip with `uv sync --no-dev`) and the `canary` group (NeMo, opt in with
+`uv sync --group canary`). All three are resolved into the one lock, so the
+optional engine cannot change what the base install gets.
 
 - `fastapi`: API framework used by `fastapi_backend/app/main.py`.
 - `uvicorn[standard]`: ASGI server and reload/runtime extras for local serving.

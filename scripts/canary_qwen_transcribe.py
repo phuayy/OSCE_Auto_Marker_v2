@@ -663,7 +663,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not nemo_available():
         print(
-            'The NeMo toolkit is not installed. Install it with: pip install "nemo_toolkit[asr]>=2.5"',
+            "The NeMo toolkit is not installed. Install it with: uv sync --group canary",
             file=sys.stderr,
         )
         return 3
