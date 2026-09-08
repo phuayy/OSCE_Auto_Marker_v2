@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -70,6 +71,28 @@ _MEMORY_ERROR_SIGNATURES = (
     "out of memory",
     "bad_alloc",
 )
+
+# Exit codes that mean the operating system killed the interpreter, so no
+# Python handler in the script ever ran and stderr holds only whatever NeMo had
+# already printed. Windows reports an NTSTATUS as an unsigned exit code; POSIX
+# reports a signal as a negative one, and the Linux OOM killer's SIGKILL
+# belongs here for exactly the same reason as the access violation.
+#
+# The access violation is the one this table was written for: with the commit
+# limit exhausted, torch's CPU allocator writes to a buffer Windows never gave
+# it, inside ``torch.nn.Linear.__init__`` while the Conformer encoder is being
+# built. It is fatal, it is silent, and it is identical on every attempt.
+FATAL_EXIT_CODES = {
+    3221225477: "0xC0000005 access violation",
+    3221225495: "0xC0000017 no memory available",
+    3221225725: "0xC00000FD stack overflow",
+    3221226505: "0xC0000409 stack buffer overrun",
+    -4: "SIGILL",
+    -6: "SIGABRT",
+    -9: "SIGKILL (killed by the OS, typically the out-of-memory killer)",
+    -11: "SIGSEGV",
+}
+_EXIT_CODE_PATTERN = re.compile(r"failed with exit code (-?\d+)")
 
 # How long an availability answer is reused. Long enough that polling the
 # settings screen does not start an interpreter per request, short enough that
@@ -170,6 +193,34 @@ def is_memory_exhaustion(text: str) -> bool:
     """
     lowered = str(text or "").lower()
     return any(signature in lowered for signature in _MEMORY_ERROR_SIGNATURES)
+
+
+def native_crash_reason(text: str) -> str | None:
+    """The fatal exit code in a runner failure, named, or ``None``.
+
+    A crashed subprocess is not a failed one: it produced no diagnosis, and the
+    only signal is the number the runner puts in its message. Without reading
+    it the queue sees a plain ``RuntimeError``, spends every attempt on a
+    ~40-second model load that dies the same way, and finally buries the
+    session under three lines of NeMo telemetry that explain nothing.
+    """
+    match = _EXIT_CODE_PATTERN.search(str(text or ""))
+    if match is None:
+        return None
+    return FATAL_EXIT_CODES.get(int(match.group(1)))
+
+
+def native_crash_message(model: str, reason: str) -> str:
+    """One operator-facing sentence for a subprocess the OS killed."""
+    return (
+        f"Loading {model} crashed the transcription subprocess ({reason}); it was killed by the "
+        "operating system before it could report anything. On Windows this is almost always the "
+        "commit limit: the checkpoint needs several gigabytes of RAM plus pagefile, and when the "
+        "charge is refused the allocator faults instead of raising. Raise the pagefile, free "
+        "memory, or select the WhisperX engine in Settings, which loads a much smaller model. "
+        "The subprocess writes the crashing Python stack to its log, which names the module that "
+        "was being built when it died."
+    )
 
 
 def memory_failure_message(model: str, text: str) -> str:
@@ -379,6 +430,9 @@ class CanaryQwenEngine(TranscriptionEngine):
             # keeps its original exception and its retry.
             if is_memory_exhaustion(str(error)):
                 raise TranscriptionResourceError(memory_failure_message(model, str(error))) from error
+            crash_reason = native_crash_reason(str(error))
+            if crash_reason is not None:
+                raise TranscriptionResourceError(native_crash_message(model, crash_reason)) from error
             raise
         if not output_path.exists():
             raise RuntimeError("Canary-Qwen transcription produced no output file.")

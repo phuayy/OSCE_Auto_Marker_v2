@@ -38,7 +38,10 @@ class TranscriptionResourceError(AppError):
     Raised when a model load dies of exhaustion rather than of anything about
     the recording: a Windows commit limit ("The paging file is too small for
     this operation to complete", OS error 1455), a CPU allocator refusal, or a
-    CUDA out-of-memory the engine could not fall back from.
+    CUDA out-of-memory the engine could not fall back from — or the same
+    shortage arriving as a crash rather than an exception, when the allocator
+    faults on memory the OS refused and the subprocess dies with an access
+    violation before any handler runs.
 
     It is a 507 — the server, not the request, is short — but deliberately
     **not retryable**: RAM, VRAM and the pagefile are the same size on the next

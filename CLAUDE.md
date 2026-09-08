@@ -395,6 +395,18 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 - An 8-second session-index poll drives all live state (cards AND per-clip run
   rows inside a long-session workspace). The backend SSE endpoint still exists
   but the frontend no longer consumes it.
+- The upload overlay's **Dismiss** hides the card and nothing else. The transfer
+  is never cancelled by it, so the phase cannot live in the overlay's state:
+  `lib/uploadTracking.js` keeps a session-keyed track (`preparing` →
+  `uploading` → `finalizing` → `done`/`failed`) with the byte count and the
+  start timestamp, and the session card renders it through the same gauge as
+  `describeProcessingStage`. While the transfer runs the server only knows
+  `waiting_for_upload`, so the client track answers; on `done` it is dropped and
+  the server-derived stage takes the card back over. Elapsed time is derived
+  from timestamps, not counted by an interval the overlay owns — which is why it
+  survives being dismissed. Both files are gauged as one transfer (combined
+  bytes), and a session uploading in this tab is un-enterable like any other
+  in-flight one.
 
 **Key state flows:**
 

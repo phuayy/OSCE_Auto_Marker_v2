@@ -10,6 +10,7 @@ import {
   describeProcessingStage,
   formatProcessingStageLabel,
 } from '@/lib/processingStage';
+import { UPLOAD_PHASE, useUploadTracker } from '@/lib/uploadTracking';
 import {
   ArrowLeft,
   BarChart3,
@@ -407,6 +408,17 @@ export default function OSCEAiMarkerMockup({
 
   const [isUploading, setIsUploading] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  // Per-session upload phase, owned by this tab (see lib/uploadTracking.js).
+  // It outlives the progress overlay: dismissing that card hides a view, the
+  // transfer keeps running and keeps reporting here, where the session card
+  // reads it.
+  const uploadTracker = useUploadTracker();
+  // Overlay visibility only. Deliberately separate from `isUploading`, which
+  // means "a transfer is in flight" and still gates the upload form.
+  const [uploadOverlayDismissed, setUploadOverlayDismissed] = useState(false);
+  // Session whose transfer this tab is currently driving, so the failure path
+  // can mark the right track without threading the id through every throw.
+  const activeUploadSessionIdRef = useRef(null);
   const [processingStage, setProcessingStage] = useState('pipeline');
   const [isDemoFallback, setIsDemoFallback] = useState(false);
   const [runtimeSeconds, setRuntimeSeconds] = useState(0);
@@ -1473,7 +1485,11 @@ export default function OSCEAiMarkerMockup({
   // gauges the current stage (see describeProcessingStage); this button
   // unlocks once processing reaches a terminal state.
   function renderSessionAction(sessionEntry) {
-    const inFlight = IN_FLIGHT_STATUSES.has(sessionEntry.status);
+    // An upload still in flight in this tab is as un-enterable as a running
+    // pipeline — the session has no video on disk yet — but the server still
+    // reports it as `waiting_for_upload`, so the status alone cannot say so.
+    const uploading = uploadTracker.isActive(sessionEntry.id);
+    const inFlight = uploading || IN_FLIGHT_STATUSES.has(sessionEntry.status);
 
     if (inFlight) {
       return (
@@ -1482,10 +1498,14 @@ export default function OSCEAiMarkerMockup({
           variant="outline"
           disabled
           className="gap-1"
-          title="Available when processing completes. Progress is shown on this card."
+          title={
+            uploading
+              ? 'Available once the upload finishes. Progress is shown on this card.'
+              : 'Available when processing completes. Progress is shown on this card.'
+          }
         >
           <Loader2 className="h-3 w-3 animate-spin" />
-          Processing…
+          {uploading ? 'Uploading…' : 'Processing…'}
         </Button>
       );
     }
@@ -2083,16 +2103,31 @@ export default function OSCEAiMarkerMockup({
       throw new Error('Async upload initiation did not return both file upload plans.');
     }
 
+    // The session now exists server-side (status `waiting_for_upload`), so it
+    // can carry the transfer's progress on its own card. Open the track before
+    // the first byte and pull the session into the list right away, so the card
+    // is already there if the user dismisses the overlay a second later.
+    activeUploadSessionIdRef.current = sessionId;
+    uploadTracker.begin(sessionId, videoFile.size + caseStudyFile.size);
+    refreshSessionIndex();
+
+    // Both files are one transfer as far as the user is concerned, so progress
+    // is reported against their combined size rather than restarting at 0% for
+    // the second file.
+    let bytesFromCompletedFiles = 0;
     const updateUploadProgress = (uploadedBytes, totalBytes, plan) => {
       const percent = totalBytes > 0 ? Math.round((uploadedBytes / totalBytes) * 100) : 0;
       const label = plan.kind === 'caseStudy' ? 'case study' : 'video';
       setProcessingMessage(`Uploading ${label} (${percent}%)...`);
       setLiveLogLine(`Uploaded ${label}: ${percent}%`);
+      uploadTracker.reportProgress(sessionId, bytesFromCompletedFiles + uploadedBytes, label);
     };
 
     await uploadFileParts(videoFile, videoPlan, updateUploadProgress);
+    bytesFromCompletedFiles += videoFile.size;
     await uploadFileParts(caseStudyFile, caseStudyPlan, updateUploadProgress);
 
+    uploadTracker.setPhase(sessionId, UPLOAD_PHASE.FINALIZING);
     setProcessingMessage('Finalizing upload and verifying media...');
     const completeResponse = await fetch(`/api/uploads/${initiateBody.uploadId}/complete`, {
       method: 'POST',
@@ -2106,6 +2141,13 @@ export default function OSCEAiMarkerMockup({
     // Upload is committed and the job is queued. Return the user to the main
     // page: the session card shows the live stage, other sessions stay fully
     // browsable, and this session unlocks when processing completes.
+    //
+    // The server's status now describes the session better than this tab can,
+    // so the client-side track stands down and `describeProcessingStage` takes
+    // the card back over.
+    uploadTracker.setPhase(sessionId, UPLOAD_PHASE.DONE);
+    uploadTracker.forget(sessionId);
+    activeUploadSessionIdRef.current = null;
     setSession(null);
     setIsUploading(false);
     setIsProcessing(false);
@@ -2226,6 +2268,10 @@ export default function OSCEAiMarkerMockup({
     });
     setProcessingStage(uploadFlow === 'long' ? 'autocrop' : 'pipeline');
     debugPipeline('[pipeline] started');
+    // A new run always opens with the overlay visible, whatever the user did
+    // with the previous one.
+    setUploadOverlayDismissed(false);
+    activeUploadSessionIdRef.current = null;
     setIsUploading(true);
     setIsProcessing(true);
     setProcessingMessage('Preparing cloud-ready upload...');
@@ -2241,9 +2287,15 @@ export default function OSCEAiMarkerMockup({
         await runLegacyUploadAssessment();
       }
     } catch (requestError) {
-      setError(`Upload failed: ${requestError.message || 'Unknown error. Check that the backend is running.'}`);
+      const message = requestError.message || 'Unknown error. Check that the backend is running.';
+      // The overlay may well be dismissed by now, so the failure has to be
+      // legible from the session card too: mark the track rather than only
+      // raising a banner the user might not be looking at.
+      uploadTracker.fail(activeUploadSessionIdRef.current, message);
+      setError(`Upload failed: ${message}`);
       setShowWorkspace(false);
     } finally {
+      activeUploadSessionIdRef.current = null;
       setIsUploading(false);
       setIsProcessing(false);
     }
@@ -3775,7 +3827,10 @@ export default function OSCEAiMarkerMockup({
                               {sessionEntry.id}
                             </div>
                             <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]">
-                              {(sessionEntry.status === 'assembling' || sessionEntry.status === 'queued' || sessionEntry.status === 'processing') && (
+                              {(uploadTracker.isActive(sessionEntry.id) ||
+                                sessionEntry.status === 'assembling' ||
+                                sessionEntry.status === 'queued' ||
+                                sessionEntry.status === 'processing') && (
                                 <Loader2 className="h-3 w-3 animate-spin text-cyan-600" />
                               )}
                               <span className={
@@ -3802,19 +3857,47 @@ export default function OSCEAiMarkerMockup({
                             {(() => {
                               // Stage gauge for in-flight sessions: the row is
                               // not enterable, so the card is where the user
-                              // tracks how far along processing is.
-                              const stage = describeProcessingStage(sessionEntry);
+                              // tracks how far along the run is.
+                              //
+                              // Two sources, one gauge. While this tab is still
+                              // sending bytes the server knows nothing but
+                              // "waiting_for_upload", so the client-side track
+                              // answers; once the upload is committed it stands
+                              // down and the server-derived stage takes over.
+                              const uploadStage = uploadTracker.describe(sessionEntry.id);
+                              const stage = uploadStage || describeProcessingStage(sessionEntry);
                               if (!stage) return null;
+                              const failed = Boolean(stage.failed);
                               return (
                                 <div className="mt-2">
-                                  <div className="flex items-center justify-between text-[11px] text-slate-600">
+                                  <div className="flex items-center justify-between gap-2 text-[11px] text-slate-600">
                                     {/* The stage's own percentage when the step
-                                        streams one (WhisperX), next to the
-                                        overall run completion on the right. */}
-                                    <span>{formatProcessingStageLabel(stage)}…</span>
-                                    <span>{Math.round(stage.fraction * 100)}%</span>
+                                        streams one (upload bytes, WhisperX),
+                                        next to the elapsed clock and the
+                                        completion on the right. */}
+                                    <span className={failed ? 'text-rose-600' : undefined}>
+                                      {formatProcessingStageLabel(stage)}
+                                      {failed ? '' : '…'}
+                                    </span>
+                                    <span className="flex shrink-0 items-center gap-1">
+                                      {stage.elapsedSeconds === undefined ? null : (
+                                        <>
+                                          <Clock3 className="h-3 w-3 text-slate-400" />
+                                          <span className="tabular-nums">
+                                            {formatRuntime(stage.elapsedSeconds)}
+                                          </span>
+                                          <span className="text-slate-300">·</span>
+                                        </>
+                                      )}
+                                      <span>{Math.round(stage.fraction * 100)}%</span>
+                                    </span>
                                   </div>
                                   <Progress value={stage.fraction * 100} className="mt-1 h-1.5" />
+                                  {failed && uploadTracker.tracks[sessionEntry.id]?.error ? (
+                                    <div className="mt-1 text-[11px] text-rose-600">
+                                      {uploadTracker.tracks[sessionEntry.id].error}
+                                    </div>
+                                  ) : null}
                                 </div>
                               );
                             })()}
@@ -5090,7 +5173,9 @@ export default function OSCEAiMarkerMockup({
       </AnimatePresence>
 
       <AnimatePresence>
-        {(isUploading || isProcessing) && (
+        {/* Dismissing this overlay hides it and nothing else — the transfer
+            keeps running and keeps reporting to the session card. */}
+        {(isUploading || isProcessing) && !uploadOverlayDismissed && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -5146,14 +5231,25 @@ export default function OSCEAiMarkerMockup({
                     </div>
                   )}
 
+                  {/* Hides the card only. Previously this also cleared the
+                      in-flight flags, which stopped the runtime clock and left
+                      the session card with a bare "waiting_for_upload" — while
+                      the transfer it appeared to cancel carried on regardless.
+                      The run now keeps its clock and its percentage on the
+                      Saved Sessions card. */}
                   <Button
                     variant="ghost"
                     size="sm"
                     className="w-full text-slate-400 hover:text-slate-600"
                     onClick={() => {
-                      setIsUploading(false);
-                      setIsProcessing(false);
+                      setUploadOverlayDismissed(true);
+                      setNotice(
+                        isUploading
+                          ? 'Upload still running. Track its time and progress on the session card below.'
+                          : 'Still running. Track its stage on the session card below.',
+                      );
                     }}
+                    title="Hide this card — the upload keeps running"
                   >
                     Dismiss
                   </Button>
