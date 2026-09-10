@@ -33,6 +33,10 @@ dependencies = [
 
     # Authentication.
     "bcrypt==5.0.0",
+    # AES-256-GCM for the provider API keys the settings screen stores.
+    # Already present transitively; pinned directly because app/core/secret_box.py
+    # imports it and a transitive dependency is free to drop it.
+    "cryptography==50.0.1",
 
     # Durable queue support. Local development can use SQLite plus in-process
     # workers; production uses Hatchet backed by PostgreSQL.

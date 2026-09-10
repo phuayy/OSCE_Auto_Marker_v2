@@ -25,6 +25,7 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any, Union
 
+from app.core.secret_box import redact_secrets
 from app.llm import credentials as credential_resolver
 from app.llm import registry
 from app.llm.base import ChatRequest, LLMError, ProviderCredentials, ReasoningPolicy
@@ -32,6 +33,7 @@ from app.llm.router import LLMRouter
 from app.llm.routing import LLMTarget, RoutingConfig
 from app.llm.runtime import retry_policy_from_env
 from app.repositories.app_settings_repository import AppSettingsRepository
+from app.services.provider_credential_service import ProviderCredentialService
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,7 @@ class LLMSettingsService:
         app_settings: AppSettingsRepository,
         *,
         key_overrides: KeyOverrideSource | None = None,
+        credential_store: ProviderCredentialService | None = None,
     ) -> None:
         self.app_settings = app_settings
         # Keys the API holds in memory but that are not in os.environ — the
@@ -61,6 +64,10 @@ class LLMSettingsService:
         # container is built before AuthService loads its secrets, so a snapshot
         # taken here would always be empty.
         self._key_overrides = key_overrides
+        # Keys the operator saved in the settings screen. Optional so a service
+        # built for a test, or a deployment that keeps every key in the
+        # environment, behaves exactly as it did before this existed.
+        self.credential_store = credential_store
 
     # --- credentials -------------------------------------------------------
 
@@ -75,18 +82,73 @@ class LLMSettingsService:
                 return {}
         return {key: value for key, value in dict(self._key_overrides).items() if value}
 
-    def credentials(self) -> dict[str, ProviderCredentials]:
-        return credential_resolver.resolve_all(overrides=self.key_overrides())
+    async def stored_keys(self) -> dict[str, str]:
+        """The keys saved through the settings screen, decrypted.
 
-    def providers(self) -> dict[str, Any]:
-        return registry.build_all(self.credentials())
+        Read live on every scoring call rather than cached, for the same reason
+        the model selection is: a key rotated in one process must apply to the
+        next run in every process — clip children and the Hatchet worker
+        included — with no restart. One indexed read per run is a cheap price
+        for that.
+        """
+        if self.credential_store is None:
+            return {}
+        try:
+            return await self.credential_store.api_keys()
+        except Exception:
+            # An unreadable credential table must not be the thing that fails a
+            # run: the environment may still carry a usable key.
+            logger.exception("Failed to read stored provider API keys; using the environment only.")
+            return {}
 
-    def configured_provider_ids(self) -> set[str]:
+    async def merged_overrides(self, extra: Mapping[str, str] | None = None) -> dict[str, str]:
+        """Every key this process holds outside os.environ, weakest first.
+
+        Order is the policy: a key saved in the settings screen beats one loaded
+        from the platform secrets file, which beats the environment (applied
+        last, inside ``resolve_credentials``). Rotation from the UI has to win,
+        or it is not rotation. ``extra`` is the un-saved key a connection test
+        was handed, which outranks everything for that one call only.
+        """
+        overrides = dict(self.key_overrides())
+        overrides.update(await self.stored_keys())
+        for provider_id, value in (extra or {}).items():
+            if str(value or "").strip():
+                overrides[provider_id] = str(value).strip()
+        return overrides
+
+    async def credentials(
+        self, *, extra_keys: Mapping[str, str] | None = None
+    ) -> dict[str, ProviderCredentials]:
+        return credential_resolver.resolve_all(overrides=await self.merged_overrides(extra_keys))
+
+    async def providers(self, *, extra_keys: Mapping[str, str] | None = None) -> dict[str, Any]:
+        return registry.build_all(await self.credentials(extra_keys=extra_keys))
+
+    async def configured_provider_ids(self) -> set[str]:
         return {
             provider_id
-            for provider_id, provider in self.providers().items()
+            for provider_id, provider in (await self.providers()).items()
             if provider.availability().available
         }
+
+    async def credential_sources(self) -> dict[str, str]:
+        """Where each provider's key is coming from right now: "app", the
+        settings screen; "environment", this deployment's env or secrets file;
+        "none", nowhere. Rendered in the settings screen so an operator can see
+        that a saved key is shadowing a stale ``.env`` entry rather than
+        wondering why the file they edited had no effect."""
+        stored = await self.stored_keys()
+        environment = credential_resolver.resolve_all(overrides=self.key_overrides())
+        sources: dict[str, str] = {}
+        for provider_id in registry.provider_ids():
+            if str(stored.get(provider_id) or "").strip():
+                sources[provider_id] = "app"
+            elif environment.get(provider_id, ProviderCredentials()).configured:
+                sources[provider_id] = "environment"
+            else:
+                sources[provider_id] = "none"
+        return sources
 
     # --- selection ---------------------------------------------------------
 
@@ -131,7 +193,7 @@ class LLMSettingsService:
         router rather than as "no target configured".
         """
         stored = await self.stored_routing()
-        usable = self.configured_provider_ids()
+        usable = await self.configured_provider_ids()
         primary = stored.primary if stored.primary.provider_id in usable else None
         fallbacks = tuple(target for target in stored.fallbacks if target.provider_id in usable)
 
@@ -156,19 +218,48 @@ class LLMSettingsService:
         config = await self.routing()
         env = dict(config.to_env())
         provider_ids = [target.provider_id for target in config.targets()]
-        env.update(credential_resolver.credential_env_for(provider_ids, overrides=self.key_overrides()))
+        env.update(
+            credential_resolver.credential_env_for(
+                provider_ids, overrides=await self.merged_overrides()
+            )
+        )
         return env
 
     # --- settings screen ---------------------------------------------------
 
     async def describe(self) -> dict[str, Any]:
-        """Every provider, its models, its availability, and the current choice."""
+        """Every provider, its models, its availability, its credential state,
+        and the current choice.
+
+        The credential block is metadata only - where the key came from, its last
+        four characters, when it was set, how the last test went. The key itself
+        is never part of this response, and there is no endpoint that returns
+        one: the settings screen is a place to *replace* a credential, not to
+        read one back.
+        """
         stored = await self.stored_routing()
         effective = await self.routing()
+        sources = await self.credential_sources()
+        statuses = await self.credential_statuses()
         providers: list[dict[str, Any]] = []
-        for provider_id, provider in self.providers().items():
+        for provider_id, provider in (await self.providers()).items():
             payload = provider.descriptor.to_public()
             payload["availability"] = provider.availability().to_public()
+            status = dict(statuses.get(provider_id) or {})
+            payload["credential"] = {
+                "source": sources.get(provider_id, "none"),
+                "configured": sources.get(provider_id, "none") != "none",
+                "maskedKey": status.get("maskedKey", ""),
+                "updatedAt": status.get("updatedAt", ""),
+                "updatedBy": status.get("updatedBy", ""),
+                "lastTestedAt": status.get("lastTestedAt", ""),
+                "lastTestOk": status.get("lastTestOk"),
+                "lastTestError": status.get("lastTestError", ""),
+                # False means the row exists but this deployment's master key
+                # cannot open it - the operator has to re-enter, and saying so
+                # is better than reporting the provider as simply unconfigured.
+                "readable": bool(status.get("readable", True)) if status else True,
+            }
             providers.append(payload)
         return {
             "providers": providers,
@@ -179,15 +270,54 @@ class LLMSettingsService:
             # operator learns their fallback is inert before a run proves it.
             "effective": effective.to_public(),
             "retry": effective.retry.to_public(),
+            "credentialStorage": self.credential_storage_status(),
         }
 
-    async def test_target(self, provider_id: str, model: str) -> dict[str, Any]:
+    async def credential_statuses(self) -> dict[str, dict[str, Any]]:
+        if self.credential_store is None:
+            return {}
+        try:
+            return await self.credential_store.statuses()
+        except Exception:
+            logger.exception("Failed to read stored provider API key metadata.")
+            return {}
+
+    def credential_storage_status(self) -> dict[str, Any]:
+        """Whether this server can store keys at all.
+
+        A deployment with no encryption key must say so rather than silently
+        refusing every save: the screen hides the key fields and points at
+        CREDENTIAL_ENCRYPTION_KEY instead.
+        """
+        if self.credential_store is None:
+            return {
+                "available": False,
+                "source": "",
+                "reason": "Credential storage is not enabled on this server.",
+            }
+        return self.credential_store.encryption_status()
+
+    async def test_target(
+        self,
+        provider_id: str,
+        model: str,
+        *,
+        api_key: str = "",
+    ) -> dict[str, Any]:
         """One real round trip to a provider, for the settings screen's Test button.
 
         Deliberately runs a *single* target with no fallback: the operator is
         asking about this provider, and silently succeeding via a different one
         would be the opposite of useful. Retries still apply, so a transient
         blip does not report a working provider as broken.
+
+        ``api_key`` probes a key that has *not* been saved. It is held for this
+        call only, never written and never logged, so a mistyped credential can
+        be caught before it replaces a working one. Without it the test uses
+        whatever the server would actually use for a scoring run - which is the
+        question an operator is really asking after a rotation - and the verdict
+        is recorded against the stored key so the screen still shows it after a
+        reload.
         """
         resolved_id = str(provider_id or "").strip()
         if resolved_id not in registry.PROVIDER_FACTORIES:
@@ -199,11 +329,23 @@ class LLMSettingsService:
                 "error": f"Unknown provider '{resolved_id}'. Available: {known}.",
             }
 
+        probe_key = str(api_key or "").strip()
         config = RoutingConfig(
             primary=LLMTarget(resolved_id, str(model or "").strip()),
             retry=retry_policy_from_env(),
         )
-        router = LLMRouter(self.providers(), config)
+        providers = await self.providers(
+            extra_keys={resolved_id: probe_key} if probe_key else None
+        )
+        # Whatever key this call will actually send, so it can be scrubbed out of
+        # any message that comes back. Some vendors quote the rejected credential
+        # in their 401 body, and that body is rendered in the browser and written
+        # to the log.
+        target_provider = providers.get(resolved_id)
+        sent_key = str(getattr(getattr(target_provider, "credentials", None), "api_key", "") or "")
+        secrets = tuple(value for value in (probe_key, sent_key) if value)
+        source = (await self.credential_sources()).get(resolved_id, "none")
+        router = LLMRouter(providers, config)
         request = ChatRequest(
             messages=[
                 {"role": "system", "content": "You are a connectivity probe. Answer with JSON only."},
@@ -222,30 +364,55 @@ class LLMSettingsService:
         try:
             response = await asyncio.to_thread(router.complete, request)
         except LLMError as error:
+            message = redact_secrets(error.message, secrets)
+            await self._remember_test(resolved_id, ok=False, error=message, probe=bool(probe_key))
             return {
                 "ok": False,
                 "providerId": resolved_id,
                 "model": config.primary.model,
-                "error": error.message,
+                "credentialSource": source,
+                "error": message,
                 "elapsedSeconds": round(time.monotonic() - started, 3),
-                "attempts": [record.to_public() for record in getattr(error, "attempts", ())],
+                "attempts": [
+                    {**record.to_public(), "error": redact_secrets(record.error, secrets)}
+                    for record in getattr(error, "attempts", ())
+                ],
             }
         except Exception as error:  # pragma: no cover - defensive
             logger.exception("LLM connection test raised an unexpected error.")
+            message = redact_secrets(f"{type(error).__name__}: {error}", secrets)
+            await self._remember_test(resolved_id, ok=False, error=message, probe=bool(probe_key))
             return {
                 "ok": False,
                 "providerId": resolved_id,
                 "model": config.primary.model,
-                "error": f"{type(error).__name__}: {error}",
+                "credentialSource": source,
+                "error": message,
                 "elapsedSeconds": round(time.monotonic() - started, 3),
             }
 
+        await self._remember_test(resolved_id, ok=True, error="", probe=bool(probe_key))
         return {
             "ok": True,
             "providerId": response.provider_id,
             "model": response.model,
             "mode": response.mode,
+            "credentialSource": source,
             "elapsedSeconds": round(time.monotonic() - started, 3),
             "attempts": [record.to_public() for record in response.attempts],
             "usage": dict(response.usage or {}),
         }
+
+    async def _remember_test(self, provider_id: str, *, ok: bool, error: str, probe: bool) -> None:
+        """Persist a verdict against the *stored* key only.
+
+        A probe of an unsaved key says nothing about the key on the row, so
+        writing its result there would put a red cross next to a credential that
+        still works.
+        """
+        if probe or self.credential_store is None:
+            return
+        try:
+            await self.credential_store.record_test(provider_id, ok=ok, error=error)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to record the connection-test result for '%s'.", provider_id)

@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import CorporaManager from '@/CorporaManager.jsx';
 import LlmRoutingSettings from '@/LlmRoutingSettings.jsx';
+import ProviderKeysSettings from '@/ProviderKeysSettings.jsx';
 import TranscriptionEngineSettings from '@/TranscriptionEngineSettings.jsx';
 import WebhooksManager from '@/WebhooksManager.jsx';
 
@@ -15,6 +16,11 @@ export default function SettingsPage({ onBack }) {
   const [loadError, setLoadError] = useState('');
   const [saveError, setSaveError] = useState('');
   const [saving, setSaving] = useState(false);
+  // Bumped whenever the model card or the API-keys card writes something the
+  // other one renders. Saving a key changes which providers are usable, and
+  // saving a model changes which key matters, so neither card can be the sole
+  // owner of that state.
+  const [providersVersion, setProvidersVersion] = useState(0);
 
   async function loadSettings() {
     setLoadError('');
@@ -94,7 +100,15 @@ export default function SettingsPage({ onBack }) {
 
         <TranscriptionEngineSettings />
 
-        <LlmRoutingSettings />
+        <LlmRoutingSettings
+          version={providersVersion}
+          onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
+        />
+
+        <ProviderKeysSettings
+          version={providersVersion}
+          onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
+        />
 
         <Card className="border-slate-200 bg-white shadow-sm">
           <CardHeader>

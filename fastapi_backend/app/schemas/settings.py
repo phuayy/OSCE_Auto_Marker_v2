@@ -51,6 +51,11 @@ class TestLLMTargetRequest(BaseModel):
 
     providerId: str
     model: str = ""
+    # An unsaved key to probe. Held for the one call and never persisted, so a
+    # mistyped credential is caught before it overwrites a working one. Omitted
+    # (the normal case), the test uses whatever the server would actually use
+    # for a scoring run.
+    apiKey: str = ""
 
     @field_validator("providerId")
     @classmethod
@@ -62,6 +67,37 @@ class TestLLMTargetRequest(BaseModel):
             known = ", ".join(llm_registry.provider_ids())
             raise ValueError(f"Unknown LLM provider '{provider_id}'. Available: {known}.")
         return provider_id
+
+    @field_validator("apiKey")
+    @classmethod
+    def trimmed_key(cls, value: str) -> str:
+        return str(value or "").strip()
+
+
+class SetProviderKeyRequest(BaseModel):
+    """Body of the API-key field in the credentials card.
+
+    Only the key. The provider is a path parameter so the value never travels in
+    a position where it could be confused for one, and there is deliberately no
+    GET counterpart: this endpoint writes credentials, nothing reads them back.
+
+    Format is not validated against a vendor's prefix on purpose. Vendors change
+    their key formats, and rejecting a valid new-format key would leave an
+    operator unable to configure a working provider; the connection test is the
+    check that actually proves a key.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    apiKey: str
+
+    @field_validator("apiKey")
+    @classmethod
+    def present(cls, value: str) -> str:
+        key = str(value or "").strip()
+        if not key:
+            raise ValueError("apiKey is required.")
+        return key
 
 
 class UpdateSettingsRequest(BaseModel):

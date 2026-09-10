@@ -270,6 +270,40 @@ class AppSettingRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 
+class ProviderCredentialRecord(Base):
+    """One scoring provider's API key, sealed with this deployment's master key.
+
+    Deliberately not a row in ``app_settings``. That table is returned verbatim
+    by ``GET /api/settings`` and is the screen's own state; a credential put
+    there would be readable by anyone who can open settings and would ride along
+    in every database backup as plaintext. This table is never serialised to a
+    client: the API answers with ``last4`` and timestamps only.
+
+    ``key_fingerprint`` identifies the master key that sealed ``ciphertext``, so
+    a deployment whose key was rotated or lost reports "re-enter this key"
+    rather than decrypting to nonsense. ``nonce`` is per-write, never reused.
+    """
+
+    __tablename__ = "provider_credentials"
+
+    provider_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    nonce: Mapped[str] = mapped_column(String(64), nullable=False)
+    key_fingerprint: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    # Last four characters of the key, so an operator can tell which credential
+    # is installed without the server ever handing the credential back.
+    last4: Mapped[str] = mapped_column(String(8), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # Outcome of the last connection test run against this key. Kept on the row
+    # so the settings screen can show "verified 10 minutes ago" after a reload
+    # instead of forgetting every probe the moment the page is closed.
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_test_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    last_test_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class SessionRecord(Base):
     __tablename__ = "sessions"
     __table_args__ = (

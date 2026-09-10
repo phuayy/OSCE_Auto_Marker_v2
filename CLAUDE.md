@@ -40,13 +40,15 @@ OSCE-AI-FYP/
 │   │   └── versions/
 │   │       ├── 0001_initial_schema.py            # Baseline: ORM tables + raw-SQL jobs tables
 │   │       ├── 0002_notification_event_type.py   # notifications.event_type + backfill
-│   │       └── 0003_change_tracking_triggers.py  # table_versions triggers (+ pg_notify)
+│   │       ├── 0003_change_tracking_triggers.py  # table_versions triggers (+ pg_notify)
+│   │       └── 0004_provider_credentials.py      # encrypted operator-managed LLM API keys
 │   └── app/
 │       ├── main.py             # FastAPI app, middleware, startup/shutdown
 │       ├── core/
 │       │   ├── config.py       # Settings (pydantic-settings), all env vars
 │       │   ├── process.py      # CommandRunner — async subprocess wrapper
 │       │   ├── rate_limit.py   # FixedWindowRateLimiter (login endpoint)
+│       │   ├── secret_box.py   # AES-256-GCM for operator-entered secrets at rest
 │       │   ├── tasks.py        # BackgroundTaskRegistry (strong-ref fire-and-forget)
 │       │   ├── token_revocation.py
 │       │   └── logging_utils.py # log_context() structured logging helper
@@ -58,6 +60,7 @@ OSCE-AI-FYP/
 │       ├── repositories/
 │       │   ├── session_repository.py    # SessionRecord CRUD + legacy JSON migration
 │       │   ├── job_repository.py        # Raw SQL jobs store
+│       │   ├── provider_credential_repository.py  # Sealed LLM API keys (ciphertext only)
 │       │   ├── assessment_repository.py
 │       │   ├── rubric_asset_repository.py
 │       │   ├── upload_repository.py     # JSON files on disk (uploads_dir)
@@ -66,6 +69,7 @@ OSCE-AI-FYP/
 │       │   ├── container.py             # AppContainer + create_container() — DI root
 │       │   ├── transcription_router.py  # Picks + runs the selected engine per run
 │       │   ├── llm_settings_service.py  # Resolves the primary/fallback model choice; subprocess env
+│       │   ├── provider_credential_service.py  # Set/rotate/revoke provider API keys, encrypted
 │       │   ├── session_service.py
 │       │   ├── pipeline_service.py      # Orchestrates full assessment pipeline
 │       │   ├── clip_service.py          # Auto-crop, clip export planning/execution, clip assessment
@@ -154,7 +158,8 @@ AppContainer
  ├── assessments       AssessmentService -> AssessmentRepository(orm_database)
  ├── rubrics           RubricService
  ├── media             MediaPipeline(settings, runner, events, auth)
- ├── llm_settings      LLMSettingsService(app_settings, key_overrides=lambda: nvidia key)
+ ├── provider_credentials ProviderCredentialService(repo, master_key_source=auth secret)
+ ├── llm_settings      LLMSettingsService(app_settings, key_overrides, credential_store)
  ├── scoring           ScoringPipeline(settings, runner, events, auth, rubrics, llm_settings)
  ├── pipeline          PipelineService(sessions, events, media, scoring, assessments)
  ├── clips             ClipService(sessions, events, media, pipeline, jobs)
@@ -335,6 +340,7 @@ Defined in [models.py](fastapi_backend/app/database/models.py):
 | `assessment_results` | `AssessmentResultRecord` | Per-scorer result + scores |
 | `assessment_criteria` | `AssessmentCriterionRecord` | Per-rubric-criterion evidence |
 | `notifications` | `NotificationRecord` | Task-completion notification history; `read_at` null = unread |
+| `provider_credentials` | `ProviderCredentialRecord` | Per-provider LLM API key as AES-256-GCM ciphertext; never serialised to a client |
 
 Jobs table (`jobs`, `job_events`) managed by raw SQL via `JobRepository` / `Database`.
 
@@ -457,7 +463,8 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 | `GCS_SIGNED_URL_TTL_SECONDS` | `3600` | Lifetime of V4 signed playback URLs |
 | `DATABASE_URL` | SQLite in storage/ | PostgreSQL or SQLite URL |
 | `DB_AUTO_MIGRATE` | `true` | Run `alembic upgrade head` at startup; false = migrate as a deploy step |
-| `NVIDIA_API_KEY` | — | Credentials for the NVIDIA scoring provider (also the default when nothing is selected) |
+| `CREDENTIAL_ENCRYPTION_KEY` | derived from `AUTH_SECRET` | Master key (32 bytes, base64 or hex) for the provider API keys saved in Settings. Changing it makes stored keys unreadable and the screen asks for them again |
+| `NVIDIA_API_KEY` | — | Credentials for the NVIDIA scoring provider (also the default when nothing is selected). Overridden by a key saved in Settings for the same provider |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` / `OPENROUTER_API_KEY` | — | Credentials for the other scoring providers. A provider with no key is shown as unavailable in Settings and dropped from routing |
 | `<PROVIDER>_BASE_URL` | vendor default | Endpoint override per provider (proxy, gateway, regional endpoint) |
 | `LLM_MAX_ATTEMPTS_PER_MODE` | `3` | Attempts per request shape before the router degrades the shape |
@@ -578,10 +585,27 @@ dropped, or one with no API key on this machine, is removed and the first usable
 fallback is promoted. If filtering would empty the list the raw selection is
 kept, so the failure names the missing credential instead of saying "no target".
 
-**Keys never enter the database.** `app_settings` is dumped verbatim to anyone
-who can open the settings screen and ends up in backups; it stores *which*
-provider, while the deployment's environment stores how to authenticate. The
-serialised routing blob is therefore safe to log.
+**Keys are operator-managed, encrypted, and write-only.** Settings → Provider
+API keys sets one key per *platform* (an OpenRouter key covers every model
+OpenRouter offers), so rotating a leaked credential is a thirty-second action in
+the browser rather than an ssh session plus a restart. What makes that safe:
+
+| Concern | How it is handled |
+|---|---|
+| Database dump | Row is AES-256-GCM ciphertext (`app/core/secret_box.py`); the master key comes from `CREDENTIAL_ENCRYPTION_KEY`, or is HKDF-derived from the deployment's auth secret |
+| Row swapped between providers | Provider id is the AEAD's additional authenticated data, so a moved ciphertext fails to open |
+| Settings screen leaking it | Nothing reads a key back. `GET /api/settings/llm-providers` carries `last4`, source and the last test verdict only, and there is no GET counterpart to the write endpoint |
+| `app_settings` disclosure | Keys are never stored there — that table is returned verbatim to every settings reader |
+| Vendor echoing the key in a 401 | Every provider message passes through `redact_secrets` before it reaches a response or a log |
+| Subprocess blast radius | `credential_env_for` forwards only the providers the routing actually names |
+| Master key rotated or lost | `key_fingerprint` on the row makes it read as *unreadable*; the screen asks for a re-entry instead of decrypting to garbage |
+
+Precedence is **saved key > platform secrets file > environment**, because a
+rotation performed in the UI has to win over a stale `.env`; the screen labels
+which source is in force. Keys are read live per run like the model selection,
+so a rotation applies to the next assessment in every process — clip children
+and the Hatchet worker included — with no restart. The serialised routing blob
+stays credential-free and safe to log.
 
 **Subprocesses get the same answer.** `ScoringPipeline.scoring_env()` and
 `TranscriptPreprocessor.preprocess_env()` serialise the resolved routing into
@@ -600,3 +624,12 @@ a resumed run does not relabel a half-finished sheet.
 target (no fallback — the operator is asking about *that* provider) so a bad key
 surfaces in the settings screen rather than forty minutes into a run. It always
 returns 200: a failed probe is a result the screen renders, not an API error.
+An optional `apiKey` in the body probes a key that has **not** been saved — held
+for that one call, never written — so a mistyped credential is caught before it
+replaces a working one. Without it the test uses the key the server would
+actually use, and the verdict is recorded on the row so the screen still shows
+it after a reload.
+
+`PUT` / `DELETE /api/settings/llm-providers/{providerId}/key` store and revoke.
+Both answer with the same provider description every other settings read gets,
+so the screen refreshes in one round trip without the key travelling back.

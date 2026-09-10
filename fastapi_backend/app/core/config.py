@@ -245,6 +245,15 @@ class Settings:
     default_admin_username: str = os.getenv("DEFAULT_ADMIN_USERNAME", "admin")
     default_admin_password: str = os.getenv("DEFAULT_ADMIN_PASSWORD", "")
     auth_bcrypt_rounds: int = read_int_env("AUTH_BCRYPT_ROUNDS", 12)
+    # Master key for the provider API keys the settings screen stores, as 32
+    # bytes in base64 or 64 hex characters. Left empty, the key is derived from
+    # this deployment's auth secret (HKDF, separate info label), which keeps a
+    # fresh install encrypted at rest with no extra setup. Set it explicitly in
+    # production: a key held by the platform's secret store rather than derived
+    # from a file next to the database is what makes a stolen database dump
+    # useless on its own. Changing it makes existing stored keys unreadable, and
+    # the settings screen asks for them to be re-entered.
+    credential_encryption_key: str = os.getenv("CREDENTIAL_ENCRYPTION_KEY", "").strip()
     # When True, /media/* static artifacts require a valid bearer token or a
     # short-lived stream ticket. Disable only for fully trusted local setups.
     protect_media_endpoints: bool = read_bool_env("PROTECT_MEDIA_ENDPOINTS", True)

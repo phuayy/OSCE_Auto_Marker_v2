@@ -30,7 +30,7 @@ import {
 // this file. The choice applies to every future run: content scoring,
 // communication scoring and transcript preprocessing, including per-clip runs
 // and the Hatchet worker.
-export default function LlmRoutingSettings() {
+export default function LlmRoutingSettings({ version = 0, onProvidersChanged }) {
   const [description, setDescription] = useState(null); // null = never loaded
   const [loadError, setLoadError] = useState('');
   const [saveError, setSaveError] = useState('');
@@ -68,7 +68,9 @@ export default function LlmRoutingSettings() {
 
   useEffect(() => {
     loadProviders();
-  }, []);
+    // Re-reads when the API-keys card saves or removes a key: availability, and
+    // therefore which targets would actually run, changes underneath this form.
+  }, [version]);
 
   const primaryProvider = useMemo(
     () => findProvider(description, primary.providerId),
@@ -126,6 +128,7 @@ export default function LlmRoutingSettings() {
       // Re-read so the "what will actually run" line reflects the server's own
       // filtering rather than what this form believes it just saved.
       await loadProviders();
+      if (onProvidersChanged) onProvidersChanged();
     } catch (error) {
       setSaveError(error.message || 'Failed to save the scoring model.');
     } finally {
@@ -282,7 +285,8 @@ export default function LlmRoutingSettings() {
 
         {provider && !isProviderReady(provider) ? (
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
-            {provider.requirements || provider.availability?.reason}
+            No API key for {provider.label}. Add one in <span className="font-semibold">Provider API keys</span>{' '}
+            below — it applies immediately, with no restart.
           </div>
         ) : null}
 

@@ -20,10 +20,12 @@ from app.pipeline.transcription.registry import EngineDependencies
 from app.pipeline.scoring import ScoringPipeline
 from app.repositories.app_settings_repository import AppSettingsRepository
 from app.services.llm_settings_service import LLMSettingsService
+from app.services.provider_credential_service import ProviderCredentialService
 from app.repositories.assessment_repository import AssessmentRepository
 from app.repositories.corpus_repository import CorpusRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.notification_repository import NotificationRepository
+from app.repositories.provider_credential_repository import ProviderCredentialRepository
 from app.repositories.rubric_asset_repository import RubricAssetRepository
 from app.repositories.session_repository import SessionRepository
 from app.repositories.webhook_repository import WebhookRepository
@@ -78,6 +80,7 @@ class AppContainer:
     corpora: CorpusRepository
     app_settings: AppSettingsRepository
     llm_settings: LLMSettingsService
+    provider_credentials: ProviderCredentialService
     videos: VideoRepository
     session_maintenance: SessionMaintenanceService
     login_rate_limiter: FixedWindowRateLimiter
@@ -191,9 +194,19 @@ def create_container(settings: Settings | None = None) -> AppContainer:
     # The NVIDIA key can arrive from the platform secrets file rather than
     # os.environ, and AuthService only reads it during startup() — after this
     # container is built. Passing a callable defers the lookup to call time.
+    # Operator-managed API keys, encrypted with a key derived from the auth
+    # secret unless CREDENTIAL_ENCRYPTION_KEY says otherwise. The secret is read
+    # through a callable for the same reason the NVIDIA override is: AuthService
+    # only loads it during startup(), after this container exists.
+    provider_credentials = ProviderCredentialService(
+        ProviderCredentialRepository(orm_database),
+        master_key_source=lambda: auth.runtime.auth_secret,
+        env_key=active_settings.credential_encryption_key,
+    )
     llm_settings = LLMSettingsService(
         app_settings,
         key_overrides=lambda: {"nvidia": auth.runtime.nvidia_api_key},
+        credential_store=provider_credentials,
     )
     scoring = ScoringPipeline(active_settings, runner, events, auth, rubrics, llm_settings=llm_settings)
     webhooks = WebhookRepository(orm_database)
@@ -276,6 +289,7 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         corpora=corpora,
         app_settings=app_settings,
         llm_settings=llm_settings,
+        provider_credentials=provider_credentials,
         videos=videos,
         session_maintenance=session_maintenance,
         login_rate_limiter=login_rate_limiter,

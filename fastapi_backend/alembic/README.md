@@ -35,6 +35,7 @@ alembic -x db_url=postgresql+psycopg://user:pass@host/db upgrade head
 | `0001_initial_schema` | Baseline: every ORM table plus the raw-SQL jobs tables. Mirrors the schema the old `create_all` startup path produced, minus `notifications.event_type`. |
 | `0002_notification_event_type` | Adds `notifications.event_type` and backfills legacy rows to `scoring.completed`. Mirrors the `ADDITIVE_MIGRATIONS` entry in `app/database/migrations.py`. |
 | `0003_change_tracking_triggers` | Installs the per-table triggers that bump `table_versions.version` (and `pg_notify` on PostgreSQL). Mirrors `install_change_tracking()`. |
+| `0004_provider_credentials` | Adds `provider_credentials`: the operator-managed LLM API keys, stored as AES-256-GCM ciphertext bound to their provider id. Never in `app_settings`, which is returned verbatim by `GET /api/settings`. |
 
 Revision files are self-contained snapshots — they never import
 `app.database.models` or `app.database.schema`. A migration has to keep

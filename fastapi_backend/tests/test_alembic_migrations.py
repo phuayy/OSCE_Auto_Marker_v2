@@ -23,6 +23,23 @@ pytest.importorskip("alembic", reason="Alembic is an optional install for the sc
 JOBS_TABLES = {"jobs", "job_attempts", "job_events"}
 
 
+def _head_revision() -> str:
+    """Whatever the versions directory currently tops out at.
+
+    Read from the scripts rather than pinned to a literal: these tests assert
+    that a migrated database lands on *head*, which is a property that must keep
+    holding as revisions are added, not a claim about which revision is newest.
+    """
+    from alembic.script import ScriptDirectory
+
+    from app.database.migration_runner import ALEMBIC_SCRIPTS
+
+    return ScriptDirectory(str(ALEMBIC_SCRIPTS)).get_current_head()
+
+
+HEAD_REVISION = _head_revision()
+
+
 def _sync_url(path) -> str:
     return to_sync_url(OrmDatabase._normalize_url(path))
 
@@ -57,7 +74,7 @@ def test_upgrade_builds_the_whole_schema_from_empty(tmp_path) -> None:
     tables = _tables(database_path)
     assert set(Base.metadata.tables) <= tables
     assert JOBS_TABLES <= tables
-    assert _stamped_revision(database_path) == "0003"
+    assert _stamped_revision(database_path) == HEAD_REVISION
 
 
 def test_event_type_column_and_backfill_are_applied(tmp_path) -> None:
@@ -105,7 +122,7 @@ def test_rerunning_upgrade_is_a_no_op(tmp_path) -> None:
 
     assert asyncio.run(run_database_migrations(database_path)) == "created"
     assert asyncio.run(run_database_migrations(database_path)) == "upgraded"
-    assert _stamped_revision(database_path) == "0003"
+    assert _stamped_revision(database_path) == HEAD_REVISION
 
 
 def test_pre_alembic_database_is_adopted_and_then_upgraded(tmp_path) -> None:
@@ -129,7 +146,7 @@ def test_pre_alembic_database_is_adopted_and_then_upgraded(tmp_path) -> None:
     action = asyncio.run(run_database_migrations(database_path))
 
     assert action == "adopted"
-    assert _stamped_revision(database_path) == "0003"
+    assert _stamped_revision(database_path) == HEAD_REVISION
 
 
 def test_legacy_rows_are_backfilled_when_a_database_is_adopted(tmp_path) -> None:

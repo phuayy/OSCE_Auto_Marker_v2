@@ -19,6 +19,7 @@ from app.api.routes import (
     jobs,
     notifications,
     sessions,
+    settings as settings_routes,
     uploads,
     webhooks,
 )
@@ -90,6 +91,7 @@ def build_test_client(tmp_path: Path) -> TestClient:
     app.include_router(notifications.router, prefix="/api")
     app.include_router(events_routes.router, prefix="/api")
     app.include_router(webhooks.router, prefix="/api")
+    app.include_router(settings_routes.router, prefix="/api")
     return TestClient(app)
 
 
