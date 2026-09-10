@@ -11,6 +11,7 @@ from uuid import uuid4
 from app.core.exceptions import AppError
 from app.core.logging_utils import log_context
 from app.domain.notifications import NotificationType
+from app.pipeline import person_presets
 from app.pipeline.media import MediaPipeline
 from app.services.event_service import EventService
 from app.services.pipeline_service import PipelineService
@@ -57,6 +58,18 @@ class ClipService:
         if requested in {"bells", "person"}:
             return requested
         return self.media.settings.auto_crop_segmentation_default
+
+    @staticmethod
+    def _resolve_person_options(session: dict[str, Any]) -> dict[str, Any]:
+        """Occupancy rule for this session's person detection.
+
+        Lenient by design: the upload API is what rejects a bad preset, and by
+        the time a job runs the only useful answer to an unrecognised value is
+        the default rule — a session that has been uploaded and queued must not
+        die on a name this build no longer ships.
+        """
+        stored = session.get("segmentationOptions")
+        return person_presets.resolve_options(stored if isinstance(stored, dict) else None)
 
     async def auto_crop_session_by_id(self, session_id: str, *, allow_processing: bool = False) -> dict[str, Any]:
         session = await self.sessions.read(session_id)
@@ -186,10 +199,17 @@ class ClipService:
         """
         session_id = str(session.get("id") or "")
         if method == "person":
+            options = self._resolve_person_options(session)
             await self.events.publish(
                 session_id,
                 "log",
-                {"source": "autocrop", "message": "Sampling frames and detecting people (RT-DETR)..."},
+                {
+                    "source": "autocrop",
+                    "message": (
+                        "Sampling frames and detecting people (RT-DETR), occupancy rule "
+                        f"'{options['preset']}': at least {options['minPeople']} person(s) on screen."
+                    ),
+                },
             )
             # Readings arrive from the subprocess reader threads; the lock makes
             # the session document a single-writer resource for their duration.
@@ -199,6 +219,7 @@ class ClipService:
                     video_path,
                     video_duration,
                     session_id=session_id,
+                    options=options,
                     on_progress=lambda percent: self._record_segmentation_progress(
                         session, PERSON_DETECTION_STEP, percent, lock=progress_lock
                     ),

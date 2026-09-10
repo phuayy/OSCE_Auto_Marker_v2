@@ -19,6 +19,8 @@ async def upload_session(
     caseStudy: UploadFile | None = File(None),
     sessionName: str | None = Form(None),
     segmentation: str | None = Form(None),
+    # JSON object string — multipart cannot carry a nested object any other way.
+    segmentationOptions: str | None = Form(None),
     workflow: str | None = Form(None),
     corpusId: str | None = Form(None),
     container: AppContainer = Depends(get_container),
@@ -29,7 +31,11 @@ async def upload_session(
         # identical invariants (trimmed/bounded name, known workflow, known
         # segmentation, segmentation only meaningful for long uploads).
         form = LegacyUploadForm(
-            sessionName=sessionName, segmentation=segmentation, workflow=workflow, corpusId=corpusId
+            sessionName=sessionName,
+            segmentation=segmentation,
+            segmentationOptions=segmentationOptions,
+            workflow=workflow,
+            corpusId=corpusId,
         )
         container.artifacts.validate_video_upload(video)
         container.artifacts.validate_pdf_upload(caseStudy, field_name="caseStudy")
@@ -78,6 +84,7 @@ async def upload_session(
             # leaves a window where the session looks like a standard one.
             "workflow": form.workflow,
             "segmentation": form.segmentation,
+            "segmentationOptions": form.resolved_segmentation_options(),
             "corpus": corpus_snapshot,
             "pipeline": {
                 "startedAt": None,

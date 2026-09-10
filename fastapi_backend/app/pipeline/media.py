@@ -13,6 +13,7 @@ from app.core.exceptions import EmptyTranscriptError
 from app.core.json_utils import extract_json_object
 from app.core.process import CommandRunner
 from app.core.utils import atomic_replace, clamp_number, format_timestamp, utc_now_iso
+from app.pipeline import person_presets
 from app.pipeline.whisperx_options import WhisperxRunOptions
 from app.pipeline.progress_tracker import ProgressTracker
 from app.services.auth_service import AuthService
@@ -521,6 +522,7 @@ class MediaPipeline:
         *,
         session_id: str | None = None,
         on_progress: ProgressCallback | None = None,
+        options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Detect student clip ranges from person presence (RT-DETR).
 
@@ -534,6 +536,12 @@ class MediaPipeline:
         only thing it writes for minutes at a time, so a caller that persists
         these readings is also what keeps the session's change stream alive
         while it runs.
+
+        ``options`` is the resolved occupancy rule (see
+        ``app/pipeline/person_presets.py``). It is passed as explicit numbers
+        rather than as a preset name so the subprocess cannot resolve the same
+        session differently from the caller that queued it; the name travels
+        too, purely so the run's log and payload say which rule was picked.
         """
         if not self.settings.enable_human_detector:
             raise RuntimeError("Human detector is disabled (ENABLE_HUMAN_DETECTOR=false).")
@@ -554,6 +562,18 @@ class MediaPipeline:
             str(self.settings.human_detector_start_offset_seconds),
             "--workers",
             str(max(1, self.settings.human_detector_workers)),
+        ]
+
+        resolved_options = person_presets.resolve_options(options)
+        args += [
+            "--preset",
+            str(resolved_options["preset"]),
+            "--min-people",
+            str(resolved_options["minPeople"]),
+            "--min-box-height-ratio",
+            str(resolved_options["minBoxHeightRatio"]),
+            "--min-session-seconds",
+            str(resolved_options["minSessionSeconds"]),
         ]
 
         # The detector counts once, straight through, so a single span — unlike
@@ -621,7 +641,15 @@ class MediaPipeline:
                 "confidence": payload.get("confidence"),
                 "sampleFps": payload.get("sample_fps"),
                 "sampledFrames": int(payload.get("sampled_frames") or 0),
+                # The rule the detector actually ran with, read back from its
+                # own payload — after a fallback or a clamp that can differ from
+                # what was requested, and the clip list should record what
+                # produced it.
+                "preset": str(payload.get("preset") or resolved_options["preset"]),
                 "minPeople": int(payload.get("min_people") or 2),
+                "minBoxHeightRatio": payload.get("min_box_height_ratio"),
+                "minSessionSeconds": payload.get("min_session_seconds"),
+                "rejectedSmallBoxes": int(debug.get("rejected_small_boxes") or 0),
                 "endAfterSeconds": payload.get("end_after_seconds"),
                 "startAfterSeconds": payload.get("start_after_seconds"),
                 "personCountHistogram": payload.get("person_count_histogram") or {},

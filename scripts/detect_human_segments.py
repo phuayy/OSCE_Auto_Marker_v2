@@ -7,7 +7,16 @@ with an RT-DETR object detector, and derives student clip ranges from
 sustained changes in person count:
 
 * A session is ACTIVE while at least ``--min-people`` (default 2: the student
-  plus the patient/examiner) are visible.
+  plus the patient/examiner) are visible. A detection only counts as a person
+  when its box is at least ``--min-box-height-ratio`` of the frame height —
+  the filter that stops a hand or shoulder intruding at the edge of the frame
+  from being counted as a whole extra person (0, the default, disables it).
+* Confirmed sessions shorter than ``--min-session-seconds`` are discarded — a
+  second, independent guard against a burst of false positives opening a clip.
+* ``--preset`` bundles those three numbers into the camera scenarios the
+  operator actually picks from (pair / pair_strict / solo / custom); see
+  ``fastapi_backend/app/pipeline/person_presets.py`` for the measurements
+  behind each. Explicit flags override whatever the preset chose.
 * Boundaries are confirmed with a tolerant **N-of-M window** (the standard
   debounce for noisy boolean sensors): a session STARTS at the first sample
   that crossed the threshold once a full ``--start-after-seconds`` window
@@ -118,10 +127,37 @@ def read_int_env(name: str, default: int) -> int:
         return default
 
 
+def _optional_float_env(name: str) -> float | None:
+    """Float from the environment, or None when unset/unparseable.
+
+    Distinct from ``read_float_env``: preset-backed knobs need "the operator
+    said nothing" to stay distinguishable from "the operator said 0".
+    """
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 def log(message: str) -> None:
     """Progress/diagnostic line. stderr only — stdout is reserved for the JSON
     contract (CommandRunner streams stderr into the live SSE log)."""
     print(f"[human-segments] {message}", file=sys.stderr, flush=True)
+
+
+# The occupancy preset table is shared with the backend rather than duplicated:
+# the API validates against it, the upload screen renders from it, and this
+# script resolves ``--preset`` with it, so "solo" cannot come to mean two
+# different things in two places. Only stdlib is imported transitively (the
+# module deliberately depends on nothing from the app), and the repo layout
+# guarantees the path — the same trick scripts/llm_bootstrap.py uses.
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent / "fastapi_backend"
+if str(_BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_ROOT))
+from app.pipeline import person_presets  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +192,11 @@ class SegmenterConfig:
     start_offset_seconds: float = 0.0
     end_offset_seconds: float = 2.0
     min_clip_seconds: float = 0.5
+    # Shortest confirmed session kept (0 = keep every confirmed session). Unlike
+    # min_clip_seconds — a sliver guard measured in fractions of a second — this
+    # encodes "an OSCE station lasts minutes", which is what makes a burst of
+    # false detections fail to produce a clip.
+    min_session_seconds: float = 0.0
 
     @property
     def sample_dt(self) -> float:
@@ -172,6 +213,10 @@ class DetectorConfig:
     confidence: float = 0.7
     batch_size: int = 8
     decode_width: int = 640  # ffmpeg pre-scale; the processor re-sizes anyway
+    # Smallest box height, as a fraction of frame height, that counts as a
+    # person. 0 disables the gate (historic behaviour). See person_presets for
+    # the measured separation between real people and intruding limbs.
+    min_box_height_ratio: float = 0.0
 
 
 @dataclass
@@ -187,6 +232,10 @@ class DetectionStats:
     workers: int = 1
     padded_samples: int = 0
     person_count_histogram: dict[str, int] = field(default_factory=dict)
+    # Detections the confidence threshold accepted but the height gate rejected.
+    # Surfaced in the payload so a mis-tuned gate is diagnosable from one run
+    # instead of guessed at.
+    rejected_small_boxes: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +408,32 @@ def iter_chunk_frames(
 # ---------------------------------------------------------------------------
 
 
+def count_valid_people(
+    boxes: list[tuple[float, float, float, float]],
+    frame_height: float,
+    min_box_height_ratio: float,
+) -> tuple[int, int]:
+    """Count person boxes that clear the height gate. Returns ``(kept, rejected)``.
+
+    Pure, so the gate can be tested against recorded detections without a GPU.
+    ``boxes`` are ``(x0, y0, x1, y1)`` in pixels of the analysed frame, already
+    filtered to the person class and to the confidence threshold.
+
+    A box is rejected when it is too *short* relative to the frame — the one
+    measurement that separates a whole person from the hand, forearm or
+    shoulder of somebody standing outside the shot. Width is deliberately not
+    tested: a person seated side-on is legitimately wide, while a raised arm
+    across the lens is legitimately narrow.
+    """
+    if min_box_height_ratio <= 0.0 or frame_height <= 0:
+        return len(boxes), 0
+    kept = 0
+    for _x0, y0, _x1, y1 in boxes:
+        if (max(0.0, y1 - y0) / frame_height) >= min_box_height_ratio:
+            kept += 1
+    return kept, len(boxes) - kept
+
+
 class PersonCounter:
     """Batched people-counter around an RT-DETR checkpoint.
 
@@ -466,7 +541,7 @@ class PersonCounter:
         if not frames:
             return []
         try:
-            return self._infer(frames)
+            return self._infer(frames, stats)
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             if len(frames) > 1:
@@ -480,9 +555,9 @@ class PersonCounter:
             self.use_fp16 = False
             self.model = self.model.float().to("cpu")
             torch.cuda.empty_cache()
-            return self._infer(frames)
+            return self._infer(frames, stats)
 
-    def _infer(self, frames: list["Any"]) -> list[int]:
+    def _infer(self, frames: list["Any"], stats: DetectionStats) -> list[int]:
         import torch
 
         assert self.model is not None and self.processor is not None, "call load() first"
@@ -499,9 +574,18 @@ class PersonCounter:
             target_sizes=target_sizes,
         )
         counts: list[int] = []
-        for result in results:
-            labels = result["labels"].tolist()
-            counts.append(sum(1 for label in labels if int(label) in self.person_label_ids))
+        for frame, result in zip(frames, results):
+            frame_height = float(frame.shape[0])
+            person_boxes = [
+                tuple(box)
+                for label, box in zip(result["labels"].tolist(), result["boxes"].tolist())
+                if int(label) in self.person_label_ids
+            ]
+            kept, rejected = count_valid_people(
+                person_boxes, frame_height, self.config.min_box_height_ratio
+            )
+            stats.rejected_small_boxes += rejected
+            counts.append(kept)
         return counts
 
     def close(self) -> None:
@@ -548,6 +632,7 @@ def build_tolerant_session_ranges(
     start_offset_seconds: float,
     end_offset_seconds: float,
     min_clip_seconds: float,
+    min_session_seconds: float = 0.0,
 ) -> tuple[list[dict], list[dict]]:
     """Tolerant N-of-M hysteresis over per-sample person counts.
 
@@ -633,6 +718,19 @@ def build_tolerant_session_ranges(
         if padded[i]["end"] > padded[i + 1]["start"]:
             padded[i]["end"] = padded[i + 1]["start"]
     padded = [r for r in padded if r["end"] - r["start"] >= min_clip_seconds]
+    # Duration guard, applied BEFORE numbering so the surviving clips are still
+    # Student 1..N with no holes. A short confirmed range is either a detector
+    # artefact or somebody tidying the room; either way it is not a station.
+    if min_session_seconds > 0:
+        dropped = [r for r in padded if r["end"] - r["start"] < min_session_seconds]
+        if dropped:
+            log(
+                f"Discarding {len(dropped)} confirmed range(s) shorter than "
+                f"{min_session_seconds:g}s: "
+                + ", ".join(f"{r['start']:.0f}-{r['end']:.0f}s" for r in dropped[:8])
+                + ("..." if len(dropped) > 8 else "")
+            )
+        padded = [r for r in padded if r["end"] - r["start"] >= min_session_seconds]
     for i, clip_range in enumerate(padded, start=1):
         clip_range["student_index"] = i
     return padded, transitions
@@ -739,6 +837,7 @@ def run_chunk(task: dict) -> dict:
         confidence=task["confidence"],
         batch_size=task["batch_size"],
         decode_width=task["decode_width"],
+        min_box_height_ratio=task["min_box_height_ratio"],
     )
     stats = DetectionStats(effective_batch_size=detector_config.batch_size)
     counter = PersonCounter(detector_config)
@@ -791,6 +890,7 @@ def run_chunk(task: dict) -> dict:
         "decode_seconds": time.perf_counter() - decode_started - inference_seconds,
         "inference_seconds": inference_seconds,
         "oom_batch_reductions": stats.oom_batch_reductions,
+        "rejected_small_boxes": stats.rejected_small_boxes,
         "cpu_fallback": stats.cpu_fallback,
         "device": counter.device,
         "model": counter.resolved_model_id,
@@ -840,6 +940,7 @@ def detect_counts_parallel(
             "confidence": detector_config.confidence,
             "batch_size": detector_config.batch_size,
             "decode_width": detector_config.decode_width,
+            "min_box_height_ratio": detector_config.min_box_height_ratio,
         }
         for i, (span_start, span_end) in enumerate(spans)
     ]
@@ -862,6 +963,7 @@ def detect_counts_parallel(
         stats.decode_seconds += result["decode_seconds"]
         stats.inference_seconds += result["inference_seconds"]
         stats.oom_batch_reductions += result["oom_batch_reductions"]
+        stats.rejected_small_boxes += int(result.get("rejected_small_boxes") or 0)
         stats.cpu_fallback = stats.cpu_fallback or result["cpu_fallback"]
 
     device = ", ".join(sorted({r["device"] for r in results}))
@@ -981,6 +1083,30 @@ def self_check() -> None:
     assert len(empty_segments) == 1
     assert empty_segments[0] == {"start": 0.0, "end": 60.0, "kind": INTERMISSION_KIND, "person_count": 0}
 
+    # Height gate: a full body (0.8 of frame) plus a limb at the edge (0.2)
+    # counts as ONE person once the gate is on, and as two when it is off.
+    body = (10.0, 20.0, 90.0, 180.0)  # 160px tall in a 200px frame -> 0.8
+    limb = (180.0, 150.0, 199.0, 190.0)  # 40px -> 0.2
+    assert count_valid_people([body, limb], 200.0, 0.0) == (2, 0)
+    assert count_valid_people([body, limb], 200.0, 0.4) == (1, 1)
+    assert count_valid_people([body, limb], 200.0, 0.9) == (0, 2)
+
+    # Session-duration guard: a 60s confirmed range is dropped by a 120s floor
+    # while a 300s one survives, and the survivor is still Student 1.
+    short_then_long = [0] * 60 + [2] * 60 + [0] * 120 + [2] * 300 + [0] * 120
+    guarded_kwargs = {**kwargs, "min_session_seconds": 120.0}
+    guarded, _ = build_tolerant_session_ranges(short_then_long, 660.0, **guarded_kwargs)
+    assert len(guarded) == 1, guarded
+    assert guarded[0]["student_index"] == 1 and guarded[0]["end"] - guarded[0]["start"] >= 120.0
+    unguarded, _ = build_tolerant_session_ranges(short_then_long, 660.0, **kwargs)
+    assert len(unguarded) == 2, unguarded
+
+    # Presets resolve to the numbers the docstring promises, and an unknown id
+    # degrades to the default rather than killing a queued run.
+    assert person_presets.resolve("solo").min_people == 1
+    assert person_presets.resolve("pair").min_box_height_ratio == 0.0
+    assert person_presets.resolve("nonsense").id == person_presets.DEFAULT_PRESET
+
     print("self-check OK")
 
 
@@ -1020,10 +1146,40 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--preset",
+        default=os.getenv("HUMAN_SEGMENTS_PRESET") or person_presets.DEFAULT_PRESET,
+        choices=list(person_presets.PRESET_IDS),
+        help=(
+            "Occupancy preset supplying min-people / min-box-height-ratio / "
+            f"min-session-seconds (default {person_presets.DEFAULT_PRESET}). "
+            "Any of those flags given explicitly wins over the preset."
+        ),
+    )
+    # The three preset-backed knobs default to None so "not given" is
+    # distinguishable from "given the same value the preset holds" — that is
+    # what lets an explicit flag override a preset without the preset having to
+    # know which flags exist.
+    parser.add_argument(
         "--min-people",
         type=int,
-        default=read_int_env("HUMAN_SEGMENTS_MIN_PEOPLE", 2),
-        help="People required on screen for a session to count as active (default 2)",
+        default=None,
+        help="People required on screen for a session to count as active (preset default)",
+    )
+    parser.add_argument(
+        "--min-box-height-ratio",
+        type=float,
+        default=None,
+        help=(
+            "Smallest detection height, as a fraction of frame height, that counts "
+            "as a person (preset default; 0 disables). Rejects limbs and passers-by "
+            "intruding at the frame edge, which a confidence threshold cannot."
+        ),
+    )
+    parser.add_argument(
+        "--min-session-seconds",
+        type=float,
+        default=None,
+        help="Discard confirmed sessions shorter than this (preset default; 0 disables)",
     )
     parser.add_argument(
         "--start-after-seconds",
@@ -1122,15 +1278,43 @@ def main() -> int:
     if video_duration <= 0:
         raise ValueError("--video-duration must be a positive number of seconds.")
 
+    # Precedence: explicit flag > environment > preset. The environment layer
+    # keeps the documented HUMAN_SEGMENTS_* overrides working for deployments
+    # that tuned them before presets existed.
+    preset = person_presets.resolve(
+        args.preset,
+        min_people=(
+            args.min_people
+            if args.min_people is not None
+            else (read_int_env("HUMAN_SEGMENTS_MIN_PEOPLE", 0) or None)
+        ),
+        min_box_height_ratio=(
+            args.min_box_height_ratio
+            if args.min_box_height_ratio is not None
+            else _optional_float_env("HUMAN_SEGMENTS_MIN_BOX_HEIGHT_RATIO")
+        ),
+        min_session_seconds=(
+            args.min_session_seconds
+            if args.min_session_seconds is not None
+            else _optional_float_env("HUMAN_SEGMENTS_MIN_SESSION_SECONDS")
+        ),
+    )
+    log(
+        f"Occupancy preset '{preset.id}': min_people={preset.min_people}, "
+        f"min_box_height_ratio={preset.min_box_height_ratio:g}, "
+        f"min_session_seconds={preset.min_session_seconds:g}."
+    )
+
     segmenter_config = SegmenterConfig(
         sample_fps=max(0.1, float(args.sample_fps)),
-        min_people=max(1, int(args.min_people)),
+        min_people=preset.min_people,
         start_after_seconds=max(0.0, float(args.start_after_seconds)),
         end_after_seconds=max(0.0, float(args.end_after_seconds)),
         flicker_tolerance_seconds=max(0.0, float(args.flicker_tolerance_seconds)),
         start_offset_seconds=max(0.0, float(args.start_offset)),
         end_offset_seconds=max(0.0, float(args.end_offset)),
         min_clip_seconds=max(0.0, float(args.min_clip_seconds)),
+        min_session_seconds=preset.min_session_seconds,
     )
     detector_config = DetectorConfig(
         model_id=str(args.model),
@@ -1138,6 +1322,7 @@ def main() -> int:
         confidence=min(0.99, max(0.05, float(args.confidence))),
         batch_size=max(1, int(args.batch_size)),
         decode_width=max(160, int(args.decode_width)),
+        min_box_height_ratio=preset.min_box_height_ratio,
     )
     workers = max(1, int(args.workers))
 
@@ -1208,6 +1393,7 @@ def main() -> int:
         start_offset_seconds=segmenter_config.start_offset_seconds,
         end_offset_seconds=segmenter_config.end_offset_seconds,
         min_clip_seconds=segmenter_config.min_clip_seconds,
+        min_session_seconds=segmenter_config.min_session_seconds,
     )
     used_trigger = "person_presence"
     if not clip_ranges and args.allow_fallback_full_video:
@@ -1245,7 +1431,10 @@ def main() -> int:
         "confidence": detector_config.confidence,
         "sample_fps": segmenter_config.sample_fps,
         "sampled_frames": stats.sampled_frames,
+        "preset": preset.id,
         "min_people": segmenter_config.min_people,
+        "min_box_height_ratio": detector_config.min_box_height_ratio,
+        "min_session_seconds": segmenter_config.min_session_seconds,
         "start_after_seconds": segmenter_config.start_after_seconds,
         "end_after_seconds": segmenter_config.end_after_seconds,
         "flicker_tolerance_seconds": segmenter_config.flicker_tolerance_seconds,
@@ -1263,6 +1452,7 @@ def main() -> int:
             "batch_size": detector_config.batch_size,
             "workers": stats.workers,
             "padded_samples": stats.padded_samples,
+            "rejected_small_boxes": stats.rejected_small_boxes,
             "oom_batch_reductions": stats.oom_batch_reductions,
             "cpu_fallback": stats.cpu_fallback,
             "decode_resolution": f"{out_width}x{out_height}",

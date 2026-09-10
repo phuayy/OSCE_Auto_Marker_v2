@@ -117,6 +117,9 @@ class AsyncUploadService:
             # Long-workflow auto-crop method ("bells" | "person"); None defers
             # to the server default at job execution time.
             "segmentation": payload.segmentation if payload.workflow == "long" else None,
+            # Resolved occupancy rule for the person detector (preset name plus
+            # the numbers it meant at upload time), or None to use its default.
+            "segmentationOptions": payload.resolved_segmentation_options(),
             # Snapshot of the chosen transcription corpus (or None); inherited
             # by clip children so one pick covers every clip in the session.
             "corpus": corpus_snapshot,

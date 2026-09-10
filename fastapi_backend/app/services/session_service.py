@@ -243,6 +243,10 @@ class SessionService:
             "status": session.get("status"),
             "workflow": session.get("workflow"),
             "segmentation": session.get("segmentation") or None,
+            # Occupancy rule the person detector ran (or will run) with. New
+            # payload fields must be whitelisted here or the browser never sees
+            # them (see the videoClips "kind" lesson).
+            "segmentationOptions": session.get("segmentationOptions") or None,
             "pipeline": session.get("pipeline"),
             "parentSessionId": session.get("parentSessionId"),
             "clipSource": session.get("clipSource"),

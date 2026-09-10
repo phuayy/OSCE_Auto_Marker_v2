@@ -72,8 +72,9 @@ class FakeMedia:
         *,
         session_id: str | None = None,
         on_progress: Any | None = None,
+        options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        self.person_calls.append({"path": source_path, "sessionId": session_id})
+        self.person_calls.append({"path": source_path, "sessionId": session_id, "options": options})
         for percent in self.person_progress:
             if on_progress is not None:
                 await on_progress(percent)
@@ -135,7 +136,11 @@ def build_settings(tmp_path: Path) -> Settings:
     )
 
 
-def build_long_session(tmp_path: Path, segmentation: str | None) -> dict[str, Any]:
+def build_long_session(
+    tmp_path: Path,
+    segmentation: str | None,
+    segmentation_options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     video_path = tmp_path / "long.mp4"
     video_path.write_bytes(b"video")
     return {
@@ -144,6 +149,7 @@ def build_long_session(tmp_path: Path, segmentation: str | None) -> dict[str, An
         "status": "uploaded",
         "workflow": "long",
         "segmentation": segmentation,
+        "segmentationOptions": segmentation_options,
         "files": {"video": {"absolutePath": str(video_path)}},
         "outputs": {},
         "error": None,
@@ -156,10 +162,11 @@ def build_clip_service(
     *,
     person_error: Exception | None = None,
     person_progress: tuple[float, ...] = (),
+    segmentation_options: dict[str, Any] | None = None,
 ):
     settings = build_settings(tmp_path)
     media = FakeMedia(settings, person_error=person_error, person_progress=person_progress)
-    sessions = FakeSessions(build_long_session(tmp_path, segmentation))
+    sessions = FakeSessions(build_long_session(tmp_path, segmentation, segmentation_options))
     events = FakeEvents()
     service = ClipService(sessions=sessions, events=events, media=media, pipeline=None, jobs=None)
     return service, media, sessions, events
@@ -200,6 +207,47 @@ def test_auto_crop_uses_person_detector_when_selected(tmp_path) -> None:
     assert sessions.current["status"] == "cropped"
     clips = sessions.current["outputs"]["videoClips"]
     assert [clip["kind"] for clip in clips] == ["session", "intermission", "session"]
+
+
+def test_auto_crop_forwards_the_chosen_occupancy_preset(tmp_path) -> None:
+    """The preset is chosen at upload but applied inside a job that may run
+    minutes later in another process, so the resolved numbers have to travel on
+    the session — not be re-derived from a table that could have moved."""
+    service, media, _sessions, events = build_clip_service(
+        tmp_path,
+        "person",
+        segmentation_options={
+            "preset": "solo",
+            "minPeople": 1,
+            "minBoxHeightRatio": 0.4,
+            "minSessionSeconds": 120.0,
+        },
+    )
+    asyncio.run(service.auto_crop_session_by_id("session-long-1"))
+
+    assert media.person_calls[0]["options"] == {
+        "preset": "solo",
+        "minPeople": 1,
+        "minBoxHeightRatio": 0.4,
+        "minSessionSeconds": 120.0,
+    }
+    # The operator can see which rule ran without opening the payload.
+    log_messages = [payload.get("message", "") for _sid, kind, payload in events.items if kind == "log"]
+    assert any("'solo'" in message for message in log_messages)
+
+
+def test_auto_crop_falls_back_to_the_default_preset(tmp_path) -> None:
+    """Sessions uploaded before presets existed carry no options at all, and a
+    preset this build no longer ships must not kill a queued job either."""
+    service, media, _sessions, _events = build_clip_service(tmp_path, "person")
+    asyncio.run(service.auto_crop_session_by_id("session-long-1"))
+    assert media.person_calls[0]["options"]["preset"] == "pair"
+
+    service, media, _sessions, _events = build_clip_service(
+        tmp_path, "person", segmentation_options={"preset": "retired-preset"}
+    )
+    asyncio.run(service.auto_crop_session_by_id("session-long-1"))
+    assert media.person_calls[0]["options"]["preset"] == "pair"
 
 
 def test_auto_crop_defaults_to_bell_detector(tmp_path) -> None:
@@ -442,6 +490,210 @@ def test_initiate_persists_segmentation_choice(tmp_path) -> None:
 
     stored = asyncio.run(client.app.state.container.sessions.read(body["session"]["id"]))
     assert stored["segmentation"] == "person"
+
+
+def test_detector_argv_carries_the_resolved_occupancy_rule(tmp_path) -> None:
+    """The subprocess is handed explicit numbers, not a preset name to look up:
+    the caller and the detector must not be able to resolve the same session
+    differently."""
+    import json
+    from types import SimpleNamespace
+
+    from app.core.process import CommandResult
+    from app.pipeline.media import MediaPipeline
+
+    recorded: dict[str, Any] = {}
+
+    class ArgvRunner:
+        async def run(self, command: str, args: list[str], label: str, **kwargs: Any) -> CommandResult:
+            recorded["args"] = list(args)
+            return CommandResult(
+                stdout=json.dumps(
+                    {
+                        "clip_ranges": [{"start": 0.0, "end": 60.0}],
+                        "timeline_segments": [],
+                        "preset": "solo",
+                        "min_people": 1,
+                        "min_box_height_ratio": 0.4,
+                        "min_session_seconds": 120.0,
+                        "debug": {"workers": 1, "rejected_small_boxes": 42},
+                    }
+                ),
+                stderr="",
+            )
+
+    settings = build_settings(tmp_path)
+    script = settings.human_detector_script_path
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("# stand-in", encoding="utf-8")
+    media = MediaPipeline(
+        settings,
+        runner=ArgvRunner(),
+        events=FakeEvents(),
+        auth=SimpleNamespace(runtime=SimpleNamespace(whisperx_hf_token="")),
+    )
+
+    result = asyncio.run(
+        media.detect_person_clip_ranges_with_python(
+            tmp_path / "long.mp4",
+            600.0,
+            options={
+                "preset": "solo",
+                "minPeople": 1,
+                "minBoxHeightRatio": 0.4,
+                "minSessionSeconds": 120.0,
+            },
+        )
+    )
+
+    args = recorded["args"]
+    for flag, value in (
+        ("--preset", "solo"),
+        ("--min-people", "1"),
+        ("--min-box-height-ratio", "0.4"),
+        ("--min-session-seconds", "120.0"),
+    ):
+        assert flag in args, args
+        assert args[args.index(flag) + 1] == value
+
+    # The clip list records the rule the detector reported running, so a run
+    # stays auditable after the fact.
+    assert result["source"]["preset"] == "solo"
+    assert result["source"]["minBoxHeightRatio"] == 0.4
+    assert result["source"]["rejectedSmallBoxes"] == 42
+
+
+def test_segmentation_presets_endpoint_lists_every_preset(tmp_path) -> None:
+    """The upload screen renders its picker from this endpoint, so a preset
+    added or retuned in the backend needs no frontend change."""
+    from app.pipeline import person_presets
+
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    response = client.get(
+        "/api/settings/segmentation-presets", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert [item["id"] for item in body["presets"]] == list(person_presets.PRESET_IDS)
+    assert body["defaultPreset"] == "pair"
+    solo = next(item for item in body["presets"] if item["id"] == "solo")
+    assert (solo["minPeople"], solo["minBoxHeightRatio"]) == (1, 0.4)
+    # Bounds ship with the catalogue so the custom form validates the same
+    # range the API enforces instead of hardcoding a second copy.
+    assert body["bounds"]["minPeople"] == [1, 10]
+
+
+def test_initiate_persists_resolved_segmentation_options(tmp_path) -> None:
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    response = client.post(
+        "/api/uploads/initiate",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "workflow": "long",
+            "autoProcess": True,
+            "segmentation": "person",
+            "segmentationOptions": {"preset": "solo"},
+            "files": [
+                {"kind": "video", "originalName": "station.mp4", "mimeType": "video/mp4", "sizeBytes": 5},
+                {"kind": "caseStudy", "originalName": "case.pdf", "mimeType": "application/pdf", "sizeBytes": 4},
+            ],
+        },
+    )
+    assert response.status_code == 201, response.text
+    # Both halves are persisted: the name the operator picked AND the numbers it
+    # meant on the day, so a later retune cannot silently re-cut this session.
+    assert response.json()["session"]["segmentationOptions"] == {
+        "preset": "solo",
+        "minPeople": 1,
+        "minBoxHeightRatio": 0.4,
+        "minSessionSeconds": 120.0,
+    }
+
+    stored = asyncio.run(client.app.state.container.sessions.read(response.json()["session"]["id"]))
+    assert stored["segmentationOptions"]["minPeople"] == 1
+
+
+def test_initiate_accepts_custom_occupancy_numbers(tmp_path) -> None:
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    response = client.post(
+        "/api/uploads/initiate",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "workflow": "long",
+            "autoProcess": True,
+            "segmentation": "person",
+            "segmentationOptions": {
+                "preset": "custom",
+                "minPeople": 3,
+                "minBoxHeightRatio": 0.55,
+                "minSessionSeconds": 45,
+            },
+            "files": [
+                {"kind": "video", "originalName": "station.mp4", "mimeType": "video/mp4", "sizeBytes": 5},
+                {"kind": "caseStudy", "originalName": "case.pdf", "mimeType": "application/pdf", "sizeBytes": 4},
+            ],
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["session"]["segmentationOptions"] == {
+        "preset": "custom",
+        "minPeople": 3,
+        "minBoxHeightRatio": 0.55,
+        "minSessionSeconds": 45.0,
+    }
+
+
+def test_initiate_rejects_unknown_preset_and_out_of_range_numbers(tmp_path) -> None:
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    files = [
+        {"kind": "video", "originalName": "station.mp4", "mimeType": "video/mp4", "sizeBytes": 5},
+        {"kind": "caseStudy", "originalName": "case.pdf", "mimeType": "application/pdf", "sizeBytes": 4},
+    ]
+    for options in (
+        {"preset": "laser-eyes"},
+        {"preset": "custom", "minPeople": 99},
+        {"preset": "custom", "minBoxHeightRatio": 2.0},
+    ):
+        response = client.post(
+            "/api/uploads/initiate",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "workflow": "long",
+                "autoProcess": True,
+                "segmentation": "person",
+                "segmentationOptions": options,
+                "files": files,
+            },
+        )
+        assert response.status_code in {400, 422}, (options, response.text)
+
+
+def test_initiate_ignores_occupancy_options_for_bell_detection(tmp_path) -> None:
+    """The rule only means anything to the person detector; storing it beside a
+    bell-split session would claim a setting that never ran."""
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    response = client.post(
+        "/api/uploads/initiate",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "workflow": "long",
+            "autoProcess": True,
+            "segmentation": "bells",
+            "segmentationOptions": {"preset": "solo"},
+            "files": [
+                {"kind": "video", "originalName": "station.mp4", "mimeType": "video/mp4", "sizeBytes": 5},
+                {"kind": "caseStudy", "originalName": "case.pdf", "mimeType": "application/pdf", "sizeBytes": 4},
+            ],
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["session"]["segmentationOptions"] is None
 
 
 def test_initiate_standard_workflow_drops_segmentation(tmp_path) -> None:

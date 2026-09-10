@@ -244,6 +244,32 @@ When `workflow == "long"` the job type is `auto_crop` instead of `process_sessio
 manual timeline split cuts MP4s in the request. Both produce *draft* clips —
 ranges with `isDraft: true` and no file — which the timeline renders immediately.
 
+**Occupancy presets (person detection).** How many people are on screen during a
+station is a property of the camera angle, so the upload form picks a rule and
+the session carries it. The table lives in
+[person_presets.py](fastapi_backend/app/pipeline/person_presets.py) — one source
+read by the upload schema, `ClipService`, `GET /api/settings/segmentation-presets`
+and `scripts/detect_human_segments.py` alike.
+
+| Preset | min people | min box height | min session | For |
+|---|---|---|---|---|
+| `pair` (default) | 2 | 0 (off) | 0 (off) | wide shot, both subjects fully in frame; the pre-preset behaviour |
+| `pair_strict` | 2 | 0.40 | 120 s | wide shot where limbs / passers-by clip the frame edge |
+| `solo` | 1 | 0.40 | 120 s | tight shot on one student |
+| `custom` | operator | operator | operator | anything else |
+
+The height gate is the load-bearing part: RT-DETR scores a forearm at the frame
+edge above any usable confidence threshold, so *confidence cannot separate a
+limb from a person* — box height can (measured on two OSCE tapes: real people
+0.56-1.05 of frame height, intruding limbs 0.16-0.35). `min_people=1` without
+the gate is useless on its own, because the breaks between stations contain
+people too; the preset therefore carries both halves together.
+
+The upload resolves the preset into **concrete numbers** and stores both those
+and the name on `session.segmentationOptions`. The job passes the numbers to the
+subprocess as explicit flags, so a retuned table can never silently re-cut a
+session that was queued under the old one.
+
 1. Segmentation (`auto_crop` job): bell detector (`scripts/bell_detector.py`) or
    person detector (RT-DETR) proposes ranges. `build_clip_drafts_from_ranges`
    records them; no ffmpeg runs. Session status -> `cropped`.
@@ -454,6 +480,11 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 | `WHISPERX_MODEL` | `large-v3` | Whisper checkpoint; `distil-large-v3` for lower latency |
 | `WHISPERX_COMPUTE_TYPE` | `float16` | Native large-v3 precision; set `int8` on <=4 GB cards; auto-downgrades to `int8` on CPU |
 | `WHISPERX_BATCH_SIZE` | `1` | Raise on GPUs with more than 6 GB VRAM |
+| `HUMAN_SEGMENTS_PRESET` | `pair` | Occupancy preset when an upload chose none (`pair` \| `pair_strict` \| `solo` \| `custom`) |
+| `HUMAN_SEGMENTS_MIN_BOX_HEIGHT_RATIO` | preset | Smallest detection height (fraction of frame height) counted as a person; 0 = off. Overrides the preset |
+| `HUMAN_SEGMENTS_MIN_SESSION_SECONDS` | preset | Discard confirmed sessions shorter than this; 0 = off. Overrides the preset |
+| `HUMAN_SEGMENTS_MIN_PEOPLE` | preset | People required on screen for a station to be active. Overrides the preset |
+| `HUMAN_SEGMENTS_CONFIDENCE` | `0.7` | RT-DETR score threshold. Not the knob for edge limbs — use the height ratio |
 | `PARALLEL_SCORING` | `true` | Run content branch parallel to communication branch |
 | `JOB_QUEUE_BACKEND` | `local` | `local` or `hatchet` |
 | `STORAGE_BACKEND` | `local` | `local` (parts through the API) or `gcs` (direct-to-bucket resumable uploads) |

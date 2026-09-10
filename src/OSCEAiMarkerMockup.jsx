@@ -375,6 +375,17 @@ export default function OSCEAiMarkerMockup({
   // 'person' (RT-DETR human detection). Sent with the upload; the backend
   // worker reads it from the session when the auto_crop job runs.
   const [segmentationMethod, setSegmentationMethod] = useState('bells');
+  // Occupancy rule for human detection: which camera scenario this recording
+  // is. The catalogue (labels + the numbers each preset stands for) comes from
+  // the backend, so retuning a preset never needs a frontend release; only the
+  // *selection* lives here. 'custom' unlocks the three numbers directly.
+  const [segmentationPresets, setSegmentationPresets] = useState([]);
+  const [segmentationPreset, setSegmentationPreset] = useState('pair');
+  const [customOccupancy, setCustomOccupancy] = useState({
+    minPeople: 2,
+    minBoxHeightRatio: 0.4,
+    minSessionSeconds: 120,
+  });
   // User-chosen name for the session about to be created, and the pre-flight
   // confirmation overlay shown before processing starts.
   const [sessionNameInput, setSessionNameInput] = useState('');
@@ -1178,6 +1189,7 @@ export default function OSCEAiMarkerMockup({
   useEffect(() => {
     refreshSessionIndex();
     refreshCorpora();
+    refreshSegmentationPresets();
     // Warm a stream ticket on mount so media tags use the short-lived ticket
     // rather than the long-lived bearer token in their URLs.
     ensureStreamTicket();
@@ -1279,6 +1291,54 @@ export default function OSCEAiMarkerMockup({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasInFlightSessions]);
+
+  async function refreshSegmentationPresets() {
+    try {
+      const response = await fetch('/api/settings/segmentation-presets');
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(body.error || 'Failed to load segmentation presets.');
+      }
+      const presets = Array.isArray(body.presets) ? body.presets : [];
+      setSegmentationPresets(presets);
+      // Seed the custom form from the backend's own custom defaults so the
+      // numbers a user starts editing are the ones the server would have used.
+      const custom = presets.find((preset) => preset.id === (body.customPreset || 'custom'));
+      if (custom) {
+        setCustomOccupancy({
+          minPeople: custom.minPeople,
+          minBoxHeightRatio: custom.minBoxHeightRatio,
+          minSessionSeconds: custom.minSessionSeconds,
+        });
+      }
+      if (body.defaultPreset) {
+        setSegmentationPreset((previous) =>
+          presets.some((preset) => preset.id === previous) ? previous : body.defaultPreset
+        );
+      }
+    } catch (presetLoadError) {
+      // Non-fatal: with no catalogue the picker is hidden and the backend
+      // applies its own default preset, which is the pre-preset behaviour.
+      console.warn('Could not load segmentation presets:', presetLoadError);
+    }
+  }
+
+  // The options object sent with an upload — null unless human detection is
+  // the chosen method, in which case the backend also validates it.
+  function buildSegmentationOptions() {
+    if (uploadFlow !== 'long' || segmentationMethod !== 'person') {
+      return null;
+    }
+    if (segmentationPreset !== 'custom') {
+      return { preset: segmentationPreset };
+    }
+    return {
+      preset: 'custom',
+      minPeople: Number(customOccupancy.minPeople),
+      minBoxHeightRatio: Number(customOccupancy.minBoxHeightRatio),
+      minSessionSeconds: Number(customOccupancy.minSessionSeconds),
+    };
+  }
 
   async function refreshCorpora() {
     try {
@@ -2065,6 +2125,7 @@ export default function OSCEAiMarkerMockup({
         autoProcess: true,
         sessionName: sessionNameInput.trim() || null,
         segmentation: uploadFlow === 'long' ? segmentationMethod : null,
+        segmentationOptions: buildSegmentationOptions(),
         corpusId: selectedCorpusId || null,
         files: [
           {
@@ -2169,6 +2230,12 @@ export default function OSCEAiMarkerMockup({
     }
     if (uploadFlow === 'long') {
       formData.append('segmentation', segmentationMethod);
+      const options = buildSegmentationOptions();
+      if (options) {
+        // Multipart cannot carry a nested object; the backend parses this
+        // field through the same validated model the JSON path uses.
+        formData.append('segmentationOptions', JSON.stringify(options));
+      }
     }
     if (selectedCorpusId) {
       formData.append('corpusId', selectedCorpusId);
@@ -3659,6 +3726,109 @@ export default function OSCEAiMarkerMockup({
                         </span>
                       </button>
                     </div>
+                    {segmentationMethod === 'person' && segmentationPresets.length > 0 && (
+                      <div className="mt-3 border-t border-slate-100 pt-3">
+                        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          Who is on screen during a station
+                        </div>
+                        <p className="mb-2 text-[11px] text-slate-400">
+                          Pick the rule that matches this camera angle. A hand or shoulder at the edge
+                          of the frame is a person to the detector, so a one-student angle needs a
+                          different rule from a wide two-person shot.
+                        </p>
+                        <div className="grid grid-cols-1 gap-2" role="radiogroup" aria-label="Occupancy rule">
+                          {segmentationPresets.map((preset) => (
+                            <button
+                              key={preset.id}
+                              type="button"
+                              role="radio"
+                              aria-checked={segmentationPreset === preset.id}
+                              onClick={() => setSegmentationPreset(preset.id)}
+                              className={`rounded-lg border p-2.5 text-left transition ${
+                                segmentationPreset === preset.id
+                                  ? 'border-violet-400 bg-violet-50 ring-2 ring-violet-200'
+                                  : 'border-slate-200 bg-white hover:border-slate-300'
+                              }`}
+                            >
+                              <span className="flex items-center justify-between gap-2">
+                                <span className="text-sm font-medium text-slate-800">{preset.label}</span>
+                                {preset.id !== 'custom' && (
+                                  <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
+                                    {preset.minPeople}+ on screen
+                                  </span>
+                                )}
+                              </span>
+                              <span className="mt-0.5 block text-xs text-slate-500">{preset.description}</span>
+                            </button>
+                          ))}
+                        </div>
+
+                        {segmentationPreset === 'custom' && (
+                          <div className="mt-2 grid grid-cols-1 gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 sm:grid-cols-3">
+                            <label className="block">
+                              <span className="block text-[11px] font-medium text-slate-600">People on screen</span>
+                              <input
+                                type="number"
+                                min={1}
+                                max={10}
+                                step={1}
+                                value={customOccupancy.minPeople}
+                                onChange={(event) =>
+                                  setCustomOccupancy((previous) => ({
+                                    ...previous,
+                                    minPeople: event.target.value,
+                                  }))
+                                }
+                                className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1 text-sm"
+                              />
+                              <span className="mt-1 block text-[10px] text-slate-400">
+                                Minimum for a station to count as running.
+                              </span>
+                            </label>
+                            <label className="block">
+                              <span className="block text-[11px] font-medium text-slate-600">Min person height</span>
+                              <input
+                                type="number"
+                                min={0}
+                                max={0.95}
+                                step={0.05}
+                                value={customOccupancy.minBoxHeightRatio}
+                                onChange={(event) =>
+                                  setCustomOccupancy((previous) => ({
+                                    ...previous,
+                                    minBoxHeightRatio: event.target.value,
+                                  }))
+                                }
+                                className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1 text-sm"
+                              />
+                              <span className="mt-1 block text-[10px] text-slate-400">
+                                Fraction of frame height. 0 counts every detection, limbs included.
+                              </span>
+                            </label>
+                            <label className="block">
+                              <span className="block text-[11px] font-medium text-slate-600">Min station length</span>
+                              <input
+                                type="number"
+                                min={0}
+                                max={3600}
+                                step={10}
+                                value={customOccupancy.minSessionSeconds}
+                                onChange={(event) =>
+                                  setCustomOccupancy((previous) => ({
+                                    ...previous,
+                                    minSessionSeconds: event.target.value,
+                                  }))
+                                }
+                                className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1 text-sm"
+                              />
+                              <span className="mt-1 block text-[10px] text-slate-400">
+                                Seconds. Shorter detections are discarded as false starts.
+                              </span>
+                            </label>
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {segmentationMethod === 'person' && (
                       <p className="mt-2 text-[11px] text-slate-400">
                         Falls back to bell detection automatically if the vision model is unavailable on the worker.
@@ -5062,6 +5232,15 @@ export default function OSCEAiMarkerMockup({
                               ? 'Human detection (AI vision, RT-DETR)'
                               : 'Bell detection (audio)'}
                           </div>
+                          {segmentationMethod === 'person' && (
+                            <div className="text-xs text-slate-500">
+                              {segmentationPreset === 'custom'
+                                ? `Custom rule — ${customOccupancy.minPeople}+ on screen, min height `
+                                  + `${customOccupancy.minBoxHeightRatio}, min ${customOccupancy.minSessionSeconds}s`
+                                : segmentationPresets.find((preset) => preset.id === segmentationPreset)?.label
+                                  || segmentationPreset}
+                            </div>
+                          )}
                         </div>
                       </div>
                     )}
