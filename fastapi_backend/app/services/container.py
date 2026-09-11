@@ -190,7 +190,10 @@ def create_container(settings: Settings | None = None) -> AppContainer:
     assessments = AssessmentService(AssessmentRepository(orm_database))
     rubrics = RubricService(active_settings, runner, artifacts, rubric_assets)
     media = MediaPipeline(active_settings, runner, events, auth)
-    app_settings = AppSettingsRepository(orm_database)
+    # The change feed is what lets this cache the per-run selections instead of
+    # re-querying them: a settings write anywhere fires the table's trigger, and
+    # the announcement evicts every process's copy.
+    app_settings = AppSettingsRepository(orm_database, changes=changes)
     # The NVIDIA key can arrive from the platform secrets file rather than
     # os.environ, and AuthService only reads it during startup() — after this
     # container is built. Passing a callable defers the lookup to call time.
@@ -202,6 +205,11 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         ProviderCredentialRepository(orm_database),
         master_key_source=lambda: auth.runtime.auth_secret,
         env_key=active_settings.credential_encryption_key,
+        # The change feed is what makes caching a credential safe: a rotation
+        # anywhere fires a trigger, and the announcement evicts this process's
+        # decrypted copy. Without it the service refuses to cache at all rather
+        # than risk sending a revoked key.
+        changes=changes,
     )
     llm_settings = LLMSettingsService(
         app_settings,

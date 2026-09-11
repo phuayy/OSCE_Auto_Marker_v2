@@ -17,12 +17,14 @@ CHANGE_CHANNEL = "osce_changes"
 # needs to hear about. Keep this list short: every entry costs a trigger on the
 # write path.
 #
-#   sessions           -> /api/sessions index (written by API *and* the Hatchet
-#                         worker process, which is why the counter must live in
-#                         the database rather than in memory)
-#   assessment_results -> analytics + clip summaries
-#   jobs               -> job status shown on session cards
-#   notifications      -> the notification feed and unread badge
+#   sessions             -> /api/sessions index (written by API *and* the Hatchet
+#                           worker process, which is why the counter must live in
+#                           the database rather than in memory)
+#   assessment_results   -> analytics + clip summaries
+#   jobs                 -> job status shown on session cards
+#   notifications        -> the notification feed and unread badge
+#   provider_credentials -> the decrypted LLM API keys cached in every process
+#   app_settings         -> the model/engine selection cached in every process
 #
 # ``notifications`` is tracked for a reason worth spelling out. A notification is
 # normally pushed straight to subscribers by
@@ -33,7 +35,29 @@ CHANGE_CHANNEL = "osce_changes"
 # The trigger closes that gap: the insert bumps a counter and fires pg_notify,
 # the API process turns that into a ``change`` event, and the browser refetches.
 # The direct push remains the fast path when both live in one process.
-TRACKED_TABLES: tuple[str, ...] = ("sessions", "assessment_results", "jobs", "notifications")
+#
+# ``provider_credentials`` is tracked for the inverse reason: nothing polls it,
+# and without an announcement nothing ever would. Decrypting an API key on every
+# scoring call is wasted work, so each process caches the decrypted set — but a
+# key rotated in the settings screen has to reach the Hatchet worker's cache too,
+# and the worker has no reason to re-read a table that changes twice a year. The
+# trigger is what turns a rotation into an eviction everywhere, which is what
+# makes caching a credential safe: a revoked key stops being used within
+# milliseconds rather than at the next restart.
+#
+# ``app_settings`` is the same story for the other half of the scoring hot path.
+# The model selection, the transcription engine and the preprocess toggle are
+# read on every run in every process and written a few times a year; the trigger
+# is what lets ``AppSettingsRepository`` cache them while keeping the promise
+# that a change in the settings screen applies to the next run everywhere.
+TRACKED_TABLES: tuple[str, ...] = (
+    "sessions",
+    "assessment_results",
+    "jobs",
+    "notifications",
+    "provider_credentials",
+    "app_settings",
+)
 
 _VERSION_TABLE = "table_versions"
 

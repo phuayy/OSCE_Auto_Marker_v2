@@ -41,7 +41,8 @@ OSCE-AI-FYP/
 │   │       ├── 0001_initial_schema.py            # Baseline: ORM tables + raw-SQL jobs tables
 │   │       ├── 0002_notification_event_type.py   # notifications.event_type + backfill
 │   │       ├── 0003_change_tracking_triggers.py  # table_versions triggers (+ pg_notify)
-│   │       └── 0004_provider_credentials.py      # encrypted operator-managed LLM API keys
+│   │       ├── 0004_provider_credentials.py      # encrypted operator-managed LLM API keys
+│   │       └── 0005_cache_invalidation_triggers.py  # change tracking on the two cached tables
 │   └── app/
 │       ├── main.py             # FastAPI app, middleware, startup/shutdown
 │       ├── core/
@@ -49,6 +50,7 @@ OSCE-AI-FYP/
 │       │   ├── process.py      # CommandRunner — async subprocess wrapper
 │       │   ├── rate_limit.py   # FixedWindowRateLimiter (login endpoint)
 │       │   ├── secret_box.py   # AES-256-GCM for operator-entered secrets at rest
+│       │   ├── snapshot_cache.py # One cached value, evicted by the database's own change feed
 │       │   ├── tasks.py        # BackgroundTaskRegistry (strong-ref fire-and-forget)
 │       │   ├── token_revocation.py
 │       │   └── logging_utils.py # log_context() structured logging helper
@@ -158,7 +160,7 @@ AppContainer
  ├── assessments       AssessmentService -> AssessmentRepository(orm_database)
  ├── rubrics           RubricService
  ├── media             MediaPipeline(settings, runner, events, auth)
- ├── provider_credentials ProviderCredentialService(repo, master_key_source=auth secret)
+ ├── provider_credentials ProviderCredentialService(repo, master_key_source=auth secret, changes)
  ├── llm_settings      LLMSettingsService(app_settings, key_overrides, credential_store)
  ├── scoring           ScoringPipeline(settings, runner, events, auth, rubrics, llm_settings)
  ├── pipeline          PipelineService(sessions, events, media, scoring, assessments)
@@ -367,6 +369,7 @@ Defined in [models.py](fastapi_backend/app/database/models.py):
 | `assessment_criteria` | `AssessmentCriterionRecord` | Per-rubric-criterion evidence |
 | `notifications` | `NotificationRecord` | Task-completion notification history; `read_at` null = unread |
 | `provider_credentials` | `ProviderCredentialRecord` | Per-provider LLM API key as AES-256-GCM ciphertext; never serialised to a client |
+| `app_settings` | `AppSettingRecord` | Global key/value settings — model routing, transcription engine, preprocess toggle |
 
 Jobs table (`jobs`, `job_events`) managed by raw SQL via `JobRepository` / `Database`.
 
@@ -608,13 +611,19 @@ fails `LLM_CIRCUIT_FAILURE_THRESHOLD` times in a row is skipped for a cooldown �
 but never when it is the only target left, so a stale breaker cannot be the
 reason an assessment dies.
 
-**Selection is read live per run.** `LLMSettingsService.routing()` reads
-`llmPrimary` / `llmFallbacks` from `app_settings` on every scoring call, the
-same contract the transcription engine uses, so a model changed mid-queue
-applies to the next run in every process. It also filters: a provider this build
-dropped, or one with no API key on this machine, is removed and the first usable
-fallback is promoted. If filtering would empty the list the raw selection is
-kept, so the failure names the missing credential instead of saying "no target".
+**Selection applies to the next run everywhere, with no restart.**
+`LLMSettingsService.routing()` resolves `llmPrimary` / `llmFallbacks` before
+every scoring call, the same contract the transcription engine uses, so a model
+changed mid-queue applies to the next run in every process. It also filters: a
+provider this build dropped, or one with no API key on this machine, is removed
+and the first usable fallback is promoted. If filtering would empty the list the
+raw selection is kept, so the failure names the missing credential instead of
+saying "no target".
+
+That contract used to be kept by querying on every run. It is now kept by the
+database announcing the change instead — see **Caching the scoring hot path**
+below. The guarantee is unchanged; only the mechanism moved, from asking every
+time to being told when it matters.
 
 **Keys are operator-managed, encrypted, and write-only.** Settings → Provider
 API keys sets one key per *platform* (an OpenRouter key covers every model
@@ -664,3 +673,54 @@ it after a reload.
 `PUT` / `DELETE /api/settings/llm-providers/{providerId}/key` store and revoke.
 Both answer with the same provider description every other settings read gets,
 so the screen refreshes in one round trip without the key travelling back.
+
+### Caching the scoring hot path
+
+Two values are resolved before every assessment, in the API process and in the
+Hatchet worker alike: the model selection (`app_settings`) and the provider API
+keys (`provider_credentials`). Both are read constantly and written a handful of
+times a year, so both are cached — `AppSettingsRepository` and
+`ProviderCredentialService` each hold one `SnapshotCache`
+([core/snapshot_cache.py](fastapi_backend/app/core/snapshot_cache.py)).
+
+Caching a credential is only defensible if a rotation reaches every process, so
+freshness reuses the change-tracking machinery already behind the session-index
+cache. Both tables are in `TRACKED_TABLES`: a write fires a trigger that bumps
+`table_versions` and, on PostgreSQL, issues a `pg_notify`; `ChangeFeedService`
+turns that into an observer call that drops the cached copy in every listening
+process. A second mechanism backs it up — the entry records the counter it was
+built from, and a hit requires that counter to still match — which covers the
+window while a listener reconnects, a SQLite deployment with no `NOTIFY`, and
+events dropped under back-pressure.
+
+Three rules the implementation depends on:
+
+* **A local write evicts directly**, rather than waiting for its own
+  announcement to come back round. With the listener connected the token is
+  answered from memory, so this process's counter does not move until the
+  notification arrives — and the response to a rotation is built from the very
+  snapshot the rotation changed.
+* **A token that cannot be established disables the cache.** No change feed, or
+  an unreadable counter, means every read goes to the database. Slower; the
+  alternative is a revoked key staying in use.
+* **The token is read before the value, never after.** The other order caches
+  data older than its token, which is exactly the stale read being prevented.
+
+Per-request work collapsed alongside it. `LLMSettingsService.resolve()` is the
+single place a credential read happens; `describe()` used to reach for the store
+four times and `subprocess_env()` twice, each rebuilding the same projections.
+Resolving once is also a *consistency* fix — a rotation landing mid-request could
+previously produce a routing decision made against one snapshot and a forwarded
+key taken from another.
+
+| Regime | Queries to resolve a scoring run's model + credentials |
+|---|---|
+| PostgreSQL, listener connected (warm) | **0** |
+| PostgreSQL reconnecting, or SQLite | 2 small `table_versions` reads |
+| Cold cache / after any change | 1 read per table, shared by every concurrent caller |
+
+`GET /api/health/ready` reports `caches.providerCredentials`,
+`caches.appSettings` and `caches.changeFeedPushActive`. Counters only — a cache
+holding API keys must not become the way they leak. `pushActive: false` with a
+high hit rate is the shape worth alerting on: rotations are still arriving, but
+by counter comparison rather than by announcement.

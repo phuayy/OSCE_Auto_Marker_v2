@@ -48,6 +48,15 @@ async def readiness(response: Response, container: AppContainer = Depends(get_co
     return {
         "ready": ready,
         "checks": {"database": database_ok, "storage": storage_ok, **binaries},
+        # Informational. The credential cache is only correct while the change
+        # feed can tell it a key rotated, so "pushActive: false with a high hit
+        # rate" is the shape worth alerting on — it means rotations are reaching
+        # this process by counter comparison rather than by announcement.
+        "caches": {
+            "providerCredentials": container.llm_settings.credential_cache_stats(),
+            "appSettings": container.app_settings.cache_stats(),
+            "changeFeedPushActive": container.changes.push_active,
+        },
     }
 
 
