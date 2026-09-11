@@ -288,6 +288,16 @@ class ProviderDescriptor:
     allows_custom_model: bool = True
     # Shown in the settings screen when the provider has no key configured.
     requirements: str = ""
+    # True for a provider an operator defined at runtime rather than one this
+    # build ships. The settings screen uses it to decide what may be edited:
+    # a shipped provider's endpoint is a property of the release, a custom
+    # one's is a property of the deployment.
+    is_custom: bool = False
+    # The custom provider's connection definition, echoed back so the edit form
+    # can be pre-filled from the server's own copy rather than from whatever the
+    # browser happened to remember. Never carries a credential — see
+    # ``app/llm/custom.py``. Empty for a shipped provider.
+    connection: Mapping[str, Any] = field(default_factory=dict)
 
     def model(self, model_id: str) -> ModelSpec | None:
         wanted = str(model_id or "").strip()
@@ -309,6 +319,8 @@ class ProviderDescriptor:
             "allowsCustomModel": self.allows_custom_model,
             "defaultModelId": self.default_model_id(),
             "requirements": self.requirements,
+            "isCustom": self.is_custom,
+            "connection": dict(self.connection or {}),
         }
 
 

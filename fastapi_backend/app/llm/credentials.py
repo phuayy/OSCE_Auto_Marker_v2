@@ -8,15 +8,31 @@ in database backups. The database records *which* provider to use; the
 deployment records how to authenticate to it.
 
 Each provider names the variables it accepts (``api_key_env``), so adding a
-provider adds its credentials automatically.
+provider adds its credentials automatically. An operator-defined provider names
+a generated variable of its own (``OSCE_LLM_KEY_<ID>``), so it travels to a
+subprocess by the same mechanism with no special case here.
+
+Which providers exist is a per-deployment question now, so every function takes
+a :class:`~app.llm.catalog.ProviderCatalog`. Omitting it means "whatever this
+build ships", which is what every pre-existing caller meant.
 """
 from __future__ import annotations
 
 import os
-from typing import Mapping
+from typing import Mapping, TYPE_CHECKING
 
-from app.llm import registry
 from app.llm.base import ProviderCredentials
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+    from app.llm.catalog import ProviderCatalog
+
+
+def _catalog(catalog: "ProviderCatalog | None"):
+    if catalog is None:
+        from app.llm.catalog import builtin_catalog
+
+        return builtin_catalog()
+    return catalog
 
 
 def resolve_credentials(
@@ -24,6 +40,7 @@ def resolve_credentials(
     env: Mapping[str, str] | None = None,
     *,
     overrides: Mapping[str, str] | None = None,
+    catalog: "ProviderCatalog | None" = None,
 ) -> ProviderCredentials:
     """Credentials for one provider.
 
@@ -32,7 +49,7 @@ def resolve_credentials(
     the existing case.
     """
     source = os.environ if env is None else env
-    descriptor = registry.descriptor_for(provider_id)
+    descriptor = _catalog(catalog).descriptor_for(provider_id)
     if descriptor is None:
         return ProviderCredentials()
 
@@ -58,10 +75,12 @@ def resolve_all(
     env: Mapping[str, str] | None = None,
     *,
     overrides: Mapping[str, str] | None = None,
+    catalog: "ProviderCatalog | None" = None,
 ) -> dict[str, ProviderCredentials]:
+    resolved = _catalog(catalog)
     return {
-        provider_id: resolve_credentials(provider_id, env, overrides=overrides)
-        for provider_id in registry.provider_ids()
+        provider_id: resolve_credentials(provider_id, env, overrides=overrides, catalog=resolved)
+        for provider_id in resolved.provider_ids()
     }
 
 
@@ -70,6 +89,7 @@ def credential_env_for(
     env: Mapping[str, str] | None = None,
     *,
     overrides: Mapping[str, str] | None = None,
+    catalog: "ProviderCatalog | None" = None,
 ) -> dict[str, str]:
     """The environment variables a subprocess needs for the given providers.
 
@@ -77,12 +97,13 @@ def credential_env_for(
     has no reason to hold a key for a vendor it will never call, and narrowing
     the blast radius of a crash dump or a leaked log costs nothing here.
     """
+    resolved = _catalog(catalog)
     forwarded: dict[str, str] = {}
     for provider_id in provider_ids:
-        descriptor = registry.descriptor_for(provider_id)
+        descriptor = resolved.descriptor_for(provider_id)
         if descriptor is None:
             continue
-        credentials = resolve_credentials(provider_id, env, overrides=overrides)
+        credentials = resolve_credentials(provider_id, env, overrides=overrides, catalog=resolved)
         if credentials.api_key and descriptor.api_key_env:
             forwarded[descriptor.api_key_env[0]] = credentials.api_key
         if descriptor.base_url_env and credentials.base_url and credentials.base_url != descriptor.default_base_url:

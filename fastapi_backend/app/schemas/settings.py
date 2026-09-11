@@ -1,10 +1,23 @@
+"""Request bodies for the settings screen.
+
+One rule shapes every LLM-provider payload here: **which providers exist is no
+longer a build-time fact**, so it cannot be checked by a Pydantic validator.
+An operator-defined provider lives in the database, and a validator is a
+synchronous function with no container, no session and no await. Checking a
+provider id here would therefore mean checking it against the six this build
+ships and rejecting every custom one.
+
+So these models validate *shape* — trimming, required-ness, the option schema a
+transcription engine publishes — and the route handlers validate *existence*
+against the live catalogue, where the answer actually lives. The status code is
+unchanged (422), so the boundary still behaves the same way from outside.
+"""
 from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.llm import registry as llm_registry
 from app.pipeline.transcription import registry
 
 
@@ -27,12 +40,10 @@ class LLMTargetPayload(BaseModel):
 
     @field_validator("providerId")
     @classmethod
-    def known_provider(cls, value: str) -> str:
-        provider_id = str(value or "").strip()
-        if provider_id and provider_id not in llm_registry.PROVIDER_FACTORIES:
-            known = ", ".join(llm_registry.provider_ids())
-            raise ValueError(f"Unknown LLM provider '{provider_id}'. Available: {known}.")
-        return provider_id
+    def trimmed_provider(cls, value: str) -> str:
+        # Existence is checked in the route against this deployment's catalogue;
+        # see the module docstring.
+        return str(value or "").strip()
 
     @field_validator("model")
     @classmethod
@@ -59,13 +70,13 @@ class TestLLMTargetRequest(BaseModel):
 
     @field_validator("providerId")
     @classmethod
-    def known_provider(cls, value: str) -> str:
+    def present_provider(cls, value: str) -> str:
         provider_id = str(value or "").strip()
         if not provider_id:
             raise ValueError("providerId is required.")
-        if provider_id not in llm_registry.PROVIDER_FACTORIES:
-            known = ", ".join(llm_registry.provider_ids())
-            raise ValueError(f"Unknown LLM provider '{provider_id}'. Available: {known}.")
+        # An id that no provider answers to is reported by the test itself, as a
+        # 200 carrying ok=false: the screen renders a failed probe as a result,
+        # and "that provider does not exist" is the most useful result of all.
         return provider_id
 
     @field_validator("apiKey")
@@ -161,3 +172,83 @@ class UpdateSettingsRequest(BaseModel):
                 # validation report next to the field it came from.
                 raise ValueError(error.message) from None
         return validated
+
+
+class CustomProviderRequest(BaseModel):
+    """A scoring provider an operator defines, rather than one this build ships.
+
+    **Everything is optional except the identity, the endpoint and (separately)
+    the API key.** The field list is a union across what the current market
+    needs to open a connection - bearer tokens, ``x-api-key``, Azure's
+    ``api-key`` plus ``api-version``, query-parameter keys, organisation and
+    project ids, account ids and regions baked into URLs, gateway headers,
+    vendor-specific body switches - because no single vendor needs more than a
+    handful of them and there is no useful profile that covers them all. The
+    three that are required are not preferences: a provider with no endpoint has
+    nothing to call, and one with no id cannot be selected.
+
+    **The model id is deliberately absent.** One key authorises a whole
+    catalogue, and the checkpoint changes far more often than the endpoint does,
+    so the model stays in Settings -> Scoring model where it already is. This
+    payload answers only "how do I talk to this platform".
+
+    Shape only is enforced here; the semantic rules (which auth scheme needs
+    which field, what a base URL may be, header-injection safety) live in
+    ``app/llm/custom.py`` so the HTTP route, the subprocess loader and any
+    future importer enforce one contract rather than three approximations.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # --- identity ---------------------------------------------------------
+    id: str = ""
+    label: str = ""
+    vendor: str = ""
+    description: str = ""
+    documentationUrl: str = ""
+
+    # --- endpoint ---------------------------------------------------------
+    baseUrl: str = ""
+    apiFormat: str = "openai"
+
+    # --- authentication ---------------------------------------------------
+    authScheme: str = "bearer"
+    authHeaderName: str = ""
+    authValuePrefix: str = ""
+    authQueryParam: str = ""
+
+    # --- deployment identifiers -------------------------------------------
+    apiVersion: str = ""
+    apiVersionHeader: str = ""
+    apiVersionQueryParam: str = ""
+    organizationId: str = ""
+    organizationHeader: str = ""
+    projectId: str = ""
+    projectHeader: str = ""
+    accountId: str = ""
+    region: str = ""
+
+    # --- free-form escape hatches -----------------------------------------
+    extraHeaders: dict[str, str] = Field(default_factory=dict)
+    extraQuery: dict[str, str] = Field(default_factory=dict)
+    extraBody: dict[str, Any] = Field(default_factory=dict)
+
+    # --- behaviour --------------------------------------------------------
+    requestTimeoutSeconds: float = 0.0
+    supportsJsonMode: bool = True
+    supportsReasoningControl: bool = False
+    enabled: bool = True
+
+    # --- credential -------------------------------------------------------
+    # Optional here, and never stored on the provider row: when present it is
+    # forwarded to the same encrypted credential store every shipped provider
+    # uses. Accepting it on this call exists purely so adding a provider is one
+    # action rather than two - the key is saved by the same code path the
+    # rotation endpoint uses, with the same encryption and the same eviction.
+    apiKey: str = ""
+
+    def definition(self) -> dict[str, Any]:
+        """The payload minus the credential, for ``CustomProviderSpec``."""
+        payload = self.model_dump()
+        payload.pop("apiKey", None)
+        return payload

@@ -304,6 +304,50 @@ class ProviderCredentialRecord(Base):
     last_test_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class CustomProviderRecord(Base):
+    """One scoring provider an operator defined, rather than one this build ships.
+
+    Deliberately *not* a row in ``app_settings``: that table is a flat key/value
+    bag returned verbatim to every settings reader, and a provider is an entity
+    with its own identity, lifecycle and audit trail. Giving it a table means a
+    definition can be listed, edited and deleted individually, and that a write
+    to one provider does not rewrite the blob holding all the others.
+
+    Equally deliberately, the API key is **not** here. It goes to
+    ``provider_credentials`` exactly like a shipped provider's, so a custom
+    vendor inherits the encryption, the write-only API and the
+    rotation-evicts-every-cache behaviour without a second implementation. This
+    row holds only the connection *shape*, which is why it is safe to return to
+    the settings screen in full.
+
+    ``config_json`` carries the union of connection fields
+    (``app/llm/custom.py``) rather than one column per field. The set of things
+    vendors require to authenticate changes with the market, and a schema
+    migration per field would guarantee the product lags it; validation happens
+    at the boundary in ``CustomProviderSpec.from_raw`` instead, which is where
+    the error messages belong anyway.
+    """
+
+    __tablename__ = "llm_providers"
+    __table_args__ = (Index("idx_llm_providers_enabled", "enabled"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    label: Mapped[str] = mapped_column(String(120), nullable=False)
+    vendor: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # Denormalised out of config_json purely so an operator can eyeball which
+    # endpoint a row points at with a plain SELECT during an incident.
+    base_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    api_format: Mapped[str] = mapped_column(String(32), nullable=False, default="openai")
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    # False keeps the definition but takes it out of every catalogue, so a
+    # provider can be parked during an outage without losing its configuration.
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+
 class SessionRecord(Base):
     __tablename__ = "sessions"
     __table_args__ = (

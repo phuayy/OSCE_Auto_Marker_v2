@@ -23,17 +23,19 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Union
 
 from app.core.secret_box import redact_secrets
 from app.llm import credentials as credential_resolver
 from app.llm import registry
 from app.llm.base import ChatRequest, LLMError, ProviderCredentials, ReasoningPolicy
+from app.llm.catalog import ProviderCatalog, builtin_catalog
 from app.llm.router import LLMRouter
 from app.llm.routing import LLMTarget, RoutingConfig
 from app.llm.runtime import retry_policy_from_env
 from app.repositories.app_settings_repository import AppSettingsRepository
+from app.services.custom_provider_service import CustomProviderService
 from app.services.provider_credential_service import CredentialSnapshot, ProviderCredentialService
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,11 @@ class ResolvedProviders:
     providers: Mapping[str, Any]
     # provider id -> "app" | "environment" | "none"
     sources: Mapping[str, str]
+    # Which providers existed when this was resolved. Carried on the value
+    # rather than re-read, because a provider added mid-request must not be able
+    # to make the credential map and the routing decision disagree about what
+    # the set of targets even is.
+    catalog: ProviderCatalog = field(default_factory=builtin_catalog)
 
     def configured_ids(self) -> set[str]:
         return {
@@ -85,6 +92,7 @@ class LLMSettingsService:
         *,
         key_overrides: KeyOverrideSource | None = None,
         credential_store: ProviderCredentialService | None = None,
+        custom_providers: CustomProviderService | None = None,
     ) -> None:
         self.app_settings = app_settings
         # Keys the API holds in memory but that are not in os.environ — the
@@ -97,6 +105,10 @@ class LLMSettingsService:
         # built for a test, or a deployment that keeps every key in the
         # environment, behaves exactly as it did before this existed.
         self.credential_store = credential_store
+        # Operator-defined providers. Optional for the same reason: a service
+        # built for a test, or a deployment that only ever uses the vendors this
+        # build ships, sees exactly the behaviour that predates this.
+        self.custom_providers = custom_providers
 
     # --- credentials -------------------------------------------------------
 
@@ -131,6 +143,17 @@ class LLMSettingsService:
             logger.exception("Failed to read stored provider API keys; using the environment only.")
             return CredentialSnapshot()
 
+    async def catalog(self) -> ProviderCatalog:
+        """Every provider this deployment can route to, shipped and custom.
+
+        Read through the custom-provider store's cache, so the common path costs
+        no query and an edit anywhere still reaches this process - the same
+        contract the model selection and the API keys are held to.
+        """
+        if self.custom_providers is None:
+            return builtin_catalog()
+        return await self.custom_providers.catalog()
+
     async def resolve(self, *, extra_keys: Mapping[str, str] | None = None) -> ResolvedProviders:
         """Everything derived from one credential read, computed together.
 
@@ -140,6 +163,7 @@ class LLMSettingsService:
         ``describe()`` did four reads and four decrypt passes of the same rows.
         They are all projections of one snapshot, so they are built from one.
         """
+        catalog = await self.catalog()
         snapshot = await self.credential_snapshot()
         stored = dict(snapshot.api_keys)
 
@@ -154,14 +178,14 @@ class LLMSettingsService:
             if str(value or "").strip():
                 overrides[provider_id] = str(value).strip()
 
-        credentials = credential_resolver.resolve_all(overrides=overrides)
+        credentials = credential_resolver.resolve_all(overrides=overrides, catalog=catalog)
         # Resolved a second time without the stored keys, purely to tell "saved
         # here" from "from the environment". Both calls are pure os.environ
         # reads — no database, no decryption — so this costs nothing.
-        environment_only = credential_resolver.resolve_all(overrides=environment)
+        environment_only = credential_resolver.resolve_all(overrides=environment, catalog=catalog)
 
         sources: dict[str, str] = {}
-        for provider_id in registry.provider_ids():
+        for provider_id in catalog.provider_ids():
             if str(stored.get(provider_id) or "").strip():
                 sources[provider_id] = "app"
             elif environment_only.get(provider_id, ProviderCredentials()).configured:
@@ -174,8 +198,9 @@ class LLMSettingsService:
             statuses=snapshot.statuses,
             overrides=overrides,
             credentials=credentials,
-            providers=registry.build_all(credentials),
+            providers=catalog.build_all(credentials),
             sources=sources,
+            catalog=catalog,
         )
 
     # Thin wrappers over ``resolve``. Each is one credential read; a caller that
@@ -288,9 +313,16 @@ class LLMSettingsService:
         resolved = await self.resolve()
         config = self.filter_routing(await self.stored_routing(), resolved)
         env = dict(config.to_env())
+        # The definitions travel with the routing, not separately: a subprocess
+        # told to call "our-gateway" has to be able to find out what that means,
+        # and reading it from the same snapshot the routing was filtered against
+        # is what stops the two disagreeing.
+        env.update(resolved.catalog.to_env())
         provider_ids = [target.provider_id for target in config.targets()]
         env.update(
-            credential_resolver.credential_env_for(provider_ids, overrides=resolved.overrides)
+            credential_resolver.credential_env_for(
+                provider_ids, overrides=resolved.overrides, catalog=resolved.catalog
+            )
         )
         return env
 
@@ -355,6 +387,12 @@ class LLMSettingsService:
             return {"enabled": False}
         return self.credential_store.cache_stats()
 
+    def custom_provider_cache_stats(self) -> dict[str, Any]:
+        """Cache counters for the readiness payload. Counts only, never content."""
+        if self.custom_providers is None:
+            return {"enabled": False}
+        return self.custom_providers.cache_stats()
+
     def credential_storage_status(self) -> dict[str, Any]:
         """Whether this server can store keys at all.
 
@@ -393,8 +431,14 @@ class LLMSettingsService:
         reload.
         """
         resolved_id = str(provider_id or "").strip()
-        if resolved_id not in registry.PROVIDER_FACTORIES:
-            known = ", ".join(registry.provider_ids())
+        probe_key = str(api_key or "").strip()
+        # Resolved before the id is checked, because "does this provider exist"
+        # is now a question about this deployment's catalogue rather than about
+        # the build - and the answer has to come from the same snapshot the call
+        # itself will be made against.
+        resolved = await self.resolve(extra_keys={resolved_id: probe_key} if probe_key else None)
+        if not resolved.catalog.contains(resolved_id):
+            known = ", ".join(resolved.catalog.provider_ids())
             return {
                 "ok": False,
                 "providerId": resolved_id,
@@ -402,13 +446,9 @@ class LLMSettingsService:
                 "error": f"Unknown provider '{resolved_id}'. Available: {known}.",
             }
 
-        probe_key = str(api_key or "").strip()
         config = RoutingConfig(
             primary=LLMTarget(resolved_id, str(model or "").strip()),
             retry=retry_policy_from_env(),
-        )
-        resolved = await self.resolve(
-            extra_keys={resolved_id: probe_key} if probe_key else None
         )
         providers = resolved.providers
         # Whatever key this call will actually send, so it can be scrubbed out of

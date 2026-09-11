@@ -108,7 +108,7 @@ class AnthropicProvider(LLMProvider):
         if not conversation:
             raise LLMConfigError(
                 "Anthropic requires at least one user message.",
-                provider_id=PROVIDER_ID,
+                provider_id=self.descriptor.id,
                 model=resolved_model,
             )
         if request.json_mode and mode in {RequestMode.STRUCTURED, RequestMode.JSON_ONLY}:
@@ -132,7 +132,7 @@ class AnthropicProvider(LLMProvider):
             raise error_for_status(
                 status_code,
                 f"Anthropic returned {status_code}: {self._error_message(body)}",
-                provider_id=PROVIDER_ID,
+                provider_id=self.descriptor.id,
                 model=resolved_model,
                 retry_after_seconds=self._retry_after(headers),
             )
@@ -146,12 +146,34 @@ class AnthropicProvider(LLMProvider):
         text = self.validate_content(content, finish_reason, request, resolved_model)
         return ChatResponse(
             content=text,
-            provider_id=PROVIDER_ID,
+            provider_id=self.descriptor.id,
             model=resolved_model,
             mode=mode.value,
             finish_reason=finish_reason,
             usage=dict(body.get("usage") or {}),
         )
+
+    def _headers(self) -> dict[str, str]:
+        """Everything sent with the request bar the body.
+
+        Split out so an operator-defined Anthropic-format endpoint (a corporate
+        gateway, a Bedrock-compatible relay) can add or replace a header without
+        a second copy of this transport — see ``providers/custom.py``.
+        """
+        return {
+            "x-api-key": self.credentials.api_key,
+            "anthropic-version": API_VERSION,
+            "content-type": "application/json",
+            **dict(self.credentials.extra_headers or {}),
+        }
+
+    def _query(self) -> dict[str, str]:
+        """Query parameters appended to the request. None for Anthropic itself."""
+        return {}
+
+    def _timeout(self, timeout_seconds: float) -> float:
+        """The caller's timeout, unless a definition caps it lower."""
+        return timeout_seconds
 
     def _post(
         self,
@@ -164,25 +186,20 @@ class AnthropicProvider(LLMProvider):
         except ImportError as error:  # pragma: no cover - dependency is pinned
             raise LLMConfigError(
                 "The 'httpx' package is required for the Anthropic provider.",
-                provider_id=PROVIDER_ID,
+                provider_id=self.descriptor.id,
             ) from error
 
-        headers = {
-            "x-api-key": self.credentials.api_key,
-            "anthropic-version": API_VERSION,
-            "content-type": "application/json",
-            **dict(self.credentials.extra_headers or {}),
-        }
+        headers = self._headers()
         url = f"{self.base_url.rstrip('/')}/messages"
         try:
-            with httpx.Client(timeout=timeout_seconds) as client:
-                response = client.post(url, headers=headers, json=payload)
+            with httpx.Client(timeout=self._timeout(timeout_seconds)) as client:
+                response = client.post(url, headers=headers, params=self._query() or None, json=payload)
         except Exception as error:
             # Connection-level failures never reached the model, so they are
             # always worth another attempt.
             raise LLMTransportError(
                 f"{type(error).__name__}: {error}",
-                provider_id=PROVIDER_ID,
+                provider_id=self.descriptor.id,
                 model=model,
             ) from error
         try:

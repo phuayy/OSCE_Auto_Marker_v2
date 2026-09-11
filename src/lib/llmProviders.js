@@ -59,9 +59,16 @@ export function resolveModelId(provider, storedModel) {
 }
 
 // Whether a stored model id needs the free-text field rather than an option.
+//
+// A provider with no shortlist always does. Operator-defined providers ship
+// none by design — the record describes a *platform*, and this app has no way
+// to know a private gateway's catalogue — so the dropdown would otherwise sit
+// empty with no way to type the id it is waiting for.
 export function isCustomModel(provider, modelId) {
+  if (!provider) return false;
+  if (!(provider.models || []).length) return Boolean(provider.allowsCustomModel);
   const model = String(modelId || '').trim();
-  if (!model || !provider) return false;
+  if (!model) return false;
   return !(provider.models || []).some((candidate) => candidate.id === model);
 }
 

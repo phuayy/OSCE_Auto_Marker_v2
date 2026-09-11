@@ -19,10 +19,12 @@ from app.pipeline.media import MediaPipeline
 from app.pipeline.transcription.registry import EngineDependencies
 from app.pipeline.scoring import ScoringPipeline
 from app.repositories.app_settings_repository import AppSettingsRepository
+from app.services.custom_provider_service import CustomProviderService
 from app.services.llm_settings_service import LLMSettingsService
 from app.services.provider_credential_service import ProviderCredentialService
 from app.repositories.assessment_repository import AssessmentRepository
 from app.repositories.corpus_repository import CorpusRepository
+from app.repositories.custom_provider_repository import CustomProviderRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.notification_repository import NotificationRepository
 from app.repositories.provider_credential_repository import ProviderCredentialRepository
@@ -81,6 +83,7 @@ class AppContainer:
     app_settings: AppSettingsRepository
     llm_settings: LLMSettingsService
     provider_credentials: ProviderCredentialService
+    custom_providers: CustomProviderService
     videos: VideoRepository
     session_maintenance: SessionMaintenanceService
     login_rate_limiter: FixedWindowRateLimiter
@@ -211,10 +214,19 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         # than risk sending a revoked key.
         changes=changes,
     )
+    # Providers an operator defined rather than ones this build ships. Cached
+    # on the same terms as the credentials for the same reason: the catalogue is
+    # resolved before every scoring run in every process, and an edit has to
+    # reach the Hatchet worker without a restart.
+    custom_providers = CustomProviderService(
+        CustomProviderRepository(orm_database),
+        changes=changes,
+    )
     llm_settings = LLMSettingsService(
         app_settings,
         key_overrides=lambda: {"nvidia": auth.runtime.nvidia_api_key},
         credential_store=provider_credentials,
+        custom_providers=custom_providers,
     )
     scoring = ScoringPipeline(active_settings, runner, events, auth, rubrics, llm_settings=llm_settings)
     webhooks = WebhookRepository(orm_database)
@@ -298,6 +310,7 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         app_settings=app_settings,
         llm_settings=llm_settings,
         provider_credentials=provider_credentials,
+        custom_providers=custom_providers,
         videos=videos,
         session_maintenance=session_maintenance,
         login_rate_limiter=login_rate_limiter,

@@ -3,6 +3,7 @@ import { ArrowLeft, Loader2, Settings as SettingsIcon, Wand2 } from 'lucide-reac
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import CorporaManager from '@/CorporaManager.jsx';
+import CustomProvidersSettings from '@/CustomProvidersSettings.jsx';
 import LlmRoutingSettings from '@/LlmRoutingSettings.jsx';
 import ProviderKeysSettings from '@/ProviderKeysSettings.jsx';
 import TranscriptionEngineSettings from '@/TranscriptionEngineSettings.jsx';
@@ -106,6 +107,11 @@ export default function SettingsPage({ onBack }) {
         />
 
         <ProviderKeysSettings
+          version={providersVersion}
+          onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
+        />
+
+        <CustomProvidersSettings
           version={providersVersion}
           onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
         />

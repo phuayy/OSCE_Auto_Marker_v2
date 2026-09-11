@@ -57,6 +57,11 @@ TRACKED_TABLES: tuple[str, ...] = (
     "notifications",
     "provider_credentials",
     "app_settings",
+    # Operator-defined providers are the third value on the scoring hot path,
+    # and the one with the widest blast radius when stale: a catalogue that has
+    # not learned about an edited endpoint would keep sending this deployment's
+    # key to the address the definition used to name.
+    "llm_providers",
 )
 
 _VERSION_TABLE = "table_versions"

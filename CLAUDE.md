@@ -42,7 +42,8 @@ OSCE-AI-FYP/
 │   │       ├── 0002_notification_event_type.py   # notifications.event_type + backfill
 │   │       ├── 0003_change_tracking_triggers.py  # table_versions triggers (+ pg_notify)
 │   │       ├── 0004_provider_credentials.py      # encrypted operator-managed LLM API keys
-│   │       └── 0005_cache_invalidation_triggers.py  # change tracking on the two cached tables
+│   │       ├── 0005_cache_invalidation_triggers.py  # change tracking on the two cached tables
+│   │       └── 0006_custom_llm_providers.py     # operator-defined scoring providers (+ tracking)
 │   └── app/
 │       ├── main.py             # FastAPI app, middleware, startup/shutdown
 │       ├── core/
@@ -63,6 +64,7 @@ OSCE-AI-FYP/
 │       │   ├── session_repository.py    # SessionRecord CRUD + legacy JSON migration
 │       │   ├── job_repository.py        # Raw SQL jobs store
 │       │   ├── provider_credential_repository.py  # Sealed LLM API keys (ciphertext only)
+│       │   ├── custom_provider_repository.py     # Operator-defined LLM providers
 │       │   ├── assessment_repository.py
 │       │   ├── rubric_asset_repository.py
 │       │   ├── upload_repository.py     # JSON files on disk (uploads_dir)
@@ -72,6 +74,7 @@ OSCE-AI-FYP/
 │       │   ├── transcription_router.py  # Picks + runs the selected engine per run
 │       │   ├── llm_settings_service.py  # Resolves the primary/fallback model choice; subprocess env
 │       │   ├── provider_credential_service.py  # Set/rotate/revoke provider API keys, encrypted
+│       │   ├── custom_provider_service.py      # CRUD + cached catalogue for operator-defined providers
 │       │   ├── session_service.py
 │       │   ├── pipeline_service.py      # Orchestrates full assessment pipeline
 │       │   ├── clip_service.py          # Auto-crop, clip export planning/execution, clip assessment
@@ -93,12 +96,14 @@ OSCE-AI-FYP/
 │       ├── llm/                # Pluggable scoring LLMs: one contract, many vendors
 │       │   ├── base.py             # Provider contract, ChatRequest/Response, error taxonomy
 │       │   ├── registry.py         # Providers this build ships (add one line per provider)
+│       │   ├── custom.py           # CustomProviderSpec — the union of connection fields
+│       │   ├── catalog.py          # ProviderCatalog: shipped ∪ custom, per run (+ env codec)
 │       │   ├── routing.py          # LLMTarget / RetryPolicy / RoutingConfig (+ env codec)
 │       │   ├── retry.py            # Jittered backoff + per-provider circuit breaker
 │       │   ├── router.py           # LLMRouter: targets x modes x attempts
 │       │   ├── credentials.py      # Per-provider key/base-URL resolution from env
 │       │   ├── runtime.py          # build_router_from_env() — the subprocess entry point
-│       │   └── providers/          # openai_compatible.py + one module per vendor
+│       │   └── providers/          # openai_compatible.py + one module per vendor + custom.py
 │       ├── pipeline/
 │       │   ├── transcription/  # Pluggable ASR engines
 │       │   │   ├── base.py             # Engine contract: descriptor, ParameterSpec, request/result
@@ -161,7 +166,8 @@ AppContainer
  ├── rubrics           RubricService
  ├── media             MediaPipeline(settings, runner, events, auth)
  ├── provider_credentials ProviderCredentialService(repo, master_key_source=auth secret, changes)
- ├── llm_settings      LLMSettingsService(app_settings, key_overrides, credential_store)
+ ├── custom_providers  CustomProviderService(repo, changes)
+ ├── llm_settings      LLMSettingsService(app_settings, key_overrides, credential_store, custom_providers)
  ├── scoring           ScoringPipeline(settings, runner, events, auth, rubrics, llm_settings)
  ├── pipeline          PipelineService(sessions, events, media, scoring, assessments)
  ├── clips             ClipService(sessions, events, media, pipeline, jobs)
@@ -369,6 +375,7 @@ Defined in [models.py](fastapi_backend/app/database/models.py):
 | `assessment_criteria` | `AssessmentCriterionRecord` | Per-rubric-criterion evidence |
 | `notifications` | `NotificationRecord` | Task-completion notification history; `read_at` null = unread |
 | `provider_credentials` | `ProviderCredentialRecord` | Per-provider LLM API key as AES-256-GCM ciphertext; never serialised to a client |
+| `llm_providers` | `CustomProviderRecord` | Scoring providers an operator defined at runtime — endpoint, auth placement, versions, extra headers/query/body. No key column: the credential lives in `provider_credentials` like every other provider's |
 | `app_settings` | `AppSettingRecord` | Global key/value settings — model routing, transcription engine, preprocess toggle |
 
 Jobs table (`jobs`, `job_events`) managed by raw SQL via `JobRepository` / `Database`.
@@ -586,9 +593,9 @@ Content scorer has checkpoint/repair: saves after each LLM call, up to 2 repair 
 The vendor is a **runtime** choice, not a build-time one. `app/llm/` holds one
 provider contract and six implementations (NVIDIA, OpenAI, Anthropic, DeepSeek,
 Gemini, OpenRouter); the operator picks a primary and a fallback in
-Settings → Scoring model. Adding a provider is a module plus one line in
-`app/llm/registry.py` — the settings API, request validation and the router all
-read that registry, so the dropdowns pick it up with no frontend change.
+Settings → Scoring model. Adding a provider to the *build* is a module plus one
+line in `app/llm/registry.py`. Adding one to a *deployment* needs no code at all
+— see **Operator-defined providers** below.
 
 Five providers speak the OpenAI wire format and share
 `providers/openai_compatible.py`; only Anthropic has a native adapter (httpx, no
@@ -674,18 +681,82 @@ it after a reload.
 Both answer with the same provider description every other settings read gets,
 so the screen refreshes in one round trip without the key travelling back.
 
+### Operator-defined providers
+
+Six vendors ship in the build. A seventh — a lab an institution just signed
+with, a departmental gateway, an Azure deployment, a vLLM box in the server room
+— is added in **Settings → Custom scoring providers** and is routable by the next
+assessment, with no release and no restart.
+
+**What the form asks for is a union of what the market needs to open a
+connection, and everything in it is optional except the id, the endpoint and the
+key.** Bearer tokens cover most vendors; Azure wants the key in an `api-key`
+header plus an `api-version` query parameter; Anthropic-shaped relays want
+`x-api-key` and `anthropic-version`; Google's REST surface wants it in the query
+string; OpenAI accepts organisation and project headers; Cloudflare and Azure
+put an account id or region *in the URL*; OpenRouter wants `HTTP-Referer`. No
+single vendor needs more than a handful, which is exactly why the schema is a
+union of optional fields rather than a profile. `{region}`, `{accountId}`,
+`{organizationId}`, `{projectId}` and `{apiVersion}` are substituted into the
+base URL, so changing region is a field edit rather than a URL rewrite.
+
+**The model id is deliberately not part of it.** A platform and a checkpoint are
+different decisions with different lifetimes — one key authorises a whole
+catalogue — so the model stays in Settings → Scoring model. A custom provider
+ships an empty model shortlist and `allowsCustomModel: true`, which is what makes
+that card ask for a typed id.
+
+| Piece | Where |
+|---|---|
+| The definition, validated at one boundary | [llm/custom.py](fastapi_backend/app/llm/custom.py) — `CustomProviderSpec` |
+| Shipped ∪ custom, as an immutable per-run value | [llm/catalog.py](fastapi_backend/app/llm/catalog.py) — `ProviderCatalog` |
+| The two adapters a definition binds to | [llm/providers/custom.py](fastapi_backend/app/llm/providers/custom.py) |
+| Storage, cache, CRUD | [services/custom_provider_service.py](fastapi_backend/app/services/custom_provider_service.py) |
+| The screen | [src/CustomProvidersSettings.jsx](src/CustomProvidersSettings.jsx) + [src/lib/customProviders.js](src/lib/customProviders.js) |
+
+Four properties the design rests on:
+
+* **`ProviderCatalog` is a value, not a mutated registry.** `registry.py` still
+  answers "what did this build ship"; the catalogue answers "what can *this
+  deployment* route to right now", is built from the database (API, worker) or
+  from an environment variable (scoring subprocess), threaded through a request,
+  and discarded. Two concurrent runs may hold different catalogues without either
+  being wrong — which is what "a provider was added mid-queue" means.
+* **A stored row can never redefine a shipped provider.** An id colliding with a
+  built-in one is refused at the API and ignored again when the catalogue is
+  built. Otherwise a database row would be a way to repoint `openai` at an
+  endpoint of the row author's choosing and hand it this deployment's key.
+* **The credential is not in this table.** It goes to `provider_credentials` like
+  every other provider's, so a custom vendor inherits the AES-256-GCM sealing,
+  the write-only API, the `credential_env_for` narrowing and the
+  rotation-evicts-every-cache behaviour with no second implementation. The key
+  reaches a subprocess as `OSCE_LLM_KEY_<ID>`, a name generated from the id so two
+  providers can never share a variable.
+* **Definitions travel with the routing.** `subprocess_env()` serialises them
+  into `OSCE_LLM_CUSTOM_PROVIDERS` alongside `OSCE_LLM_ROUTING`, from the same
+  resolved snapshot, so a scorer told to call `campus-gateway` can find out what
+  that means and cannot disagree with the settings screen about it. The blob is
+  credential-free and safe to log. Unset, a scorer sees exactly the six shipped
+  providers, as before.
+
+Deleting a custom provider removes its stored key with it — an orphaned
+ciphertext row is a credential nothing can use and nothing will ever rotate.
+Routing still naming it is not an error: the router already drops targets it
+cannot build and promotes the first usable fallback.
+
 ### Caching the scoring hot path
 
-Two values are resolved before every assessment, in the API process and in the
-Hatchet worker alike: the model selection (`app_settings`) and the provider API
-keys (`provider_credentials`). Both are read constantly and written a handful of
-times a year, so both are cached — `AppSettingsRepository` and
-`ProviderCredentialService` each hold one `SnapshotCache`
+Three values are resolved before every assessment, in the API process and in the
+Hatchet worker alike: the model selection (`app_settings`), the provider API keys
+(`provider_credentials`) and the provider catalogue (`llm_providers`). All three
+are read constantly and written a handful of times a year, so all three are
+cached — `AppSettingsRepository`, `ProviderCredentialService` and
+`CustomProviderService` each hold one `SnapshotCache`
 ([core/snapshot_cache.py](fastapi_backend/app/core/snapshot_cache.py)).
 
 Caching a credential is only defensible if a rotation reaches every process, so
 freshness reuses the change-tracking machinery already behind the session-index
-cache. Both tables are in `TRACKED_TABLES`: a write fires a trigger that bumps
+cache. All three tables are in `TRACKED_TABLES`: a write fires a trigger that bumps
 `table_versions` and, on PostgreSQL, issues a `pg_notify`; `ChangeFeedService`
 turns that into an observer call that drops the cached copy in every listening
 process. A second mechanism backs it up — the entry records the counter it was
@@ -720,7 +791,7 @@ key taken from another.
 | Cold cache / after any change | 1 read per table, shared by every concurrent caller |
 
 `GET /api/health/ready` reports `caches.providerCredentials`,
-`caches.appSettings` and `caches.changeFeedPushActive`. Counters only — a cache
+`caches.appSettings`, `caches.customProviders` and `caches.changeFeedPushActive`. Counters only — a cache
 holding API keys must not become the way they leak. `pushActive: false` with a
 high hit rate is the shape worth alerting on: rotations are still arriving, but
 by counter comparison rather than by announcement.

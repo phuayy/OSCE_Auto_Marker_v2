@@ -55,6 +55,7 @@ async def readiness(response: Response, container: AppContainer = Depends(get_co
         "caches": {
             "providerCredentials": container.llm_settings.credential_cache_stats(),
             "appSettings": container.app_settings.cache_stats(),
+            "customProviders": container.llm_settings.custom_provider_cache_stats(),
             "changeFeedPushActive": container.changes.push_active,
         },
     }

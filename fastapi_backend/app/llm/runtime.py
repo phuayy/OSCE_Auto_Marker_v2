@@ -18,6 +18,7 @@ from typing import Mapping
 from app.llm import credentials as credential_resolver
 from app.llm import registry
 from app.llm.base import ChatRequest, ReasoningPolicy
+from app.llm.catalog import catalog_from_env
 from app.llm.router import LLMRouter
 from app.llm.routing import ROUTING_ENV_VAR, LLMTarget, RetryPolicy, RoutingConfig
 
@@ -92,10 +93,17 @@ def routing_from_env(env: Mapping[str, str] | None = None) -> RoutingConfig:
 
 
 def build_router_from_env(env: Mapping[str, str] | None = None) -> LLMRouter:
-    """The router a scoring subprocess should use."""
+    """The router a scoring subprocess should use.
+
+    The catalogue is read from the environment first, because an operator-defined
+    provider only exists if the API put it there — and the credentials are then
+    resolved *against that catalogue*, so a custom provider's generated key
+    variable is found by the same code path a shipped provider's is.
+    """
     source = os.environ if env is None else env
     config = routing_from_env(source)
-    providers = registry.build_all(credential_resolver.resolve_all(source))
+    catalog = catalog_from_env(source)
+    providers = catalog.build_all(credential_resolver.resolve_all(source, catalog=catalog))
     return LLMRouter(providers, config)
 
 
