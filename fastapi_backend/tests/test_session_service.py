@@ -41,6 +41,147 @@ def test_public_session_hides_absolute_paths(tmp_path) -> None:
     assert public["files"]["video"]["url"] == "/media/videos/s1-video.mp4"
 
 
+def test_public_session_forwards_panel_artifacts_without_absolute_paths(tmp_path) -> None:
+    service = _make_service(tmp_path)
+    public = service.public_session(
+        {
+            "id": "s1",
+            "name": "Case 1",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "status": "completed",
+            "pipeline": {},
+            "files": {"video": None, "caseStudy": None},
+            "outputs": {
+                "audio": None,
+                "videoClips": None,
+                "scores": {
+                    "fileName": "s1.json",
+                    "absolutePath": "C:/secret/scores/s1.json",
+                    "url": "/media/scores/s1.json",
+                    "sizeBytes": 512,
+                    "panelArtifacts": {
+                        "markers": {
+                            "nvidia__nemotron": {
+                                "fileName": "nvidia__nemotron.json",
+                                "absolutePath": "C:/secret/scores/panel/s1/nvidia__nemotron.json",
+                                "url": "/media/scores/panel/s1/nvidia__nemotron.json",
+                                "sizeBytes": 128,
+                            },
+                            "gemini__gemini-pro": {
+                                "fileName": "gemini__gemini-pro.json",
+                                "absolutePath": "C:/secret/scores/panel/s1/gemini__gemini-pro.json",
+                                "url": "/media/scores/panel/s1/gemini__gemini-pro.json",
+                                "sizeBytes": 256,
+                            },
+                        },
+                        "adjudication": {
+                            "fileName": "adjudication.json",
+                            "absolutePath": "C:/secret/scores/panel/s1/adjudication.json",
+                            "url": "/media/scores/panel/s1/adjudication.json",
+                            "sizeBytes": 64,
+                        },
+                    },
+                },
+            },
+            "error": None,
+        }
+    )
+    panel_artifacts = public["outputs"]["scores"]["panelArtifacts"]
+    assert set(panel_artifacts["markers"]["nvidia__nemotron"]) == {"fileName", "sizeBytes", "url"}
+    assert panel_artifacts["markers"]["nvidia__nemotron"] == {
+        "fileName": "nvidia__nemotron.json",
+        "sizeBytes": 128,
+        "url": "/media/scores/panel/s1/nvidia__nemotron.json",
+    }
+    assert set(panel_artifacts["markers"]["gemini__gemini-pro"]) == {"fileName", "sizeBytes", "url"}
+    assert panel_artifacts["markers"]["gemini__gemini-pro"] == {
+        "fileName": "gemini__gemini-pro.json",
+        "sizeBytes": 256,
+        "url": "/media/scores/panel/s1/gemini__gemini-pro.json",
+    }
+    assert set(panel_artifacts["adjudication"]) == {"fileName", "sizeBytes", "url"}
+    assert panel_artifacts["adjudication"] == {
+        "fileName": "adjudication.json",
+        "sizeBytes": 64,
+        "url": "/media/scores/panel/s1/adjudication.json",
+    }
+    assert "absolutePath" not in str(public)
+
+
+def test_public_session_single_model_scores_carry_null_panel_artifacts(tmp_path) -> None:
+    service = _make_service(tmp_path)
+    base_session = {
+        "id": "s1",
+        "name": "Case 1",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "status": "completed",
+        "pipeline": {},
+        "files": {"video": None, "caseStudy": None},
+        "outputs": {
+            "audio": None,
+            "videoClips": None,
+            "scores": {
+                "fileName": "s1.json",
+                "absolutePath": "C:/secret/scores/s1.json",
+                "url": "/media/scores/s1.json",
+                "sizeBytes": 512,
+            },
+        },
+        "error": None,
+    }
+    public = service.public_session(base_session)
+    assert public["outputs"]["scores"] == {
+        "fileName": "s1.json",
+        "sizeBytes": 512,
+        "url": "/media/scores/s1.json",
+        "panelArtifacts": None,
+    }
+
+    missing_session = {**base_session, "outputs": {**base_session["outputs"], "scores": None}}
+    public_missing = service.public_session(missing_session)
+    assert public_missing["outputs"]["scores"] is None
+
+
+def test_public_session_degraded_panel_has_markers_but_no_adjudication(tmp_path) -> None:
+    service = _make_service(tmp_path)
+    public = service.public_session(
+        {
+            "id": "s1",
+            "name": "Case 1",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "status": "completed",
+            "pipeline": {},
+            "files": {"video": None, "caseStudy": None},
+            "outputs": {
+                "audio": None,
+                "videoClips": None,
+                "scores": {
+                    "fileName": "s1.json",
+                    "absolutePath": "C:/secret/scores/s1.json",
+                    "url": "/media/scores/s1.json",
+                    "sizeBytes": 512,
+                    "panelArtifacts": {
+                        "markers": {
+                            "nvidia__nemotron": {
+                                "fileName": "nvidia__nemotron.json",
+                                "absolutePath": "C:/secret/scores/panel/s1/nvidia__nemotron.json",
+                                "url": "/media/scores/panel/s1/nvidia__nemotron.json",
+                                "sizeBytes": 128,
+                            },
+                        },
+                        "adjudication": None,
+                    },
+                },
+            },
+            "error": None,
+        }
+    )
+    panel_artifacts = public["outputs"]["scores"]["panelArtifacts"]
+    assert list(panel_artifacts["markers"]) == ["nvidia__nemotron"]
+    assert panel_artifacts["adjudication"] is None
+    assert "absolutePath" not in str(public)
+
+
 def test_reserve_unique_session_name_handles_conflicts(tmp_path) -> None:
     service = _make_service(tmp_path)
     used = {"case"}

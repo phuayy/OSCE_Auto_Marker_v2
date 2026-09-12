@@ -26,6 +26,7 @@ from app.pipeline.marking.reconciliation import MARKING_MODE_PANEL
 from app.pipeline.marking.sheets import final_sheet_needs_refresh, marker_sheet_needs_refresh
 from app.pipeline.scoring import ScoringPipeline
 from app.services.pipeline_service import PipelineService
+from app.services.session_service import SessionService
 
 from tests.test_pipeline_service import FakeEvents, FakeMedia, FakeSessions, build_settings
 
@@ -249,6 +250,25 @@ def test_markers_run_in_parallel_with_isolated_environments_then_the_adjudicator
     # Where each marker's own sheet and the record are served from.
     assert result["panelArtifacts"]["markers"]["gemini__gemini-pro"]["url"] == "/media/scores/panel/s1/gemini__gemini-pro.json"
     assert result["panelArtifacts"]["adjudication"]["url"] == "/media/scores/panel/s1/adjudication.json"
+
+
+def test_panel_artifacts_round_trip_through_the_public_session(tmp_path: Path) -> None:
+    runner = FakeScorerRunner(hold=True)
+    pipeline = build_pipeline(tmp_path, runner, panel_plan())
+
+    result = asyncio.run(pipeline.run_content_marking(build_session(tmp_path), panel_plan()))
+
+    public = SessionService.public_session({"id": "s1", "files": {}, "outputs": {"scores": result}})
+    panel_artifacts = public["outputs"]["scores"]["panelArtifacts"]
+    assert panel_artifacts["markers"]["gemini__gemini-pro"]["url"] == "/media/scores/panel/s1/gemini__gemini-pro.json"
+    assert panel_artifacts["adjudication"]["url"] == "/media/scores/panel/s1/adjudication.json"
+    assert panel_artifacts["markers"]["gemini__gemini-pro"]["fileName"] == "gemini__gemini-pro.json"
+    assert panel_artifacts["adjudication"]["fileName"] == "adjudication.json"
+    assert isinstance(panel_artifacts["markers"]["gemini__gemini-pro"]["sizeBytes"], int)
+    assert panel_artifacts["markers"]["gemini__gemini-pro"]["sizeBytes"] > 0
+    assert isinstance(panel_artifacts["adjudication"]["sizeBytes"], int)
+    assert panel_artifacts["adjudication"]["sizeBytes"] > 0
+    assert "absolutePath" not in json.dumps(public)
 
 
 def test_a_marker_sheet_already_on_disk_is_reused_not_remarked(tmp_path: Path) -> None:

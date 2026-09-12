@@ -248,9 +248,11 @@ class SessionService:
         video = files.get("video") or {}
         case_study = files.get("caseStudy")
 
-        def output_meta(key: str, include_url: bool = True) -> dict[str, Any] | None:
-            item = outputs.get(key)
-            if not item:
+        def public_artifact(item: Any, include_url: bool = True) -> dict[str, Any] | None:
+            """One stored artefact record as the browser may see it: name, size
+            and the /media URL. Never ``absolutePath`` — server paths stay behind
+            ``read_artifact_payload``."""
+            if not isinstance(item, dict) or not item:
                 return None
             payload = {
                 "fileName": item.get("fileName"),
@@ -259,6 +261,28 @@ class SessionService:
             if include_url:
                 payload["url"] = item.get("url")
             return payload
+
+        def output_meta(key: str, include_url: bool = True) -> dict[str, Any] | None:
+            return public_artifact(outputs.get(key), include_url)
+
+        def public_panel_artifacts(scores: Any) -> dict[str, Any] | None:
+            """Where a panel run's marker sheets and adjudication record are
+            served from (``PanelMarking.run`` attaches them to the scores
+            output), projected artefact by artefact so no server path leaks.
+            ``None`` for a single-model sheet, so the key is always present."""
+            panel = scores.get("panelArtifacts") if isinstance(scores, dict) else None
+            if not isinstance(panel, dict):
+                return None
+            markers = panel.get("markers")
+            return {
+                "markers": {
+                    str(key): public_artifact(item)
+                    for key, item in (markers.items() if isinstance(markers, dict) else ())
+                    if isinstance(item, dict)
+                },
+                # None on a degraded run: only a record this run wrote is linked.
+                "adjudication": public_artifact(panel.get("adjudication")),
+            }
 
         def public_storage_ref(item: dict[str, Any]) -> dict[str, Any] | None:
             storage_ref = item.get("storageRef")
@@ -281,6 +305,14 @@ class SessionService:
                 "status": storage_ref.get("status"),
                 "committedAt": storage_ref.get("committedAt"),
             }
+
+        scores = output_meta("scores")
+        if scores is not None:
+            # A panel run's per-marker sheets and the adjudication record. Present
+            # on every scores output (None for a single-model sheet) so the score
+            # tab reads one shape. New payload fields must be whitelisted here or
+            # the browser never sees them (see the videoClips "kind" lesson).
+            scores["panelArtifacts"] = public_panel_artifacts(outputs.get("scores"))
 
         clips = outputs.get("videoClips")
         return {
@@ -369,7 +401,7 @@ class SessionService:
                 ]
                 if isinstance(clips, list)
                 else None,
-                "scores": output_meta("scores"),
+                "scores": scores,
             },
             "error": session.get("error") or None,
         }
