@@ -66,6 +66,12 @@ def resolve_binary_from_candidates(
     return explicit_value or fallback_command
 
 
+# Name of the panel sub-directory under ``scores/``. One string in one place:
+# it is both the filesystem segment and the URL segment the /media/scores mount
+# serves a panel's sheets at.
+SCORES_PANEL_SUBDIRECTORY = "panel"
+
+
 @dataclass(frozen=True)
 class StoragePaths:
     root_dir: Path
@@ -112,6 +118,16 @@ class StoragePaths:
     @property
     def output_scores_dir(self) -> Path:
         return self.storage_root / "output" / "scores"
+
+    @property
+    def output_scores_panel_dir(self) -> Path:
+        """Parent of each panel session's own directory (``<here>/<session id>``):
+        one file per marker, ``adjudication.json``, and the markers' checkpoint
+        sidecars. Spelled in the storage layout rather than only in the marking
+        package because two layers own it — the strategy writes it, session
+        teardown removes it — and a service must not import a pipeline strategy
+        to learn where a session's own files are."""
+        return self.output_scores_dir / SCORES_PANEL_SUBDIRECTORY
 
     @property
     def output_llm_preprocess_dir(self) -> Path:

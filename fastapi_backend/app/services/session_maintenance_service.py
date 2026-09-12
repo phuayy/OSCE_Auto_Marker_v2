@@ -8,8 +8,8 @@ from typing import Any
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.logging_utils import log_context
-from app.domain.enums import TaskType
-from app.domain.sessions import IN_FLIGHT_STATUSES, SessionStatus, session_video_path
+from app.domain.enums import TaskType, Workflow
+from app.domain.sessions import IN_FLIGHT_STATUSES, SessionStatus, session_clips, session_video_path
 from app.repositories.notification_repository import NotificationRepository
 from app.repositories.video_repository import VideoRepository
 from app.services.assessment_service import AssessmentService
@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 # delete/rerun. Deliberately excludes the case study (a shared, ref-counted
 # rubric asset) and the source video (handled separately: a clip child's
 # "video" is the parent's exported clip, not the child's to delete).
+#
+# Not everything a run leaves behind is named on the session: each scorer also
+# writes a crash-checkpoint sidecar beside its output, and a panel writes a
+# whole directory. Both are removed alongside these; see ``_delete_artifacts``.
 _OUTPUT_ARTIFACT_KEYS = (
     "audio",
     "whisperxJson",
@@ -150,6 +154,26 @@ class SessionMaintenanceService:
         session_video_path(session)
         return session
 
+    @staticmethod
+    def _task_type_for(session: dict[str, Any]) -> str:
+        """The job that *is* this session's run.
+
+        A long recording's run is segmentation, not the standard pipeline:
+        transcribing and scoring a two-hour multi-station tape burns GPU time
+        and paid LLM calls to produce one meaningless sheet. Everything else —
+        including a clip child, whose video is a single clip and which carries
+        no ``workflow`` of its own — is ``process_session``. The parent check is
+        explicit so a future create path that copies the parent's payload can
+        never turn a child into a segmentation job. ``session_clips`` matches
+        the browser's own rule (``workflow === 'long' || videoClips.length``),
+        which also covers rows written before ``workflow`` was persisted.
+        """
+        if session.get("parentSessionId"):
+            return TaskType.PROCESS_SESSION
+        if str(session.get("workflow") or "").lower() == Workflow.LONG or session_clips(session):
+            return TaskType.AUTO_CROP
+        return TaskType.PROCESS_SESSION
+
     async def _queue_job(
         self,
         session_id: str,
@@ -191,14 +215,25 @@ class SessionMaintenanceService:
         return {"session": self.sessions.public_session(session), "job": public_job}
 
     async def rerun_session(self, session_id: str) -> dict[str, Any]:
-        """Re-run a session's full pipeline in place under the SAME id: reset its
-        outputs/pipeline, wipe the old assessment rows and score artifacts, then
-        enqueue a fresh ``process_session`` job. On completion the pipeline
-        upserts results under the same session id, overwriting the old scores."""
+        """Re-run a session's own run in place under the SAME id.
+
+        *Its own* run: what a re-run means depends on the session. A standard
+        session (and a clip child, whose video is one clip) resets its
+        outputs/pipeline, drops the old assessment rows and score artifacts and
+        re-queues ``process_session``. A long recording re-queues ``auto_crop``
+        — segmentation is its run — keeping its exported MP4s and the child
+        sessions cut from them, which stay valid assessments of clips taken
+        from the same source video.
+        """
         session = await self._ready_to_start(session_id)
+        task_type = self._task_type_for(session)
 
         # Remove stale score artifacts + old assessment rows so a failed re-run
-        # never leaves last run's scores behind masquerading as current.
+        # never leaves last run's scores behind masquerading as current. That
+        # includes ``scores/panel/<id>/``: a re-run means "mark this again",
+        # and a panel used to adopt the marker sheets written against the
+        # previous transcript because nothing in the session's lifecycle owned
+        # that dir.
         self._delete_artifacts(session, keep_clips=True, keep_owned_video=True)
         # Wipe the whole WhisperX artifact dir too: its cache lookup has a
         # latest-file fallback, so any unrecorded leftover JSON from an old
@@ -214,22 +249,40 @@ class SessionMaintenanceService:
         }
 
         def reset(current: dict[str, Any]) -> Any:
-            current["outputs"] = {}
+            if task_type == TaskType.AUTO_CROP:
+                # Segmentation re-run. Clear only what was just deleted or
+                # superseded: the standard-pipeline outputs whose files
+                # ``_delete_artifacts`` unlinked above (leftovers from a run
+                # that should never have happened), and the export record for
+                # a plan this run is about to replace. The clip list stays —
+                # ``ClipService.auto_crop_session_by_id`` replaces it wholesale
+                # when it succeeds, so clearing it here would only cost the
+                # user the timeline they adjusted if this run fails too.
+                outputs = current.get("outputs")
+                if isinstance(outputs, dict):
+                    for key in _OUTPUT_ARTIFACT_KEYS:
+                        outputs.pop(key, None)
+                current["clipExport"] = None
+            else:
+                current["outputs"] = {}
             current["error"] = None
             current["pipeline"] = dict(reset_pipeline)
             return None
 
         await self.sessions.update(session_id, reset)
-        return await self._queue_job(
-            session_id,
-            TaskType.PROCESS_SESSION,
-            {
+        if task_type == TaskType.AUTO_CROP:
+            payload: dict[str, Any] = {
+                "workflow": session.get("workflow"),
+                "segmentation": session.get("segmentation"),
+                "rerun": True,
+            }
+        else:
+            payload = {
                 "parentSessionId": session.get("parentSessionId"),
                 "clipId": (session.get("clipSource") or {}).get("clipId"),
                 "rerun": True,
-            },
-            stage="session_rerun",
-        )
+            }
+        return await self._queue_job(session_id, task_type, payload, stage="session_rerun")
 
     def _delete_artifacts(
         self,
@@ -243,10 +296,16 @@ class SessionMaintenanceService:
 
         Never touches the case study PDF (shared, ref-counted rubric asset)."""
         outputs = session.get("outputs") if isinstance(session.get("outputs"), dict) else {}
+        session_id = str(session.get("id") or "")
         for key in _OUTPUT_ARTIFACT_KEYS:
             item = outputs.get(key)
             if isinstance(item, dict):
                 self._unlink(item.get("absolutePath"))
+                # ...and the scorer's crash-checkpoint sidecar beside it. The
+                # assessor (single mode) and the adjudicator (panel) both write
+                # one next to scores/<id>.json under a dotted name the session
+                # row never records, so nothing else would ever remove it.
+                self._unlink(self._checkpoint_sidecar(item.get("absolutePath")))
 
         if not keep_clips:
             clips = outputs.get("videoClips")
@@ -255,13 +314,23 @@ class SessionMaintenanceService:
                     if isinstance(clip, dict):
                         self._unlink(clip.get("absolutePath"))
             # The whole per-session clip directory (parent owns its clips).
-            self._rmtree(self.settings.paths.output_clips_dir / str(session.get("id") or ""))
+            # Guarded on the id: an empty one resolves to the clips *root*.
+            if session_id:
+                self._rmtree(self.settings.paths.output_clips_dir / session_id)
 
         # A clip child's video IS the parent's exported clip — deleting it would
         # corrupt the parent. Only a top-level session owns its uploaded video.
         if not keep_owned_video and not session.get("parentSessionId"):
             video = (session.get("files") or {}).get("video") or {}
             self._unlink(video.get("absolutePath"))
+
+        # The panel marking directory — every marker's sheet, adjudication.json
+        # and their own checkpoints — is the session's own artefact, with no
+        # ``keep_`` case: unlike clips (a child may hold one) or the video (a
+        # child's is the parent's), nobody else can be pointing at it. Removing
+        # it here gives delete *and* re-run the right behaviour at once.
+        if session_id:
+            self._rmtree(self.settings.paths.output_scores_panel_dir / session_id)
 
     @staticmethod
     async def _safe(action: str, session_id: str, coro: Any) -> None:
@@ -284,6 +353,20 @@ class SessionMaintenanceService:
             Path(str(path_value)).unlink(missing_ok=True)
         except OSError:
             logger.debug("Could not delete artifact file %s.", path_value, exc_info=True)
+
+    @staticmethod
+    def _checkpoint_sidecar(path_value: Any) -> str | None:
+        """The crash-checkpoint file a scorer writes beside its output.
+
+        Mirrors ``scripts/scorer_checkpoint.checkpoint_path_for_output``. The
+        API cannot import ``scripts/`` — the dependency runs the other way,
+        through ``llm_bootstrap`` — so the two spellings are pinned against
+        each other by ``tests/test_session_maintenance.py`` instead.
+        """
+        if not path_value:
+            return None
+        path = Path(str(path_value))
+        return str(path.with_name(f".{path.name}.checkpoint.json"))
 
     @staticmethod
     def _rmtree(path: Path) -> None:

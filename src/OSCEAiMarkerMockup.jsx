@@ -53,6 +53,7 @@ import { PanelMarkingSummary, PanelVotes } from '@/PanelMarkingSummary.jsx';
 import { panelCsvColumns, panelReport } from '@/lib/panelReport';
 import { describeClipExportOutcome } from '@/lib/clipExportOutcome';
 import { indexClipAssessments } from '@/lib/clipAssessments';
+import { describeRerunAction } from '@/lib/rerunAction';
 import {
   FEEDBACK_NOT_PROVIDED,
   contentCriteriaState,
@@ -1475,23 +1476,26 @@ export default function OSCEAiMarkerMockup({
     if (sessionEntry.status === SessionStatus.FAILED) {
       // A failed session opens (its partial artefacts are worth seeing), and it
       // can be re-run in place: same id, fresh job. The reason it failed is
-      // rendered on the card itself — see the session list.
+      // rendered on the card itself — see the session list. What the re-run
+      // *is* depends on the workflow (a long recording re-runs segmentation,
+      // not the pipeline), so the button says which: lib/rerunAction.js.
+      const rerun = describeRerunAction(sessionEntry);
       return (
         <>
           <Button
             size="sm"
             variant="outline"
-            onClick={() => rerunSession(sessionEntry.id)}
+            onClick={() => rerunSession(sessionEntry)}
             disabled={rerunningSessionId === sessionEntry.id}
             className="gap-1"
-            title="Queue a fresh run of this session under the same id"
+            title={rerun.title}
           >
             {rerunningSessionId === sessionEntry.id ? (
               <Loader2 className="h-3 w-3 animate-spin" />
             ) : (
               <RotateCw className="h-3 w-3" />
             )}
-            Re-run
+            {rerun.label}
           </Button>
           <Button size="sm" variant="outline" onClick={() => openExistingSession(sessionEntry.id)}>
             Open
@@ -1507,16 +1511,20 @@ export default function OSCEAiMarkerMockup({
     );
   }
 
-  // Queue a fresh run of a failed session. The server resets its outputs and
-  // enqueues a job; the card takes over from there through the list poll.
-  async function rerunSession(sessionId) {
+  // Queue a fresh run of a failed session. The server picks the job from the
+  // session itself (segmentation for a long recording, the pipeline for
+  // everything else) and resets only what that run owns; the card takes over
+  // from there through the list poll.
+  async function rerunSession(sessionEntry) {
+    const sessionId = sessionEntry?.id;
+    if (!sessionId) return;
     setRerunningSessionId(sessionId);
     try {
       await apiJson(`/api/sessions/${sessionId}/rerun`, {
         method: 'POST',
         fallbackMessage: 'The session could not be re-run.',
       });
-      setNotice('Re-run queued. Track its stage on the session card.');
+      setNotice(describeRerunAction(sessionEntry).notice);
       await refreshSessionIndex({ silent: true });
     } catch (error) {
       setSessionIndexError(error.message || 'The session could not be re-run.');
