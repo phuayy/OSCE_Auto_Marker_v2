@@ -147,12 +147,23 @@ class PanelPayload(BaseModel):
             raise ValueError(f"Unknown tie-break policy '{token}'. Available: {known}.") from None
 
 
-class UpdateSettingsRequest(BaseModel):
+class SettingsPayload(BaseModel):
+    """Every global setting, with the shape rule for each.
+
+    The base of both write bodies. ``UpdateSettingsRequest`` (PUT) is this
+    with the preprocess toggle required, as it always was; ``PatchSettingsRequest``
+    (PATCH) is this with nothing required, and the route reads
+    ``model_fields_set`` to learn which keys the caller actually sent. The
+    defaults below therefore only ever reach storage through PUT — a patch
+    never writes a key it was not given. Validators are declared once here and
+    inherited by both, so the two verbs cannot drift on what a valid value is.
+    """
+
     # extra="forbid" so an unknown key 422s instead of being silently dropped —
     # a typo'd setting name should be loud, not a no-op.
     model_config = ConfigDict(extra="forbid")
 
-    llmTranscriptPreprocess: bool
+    llmTranscriptPreprocess: bool = False
     # "" means "use this deployment's configured default engine".
     transcriptionEngine: str = ""
     # Option overrides per engine id: {"whisperx": {"model": "large-v3"}}.
@@ -222,6 +233,31 @@ class UpdateSettingsRequest(BaseModel):
                 # validation report next to the field it came from.
                 raise ValueError(error.message) from None
         return validated
+
+
+class UpdateSettingsRequest(SettingsPayload):
+    """The whole document, replaced. Kept for API compatibility and for the
+    tests that pin the full-replace contract; the settings cards use PATCH."""
+
+    # Required, as before: a replace that omitted the toggle would silently
+    # reset it, and PUT has no way to tell "omitted" from "off".
+    llmTranscriptPreprocess: bool
+
+
+class PatchSettingsRequest(SettingsPayload):
+    """Some keys, merged over what is stored. Only the keys present in the
+    body are applied; everything else is left exactly as it was."""
+
+    def changes(self) -> dict[str, Any]:
+        """The keys the caller sent, each as a complete value.
+
+        Top-level partial, nested whole: ``model_dump(exclude_unset=True)``
+        would also strip *nested* defaults — a panel sent without ``tieBreak``
+        would be stored without one, which no reader expects — so the document
+        is dumped in full and then cut down to the keys that were set.
+        """
+        full = self.model_dump()
+        return {key: full[key] for key in self.model_fields_set}
 
 
 class CustomProviderRequest(BaseModel):

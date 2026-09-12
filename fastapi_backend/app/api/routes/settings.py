@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.api.dependencies import get_auth_payload, get_container
 from app.llm import custom as custom_providers
-from app.llm.panel import MarkingMode, PanelConfig
+from app.llm.panel import MarkingMode, PanelConfig, parse_marking_mode
+from app.llm.routing import LLMTarget
 from app.pipeline import person_presets
+from app.repositories.app_settings_repository import (
+    LLM_FALLBACKS_KEY,
+    LLM_MARKING_MODE_KEY,
+    LLM_PANEL_KEY,
+    LLM_PRIMARY_KEY,
+)
 from app.schemas.settings import (
     CustomProviderRequest,
+    PatchSettingsRequest,
     SetProviderKeyRequest,
     TestLLMTargetRequest,
     UpdateSettingsRequest,
@@ -283,40 +293,86 @@ async def clear_llm_provider_key(
     return await container.llm_settings.describe()
 
 
-@router.put("")
-async def update_settings(
-    payload: UpdateSettingsRequest,
-    container: AppContainer = Depends(get_container),
-) -> dict[str, object]:
-    """Save the global settings.
+async def _check_settings_document(container: AppContainer, document: dict[str, Any]) -> None:
+    """The rules that span more than one key, run against the document that
+    would be stored.
 
-    The routing targets are checked here rather than in the Pydantic model,
-    because "is this a provider" is now a question about the database: a
-    validator can only see the six this build ships, and would reject every
-    provider an operator defined. Same status code, same shape of message - the
-    check simply moved to where the answer lives.
+    Spelled once for PUT and PATCH. Every routing target — primary, fallbacks,
+    panel markers, adjudicator — must name a provider this *deployment*
+    offers, which is a database question a Pydantic validator cannot ask (see
+    the schema module). And a panel must be coherent only when ``panel`` is the
+    mode that will run, so an operator can build one up under single mode.
+
+    PATCH hands in stored ∪ patch: a patch that flips the mode is judged
+    against the panel it will actually run with, and a patch that edits the
+    panel is judged under the mode already stored. The tolerant ``from_raw``
+    parsers are used because half of that document may be a row written by
+    another release.
     """
     catalog = await container.llm_settings.catalog()
-    for target in [
-        payload.llmPrimary,
-        *payload.llmFallbacks,
-        *payload.llmPanel.markers,
-        payload.llmPanel.adjudicator,
-    ]:
-        if target.providerId and not catalog.contains(target.providerId):
+    panel = PanelConfig.from_raw(document.get(LLM_PANEL_KEY))
+    fallbacks_raw = document.get(LLM_FALLBACKS_KEY)
+    targets = [
+        LLMTarget.from_raw(document.get(LLM_PRIMARY_KEY)),
+        *(LLMTarget.from_raw(item) for item in (fallbacks_raw if isinstance(fallbacks_raw, list) else [])),
+        *panel.markers,
+        panel.adjudicator,
+    ]
+    for target in targets:
+        # from_raw answers None for a blank row, so anything left names a provider.
+        if target is not None and not catalog.contains(target.provider_id):
             known = ", ".join(catalog.provider_ids())
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=f"Unknown LLM provider '{target.providerId}'. Available: {known}.",
+                detail=f"Unknown LLM provider '{target.provider_id}'. Available: {known}.",
             )
-    # A panel is only required to be coherent when it is the mode that will
-    # run. Saving an incomplete panel under single mode is how an operator
-    # builds one up before switching over.
-    if payload.llmMarkingMode == MarkingMode.PANEL:
-        validation = PanelConfig.from_raw(payload.llmPanel.model_dump()).validate()
+    if parse_marking_mode(document.get(LLM_MARKING_MODE_KEY)) is MarkingMode.PANEL:
+        validation = panel.validate()
         if not validation.ok:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=" ".join(validation.errors),
             )
-    return {"settings": await container.app_settings.set_values(payload.model_dump())}
+
+
+@router.put("")
+async def update_settings(
+    payload: UpdateSettingsRequest,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Replace the global settings wholesale.
+
+    Kept for API compatibility; the settings screen's cards use PATCH so one
+    card cannot carry another card's stale values back. The cross-field rules
+    live in ``_check_settings_document`` — same status code, same messages.
+    """
+    document = payload.model_dump()
+    await _check_settings_document(container, document)
+    return {"settings": await container.app_settings.set_values(document)}
+
+
+@router.patch("")
+async def patch_settings(
+    payload: PatchSettingsRequest,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Change some settings and leave the rest exactly as stored.
+
+    The screen is a set of independent cards, each owning a few keys. With
+    only a whole-document PUT, every card read the document and sent it all
+    back — and a card holding a copy from before another card's save put the
+    old values back. Saving the marking mode, then flipping the preprocess
+    toggle, reverted the marking mode. A patch names only the keys it
+    changes, so no card can carry another's; and a stored key this release
+    does not know is left alone instead of failing the write.
+
+    Cross-field rules run against stored ∪ patch — the document that will
+    exist afterwards. An empty patch answers with the current settings and
+    writes nothing, so it cannot evict every process's cache for no change.
+    """
+    changes = payload.changes()
+    stored = await container.app_settings.get_all()
+    if not changes:
+        return {"settings": stored}
+    await _check_settings_document(container, {**stored, **changes})
+    return {"settings": await container.app_settings.set_values(changes)}
