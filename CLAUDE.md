@@ -134,8 +134,9 @@ OSCE-AI-FYP/
 │   ├── run_api.py                   # Entry point: uvicorn launcher
 │   ├── llm_bootstrap.py             # Puts fastapi_backend on sys.path; re-exports the LLM router
 │   ├── nvidia_osce_assessor.py      # Content scoring subprocess (provider chosen in Settings)
-│   ├── nvidia_osce_communication_assessor.py  # Communication scoring subprocess
-│   ├── nvidia_osce_audio_professionalism.py   # Audio professionalism subprocess
+│   ├── nvidia_osce_communication.py           # Communication scoring subprocess
+│   ├── audio_professionalism_extractor.py     # Audio professionalism subprocess
+│   ├── scorer_inputs.py                       # Shared input contract: required flags, exit 2, no guessing
 │   ├── bell_detector.py             # Bell-sound clip segmentation
 │   ├── rubric_section.py            # PDF rubric section extractor
 │   └── rubric_parser.py             # Communication rubric PDF -> JSON
@@ -175,7 +176,20 @@ AppContainer
  └── login_rate_limiter FixedWindowRateLimiter
 ```
 
-`startup()` runs: config warnings -> storage layout -> **alembic upgrade head** -> DB init -> ORM init -> additive migrations -> change-tracking triggers -> legacy session migration -> auth init -> rubric parse -> stale upload recovery -> job queue startup (recover + dispatch) -> background transcription-model prefetch.
+`startup(role=ContainerRole.API)` runs: config warnings -> storage layout -> **alembic upgrade head** -> DB init -> ORM init -> additive migrations -> change-tracking triggers -> auth init -> legacy session migration -> rubric parse -> stale upload recovery -> job queue startup (recover + dispatch) -> background transcription-model prefetch.
+
+The same container boots in two processes with different duties, so
+`startup` takes a `ContainerRole`. **API** does everything above. **WORKER**
+(the Hatchet process) skips the schema migration (one process migrates), the
+seed data, the rubric parse and — the part that matters — both upload
+recovery sweeps: `recover_stale_assembling_uploads` reads "still assembling at
+boot ⇒ the restart killed it", which is true for the process that assembles
+and false for a worker booting beside a live API. The worker starts the job
+queue without recovering or dispatching (Hatchet drives its jobs) and binds
+its container once per process (`hatchet_tasks.bind_worker_container`);
+`process_job` reuses it rather than building one per job. The weight prefetch
+runs in whichever role executes jobs: the worker, or the API on the local
+backend.
 
 The prefetch is the one startup step that is spawned rather than awaited: it downloads the selected engine's weights (Canary-Qwen's checkpoint is ~5 GB) so the first assessment does not pay for the fetch, and the API must serve requests while it runs. It is cancelled, not drained, on shutdown — the HuggingFace cache resumes a partial download on the next boot.
 
@@ -209,12 +223,12 @@ Then asyncio.gather over TWO branches (PARALLEL_SCORING env var, default true):
 
   communication_branch — steps run SEQUENTIALLY inside:
     Step 4: audio_professionalism
-      scripts/nvidia_osce_audio_professionalism.py
+      scripts/audio_professionalism_extractor.py
       reads: MP3 + transcript
       -> storage/output/audio_professionalism/<session_id>.json
 
     Step 5: communication_scoring  ** depends on step 4 output **
-      scripts/nvidia_osce_communication_assessor.py
+      scripts/nvidia_osce_communication.py
       reads: transcript + parsed rubric JSON + audio_professionalism JSON
       -> storage/output/communication_scores/<session_id>.json
 
@@ -283,25 +297,41 @@ session that was queued under the old one.
    records them; no ffmpeg runs. Session status -> `cropped`.
 2. The user adjusts boundaries in the timeline editor and hits **Export clips**:
    `POST /sessions/{id}/clips/manual` -> `ClipService.request_clip_export`.
-   Persists the plan (each clip gets a stable `exportIndex`) plus a
-   `session.clipExport` progress record, enqueues an **`export_clips` job**, and
-   returns **202** immediately.
+   Persists the plan — a fresh `clipExport.planId`, and on each clip a stable
+   `exportIndex` plus that `planId` — with a `session.clipExport` progress
+   record, enqueues an **`export_clips` job**, and returns **202** immediately.
 3. The `export_clips` job runs `ClipService.export_clips_by_id`, cutting one MP4
-   per clip (`ffmpeg stream-copy` -> re-encode fallback) and **writing the
-   session after every clip**. Resumable twice over: a killed run loses at most
-   the clip in flight, and `materialize_clip` adopts any MP4 already at the
-   expected path instead of re-cutting it. Crops publish atomically (temp name +
-   rename), so an existing file is by definition a finished one.
-4. Each clip individually assessed via `POST /sessions/{id}/clips/{clipId}/assess?defer=1`.
+   per clip (`ffmpeg stream-copy` -> re-encode fallback) into
+   `clips/<session>/<planId>/clip-N.mp4` and **checkpointing the session after
+   every clip**. Resumable twice over: a killed run loses at most the clip in
+   flight, and `materialize_clip` adopts any MP4 already at the expected path
+   instead of re-cutting it. Crops publish atomically (temp name + rename), so an
+   existing file is by definition a finished one.
+
+   **The plan directory is what makes that adoption safe.** File names used to
+   be `<session>-clip-N.mp4` with N restarting at 0 for every plan, so a
+   re-split with different boundaries found the previous split's `clip-1.mp4`
+   at "its" path and adopted it — a child session then scored the wrong
+   student, with no error anywhere. Scoping the path to the plan means two
+   plans can never resolve to one file. Superseded plan directories are pruned
+   after a successful export, except any a child session's video still lives
+   in (`_prune_stale_plan_dirs`). Clips recorded before plans existed carry no
+   `planId` and keep their flat legacy path.
+4. Each clip individually assessed via `POST /sessions/{id}/clips/{clipId}/assess` (202; always queued).
 5. Each clip assessment creates a **child** session (`parentSessionId` set), runs full pipeline.
 
 The export job deliberately does **not** own `session.status` (see
 `app/services/job_tasks.py`). The user sits inside the timeline editor while
 clips are cut, and flipping the session to `processing` would eject them — the
 frontend refuses to open in-flight sessions. Progress lives on
-`session.clipExport` (`status`, `completed`, `total`, `error`, `jobId`), which
-the session-list projection exposes as `clipExportStatus` /
+`session.clipExport` (`planId`, `status`, `completed`, `total`, `error`, `jobId`),
+which the session-list projection exposes as `clipExportStatus` /
 `clipExportCompleted` / `clipExportTotal`.
+
+For the same reason every write the job makes is a **patch, not a document**:
+the checkpoint after each clip copies that clip's file fields and bumps
+`completed` on whatever the row holds *now*, so a label the user changed in the
+editor while ffmpeg ran is kept. See **Session write contract** below.
 
 While an export is in flight the open workspace watches it two ways: the change
 stream (every cut clip is a session write) and a 3s poll as a fallback. The
@@ -357,6 +387,33 @@ it needs, and a retry on the same worker reuses the cache.
 
 Assembly runs as background asyncio task tracked by `BackgroundTaskRegistry` so HTTP handler returns in < 1s. Session state: `waiting_for_upload -> assembling -> uploaded -> queued -> processing -> completed`.
 
+**Parts are serialised per upload, so the client may send them in parallel.**
+The upload record is a JSON file rewritten on every part; without a lock, two
+parts in flight for the same upload each read the record, each appended
+themselves, and the last writer won — the other part's bytes sat on disk
+unrecorded until `complete` rejected the upload as incomplete. `put_part` and
+`complete` now run under a per-upload `KeyedLocks` entry
+([core/locks.py](fastapi_backend/app/core/locks.py)); different uploads stay
+independent. On that guarantee the browser sends `DEFAULT_PART_CONCURRENCY`
+parts at once ([lib/partUpload.js](src/lib/partUpload.js)) through `apiFetch`
+with `idempotent: true` — storing part N twice replaces it, so a part whose
+response was lost is simply sent again — and if a file's transfer still
+breaks, it resumes once from the server's own ledger (`GET /uploads/{id}`
+lists the parts that arrived) instead of starting the file over.
+
+The session row is *not* written per part. The browser renders transfer
+progress from its own tracker; the server copy is mirrored at most every
+`SESSION_UPLOAD_MIRROR_INTERVAL_SECONDS` and whenever a file completes, so a
+2 GB upload no longer costs 256 whole-document session writes (each of which
+evicted the session-index cache).
+
+**A restart during assembly resumes it.** The parts are on disk (they are only
+deleted after a commit) and `_assemble_and_dispatch` is idempotent, so startup
+recovery re-spawns it for every upload still in `assembling` whose parts sum to
+the declared sizes; only an upload with missing parts is failed, and only then
+is the user asked to send the file again. The resolved `autoProcess` is stored
+on the upload record at `complete` so the resumed run answers the same way.
+
 ---
 
 ## Database Models (ORM)
@@ -379,6 +436,50 @@ Defined in [models.py](fastapi_backend/app/database/models.py):
 | `app_settings` | `AppSettingRecord` | Global key/value settings — model routing, transcription engine, preprocess toggle |
 
 Jobs table (`jobs`, `job_events`) managed by raw SQL via `JobRepository` / `Database`.
+
+### Session write contract
+
+A session is one JSON document, and while a run is in progress it has several
+writers: the pipeline (in this process or a Hatchet worker), the job queue
+mirroring job state, the export job, and the user renaming things in the
+browser. The store therefore enforces a contract rather than trusting callers:
+
+| Write | Outcome |
+|---|---|
+| Row does not exist | Created from any dict — how uploads and clip children are born |
+| Row exists, dict carries the `_loadedUpdatedAt` it was `read` with, row unchanged since | Replaced |
+| Row exists, dict carries a stamp, row **changed** since | `StaleSessionError` (409) — the other writer's change is not overwritten |
+| Row exists, dict carries **no stamp** | `SessionWriteContractError` — a projection or hand-built dict can never replace a payload |
+
+`SessionRepository.write` used to detect the third case and then overwrite
+anyway ("last writer wins, logged"). The fourth had no guard at all: startup
+recovery once wrote the 15-field list projection back through `write` and the
+row's payload became `{hasVideoClips, clipExportCompleted, …}` — `files`,
+`upload`, `job`, `corpus` gone.
+
+**`SessionService.update(session_id, mutate)` is the one way to change a
+session anyone else might also be changing.** It reads the current row, applies
+the mutator, writes, and on `StaleSessionError` re-reads and re-applies (up to
+`UPDATE_MAX_ATTEMPTS`). A mutator is a synchronous function of the document —
+`lambda s: s["outputs"]["scores"] = value` — that returns `False` to say
+"nothing to write". Because the change is expressed as a function rather than
+as a copy of the document, it can be replayed on top of whatever landed first:
+a rename during transcription keeps the rename *and* the step.
+
+`PipelineService` and `ClipService` keep one working dict per run for the paths
+they read constantly, but never write it back. Every change goes through
+`_commit(session, mutate)`, which calls `update` and refreshes the working dict
+in place (same object — the progress callbacks hold a reference to it). The
+step-state, output and status mutators are small factories
+(`_assign_output`, `_merge_outputs`, `_set_pipeline_step_state`,
+`_complete_mutator`) so the same change is applied identically whether the row
+moved or not. Plain `write` remains for the two legitimate cases: creating a
+row, and a caller that just `read` the row and is the only writer (the tests'
+read-once-write-many contract). The domain vocabulary — `SessionStatus`,
+`IN_FLIGHT_STATUSES`, `JOB_DRIVEN_STATUSES`, `empty_outputs`, `find_clip`,
+`session_video_path` — lives in
+[domain/sessions.py](fastapi_backend/app/domain/sessions.py) and is imported,
+never re-spelled at a call site.
 
 ---
 
@@ -405,7 +506,46 @@ failed export must not bury a session whose clip list is still perfectly good.
 
 Jobs carry a `payload_json` and get retries with equal-jitter exponential
 backoff, interrupted-job requeue on restart, and Hatchet-side retry accounting.
-Any long multi-step operation belongs here rather than in a request handler.
+Any long multi-step operation belongs here rather than in a request handler —
+and none runs anywhere else. `POST /sessions/{id}/process`, `/auto-crop` and
+`/clips/{clipId}/assess` all answer **202** with the session already `queued`
+and the job; `SessionMaintenanceService.start_processing` / `start_auto_crop`
+/ `rerun_session` share one `_queue_job` (status → queued, enqueue, attach the
+job record through `update`). A handler that awaited the pipeline held the
+connection for as long as transcription took, and a restart mid-way left the
+session `processing` with no job row for recovery to find.
+
+**A session in flight must always have a job row that can move it.** Two
+guarantees keep that true across restarts:
+
+* `JobRepository.claim_queued` returns a `JobClaim` verdict —
+  `claimed` / `not_queued` / `exhausted` — instead of `job | None`. A row
+  recovered at boot with its attempts already at `maxAttempts` is `exhausted`:
+  the repository marks the job failed **and** the executor fails the session
+  (`_fail_session`, when the task type owns status). Returning `None` there
+  used to read as "someone else has it", and the session stayed `processing`
+  forever — un-openable, `/rerun` refused it as in-flight, only Delete worked.
+* `JobQueueService.reconcile_orphaned_sessions()` runs at startup, after
+  `recover_interrupted_jobs` (so requeued rows count as active) and before
+  dispatch: any session in `JOB_DRIVEN_STATUSES` (`queued`, `processing`) whose
+  id has no `ACTIVE` job row is failed with "interrupted by a server restart".
+  It runs only in the process that owns recovery (API, local backend) — a
+  Hatchet worker booting beside a live API must not judge sessions whose jobs
+  run elsewhere. The list projection carries `error` so the card shows the
+  reason, and a failed session's card offers **Re-run**
+  (`POST /sessions/{id}/rerun`) right there.
+**The GPU is leased, the queue is not enough.** `JOB_WORKER_CONCURRENCY` bounds
+jobs, which are mostly network-bound and cheap to overlap. The one step that is
+not is the accelerator: transcription (any engine, fallback included) and
+person detection each load a model into the same card. `ResourceLease`
+([core/resources.py](fastapi_backend/app/core/resources.py)) is an
+`asyncio.Semaphore(GPU_SLOTS)` held only around those steps —
+`TranscriptionRouter.transcribe` and
+`MediaPipeline.detect_person_clip_ranges_with_python` — so a second job waits
+its turn instead of dying of CUDA OOM, which the pipeline would otherwise read
+as a permanent `TranscriptionResourceError`. Scoring keeps overlapping. The
+lease is per process; a Hatchet deployment bounds the machine through the
+worker's `slots`.
 
 ---
 
@@ -454,7 +594,7 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 
 - `openExistingSession(id)` — open a session; bounces in-flight sessions back
   to the list with a notice (also guards deep links/reloads).
-- `runClipAssessment(clip)` — `POST /assess?defer=1`, stays on the clip list;
+- `runClipAssessment(clip)` — `POST /assess` (202, always queued), stays on the clip list;
   the clip row shows the child session's stage and unlocks when completed.
 - `renderSessionAction(entry)` — session-list row button: disabled
   "Processing…" while in flight, "Open" when terminal.
@@ -496,6 +636,7 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 | `HUMAN_SEGMENTS_MIN_PEOPLE` | preset | People required on screen for a station to be active. Overrides the preset |
 | `HUMAN_SEGMENTS_CONFIDENCE` | `0.7` | RT-DETR score threshold. Not the knob for edge limbs — use the height ratio |
 | `PARALLEL_SCORING` | `true` | Run content branch parallel to communication branch |
+| `GPU_SLOTS` | `1` | Jobs that may hold the accelerator at once (transcription, person detection). 0 = unbounded. Per process |
 | `JOB_QUEUE_BACKEND` | `local` | `local` or `hatchet` |
 | `STORAGE_BACKEND` | `local` | `local` (parts through the API) or `gcs` (direct-to-bucket resumable uploads) |
 | `GCS_BUCKET` | — | Required when `STORAGE_BACKEND=gcs`; the factory refuses to start without it |
@@ -578,11 +719,24 @@ All three scorers are independent Python subprocesses. Read from disk, write JSO
 
 | Script | Input | Output |
 |---|---|---|
-| `nvidia_osce_assessor.py` | transcript JSON + case-study PDF | `scores/<id>.json` |
-| `nvidia_osce_audio_professionalism.py` | MP3 + transcript JSON | `audio_professionalism/<id>.json` |
-| `nvidia_osce_communication_assessor.py` | transcript JSON + rubric JSON + **audio_professionalism JSON** | `communication_scores/<id>.json` |
+| `nvidia_osce_assessor.py` | `--transcript` normalised JSON + `--case-study` PDF | `scores/<id>.json` |
+| `audio_professionalism_extractor.py` | `--audio` MP3 + `--transcript` normalised JSON | `audio_professionalism/<id>.json` |
+| `nvidia_osce_communication.py` | `--transcript` normalised JSON + parsed rubric JSON + optional `--audio-professionalism` JSON | `communication_scores/<id>.json` |
 
 Communication scorer takes audio professionalism as optional input — must run after it. Content scorer is independent, runs parallel to the whole communication branch.
+
+**Every input is handed over; none is guessed.** `ScoringPipeline` passes the
+normalised transcript (`transcripts/<id>.json`) to all three scorers and the
+session's own case-study PDF to the content scorer, and fails the step with a
+non-retryable 422 naming the missing path when one is absent. The scripts
+used to resolve inputs themselves when a flag was omitted — the raw WhisperX
+`.srt` over the normalised JSON (so hallucination drops and speaker labels
+never reached the content scorer, and the two branches scored different
+transcripts), and the *newest PDF in the upload folder* when the case study
+was missing (another session's rubric, silently). Those fallbacks are gone:
+`scripts/scorer_inputs.py` is the shared contract — required flags, an
+optional input that is named but missing is still an error, exit code 2 on
+usage errors, which the job queue does not retry.
 
 Content scorer has checkpoint/repair: saves after each LLM call, up to 2 repair passes on bad JSON output, resumes from checkpoint on crash.
 
