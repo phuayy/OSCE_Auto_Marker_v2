@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -9,12 +10,13 @@ from uuid import uuid4
 
 from app.core.config import Settings
 from app.core.exceptions import AppError
+from app.core.locks import KeyedLocks
 from app.core.tasks import BackgroundTaskRegistry
+from app.domain.sessions import SessionStatus, empty_outputs
 from app.pipeline.media import MediaPipeline
 from app.repositories.corpus_repository import CorpusRepository
 from app.repositories.upload_repository import UploadRepository
 from app.schemas.uploads import CompleteUploadRequest, InitiateUploadRequest
-from app.services.clip_service import ClipService
 from app.services.event_service import EventService
 from app.services.job_queue_service import JobQueueService
 from app.repositories.video_repository import VideoRepository
@@ -27,6 +29,13 @@ from app.storage import ObjectStorage
 logger = logging.getLogger(__name__)
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
+
+# How often, at most, a running transfer's byte count is mirrored onto the
+# session row. The browser renders upload progress from its own tracker; the
+# server copy exists for other tabs and for the record. Mirroring every part
+# made a 2 GB upload 256 whole-document session writes, each evicting the
+# session-index cache. The mirror always lands when a file finishes.
+SESSION_UPLOAD_MIRROR_INTERVAL_SECONDS = 5.0
 
 
 class AsyncUploadService:
@@ -53,8 +62,11 @@ class AsyncUploadService:
         self.rubric_assets = rubric_assets
         self.videos = videos
         self.corpora = corpora
-        self._completion_locks: dict[str, asyncio.Lock] = {}
-        self._completion_locks_guard = asyncio.Lock()
+        # One lock per upload id. The upload record is a JSON file rewritten on
+        # every part, so two parts of the same upload must never interleave
+        # their read → mutate → write; different uploads stay independent.
+        self._upload_locks = KeyedLocks()
+        self._last_session_mirror: dict[str, float] = {}
         # Holds strong references to background assembly tasks so the event loop
         # cannot garbage-collect them mid-execution (see BackgroundTaskRegistry).
         self._background_tasks = BackgroundTaskRegistry()
@@ -112,7 +124,7 @@ class AsyncUploadService:
             "id": session_id,
             "name": self.sessions.reserve_unique_session_name(used_keys, payload.sessionName or ""),
             "createdAt": utc_now_iso(),
-            "status": "waiting_for_upload",
+            "status": SessionStatus.WAITING_FOR_UPLOAD,
             "workflow": payload.workflow,
             # Long-workflow auto-crop method ("bells" | "person"); None defers
             # to the server default at job execution time.
@@ -140,7 +152,7 @@ class AsyncUploadService:
                 "video": self._pending_file_meta(upload_files, "video"),
                 "caseStudy": self._pending_file_meta(upload_files, "caseStudy"),
             },
-            "outputs": ClipService.empty_outputs(),
+            "outputs": empty_outputs(),
             "error": None,
         }
         upload = {
@@ -180,12 +192,22 @@ class AsyncUploadService:
             raise AppError("Transcription corpus not found.", status_code=400) from error
 
     async def put_part(self, upload_id: str, file_id: str | None, part_number: int, body: bytes) -> dict[str, Any]:
-        upload = await self.repository.read(upload_id)
-        self._assert_not_expired(upload)
-        resolved_file_id = file_id or self._first_file_id(upload)
-        part = await self.storage.put_part(upload, resolved_file_id, part_number, body)
-        await self.repository.write(upload)
-        await self._sync_pending_session_upload(upload)
+        """Store one part and record it on the upload.
+
+        Held under the upload's lock for the whole read → store → write, so parts
+        arriving in parallel (a browser with several chunk workers, or a retry
+        overlapping the request it is retrying) each see the previous part's
+        record. Without the lock the last writer's record wins and the other
+        parts' bytes sit on disk unrecorded until ``complete`` rejects the whole
+        upload as incomplete.
+        """
+        async with self._upload_locks.hold(upload_id):
+            upload = await self.repository.read(upload_id)
+            self._assert_not_expired(upload)
+            resolved_file_id = file_id or self._first_file_id(upload)
+            part = await self.storage.put_part(upload, resolved_file_id, part_number, body)
+            await self.repository.write(upload)
+            await self._sync_pending_session_upload(upload, file_id=resolved_file_id)
         await self.events.publish(
             str(upload["sessionId"]),
             "status",
@@ -206,12 +228,10 @@ class AsyncUploadService:
         return {"upload": self.public_upload(upload)}
 
     async def complete(self, upload_id: str, payload: CompleteUploadRequest) -> dict[str, Any]:
-        lock = await self._completion_lock(upload_id)
-        try:
-            async with lock:
-                return await self._complete_locked(upload_id, payload)
-        finally:
-            await self._release_completion_lock(upload_id, lock)
+        # Same lock as ``put_part``: a straggling part cannot land between the
+        # completeness check and the flip to "assembling".
+        async with self._upload_locks.hold(upload_id):
+            return await self._complete_locked(upload_id, payload)
 
     async def _complete_locked(self, upload_id: str, payload: CompleteUploadRequest) -> dict[str, Any]:
         upload = await self.repository.read(upload_id)
@@ -258,21 +278,27 @@ class AsyncUploadService:
             should_process = payload.autoProcess
 
         # Mark as assembling immediately so duplicate requests are rejected and
-        # the client knows the server has started work.
+        # the client knows the server has started work. The resolved autoProcess
+        # is recorded too, so a restart can resume assembly with the same answer.
         upload["status"] = "assembling"
         upload["assemblingAt"] = utc_now_iso()
+        upload["autoProcess"] = bool(should_process)
         await self.repository.write(upload)
 
-        session = await self.sessions.read(str(upload["sessionId"]))
-        session["status"] = "assembling"
-        session["error"] = None
-        session["upload"] = {
+        upload_ref = {
             "id": upload["id"],
             "status": "assembling",
             "strategy": upload.get("strategy"),
             "assemblingAt": upload["assemblingAt"],
         }
-        await self.sessions.write(session)
+
+        def to_assembling(current: dict[str, Any]) -> Any:
+            current["status"] = SessionStatus.ASSEMBLING
+            current["error"] = None
+            current["upload"] = upload_ref
+            return None
+
+        session = await self.sessions.update(str(upload["sessionId"]), to_assembling)
         await self.events.publish(
             str(session["id"]),
             "status",
@@ -345,16 +371,13 @@ class AsyncUploadService:
             upload["status"] = "committed"
             upload["committedAt"] = utc_now_iso()
 
-            session = await self.sessions.read(session_id)
-            session["status"] = "uploaded"
-            session["error"] = None
-            session["upload"] = {
+            upload_ref = {
                 "id": upload["id"],
                 "status": "committed",
                 "strategy": upload.get("strategy"),
                 "committedAt": upload["committedAt"],
             }
-            session["files"] = {
+            committed_files = {
                 "video": self._committed_file_meta(upload, "video", video_ref),
                 "caseStudy": self._committed_file_meta(
                     upload,
@@ -368,21 +391,30 @@ class AsyncUploadService:
             job = None
             if should_process:
                 task_type = "auto_crop" if upload.get("workflow") == "long" else "process_session"
-                session["status"] = "queued"
                 job = await self.jobs.enqueue(
                     session_id,
                     task_type,
                     {"uploadId": upload_id, "workflow": upload.get("workflow")},
                     auto_start=False,
                 )
-                session["job"] = self.jobs.public_job(job)
+            public_job = self.jobs.public_job(job) if job else None
+            next_status = SessionStatus.QUEUED if job else SessionStatus.UPLOADED
+
+            def commit_session(current: dict[str, Any]) -> Any:
+                current["status"] = next_status
+                current["error"] = None
+                current["upload"] = upload_ref
+                current["files"] = committed_files
+                if public_job is not None:
+                    current["job"] = public_job
+                return None
 
             # Persist both records before touching the filesystem. If the process
             # crashes here, both records show their final state and startup
             # recovery has nothing to fix.  Any orphaned part files left by a
             # crash-before-abort are wasteful but safe and can be GC'd later.
             await self.repository.write(upload)
-            await self.sessions.write(session)
+            await self.sessions.update(session_id, commit_session)
 
             # Part files are only deleted once both records are durable.
             await self.storage.abort_upload(upload)
@@ -412,17 +444,14 @@ class AsyncUploadService:
                 logger.exception("Failed to persist failed upload state for upload %s.", upload_id)
             if session_id:
                 try:
-                    session = await self.sessions.read(session_id)
-                    session["status"] = "failed"
-                    session["error"] = str(error)
-                    await self.sessions.write(session)
+                    await self.sessions.update(session_id, self._fail_session_mutator(str(error)))
                     await self.events.publish(
                         session_id,
                         "status",
                         {"code": "failed", "message": f"Upload assembly failed: {error}"},
                     )
                 except Exception:
-                    pass
+                    logger.exception("Failed to persist failed session state for upload %s.", upload_id)
 
     async def abort(self, upload_id: str) -> dict[str, Any]:
         upload = await self.repository.read(upload_id)
@@ -432,40 +461,43 @@ class AsyncUploadService:
         upload["status"] = "aborted"
         upload["abortedAt"] = utc_now_iso()
         await self.repository.write(upload)
-        session = await self.sessions.read(str(upload["sessionId"]))
-        session["status"] = "cancelled"
-        session["error"] = "Upload aborted."
-        await self.sessions.write(session)
+
+        def cancel(current: dict[str, Any]) -> Any:
+            current["status"] = SessionStatus.CANCELLED
+            current["error"] = "Upload aborted."
+            return None
+
+        session = await self.sessions.update(str(upload["sessionId"]), cancel)
         if upload.get("jobId"):
             await self.jobs.cancel(str(upload["jobId"]), "Upload aborted.")
         return {"upload": self.public_upload(upload), "session": self.sessions.public_session(session)}
 
     async def recover_stale_assembling_uploads(self) -> None:
-        """Mark uploads and sessions stuck in ``"assembling"`` as failed at startup.
+        """Resume — or, when nothing is left to resume, fail — work stuck in ``"assembling"``.
 
-        Background assembly tasks are bound to the process lifetime — a server
-        restart (including hot-reload) silently kills them, leaving records in
-        ``"assembling"`` indefinitely.  This method runs two passes:
+        Background assembly tasks are bound to the process lifetime: a server
+        restart (including hot-reload) silently kills them, leaving the upload
+        record and the session in ``"assembling"`` indefinitely.
 
         Pass 1 — upload records in ``"assembling"``:
-            Covers the common case where the assembly task was killed mid-run.
-            The corresponding session is also transitioned to ``"failed"`` so
-            the client receives a clear error rather than spinning forever.
+            The parts are still on disk (they are only deleted after a commit),
+            and ``_assemble_and_dispatch`` is idempotent by construction (temp
+            file + rename, then records). So the right recovery is to run it
+            again, not to make the user re-send the file. It is only failed when
+            the parts no longer add up to the declared size.
 
-        Pass 2 — session records still in ``"assembling"`` after pass 1:
-            Covers the narrow crash window introduced by the new write-order
-            (upload record persisted, session write did not complete).  The
-            assembled files already exist on disk in this case; the session is
-            still marked failed so the user is prompted to re-upload cleanly.
-
-        Raw part files and any assembled output files are left on disk — cleanup
-        is the caller's responsibility (explicit abort or a future GC pass).
+        Pass 2 — session records still in ``"assembling"`` with no upload record
+        in that state:
+            The narrow window where the upload record was committed but the
+            session write did not complete. Failed through ``update`` so only
+            the status and error move; the rest of the document is kept.
         """
         _FAILURE_MESSAGE = (
-            "Upload assembly was interrupted by a server restart. "
+            "Upload assembly was interrupted by a server restart and its parts are incomplete. "
             "Please start a new assessment to re-upload."
         )
-        recovered = 0
+        resumed = 0
+        failed = 0
 
         # --- Pass 1: upload records stuck in "assembling" -------------------
         try:
@@ -475,79 +507,116 @@ class AsyncUploadService:
             return
 
         stale_uploads = [u for u in all_uploads if u.get("status") == "assembling"]
+        resumed_sessions: set[str] = set()
 
         for upload in stale_uploads:
             upload_id = str(upload.get("id", ""))
             session_id = str(upload.get("sessionId", ""))
 
+            if self._parts_complete(upload):
+                self._background_tasks.spawn(
+                    self._assemble_and_dispatch(upload_id, bool(upload.get("autoProcess"))),
+                    name=f"assemble-upload:{upload_id}",
+                )
+                resumed += 1
+                resumed_sessions.add(session_id)
+                logger.warning(
+                    "Startup upload recovery: upload %s (session %s) was mid-assembly; resuming assembly.",
+                    upload_id,
+                    session_id,
+                )
+                continue
+
             try:
                 upload["status"] = "failed"
                 upload["failedAt"] = utc_now_iso()
+                upload["error"] = _FAILURE_MESSAGE
                 await self.repository.write(upload)
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Startup upload recovery: could not mark upload %s as failed — %s",
-                    upload_id,
-                    exc,
-                )
+                logger.error("Startup upload recovery: could not mark upload %s as failed — %s", upload_id, exc)
                 continue
 
             if not session_id:
                 continue
-
             try:
-                session = await self.sessions.read(session_id)
-                if session.get("status") == "assembling":
-                    session["status"] = "failed"
-                    session["error"] = _FAILURE_MESSAGE
-                    await self.sessions.write(session)
-                    recovered += 1
-                    logger.warning(
-                        "Startup upload recovery: upload %s (session %s) marked failed.",
-                        upload_id,
-                        session_id,
-                    )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Startup upload recovery: could not update session %s — %s",
+                await self.sessions.update(session_id, self._fail_if_assembling(_FAILURE_MESSAGE))
+                failed += 1
+                logger.warning(
+                    "Startup upload recovery: upload %s (session %s) had incomplete parts; marked failed.",
+                    upload_id,
                     session_id,
-                    exc,
                 )
+            except FileNotFoundError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Startup upload recovery: could not update session %s — %s", session_id, exc)
 
-        # --- Pass 2: sessions still "assembling" after pass 1 ---------------
-        # Handles the window where the upload record was committed but the
-        # session write had not yet completed before the process was killed.
+        # --- Pass 2: sessions still "assembling" with no upload to resume -----
         try:
             all_sessions = await self.sessions.list_sessions()
         except Exception as exc:  # noqa: BLE001
             logger.error("Startup upload recovery: could not read session records — %s", exc)
             return
 
-        for session in all_sessions:
-            if session.get("status") != "assembling":
+        for entry in all_sessions:
+            if entry.get("status") != "assembling":
+                continue
+            session_id = str(entry.get("id") or "")
+            if not session_id or session_id in resumed_sessions:
                 continue
             try:
-                session["status"] = "failed"
-                session["error"] = _FAILURE_MESSAGE
-                await self.sessions.write(session)
-                recovered += 1
+                # ``entry`` is a list projection, not a document: it must never be
+                # written back. ``update`` re-reads the real row and patches it.
+                await self.sessions.update(session_id, self._fail_if_assembling(_FAILURE_MESSAGE))
+                failed += 1
                 logger.warning(
                     "Startup upload recovery: orphaned assembling session %s marked failed.",
-                    session.get("id"),
+                    session_id,
                 )
+            except FileNotFoundError:
+                pass
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Startup upload recovery: could not update orphaned session %s — %s",
-                    session.get("id"),
-                    exc,
-                )
+                logger.error("Startup upload recovery: could not update orphaned session %s — %s", session_id, exc)
 
-        if recovered:
+        if resumed or failed:
             logger.warning(
-                "Startup upload recovery complete: %d record(s) transitioned to 'failed'. "
-                "Affected users must re-upload.",
-                recovered,
+                "Startup upload recovery complete: %d assembly(ies) resumed, %d record(s) failed.",
+                resumed,
+                failed,
             )
+
+    @staticmethod
+    def _parts_complete(upload: dict[str, Any]) -> bool:
+        """Every declared file has parts summing to its declared size."""
+        files = upload.get("files") or []
+        if not files:
+            return False
+        for file_record in files:
+            expected = int(file_record.get("sizeBytes") or 0)
+            received = sum(int(part.get("sizeBytes") or 0) for part in file_record.get("parts") or [])
+            if not file_record.get("parts") or received != expected:
+                return False
+        return True
+
+    @staticmethod
+    def _fail_if_assembling(message: str):
+        def mutate(session: dict[str, Any]) -> Any:
+            if session.get("status") != SessionStatus.ASSEMBLING:
+                return False
+            session["status"] = SessionStatus.FAILED
+            session["error"] = message
+            return None
+
+        return mutate
+
+    @staticmethod
+    def _fail_session_mutator(message: str):
+        def mutate(session: dict[str, Any]) -> Any:
+            session["status"] = SessionStatus.FAILED
+            session["error"] = message
+            return None
+
+        return mutate
 
     # Pre-commit upload states whose session/job may still be safely failed by
     # the expiry sweep. A session past these (uploaded/queued/processing/…) has
@@ -608,14 +677,17 @@ class AsyncUploadService:
 
             # 3. Fail the session, but only while it is still in the upload phase.
             if session_id:
+                recoverable = self._RECOVERABLE_SESSION_STATES
+
+                def expire(current: dict[str, Any]) -> Any:
+                    if str(current.get("status")) not in recoverable:
+                        return False
+                    current["status"] = SessionStatus.FAILED
+                    current["error"] = "Upload expired before completion. Please start a new assessment to re-upload."
+                    return None
+
                 try:
-                    session = await self.sessions.read(session_id)
-                    if str(session.get("status")) in self._RECOVERABLE_SESSION_STATES:
-                        session["status"] = "failed"
-                        session["error"] = (
-                            "Upload expired before completion. Please start a new assessment to re-upload."
-                        )
-                        await self.sessions.write(session)
+                    await self.sessions.update(session_id, expire)
                 except FileNotFoundError:
                     pass
                 except Exception as exc:  # noqa: BLE001
@@ -675,19 +747,50 @@ class AsyncUploadService:
             "jobId": upload.get("jobId"),
         }
 
-    async def _sync_pending_session_upload(self, upload: dict[str, Any]) -> None:
-        session = await self.sessions.read(str(upload["sessionId"]))
-        session["upload"] = {
+    async def _sync_pending_session_upload(self, upload: dict[str, Any], *, file_id: str | None = None) -> None:
+        """Mirror transfer progress onto the session, at most every few seconds.
+
+        Always mirrors when the part just stored completed its file, so the
+        session never lags a finished transfer; between those points the mirror
+        is rate-limited (see ``SESSION_UPLOAD_MIRROR_INTERVAL_SECONDS``).
+        """
+        upload_id = str(upload["id"])
+        now = time.monotonic()
+        file_record = self._file_by_kind_or_id(upload, file_id)
+        file_done = bool(file_record) and int(file_record.get("uploadedBytes") or 0) >= int(file_record.get("sizeBytes") or 0) > 0
+        last = self._last_session_mirror.get(upload_id)
+        if not file_done and last is not None and now - last < SESSION_UPLOAD_MIRROR_INTERVAL_SECONDS:
+            return
+        self._last_session_mirror[upload_id] = now
+
+        upload_ref = {
             "id": upload["id"],
             "status": upload.get("status"),
             "strategy": upload.get("strategy"),
             "expiresAt": upload.get("expiresAt"),
         }
-        session["files"] = {
+        pending_files = {
             "video": self._pending_file_meta(upload.get("files") or [], "video"),
             "caseStudy": self._pending_file_meta(upload.get("files") or [], "caseStudy"),
         }
-        await self.sessions.write(session)
+
+        def mirror(current: dict[str, Any]) -> Any:
+            if str(current.get("status")) not in {SessionStatus.WAITING_FOR_UPLOAD, SessionStatus.UPLOADING}:
+                # The session has moved on (assembling, committed, failed by a
+                # sweep); a late part must not drag it back to a transfer state.
+                return False
+            current["upload"] = upload_ref
+            current["files"] = pending_files
+            return None
+
+        await self.sessions.update(str(upload["sessionId"]), mirror)
+
+    @staticmethod
+    def _file_by_kind_or_id(upload: dict[str, Any], file_id: str | None) -> dict[str, Any]:
+        for file_record in upload.get("files") or []:
+            if file_id and str(file_record.get("fileId")) == str(file_id):
+                return file_record
+        return {}
 
     def _validate_declared_files(self, payload: InitiateUploadRequest) -> None:
         for item in payload.files:
@@ -800,16 +903,3 @@ class AsyncUploadService:
         if self._is_expired(upload):
             upload["status"] = "expired"
             raise AppError("Upload session has expired.", status_code=410)
-
-    async def _completion_lock(self, upload_id: str) -> asyncio.Lock:
-        async with self._completion_locks_guard:
-            lock = self._completion_locks.get(upload_id)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._completion_locks[upload_id] = lock
-            return lock
-
-    async def _release_completion_lock(self, upload_id: str, lock: asyncio.Lock) -> None:
-        async with self._completion_locks_guard:
-            if not lock.locked() and self._completion_locks.get(upload_id) is lock:
-                self._completion_locks.pop(upload_id, None)
