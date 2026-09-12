@@ -1,4 +1,4 @@
-import { SegmentationMethod, SessionStatus, Workflow } from '@/lib/enums';
+import { ClipExportScope, ClipExportStatus, SegmentationMethod, SessionStatus, Workflow } from '@/lib/enums';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ensureStreamTicket, resolveMediaUrl } from '@/auth';
@@ -51,6 +51,15 @@ import LongVideoSummaryCharts from './LongVideoSummaryCharts.jsx';
 import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
 import { PanelMarkingSummary, PanelVotes } from '@/PanelMarkingSummary.jsx';
 import { panelCsvColumns, panelReport } from '@/lib/panelReport';
+import { describeClipExportOutcome } from '@/lib/clipExportOutcome';
+import { indexClipAssessments } from '@/lib/clipAssessments';
+import {
+  FEEDBACK_NOT_PROVIDED,
+  contentCriteriaState,
+  contentSheetEmptyCopy,
+  feedbackCsvRows,
+  feedbackLines,
+} from '@/lib/scoreSheet';
 import {
   INTERMISSION_KIND,
   MIN_BOUNDARY_GAP_SECONDS,
@@ -70,39 +79,6 @@ import {
   selectableClipIds,
   toggleSelection,
 } from './lib/clipSelection.js';
-
-const SCORE_TEMPLATE = [
-  {
-    key: 'Communication',
-    weight: 0.35,
-    score: 84,
-    desc: 'Clarity, rapport, empathy, and patient-centered responses.',
-  },
-  {
-    key: 'Clinical Reasoning',
-    weight: 0.4,
-    score: 79,
-    desc: 'Appropriate questioning, recommendations, and follow-up safety checks.',
-  },
-  {
-    key: 'Professionalism',
-    weight: 0.15,
-    score: 92,
-    desc: 'Respectful conduct, structure, and confidence.',
-  },
-  {
-    key: 'Time Management',
-    weight: 0.1,
-    score: 86,
-    desc: 'Efficient progression through the counseling workflow.',
-  },
-];
-
-const DEFAULT_KEEP_START_STOP = {
-  keep: 'Continue the clear and patient-friendly approach shown in this consultation.',
-  start: 'Start adding sharper evidence checks and teach-back prompts after key advice.',
-  stop: 'Stop repeating medication directions without confirmation of understanding.',
-};
 
 const DEMO_SESSION_ID = '4d4afdd3-8aa2-41d1-96ba-bfc44f0b2456';
 const DEMO_RESOURCE_BASE = `/demo-resources/${DEMO_SESSION_ID}`;
@@ -541,42 +517,14 @@ export default function OSCEAiMarkerMockup({
     [sessionIndex]
   );
 
-  const clipAssessmentIndex = useMemo(() => {
-    if (!session?.id) {
-      return {};
-    }
-
-    const indexMap = {};
-    sessionIndex.forEach((entry) => {
-      if (!entry.parentSessionId) {
-        return;
-      }
-      if (String(entry.parentSessionId) !== String(session.id)) {
-        return;
-      }
-
-      const clipId = entry.clipSource?.clipId;
-      if (!clipId) {
-        return;
-      }
-
-      let status = 'idle';
-      if (entry.status === SessionStatus.COMPLETED) {
-        status = SessionStatus.COMPLETED;
-      } else if (entry.status === SessionStatus.FAILED) {
-        status = SessionStatus.FAILED;
-      } else if ([SessionStatus.QUEUED, SessionStatus.ASSEMBLING, SessionStatus.PROCESSING].includes(entry.status)) {
-        // A child clip session that is queued/assembling/processing is already
-        // in flight — surface it as 'running' so the UI blocks re-queueing the
-        // same clip (the button becomes "View progress", not "Run assessment").
-        status = 'running';
-      }
-
-      indexMap[clipId] = { status, sessionId: entry.id };
-    });
-
-    return indexMap;
-  }, [sessionIndex, session?.id]);
+  // Which child session assesses which clip, whether it is running, and
+  // whether it scored a cut the clip no longer has. Pure — see
+  // lib/clipAssessments.js, which also keeps the newest child of a clip rather
+  // than whichever the index happened to list last.
+  const clipAssessmentIndex = useMemo(
+    () => indexClipAssessments(sessionIndex, session?.id, videoClips),
+    [sessionIndex, session?.id, videoClips],
+  );
 
   const hasClipFiles = useMemo(() => videoClips.some((clip) => Boolean(clip?.url)), [videoClips]);
   const hasDraftClips = videoClips.length > 0 && !hasClipFiles;
@@ -585,7 +533,12 @@ export default function OSCEAiMarkerMockup({
   // and this record — not the response body — is what says when they are all in.
   const clipExport = session?.clipExport || null;
   const clipExportStatus = String(clipExport?.status || '');
-  const isClipExportRunning = [SessionStatus.QUEUED, 'running'].includes(clipExportStatus);
+  const isClipExportRunning = [ClipExportStatus.QUEUED, ClipExportStatus.RUNNING].includes(clipExportStatus);
+  // A recrop is an export scoped to one clip: it drives the same record and
+  // the same watchers, but only the crop editor is busy — the split controls
+  // and the rest of the timeline stay usable.
+  const isRecropRunning = isClipExportRunning && clipExport?.scope === ClipExportScope.CLIP;
+  const isPlanExportRunning = isClipExportRunning && !isRecropRunning;
   // Watch a bit wider than "the record says running": an export we just
   // requested counts too, so a response that never carried the clipExport
   // record still leaves the editor watching for the clips instead of sitting
@@ -882,25 +835,11 @@ export default function OSCEAiMarkerMockup({
       return null;
     }
 
-    return {
-      keep: String(scoreReport.keep_start_stop.keep || '').trim(),
-      start: String(scoreReport.keep_start_stop.start || '').trim(),
-      stop: String(scoreReport.keep_start_stop.stop || '').trim(),
-    };
+    // '' marks a field the model left empty; the view says so instead of
+    // substituting a sentence of its own (see lib/scoreSheet.js). null still
+    // means the sheet has no block at all.
+    return feedbackLines(scoreReport.keep_start_stop);
   }, [scoreReport]);
-
-  const fallbackScores = useMemo(() => {
-    const adjustment = Math.min(8, Math.floor(transcriptSegments.length / 20));
-    return SCORE_TEMPLATE.map((score) => ({
-      ...score,
-      score: Math.min(98, score.score + adjustment),
-    }));
-  }, [transcriptSegments.length]);
-
-  const fallbackOverallScore = useMemo(() => {
-    const weightedTotal = fallbackScores.reduce((sum, item) => sum + item.score * item.weight, 0);
-    return Math.round(weightedTotal);
-  }, [fallbackScores]);
 
   const scoringSummary = useMemo(() => {
     const summary = scoreReport?.scoring_summary;
@@ -954,6 +893,14 @@ export default function OSCEAiMarkerMockup({
 
   const canDownloadScoreSheet =
     aiCriteria.length > 0 || Boolean(keepStartStop) || communicationCriteria.length > 0;
+
+  // Drives the Content Scores / Feedback empty states. A real session with no
+  // sheet is 'empty' (or 'failed'), never a template preview.
+  const contentState = contentCriteriaState({
+    criteriaCount: aiCriteria.length,
+    isDemoFallback,
+    sessionStatus: session?.status || null,
+  });
 
   const currentVideoUrl = resolveMediaUrl(session?.files?.video?.url) || localVideoUrl;
   const currentSubtitleUrl = resolveMediaUrl(session?.outputs?.subtitleTrack?.url) || null;
@@ -1028,18 +975,23 @@ export default function OSCEAiMarkerMockup({
       if (cancelled) {
         return;
       }
-      const clips = Array.isArray(fresh?.outputs?.videoClips) ? fresh.outputs.videoClips : [];
-      const exported = clips.filter((clip) => clip.kind !== INTERMISSION_KIND && clip.url);
-      if (String(fresh?.clipExport?.status) === SessionStatus.FAILED || exported.length === 0) {
+      // What the editor owes the user depends on what the job cut: a whole
+      // split hands over a new clip list, a recrop hands back the one clip
+      // they were already looking at. The decision itself is pure — see
+      // lib/clipExportOutcome.js.
+      const outcome = describeClipExportOutcome({
+        clipExport: fresh?.clipExport,
+        clips: fresh?.outputs?.videoClips,
+        selectedClipId,
+      });
+      if (!outcome.notice) {
         return;
       }
-      setSelectedClipId((previous) =>
-        exported.some((clip) => String(clip.id) === String(previous)) ? previous : exported[0].id
-      );
-      setNotice(
-        `Exported ${exported.length} clip${exported.length === 1 ? '' : 's'} — ready to assess below.`
-      );
-      setClipExportJustFinished(true);
+      setSelectedClipId(outcome.selectedClipId);
+      setNotice(outcome.notice);
+      if (outcome.scrollToAssessments) {
+        setClipExportJustFinished(true);
+      }
     })();
 
     return () => {
@@ -2328,11 +2280,6 @@ export default function OSCEAiMarkerMockup({
     };
 
     const buildContentRows = () => {
-      const feedbackPayload = {
-        keep: keepStartStop?.keep || DEFAULT_KEEP_START_STOP.keep,
-        start: keepStartStop?.start || DEFAULT_KEEP_START_STOP.start,
-        stop: keepStartStop?.stop || DEFAULT_KEEP_START_STOP.stop,
-      };
       const contentRows = [
         ['OSCE Rubric Score Sheet - Content'],
         [],
@@ -2391,9 +2338,9 @@ export default function OSCEAiMarkerMockup({
         [],
         ['Keep / Start / Stop Feedback'],
         ['Type', 'Notes'],
-        ['Keep', feedbackPayload.keep],
-        ['Start', feedbackPayload.start],
-        ['Stop', feedbackPayload.stop],
+        // A field the model left empty exports empty: an examiner's sheet must
+        // never carry text the model did not write.
+        ...feedbackCsvRows(keepStartStop),
       );
 
       if (scoreReport?.overall_summary) {
@@ -2498,6 +2445,10 @@ export default function OSCEAiMarkerMockup({
         end: Number(cropDraft.end),
       };
 
+      // 202: the clip comes back as a draft with its new range and the MP4 is
+      // re-cut by the same export job a full split uses. Start the export
+      // watch here rather than waiting for the response to carry a running
+      // record — it is queued, not running, at this point.
       const body = await apiJson(`/api/sessions/${session.id}/clips/${selectedClip.id}/recrop`, {
         method: 'POST',
         json: payload,
@@ -2507,6 +2458,8 @@ export default function OSCEAiMarkerMockup({
       if (body?.session) {
         setSession(body.session);
       }
+      setAwaitingClipExportFor(session.id);
+      setNotice(`Re-cutting ${selectedClip.label || 'clip'} — its row updates when the new crop lands.`);
     } catch (error) {
       setError(error.message || 'Recrop failed.');
     } finally {
@@ -2884,7 +2837,11 @@ export default function OSCEAiMarkerMockup({
         ...previous,
         [clip.id]: { status: 'running', sessionId: clipSession.id },
       }));
-      setNotice(`Assessment for "${clip.label || 'clip'}" queued — its row updates as it progresses.`);
+      setNotice(
+        body.reused
+          ? `Assessment for "${clip.label || 'clip'}" is already under way — its row updates as it progresses.`
+          : `Assessment for "${clip.label || 'clip'}" queued — its row updates as it progresses.`,
+      );
       refreshSessionIndex();
       return true;
     } catch (assessmentError) {
@@ -2897,40 +2854,13 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
-  async function rerunClipAssessment(clip, childSessionId) {
-    if (!clip?.id) {
-      return false;
-    }
-    // No existing child (or demo bundle) → fall back to a first run, which
-    // handles the demo path and creates the child session.
-    if (!childSessionId || session?._demoChildren) {
-      return runClipAssessment(clip);
-    }
-    if (clipAssessmentRuns[clip.id]?.status === 'running') {
-      return false;
-    }
-
-    unselectClipForBatch(clip.id);
-    setError('');
-    setClipAssessmentRuns((previous) => ({
-      ...previous,
-      [clip.id]: { status: 'running', sessionId: childSessionId },
-    }));
-    try {
-      await apiJson(`/api/sessions/${childSessionId}/rerun`, {
-        method: 'POST', fallbackMessage: 'Re-run failed.',
-      });
-      setNotice(`Re-running assessment for "${clip.label || 'clip'}" — its row updates as it progresses.`);
-      refreshSessionIndex();
-      return true;
-    } catch (rerunError) {
-      setClipAssessmentRuns((previous) => ({
-        ...previous,
-        [clip.id]: { status: SessionStatus.FAILED, sessionId: childSessionId, error: rerunError.message || 'Re-run failed.' },
-      }));
-      setError(rerunError.message || 'Re-run failed.');
-      return false;
-    }
+  // Re-running a clip's assessment is the same request as running it: the
+  // server keeps one child session per clip, so `POST /assess` re-runs the
+  // existing one in place — against the clip's *current* MP4, which is what a
+  // re-cut clip needs. The separate `/rerun` call this used to make could not
+  // do that: it re-scored whatever footage the child still pointed at.
+  async function rerunClipAssessment(clip, _childSessionId) {
+    return runClipAssessment(clip);
   }
 
   function unselectClipForBatch(clipId) {
@@ -3429,7 +3359,10 @@ export default function OSCEAiMarkerMockup({
     cropDraft,
     setCropDraft,
     videoDurationSeconds,
-    isRecropping,
+    // The crop editor is busy from the moment the request is sent until the
+    // job's cut lands, not just while the POST is in flight — re-cutting is
+    // queued work now, and the button has to say so for its whole life.
+    isRecropping: isRecropping || isRecropRunning,
     seekToSeconds,
     recropSelectedClip,
   };
@@ -4189,11 +4122,16 @@ export default function OSCEAiMarkerMockup({
                               </div>
                               <StudentClipSplitterCard
                                 {...clipSplitterSharedProps}
-                                lockEdits={clipEditsLocked}
+                                // Re-cutting one clip is durable work now (a
+                                // queued export scoped to that clip), so an
+                                // exported session no longer locks the crop
+                                // editor for good — only while a cut is
+                                // actually in flight.
+                                lockEdits={isPlanExportRunning}
                                 title="Auto-detected clips"
                                 description={
                                   clipEditsLocked
-                                    ? 'Clips exported. Review labels and downloads (editing is locked).'
+                                    ? 'Clips exported. Adjust a clip’s crop to re-cut just that student.'
                                     : 'Detected boundaries from the bell / hybrid detector (clips are not generated yet)'
                                 }
                               />
@@ -4402,20 +4340,8 @@ export default function OSCEAiMarkerMockup({
                               <div className="mt-2 text-xs text-slate-600">{scoringSummary.decisionReason}</div>
                             ) : null}
                           </div>
-                        ) : isDemoFallback ? (
-                          <div className="rounded-xl border border-cyan-200 bg-cyan-50 p-4">
-                            <div className="text-sm text-cyan-700">Demo weighted preview</div>
-                            <div className="text-3xl font-bold text-cyan-900">{fallbackOverallScore} / 100</div>
-                          </div>
                         ) : (
-                          <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/90 p-6 text-center shadow-inner">
-                            <p className="text-sm font-medium text-slate-700">
-                              Rubric-aligned scores appear here after transcription finishes.
-                            </p>
-                            <p className="mt-2 text-xs text-slate-500">
-                              Run the pipeline with a valid OpenRouter key to populate Pass/Fail and criteria.
-                            </p>
-                          </div>
+                          <ContentSheetEmptyState state={contentState} error={session?.error} subject="scores" />
                         )}
 
                         <PanelMarkingSummary
@@ -4476,23 +4402,11 @@ export default function OSCEAiMarkerMockup({
                                 </div>
                               );
                             })
-                          : fallbackScores.map((criterion) => (
-                              <div key={criterion.key} className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                                <div className="mb-2 flex items-start justify-between gap-3">
-                                  <div>
-                                    <div className="font-semibold text-slate-900">{criterion.key}</div>
-                                    <div className="text-xs text-slate-500">{criterion.desc}</div>
-                                  </div>
-                                  <div className="text-right">
-                                    <div className="text-xs text-slate-500">
-                                      Weight {Math.round(criterion.weight * 100)}%
-                                    </div>
-                                    <div className="text-xl font-bold text-slate-900">{criterion.score}/100</div>
-                                  </div>
-                                </div>
-                                <Progress value={criterion.score} className="h-2.5 bg-slate-200" />
+                          : scoringSummary ? (
+                              <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/90 p-4 text-center text-sm text-slate-500">
+                                This sheet lists no criteria.
                               </div>
-                            ))}
+                            ) : null}
 
                         {scoreReport?.overall_summary ? (
                           <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
@@ -4527,56 +4441,14 @@ export default function OSCEAiMarkerMockup({
                       <CardContent className="space-y-4 text-sm text-slate-800">
                         {keepStartStop ? (
                           <>
-                            <FeedbackBlock
-                              title="Keep"
-                              lines={[
-                                keepStartStop.keep || DEFAULT_KEEP_START_STOP.keep,
-                              ]}
-                            />
+                            <FeedbackBlock title="Keep" lines={[keepStartStop.keep]} />
 
-                            <FeedbackBlock
-                              title="Start"
-                              lines={[
-                                keepStartStop.start || DEFAULT_KEEP_START_STOP.start,
-                              ]}
-                            />
+                            <FeedbackBlock title="Start" lines={[keepStartStop.start]} />
 
-                            <FeedbackBlock
-                              title="Stop"
-                              lines={[
-                                keepStartStop.stop || DEFAULT_KEEP_START_STOP.stop,
-                              ]}
-                            />
+                            <FeedbackBlock title="Stop" lines={[keepStartStop.stop]} />
                           </>
                         ) : (
-                          <>
-                            <FeedbackBlock
-                              title="Strengths"
-                              lines={[
-                                'Maintains consistent patient-facing tone and polite transitions.',
-                                'Uses structured explanations and confirms understanding.',
-                                'Keeps interaction flowing with clear progression through questions.',
-                              ]}
-                            />
-
-                            <FeedbackBlock
-                              title="Areas to Improve"
-                              lines={[
-                                'Tighten phrasing in complex medication advice to reduce repetition.',
-                                'Add explicit teach-back checkpoints after key counseling instructions.',
-                                'Close with a concise summary of red flags and follow-up timing.',
-                              ]}
-                            />
-
-                            <FeedbackBlock
-                              title="Suggested Practice"
-                              lines={[
-                                'Practice 60-second medication summaries using plain language.',
-                                'Use one verification question every 2-3 recommendation blocks.',
-                                'End with a short recap: what to use, how to use, when to seek help.',
-                              ]}
-                            />
-                          </>
+                          <ContentSheetEmptyState state={contentState} error={session?.error} subject="feedback" />
                         )}
                       </CardContent>
                     </Card>
@@ -4824,6 +4696,13 @@ export default function OSCEAiMarkerMockup({
                                   <div className="text-xs text-slate-500">
                                     {formatRuntime(clip.start)} - {formatRuntime(clip.end)}
                                   </div>
+                                  {/* The child scored a cut this clip no longer has —
+                                      re-cropping replaced the MP4 after it ran. */}
+                                  {clipAssessmentIndex[clip.id]?.stale && runState.status !== 'running' ? (
+                                    <div className="mt-1 text-xs font-medium text-amber-700">
+                                      Clip re-cut since this assessment — re-run to score the new crop.
+                                    </div>
+                                  ) : null}
                                 </div>
                               </div>
                               <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${statusClass}`}>
@@ -5579,14 +5458,38 @@ function FeatureRow({ icon, text }) {
   );
 }
 
+// Empty state for the Content Scores and Feedback tabs when the session has no
+// content sheet. The copy says why (failed run, demo bundle, not produced yet)
+// and never stands in for the sheet with template numbers or canned sentences:
+// an examiner must be able to trust everything these tabs show.
+function ContentSheetEmptyState({ state, error, subject }) {
+  const copy = contentSheetEmptyCopy(state, { error, subject });
+  return (
+    <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/90 p-6 text-center shadow-inner">
+      <p className="text-sm font-medium text-slate-700">{copy.title}</p>
+      {copy.hint ? <p className="mt-2 text-xs text-slate-500">{copy.hint}</p> : null}
+      {copy.detail ? (
+        <p className="mt-2 rounded border border-rose-100 bg-rose-50 px-2 py-1 text-[11px] leading-snug text-rose-700">
+          {copy.detail}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+// A Keep/Start/Stop block. A field the model left empty is said to be empty,
+// in muted text; the view never substitutes a sentence of its own.
 function FeedbackBlock({ title, lines }) {
+  const provided = lines.map((line) => String(line || '').trim()).filter(Boolean);
   return (
     <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
       <div className="mb-2 text-sm font-semibold text-slate-900">{title}</div>
       <div className="space-y-1.5 text-sm text-slate-800">
-        {lines.map((line) => (
-          <div key={line}>- {line}</div>
-        ))}
+        {provided.length ? (
+          provided.map((line) => <div key={line}>- {line}</div>)
+        ) : (
+          <div className="text-sm italic text-slate-400">{FEEDBACK_NOT_PROVIDED}</div>
+        )}
       </div>
     </div>
   );
@@ -5825,7 +5728,8 @@ function StudentClipSplitterCard({
 
                 {lockEdits ? (
                   <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
-                    Clips are finalized after export. Crop editing is locked for this session.
+                    Clips are being cut from the recording. Crop editing resumes when the export
+                    lands.
                   </div>
                 ) : (
                   <>
@@ -5890,7 +5794,7 @@ function StudentClipSplitterCard({
                         onClick={recropSelectedClip}
                         disabled={isRecropping || !videoDurationSeconds}
                       >
-                        {isRecropping ? 'Re-cropping...' : 'Save crop'}
+                        {isRecropping ? 'Re-cutting…' : 'Save crop'}
                       </Button>
                     </div>
                   </>
