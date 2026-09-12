@@ -51,6 +51,7 @@ import LongVideoSummaryCharts from './LongVideoSummaryCharts.jsx';
 import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
 import {
   INTERMISSION_KIND,
+  MIN_BOUNDARY_GAP_SECONDS,
   contextMenuActions,
   ensureKinds,
   hitTestTimeline,
@@ -492,6 +493,10 @@ export default function OSCEAiMarkerMockup({
   const videoPlayerSectionRef = useRef(null);
   const timelineContainerRef = useRef(null);
   const manualTimelineRef = useRef(null);
+  // Latest separators, readable synchronously from the drag handlers: a
+  // mousemove burst can queue several updates before React re-renders.
+  const manualBoundariesRef = useRef([]);
+  manualBoundariesRef.current = manualBoundaries;
   const timelineMenuRef = useRef(null);
   const timelineSegmentRefs = useRef(new Map());
   const workspaceLoadRef = useRef(null);
@@ -2484,17 +2489,6 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
-  function syncManualLabels(segmentCount, preferExisting = true) {
-    setManualLabels((previous) => {
-      const next = [];
-      for (let index = 0; index < segmentCount; index += 1) {
-        const existing = preferExisting ? String(previous[index] || '').trim() : '';
-        next.push(existing || `Student ${index + 1}`);
-      }
-      return next;
-    });
-  }
-
   function generateManualBoundariesFromCount() {
     const segmentCount = clampNumber(Number(manualSegmentCount || 0), 2, 24);
     if (!Number.isFinite(videoDurationSeconds) || videoDurationSeconds <= 0) {
@@ -2506,10 +2500,11 @@ export default function OSCEAiMarkerMockup({
     for (let index = 1; index < segmentCount; index += 1) {
       boundaries.push((videoDurationSeconds * index) / segmentCount);
     }
+    const kinds = Array(segmentCount).fill('session');
     setManualSegmentCount(segmentCount);
     setManualBoundaries(boundaries);
-    setManualSegmentKinds(Array(segmentCount).fill('session'));
-    syncManualLabels(segmentCount, true);
+    setManualSegmentKinds(kinds);
+    setManualLabels((previous) => normalizeLabels(previous.slice(0, segmentCount), kinds));
   }
 
   function seekVideoPreview(seconds) {
@@ -2527,22 +2522,23 @@ export default function OSCEAiMarkerMockup({
   }
 
   function updateBoundaryAt(index, nextValueSeconds, { seekVideo = false } = {}) {
-    let appliedValue = null;
-    setManualBoundaries((previous) => {
-      const updated = [...previous];
-      const leftLimit = index === 0 ? 0 : Number(updated[index - 1] || 0) + 0.2;
-      const rightLimit =
-        index === updated.length - 1
-          ? Number(videoDurationSeconds || 0)
-          : Number(updated[index + 1] || videoDurationSeconds) - 0.2;
-      const nextBoundary = clampNumber(Number(nextValueSeconds || 0), leftLimit, rightLimit);
-      updated[index] = nextBoundary;
-      appliedValue = nextBoundary;
-      return updated;
-    });
+    const current = manualBoundariesRef.current;
+    if (index < 0 || index >= current.length) {
+      return;
+    }
+    const leftLimit = index === 0 ? 0 : Number(current[index - 1] || 0) + MIN_BOUNDARY_GAP_SECONDS;
+    const rightLimit =
+      index === current.length - 1
+        ? Number(videoDurationSeconds || 0)
+        : Number(current[index + 1] || videoDurationSeconds) - MIN_BOUNDARY_GAP_SECONDS;
+    const nextBoundary = clampNumber(Number(nextValueSeconds || 0), leftLimit, Math.max(leftLimit, rightLimit));
+    const updated = [...current];
+    updated[index] = nextBoundary;
+    manualBoundariesRef.current = updated;
+    setManualBoundaries(updated);
 
-    if (seekVideo && appliedValue != null) {
-      seekVideoPreview(appliedValue);
+    if (seekVideo) {
+      seekVideoPreview(nextBoundary);
     }
   }
 
@@ -3090,7 +3086,14 @@ export default function OSCEAiMarkerMockup({
   const showCropWorkflow = allowCropping;
   const showClipAssessmentPanel = allowCropping && hasClipFiles;
   const showAssessmentPanels = !isLongWorkflow || isClipAssessmentView;
-  const clipEditsLocked = allowCropping && hasClipFiles;
+  // Editing locks once the export has finished. While clips are still being
+  // cut, or after a failed export, the manual editor stays: it carries the
+  // progress / failure banners and the re-export button.
+  const clipEditsLocked =
+    allowCropping &&
+    hasClipFiles &&
+    !shouldWatchClipExport &&
+    clipExportStatus !== SessionStatus.FAILED;
 
   const manualCropControls = (
     <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 shadow-inner">
@@ -3335,37 +3338,49 @@ export default function OSCEAiMarkerMockup({
             const ordinal = sessionOrdinals(
               ensureKinds(manualSegmentKinds, manualLabels.length)
             )[segmentIndex];
+            const segmentSeconds = Math.max(0, segmentEnd - segmentStart);
             return (
               <div
                 key={`manual-label-${segmentIndex}`}
-                className={`flex items-center gap-2 rounded-xl border px-2 py-2 shadow-sm ${
+                className={`rounded-xl border px-2 py-2 shadow-sm ${
                   isIntermission ? 'border-slate-200 bg-slate-100 opacity-70' : 'border-slate-200 bg-white'
                 }`}
               >
-                <div className="flex w-8 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-[11px] font-bold text-slate-700">
-                  {isIntermission ? '—' : ordinal}
+                <div className="flex items-center gap-2">
+                  <div className="flex w-8 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-[11px] font-bold text-slate-700">
+                    {isIntermission ? '—' : ordinal}
+                  </div>
+                  {isIntermission ? (
+                    <span className="min-w-0 flex-1 truncate px-1 text-xs font-medium italic text-slate-500">
+                      Intermission (break)
+                    </span>
+                  ) : (
+                    <input
+                      type="text"
+                      value={labelValue}
+                      onChange={(event) => updateManualLabelAt(segmentIndex, event.target.value)}
+                      placeholder={`Student ${ordinal || segmentIndex + 1}`}
+                      className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-800 focus:border-cyan-400 focus:outline-none focus:ring-2 focus:ring-cyan-400/30"
+                    />
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleManualSegmentClick(segmentStart)}
+                    className="shrink-0 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-[11px] font-semibold text-slate-700 hover:border-cyan-300 hover:bg-cyan-50"
+                    title={`Jump to ${formatRuntime(segmentStart)}`}
+                  >
+                    Jump
+                  </button>
                 </div>
-                {isIntermission ? (
-                  <span className="min-w-0 flex-1 truncate px-1 text-xs font-medium italic text-slate-500">
-                    Intermission (break)
-                  </span>
-                ) : (
-                  <input
-                    type="text"
-                    value={labelValue}
-                    onChange={(event) => updateManualLabelAt(segmentIndex, event.target.value)}
-                    placeholder={`Student ${ordinal || segmentIndex + 1}`}
-                    className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-800 focus:border-cyan-400 focus:outline-none focus:ring-2 focus:ring-cyan-400/30"
-                  />
-                )}
-                <button
-                  type="button"
-                  onClick={() => handleManualSegmentClick(segmentStart)}
-                  className="shrink-0 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-[11px] font-semibold text-slate-700 hover:border-cyan-300 hover:bg-cyan-50"
-                  title={`Jump to ${formatRuntime(segmentStart)} – ${formatRuntime(segmentEnd)}`}
+                <div
+                  className="mt-1.5 flex items-center justify-between px-1 text-[11px] text-slate-500"
+                  data-testid={`manual-segment-range-${segmentIndex}`}
                 >
-                  {formatRuntime(segmentStart)}
-                </button>
+                  <span className="font-medium tabular-nums text-slate-700">
+                    {formatRuntime(segmentStart)} – {formatRuntime(segmentEnd)}
+                  </span>
+                  <span className="tabular-nums">{segmentSeconds.toFixed(1)}s</span>
+                </div>
               </div>
             );
           })}
@@ -4110,7 +4125,7 @@ export default function OSCEAiMarkerMockup({
                         {showCropWorkflow ? (
                           <Tabs
                             defaultValue={clipEditsLocked ? 'auto' : 'manual'}
-                            key={`crop-workflow-${session?.id || 'anon'}`}
+                            key={`crop-workflow-${session?.id || 'anon'}-${clipEditsLocked ? 'locked' : 'editable'}`}
                             className="w-full"
                           >
                             <TabsList
