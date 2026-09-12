@@ -19,6 +19,7 @@ from llm_bootstrap import (
     describe_routing,
     validator_from,
 )
+from scorer_inputs import required_file, run_main, session_id_from
 from rubric_section import (
     diagnose_missing_rubric_section,
     split_case_study_context_and_rubric,
@@ -28,11 +29,6 @@ from rubric_section import (
 ROOT_DIR = Path(__file__).resolve().parents[1]
 load_env_file(ROOT_DIR)
 STORAGE_DIR = ROOT_DIR / "storage"
-SESSIONS_DIR = STORAGE_DIR / "sessions"
-WHISPERX_OUTPUT_DIR = STORAGE_DIR / "output" / "whisperx"
-NORMALIZED_TRANSCRIPTS_DIR = STORAGE_DIR / "output" / "transcripts"
-UPLOADED_CASE_STUDIES_DIR = STORAGE_DIR / "input" / "case_studies"
-FALLBACK_CASE_STUDIES_DIR = ROOT_DIR / "case_studies"
 SCORES_OUTPUT_DIR = STORAGE_DIR / "output" / "scores"
 
 # Which provider and model run is no longer decided here. The API resolves the
@@ -141,20 +137,16 @@ def parse_args() -> argparse.Namespace:
             "using NVIDIA API."
         )
     )
-    parser.add_argument("--session-id", help="Session ID (defaults to latest session metadata file)")
+    parser.add_argument("--session-id", help="Session ID (defaults to the transcript file's stem)")
     parser.add_argument(
         "--transcript",
-        help=(
-            "Transcript path override. If omitted, uses "
-            "storage/output/whisperx/<session-id>/<session-id>.srt"
-        ),
+        required=True,
+        help="Normalised transcript JSON (storage/output/transcripts/<session-id>.json). Required.",
     )
     parser.add_argument(
         "--case-study",
-        help=(
-            "Case study file override (PDF expected). If omitted, tries latest uploaded "
-            "case study in storage/input/case_studies, then falls back to case_studies/*.pdf"
-        ),
+        required=True,
+        help="This session's case-study PDF (the rubric is embedded in it). Required.",
     )
     parser.add_argument(
         "--output",
@@ -166,122 +158,6 @@ def parse_args() -> argparse.Namespace:
         help="Print JSON to stdout and skip writing output file",
     )
     return parser.parse_args()
-
-
-def newest_file(directory: Path, pattern: str) -> Path | None:
-    if not directory.exists():
-        return None
-
-    candidates = [p for p in directory.glob(pattern) if p.is_file()]
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0]
-
-
-def session_id_from_latest_metadata() -> str:
-    latest = newest_file(SESSIONS_DIR, "*.json")
-    if latest is None:
-        raise FileNotFoundError(
-            f"No session metadata found in {SESSIONS_DIR}. Provide --session-id or --transcript explicitly."
-        )
-    return latest.stem
-
-
-def read_session_metadata(session_id: str) -> dict[str, Any] | None:
-    session_path = SESSIONS_DIR / f"{session_id}.json"
-    if not session_path.exists():
-        return None
-
-    return json.loads(session_path.read_text(encoding="utf-8"))
-
-
-def resolve_transcript_path(session_id: str, transcript_override: str | None) -> Path:
-    if transcript_override:
-        transcript_path = Path(transcript_override).expanduser().resolve()
-        if not transcript_path.exists():
-            raise FileNotFoundError(f"Transcript override does not exist: {transcript_path}")
-        return transcript_path
-
-    session_folder = WHISPERX_OUTPUT_DIR / session_id
-
-    expected_srt = session_folder / f"{session_id}.srt"
-    if expected_srt.exists():
-        return expected_srt
-
-    fallback_srt = newest_file(session_folder, "*.srt") if session_folder.exists() else None
-    if fallback_srt:
-        return fallback_srt
-
-    expected_vtt = session_folder / f"{session_id}.vtt"
-    if expected_vtt.exists():
-        return expected_vtt
-
-    fallback_vtt = newest_file(session_folder, "*.vtt") if session_folder.exists() else None
-    if fallback_vtt:
-        return fallback_vtt
-
-    expected_txt = session_folder / f"{session_id}.txt"
-    if expected_txt.exists():
-        return expected_txt
-
-    fallback_txt = newest_file(session_folder, "*.txt") if session_folder.exists() else None
-    if fallback_txt:
-        return fallback_txt
-
-    expected_json = session_folder / f"{session_id}.json"
-    if expected_json.exists():
-        return expected_json
-
-    fallback_json = newest_file(session_folder, "*.json") if session_folder.exists() else None
-    if fallback_json:
-        return fallback_json
-
-    normalized_transcript_json = NORMALIZED_TRANSCRIPTS_DIR / f"{session_id}.json"
-    if normalized_transcript_json.exists():
-        return normalized_transcript_json
-
-    raise FileNotFoundError(
-        "Could not resolve transcript file. Expected "
-        f"{expected_srt} or another .srt/.vtt/.txt/.json inside {session_folder}, "
-        f"or normalized transcript {normalized_transcript_json}."
-    )
-
-
-def resolve_case_study_path(
-    case_study_override: str | None,
-    session_metadata: dict[str, Any] | None,
-) -> Path:
-    if case_study_override:
-        case_study_path = Path(case_study_override).expanduser().resolve()
-        if not case_study_path.exists():
-            raise FileNotFoundError(f"Case study override does not exist: {case_study_path}")
-        return case_study_path
-
-    case_study_from_session = (
-        session_metadata
-        and session_metadata.get("files", {})
-        and session_metadata["files"].get("caseStudy", {})
-        and session_metadata["files"]["caseStudy"].get("absolutePath")
-    )
-    if case_study_from_session:
-        case_study_path = Path(str(case_study_from_session))
-        if case_study_path.exists():
-            return case_study_path
-
-    uploaded_case_study = newest_file(UPLOADED_CASE_STUDIES_DIR, "*.pdf")
-    if uploaded_case_study:
-        return uploaded_case_study
-
-    fallback_case_study = newest_file(FALLBACK_CASE_STUDIES_DIR, "*.pdf")
-    if fallback_case_study:
-        return fallback_case_study
-
-    raise FileNotFoundError(
-        "No case study PDF found. Provide --case-study, upload one to storage/input/case_studies, "
-        f"or place one in {FALLBACK_CASE_STUDIES_DIR}."
-    )
 
 
 def read_pdf_text(path: Path) -> str:
@@ -1050,33 +926,21 @@ def to_repo_relative(path: Path) -> str:
         return str(path.resolve())
 
 
-def parse_session_id(args: argparse.Namespace) -> str:
-    if args.session_id:
-        return str(args.session_id).strip()
-
-    if args.transcript:
-        transcript_name = Path(args.transcript).stem.strip()
-        if transcript_name:
-            return transcript_name
-
-    return session_id_from_latest_metadata()
-
-
 def main() -> int:
     args = parse_args()
     router = build_router_from_env()
     routing_summary = describe_routing(router)
     print(f"[nvidia_osce_assessor] LLM routing: {routing_summary}", file=sys.stderr)
 
-    session_id = parse_session_id(args)
+    # Both inputs are handed over by the API (or the operator); nothing is
+    # searched for. See scripts/scorer_inputs.py for why.
+    transcript_path = required_file(args.transcript, flag="--transcript", label="Transcript")
+    case_study_path = required_file(args.case_study, flag="--case-study", label="Case-study PDF")
+    session_id = session_id_from(args, transcript_path)
     output_path = None if args.stdout_only else (
         Path(args.output).expanduser().resolve() if args.output else SCORES_OUTPUT_DIR / f"{session_id}.json"
     )
     checkpoint_path = checkpoint_path_for_output(output_path) if output_path is not None else None
-    session_metadata = read_session_metadata(session_id)
-
-    transcript_path = resolve_transcript_path(session_id, args.transcript)
-    case_study_path = resolve_case_study_path(args.case_study, session_metadata)
 
     transcript_text = clip_text(read_file_as_context_text(transcript_path), MAX_TRANSCRIPT_CHARS, "transcript")
 
@@ -1319,8 +1183,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Exception as error:
-        print(f"Error: {error}", file=sys.stderr)
-        raise SystemExit(1)
+    run_main(main, script_name="nvidia_osce_assessor")

@@ -37,13 +37,11 @@ from llm_bootstrap import (
     describe_routing,
     validator_from,
 )
+from scorer_inputs import optional_file, required_file, run_main, session_id_from
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 load_env_file(ROOT_DIR)
 STORAGE_DIR = ROOT_DIR / "storage"
-SESSIONS_DIR = STORAGE_DIR / "sessions"
-TRANSCRIPTS_DIR = STORAGE_DIR / "output" / "transcripts"
-AUDIO_PROF_DIR = STORAGE_DIR / "output" / "audio_professionalism"
 COMM_SCORES_DIR = STORAGE_DIR / "output" / "communication_scores"
 AUTH_DIR = STORAGE_DIR / "auth"
 PARSED_RUBRIC_PATH = AUTH_DIR / "communication_rubric.json"
@@ -121,9 +119,16 @@ def parse_args() -> argparse.Namespace:
             f"{PARSED_RUBRIC_PATH} (override with --parsed-rubric)."
         )
     )
-    parser.add_argument("--session-id", help="Session ID (defaults to latest session metadata file)")
-    parser.add_argument("--transcript", help="Transcript JSON path override")
-    parser.add_argument("--audio-professionalism", help="Audio professionalism JSON path override")
+    parser.add_argument("--session-id", help="Session ID (defaults to the transcript file's stem)")
+    parser.add_argument(
+        "--transcript",
+        required=True,
+        help="Normalised transcript JSON (storage/output/transcripts/<session-id>.json). Required.",
+    )
+    parser.add_argument(
+        "--audio-professionalism",
+        help="Audio professionalism JSON for this session. Optional; scored without it when omitted.",
+    )
     parser.add_argument(
         "--parsed-rubric",
         help=(
@@ -148,89 +153,6 @@ def parse_args() -> argparse.Namespace:
         help="Print JSON to stdout and skip writing --output.",
     )
     return parser.parse_args()
-
-
-def newest_file(directory: Path, pattern: str) -> Path | None:
-    if not directory.exists():
-        return None
-
-    candidates = [p for p in directory.glob(pattern) if p.is_file()]
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0]
-
-
-def session_id_from_latest_metadata() -> str:
-    latest = newest_file(SESSIONS_DIR, "*.json")
-    if latest is None:
-        raise FileNotFoundError(
-            f"No session metadata found in {SESSIONS_DIR}. Provide --session-id explicitly."
-        )
-    return latest.stem
-
-
-def read_session_metadata(session_id: str) -> dict[str, Any] | None:
-    session_path = SESSIONS_DIR / f"{session_id}.json"
-    if not session_path.exists():
-        return None
-
-    return json.loads(session_path.read_text(encoding="utf-8"))
-
-
-def resolve_transcript_path(
-    session_id: str,
-    transcript_override: str | None,
-    session_metadata: dict[str, Any] | None,
-) -> Path:
-    if transcript_override:
-        transcript_path = Path(transcript_override).expanduser().resolve()
-        if not transcript_path.exists():
-            raise FileNotFoundError(f"Transcript override does not exist: {transcript_path}")
-        return transcript_path
-
-    if session_metadata and session_metadata.get("outputs", {}).get("transcript", {}).get("absolutePath"):
-        transcript_path = Path(str(session_metadata["outputs"]["transcript"]["absolutePath"]))
-        if transcript_path.exists():
-            return transcript_path
-
-    expected = TRANSCRIPTS_DIR / f"{session_id}.json"
-    if expected.exists():
-        return expected
-
-    fallback = newest_file(TRANSCRIPTS_DIR, f"{session_id}*.json") or newest_file(TRANSCRIPTS_DIR, "*.json")
-    if fallback:
-        return fallback
-
-    raise FileNotFoundError(f"Could not resolve transcript file for session {session_id}.")
-
-
-def resolve_audio_prof_path(
-    session_id: str,
-    audio_prof_override: str | None,
-    session_metadata: dict[str, Any] | None,
-) -> Path | None:
-    if audio_prof_override:
-        audio_prof_path = Path(audio_prof_override).expanduser().resolve()
-        if not audio_prof_path.exists():
-            raise FileNotFoundError(f"Audio professionalism override does not exist: {audio_prof_path}")
-        return audio_prof_path
-
-    if session_metadata and session_metadata.get("outputs", {}).get("audioProfessionalism", {}).get("absolutePath"):
-        audio_prof_path = Path(str(session_metadata["outputs"]["audioProfessionalism"]["absolutePath"]))
-        if audio_prof_path.exists():
-            return audio_prof_path
-
-    expected = AUDIO_PROF_DIR / f"{session_id}.json"
-    if expected.exists():
-        return expected
-
-    fallback = newest_file(AUDIO_PROF_DIR, f"{session_id}*.json")
-    if fallback:
-        return fallback
-
-    return None
 
 
 def resolve_parsed_rubric_path(parsed_override: str | None) -> Path:
@@ -939,11 +861,12 @@ def main() -> int:
         file=sys.stderr,
     )
 
-    session_id = str(args.session_id).strip() if args.session_id else session_id_from_latest_metadata()
-    session_metadata = read_session_metadata(session_id)
-
-    transcript_path = resolve_transcript_path(session_id, args.transcript, session_metadata)
-    audio_prof_path = resolve_audio_prof_path(session_id, args.audio_professionalism, session_metadata)
+    # Inputs are handed over, never searched for (scripts/scorer_inputs.py).
+    transcript_path = required_file(args.transcript, flag="--transcript", label="Transcript")
+    audio_prof_path = optional_file(
+        args.audio_professionalism, flag="--audio-professionalism", label="Audio professionalism JSON"
+    )
+    session_id = session_id_from(args, transcript_path)
     parsed_rubric_path = resolve_parsed_rubric_path(args.parsed_rubric)
     rubric = read_parsed_rubric(parsed_rubric_path)
     communication_criteria_expected = len(rubric.get("criteria", []))
@@ -1083,8 +1006,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Exception as error:
-        print(f"Error: {error}", file=sys.stderr)
-        raise SystemExit(1)
+    run_main(main, script_name="nvidia_osce_communication")

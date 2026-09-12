@@ -7,12 +7,34 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings
+from app.core.exceptions import AppError
 from app.core.json_utils import extract_json_object, write_json_file
 from app.core.process import CommandRunner
 from app.services.auth_service import AuthService
 from app.services.event_service import EventService
 
 logger = logging.getLogger(__name__)
+
+
+def _require_input(raw_path: Any, description: str) -> Path:
+    """The path of an input a scorer must be handed, or a non-retryable failure.
+
+    The scorers used to find their own inputs when the API did not pass one —
+    the raw WhisperX ``.srt`` instead of the normalised transcript, or the
+    newest PDF in the upload folder instead of *this* session's case study.
+    Both are wrong answers that look like right ones. The API knows every path,
+    so it hands them over explicitly, and a missing one fails the step here with
+    the path named rather than letting a subprocess guess. Not retryable: the
+    file will be just as absent on the next attempt.
+    """
+    path = Path(str(raw_path or ""))
+    if not raw_path or not path.is_file():
+        raise AppError(
+            f"{description} is missing ({path or 'no path recorded'}); the step cannot run without it.",
+            status_code=422,
+            retryable=False,
+        )
+    return path
 
 
 class ScoringPipeline:
@@ -113,11 +135,30 @@ class ScoringPipeline:
     async def run_content_scoring(self, session: dict[str, Any]) -> dict[str, Any]:
         if not self.settings.scorer_script_path.exists():
             raise RuntimeError(f"Scorer script not found at {self.settings.scorer_script_path}")
+        outputs = session.get("outputs") or {}
+        # The normalised transcript — the same document the communication
+        # branch scores — never the raw engine .srt: hallucination drops and
+        # speaker labels exist only here, and the two scorers must agree on
+        # what was said.
+        transcript_path = _require_input(
+            (outputs.get("transcript") or {}).get("absolutePath"), "The normalised transcript"
+        )
+        case_study_path = _require_input(
+            ((session.get("files") or {}).get("caseStudy") or {}).get("absolutePath"),
+            "This session's case-study PDF",
+        )
         output_path = self.settings.paths.output_scores_dir / f"{session['id']}.json"
-        args = [str(self.settings.scorer_script_path), "--session-id", str(session["id"]), "--output", str(output_path)]
-        case_study = (session.get("files") or {}).get("caseStudy") or {}
-        if case_study.get("absolutePath") and Path(str(case_study["absolutePath"])).exists():
-            args.extend(["--case-study", str(case_study["absolutePath"])])
+        args = [
+            str(self.settings.scorer_script_path),
+            "--session-id",
+            str(session["id"]),
+            "--transcript",
+            str(transcript_path),
+            "--case-study",
+            str(case_study_path),
+            "--output",
+            str(output_path),
+        ]
         await self.events.publish(
             str(session["id"]),
             "log",
@@ -126,7 +167,7 @@ class ScoringPipeline:
         result = await self.runner.run(
             self.settings.scorer_python_bin,
             args,
-            "OpenRouter scoring",
+            "Content scoring",
             env=await self.scoring_env(),
             on_output=lambda stream, text: self.events.publish(
                 str(session["id"]),
@@ -152,12 +193,10 @@ class ScoringPipeline:
         if not self.settings.audio_professionalism_script_path.exists():
             raise RuntimeError(f"Audio professionalism script not found at {self.settings.audio_professionalism_script_path}")
         outputs = session.get("outputs") or {}
-        audio_path = Path(str((outputs.get("audio") or {}).get("absolutePath") or ""))
-        transcript_path = Path(str((outputs.get("transcript") or {}).get("absolutePath") or ""))
-        if not audio_path.exists():
-            raise RuntimeError("Audio professionalism requires an extracted audio file.")
-        if not transcript_path.exists():
-            raise RuntimeError("Audio professionalism requires a normalized transcript.")
+        audio_path = _require_input((outputs.get("audio") or {}).get("absolutePath"), "The extracted audio")
+        transcript_path = _require_input(
+            (outputs.get("transcript") or {}).get("absolutePath"), "The normalised transcript"
+        )
         output_path = self.settings.paths.output_audio_professionalism_dir / f"{session['id']}.json"
         args = [
             str(self.settings.audio_professionalism_script_path),
@@ -209,9 +248,9 @@ class ScoringPipeline:
         if not self.settings.communication_scorer_script_path.exists():
             raise RuntimeError(f"Communication scorer script not found at {self.settings.communication_scorer_script_path}")
         outputs = session.get("outputs") or {}
-        transcript_path = Path(str((outputs.get("transcript") or {}).get("absolutePath") or ""))
-        if not transcript_path.exists():
-            raise RuntimeError("Communication scoring requires a normalized transcript.")
+        transcript_path = _require_input(
+            (outputs.get("transcript") or {}).get("absolutePath"), "The normalised transcript"
+        )
         output_path = self.settings.paths.output_communication_scores_dir / f"{session['id']}.json"
         args = [
             str(self.settings.communication_scorer_script_path),

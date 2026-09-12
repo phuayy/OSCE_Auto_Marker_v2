@@ -8,19 +8,16 @@ import math
 import os
 import re
 import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
 from env_loader import load_env_file
+from scorer_inputs import required_file, run_main, session_id_from
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 load_env_file(ROOT_DIR)
 STORAGE_DIR = ROOT_DIR / "storage"
-SESSIONS_DIR = STORAGE_DIR / "sessions"
-AUDIO_DIR = STORAGE_DIR / "output" / "audio"
-TRANSCRIPTS_DIR = STORAGE_DIR / "output" / "transcripts"
 OUTPUT_DIR = STORAGE_DIR / "output" / "audio_professionalism"
 
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
@@ -65,91 +62,12 @@ def parse_args() -> argparse.Namespace:
             "producing structured JSON for communications rubric support."
         )
     )
-    parser.add_argument("--session-id", help="Session ID (defaults to latest session metadata file)")
-    parser.add_argument("--audio", help="Audio path override (MP3/WAV expected)")
-    parser.add_argument("--transcript", help="Transcript JSON path override")
+    parser.add_argument("--session-id", help="Session ID (defaults to the audio file's stem)")
+    parser.add_argument("--audio", required=True, help="Extracted session audio (MP3/WAV). Required.")
+    parser.add_argument("--transcript", required=True, help="Normalised transcript JSON. Required.")
     parser.add_argument("--output", help="Output JSON path")
     parser.add_argument("--student-speaker", help="Override student speaker label (e.g., SPEAKER_03)")
     return parser.parse_args()
-
-
-def newest_file(directory: Path, pattern: str) -> Path | None:
-    if not directory.exists():
-        return None
-
-    candidates = [p for p in directory.glob(pattern) if p.is_file()]
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0]
-
-
-def session_id_from_latest_metadata() -> str:
-    latest = newest_file(SESSIONS_DIR, "*.json")
-    if latest is None:
-        raise FileNotFoundError(
-            f"No session metadata found in {SESSIONS_DIR}. Provide --session-id explicitly."
-        )
-    return latest.stem
-
-
-def read_session_metadata(session_id: str) -> dict[str, Any] | None:
-    session_path = SESSIONS_DIR / f"{session_id}.json"
-    if not session_path.exists():
-        return None
-
-    return json.loads(session_path.read_text(encoding="utf-8"))
-
-
-def resolve_audio_path(session_id: str, audio_override: str | None, session_metadata: dict[str, Any] | None) -> Path:
-    if audio_override:
-        audio_path = Path(audio_override).expanduser().resolve()
-        if not audio_path.exists():
-            raise FileNotFoundError(f"Audio override does not exist: {audio_path}")
-        return audio_path
-
-    if session_metadata and session_metadata.get("outputs", {}).get("audio", {}).get("absolutePath"):
-        audio_path = Path(str(session_metadata["outputs"]["audio"]["absolutePath"]))
-        if audio_path.exists():
-            return audio_path
-
-    expected = AUDIO_DIR / f"{session_id}.mp3"
-    if expected.exists():
-        return expected
-
-    fallback = newest_file(AUDIO_DIR, f"{session_id}*.mp3") or newest_file(AUDIO_DIR, "*.mp3")
-    if fallback:
-        return fallback
-
-    raise FileNotFoundError(f"Could not resolve audio file for session {session_id}.")
-
-
-def resolve_transcript_path(
-    session_id: str,
-    transcript_override: str | None,
-    session_metadata: dict[str, Any] | None,
-) -> Path:
-    if transcript_override:
-        transcript_path = Path(transcript_override).expanduser().resolve()
-        if not transcript_path.exists():
-            raise FileNotFoundError(f"Transcript override does not exist: {transcript_path}")
-        return transcript_path
-
-    if session_metadata and session_metadata.get("outputs", {}).get("transcript", {}).get("absolutePath"):
-        transcript_path = Path(str(session_metadata["outputs"]["transcript"]["absolutePath"]))
-        if transcript_path.exists():
-            return transcript_path
-
-    expected = TRANSCRIPTS_DIR / f"{session_id}.json"
-    if expected.exists():
-        return expected
-
-    fallback = newest_file(TRANSCRIPTS_DIR, f"{session_id}*.json") or newest_file(TRANSCRIPTS_DIR, "*.json")
-    if fallback:
-        return fallback
-
-    raise FileNotFoundError(f"Could not resolve transcript file for session {session_id}.")
 
 
 def infer_speaker(segment: dict[str, Any]) -> str:
@@ -511,11 +429,10 @@ def build_evidence(
 
 def main() -> int:
     args = parse_args()
-    session_id = str(args.session_id).strip() if args.session_id else session_id_from_latest_metadata()
-    session_metadata = read_session_metadata(session_id)
-
-    audio_path = resolve_audio_path(session_id, args.audio, session_metadata)
-    transcript_path = resolve_transcript_path(session_id, args.transcript, session_metadata)
+    # Inputs are handed over, never searched for (scripts/scorer_inputs.py).
+    audio_path = required_file(args.audio, flag="--audio", label="Audio file")
+    transcript_path = required_file(args.transcript, flag="--transcript", label="Transcript")
+    session_id = session_id_from(args, audio_path)
 
     segments = load_transcript_segments(transcript_path)
     if not segments:
@@ -622,8 +539,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Exception as error:
-        print(f"Error: {error}", file=sys.stderr)
-        raise SystemExit(1)
+    run_main(main, script_name="audio_professionalism_extractor")
