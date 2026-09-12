@@ -1,4 +1,4 @@
-import { PipelineStep, SessionStatus, Workflow } from './enums.js';
+import { PipelineStep, SessionStatus, StepStatus, Workflow } from './enums.js';
 // Stage gauge for in-flight sessions.
 //
 // Lives outside the main component because it is pure: it maps one row of the
@@ -58,14 +58,76 @@ export function canonicalStepId(step) {
   return LEGACY_STEP_ALIASES[id] || id;
 }
 
-// Live 0-100 completion of the current step, or null when the running step
-// reports no progress of its own (only WhisperX does today).
-function readStepPercent(entry) {
-  const raw = entry?.stepProgress;
+// Clamp a raw JSON-scalar reading to a 0-100 percent, or null when it is not
+// a usable number (absent, empty, or non-numeric — SQLite can hand a JSON
+// scalar back as text depending on the driver).
+function normalizePercent(raw) {
   if (raw === null || raw === undefined || raw === '') return null;
   const percent = Number(raw);
   if (!Number.isFinite(percent)) return null;
   return Math.min(Math.max(percent, 0), 100);
+}
+
+// Live 0-100 completion of the current step, or null when the running step
+// reports no progress of its own (only WhisperX does today).
+function readStepPercent(entry) {
+  return normalizePercent(entry?.stepProgress);
+}
+
+// Stage from the compact `steps` map (status + progress per pipeline step),
+// used instead of the single currentStep/stepProgress pair whenever the
+// session-list projection carries one. PARALLEL_SCORING can run the content
+// and communication branches at once, so more than one sequence step can be
+// `running` at the same time — this is what lets the card gauge each branch
+// by its own reading instead of collapsing both onto one scalar pair that can
+// only ever describe one of them.
+function stageFromSteps(steps) {
+  // Canonicalise + keep only steps this card knows how to place on the bar,
+  // one state per sequence position (a legacy "whisperx" key and a current
+  // "transcription" key would otherwise double-book the same slot).
+  const byIndex = new Map();
+  for (const [rawStep, state] of Object.entries(steps)) {
+    const canonical = canonicalStepId(rawStep);
+    const index = PIPELINE_STAGE_SEQUENCE.findIndex(([step]) => step === canonical);
+    if (index >= 0) byIndex.set(index, state);
+  }
+
+  let credits = 0;
+  let highestCompletedIndex = -1;
+  let highestRunningIndex = -1;
+  let runningPercent = null;
+
+  for (const [index, state] of byIndex.entries()) {
+    const status = String(state?.status || '').toLowerCase();
+    if (status === StepStatus.COMPLETED || status === StepStatus.SKIPPED) {
+      credits += 1;
+      if (index > highestCompletedIndex) highestCompletedIndex = index;
+    } else if (status === StepStatus.RUNNING) {
+      const percent = normalizePercent(state?.progress);
+      // No reading: credited in full, same historical rule as the
+      // currentStep/stepProgress path below.
+      credits += percent === null ? 1 : percent / 100;
+      if (index > highestRunningIndex) {
+        highestRunningIndex = index;
+        runningPercent = percent;
+      }
+    }
+  }
+
+  const fraction = credits / STAGE_SLICES;
+
+  if (highestRunningIndex >= 0) {
+    return {
+      label: PIPELINE_STAGE_SEQUENCE[highestRunningIndex][1],
+      fraction,
+      stepPercent: runningPercent === null ? null : Math.round(runningPercent),
+    };
+  }
+
+  const nextIndex = highestCompletedIndex + 1;
+  const label =
+    nextIndex < PIPELINE_STAGE_SEQUENCE.length ? PIPELINE_STAGE_SEQUENCE[nextIndex][1] : 'Processing';
+  return { label, fraction, stepPercent: null };
 }
 
 // Human-readable stage + completion fraction for an in-flight session. Returns
@@ -98,6 +160,14 @@ export function describeProcessingStage(entry) {
       fraction: floor + (ceiling - floor) * (percent / 100),
       stepPercent: Math.round(percent),
     };
+  }
+  // A `steps` map (added for PARALLEL_SCORING) supersedes the single
+  // currentStep/stepProgress pair when present, because that pair can only
+  // ever describe one of two branches that may be running at once. Legacy
+  // rows and rows from before this projection existed carry no `steps` (or
+  // an empty one) and fall through to the pair below unchanged.
+  if (entry?.steps && typeof entry.steps === 'object' && Object.keys(entry.steps).length > 0) {
+    return stageFromSteps(entry.steps);
   }
   const currentStep = canonicalStepId(entry?.currentStep);
   const stepIndex = PIPELINE_STAGE_SEQUENCE.findIndex(([step]) => step === currentStep);

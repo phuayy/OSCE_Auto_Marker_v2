@@ -173,3 +173,140 @@ test('a session recorded before the engine rename still gauges', () => {
   assert.equal(canonicalStepId('content_scoring'), 'content_scoring');
   assert.equal(canonicalStepId(undefined), '');
 });
+
+// ---------------------------------------------------------------------------
+// `steps`: PARALLEL_SCORING can run the content and communication branches at
+// once, so the card must gauge whichever is "most advanced" by its own
+// reading rather than collapsing both onto one currentStep/stepProgress pair.
+// ---------------------------------------------------------------------------
+
+const COMMUNICATION_INDEX = PIPELINE_STAGE_SEQUENCE.findIndex(([step]) => step === 'communication_scoring');
+const CONTENT_INDEX = PIPELINE_STAGE_SEQUENCE.findIndex(([step]) => step === 'content_scoring');
+
+test('a steps-less entry produces exactly the previous results', () => {
+  // No `steps`, an empty one, and a non-object all fall back unchanged.
+  for (const steps of [undefined, null, {}, 'not-an-object']) {
+    const stage = describeProcessingStage(processing({ currentStep: 'transcription', stepProgress: 42, steps }));
+    assert.equal(stage.label, 'Transcribing speech');
+    assert.equal(stage.stepPercent, 42);
+  }
+});
+
+test('both branches running: the label and percentage belong to the more advanced one', () => {
+  const stage = describeProcessingStage(
+    processing({
+      currentStep: 'communication_scoring', // stale/irrelevant once `steps` is present
+      stepProgress: 999,
+      steps: {
+        communication_scoring: { status: 'running', progress: 70 },
+        content_scoring: { status: 'running', progress: 40 },
+      },
+    }),
+  );
+
+  assert.equal(stage.label, 'Scoring content');
+  assert.equal(stage.stepPercent, 40);
+});
+
+test('completing one branch never lowers the fraction', () => {
+  const bothRunning = describeProcessingStage(
+    processing({
+      steps: {
+        communication_scoring: { status: 'running', progress: 80 },
+        content_scoring: { status: 'running', progress: 10 },
+      },
+    }),
+  );
+  const communicationDone = describeProcessingStage(
+    processing({
+      steps: {
+        communication_scoring: { status: 'completed' },
+        content_scoring: { status: 'running', progress: 10 },
+      },
+    }),
+  );
+
+  assert.ok(
+    communicationDone.fraction >= bothRunning.fraction,
+    `${communicationDone.fraction} should be >= ${bothRunning.fraction}`,
+  );
+  // The bar must not drop to a bare "Processing" while content is still
+  // demonstrably running.
+  assert.equal(communicationDone.label, 'Scoring content');
+  assert.equal(communicationDone.stepPercent, 10);
+});
+
+test('content finishing first hands the label to the still-running communication step', () => {
+  const stage = describeProcessingStage(
+    processing({
+      steps: {
+        communication_scoring: { status: 'running' },
+        content_scoring: { status: 'completed' },
+      },
+    }),
+  );
+
+  assert.equal(stage.label, 'Scoring communication');
+  assert.equal(stage.stepPercent, null);
+  // One completed (1 credit) + one running with no reading (credited in full,
+  // 1 credit) = 2 of the 9 slices.
+  assert.equal(stage.fraction, 2 / SLICES);
+});
+
+test('both branches completed advances to the next sequence step', () => {
+  const stage = describeProcessingStage(
+    processing({
+      steps: {
+        communication_scoring: { status: 'completed' },
+        content_scoring: { status: 'completed' },
+      },
+    }),
+  );
+
+  assert.equal(stage.label, 'Saving results');
+  assert.equal(stage.stepPercent, null);
+  assert.equal(stage.fraction, 2 / SLICES);
+});
+
+test('a legacy whisperx entry in `steps` still occupies the transcription slot', () => {
+  const stage = describeProcessingStage(
+    processing({
+      steps: {
+        audio_extraction: { status: 'completed' },
+        whisperx: { status: 'running', progress: 50 },
+      },
+    }),
+  );
+
+  assert.equal(stage.label, 'Transcribing speech');
+  assert.equal(stage.stepPercent, 50);
+  assert.equal(stage.fraction, (TRANSCRIPTION_INDEX + 0.5) / SLICES);
+});
+
+test('an unrecognised key in `steps` is ignored rather than crashing the gauge', () => {
+  const stage = describeProcessingStage(
+    processing({
+      steps: {
+        some_future_step: { status: 'running', progress: 90 },
+        content_scoring: { status: 'running', progress: 40 },
+      },
+    }),
+  );
+
+  assert.equal(stage.label, 'Scoring content');
+  assert.equal(stage.stepPercent, 40);
+});
+
+test('steps credits stay below one full slice per step, keeping the total under 1', () => {
+  const everythingRunningAtOneHundred = Object.fromEntries(
+    PIPELINE_STAGE_SEQUENCE.map(([step]) => [step, { status: 'running', progress: 100 }]),
+  );
+  const stage = describeProcessingStage(processing({ steps: everythingRunningAtOneHundred }));
+
+  assert.ok(stage.fraction < 1, `unexpected ${stage.fraction}`);
+  assert.equal(stage.fraction, PIPELINE_STAGE_SEQUENCE.length / SLICES);
+});
+
+test('steps sanity indices used above are the ones this suite assumes', () => {
+  assert.ok(COMMUNICATION_INDEX >= 0 && CONTENT_INDEX > COMMUNICATION_INDEX);
+});

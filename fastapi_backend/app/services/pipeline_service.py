@@ -16,7 +16,7 @@ from app.core.utils import exception_message, runtime_seconds, utc_now_iso
 from app.domain.enums import OutputKey, PipelineStep, StepStatus
 from app.domain.notifications import NotificationType
 from app.domain.outputs import OUTPUT_SPECS, OutputSpec
-from app.domain.session_lifecycle import fail_session, record_progress
+from app.domain.session_lifecycle import fail_session, record_progress, sync_current_step
 from app.domain.sessions import SessionStatus
 from app.pipeline.hallucination_filter import screen_segments
 from app.pipeline.llm_preprocess import (
@@ -767,18 +767,13 @@ class PipelineService:
             current.setdefault("startedAt", now)
             current.pop("endedAt", None)
             current.pop("runtimeSeconds", None)
-            current.pop("progress", None)
-            pipeline["currentStep"] = step
             # A fresh step starts with no progress reading; a stale one from
             # the previous step would otherwise be projected onto this one.
-            pipeline["stepProgress"] = None
+            current.pop("progress", None)
         elif status in {StepStatus.COMPLETED, StepStatus.FAILED, StepStatus.SKIPPED}:
             current.setdefault("startedAt", now)
             current["endedAt"] = now
             current["runtimeSeconds"] = self.runtime_seconds(str(current["startedAt"]), now)
-            if pipeline.get("currentStep") == step:
-                pipeline["currentStep"] = None
-                pipeline["stepProgress"] = None
 
         if metadata is not None:
             current_metadata = current.get("metadata") if isinstance(current.get("metadata"), dict) else {}
@@ -791,6 +786,12 @@ class PipelineService:
             current.pop("error", None)
 
         steps[step] = current
+        # currentStep/stepProgress are a projection of `steps`, never set by
+        # hand: under PARALLEL_SCORING two branches can be running at once,
+        # and deriving both scalars here — instead of each caller poking them
+        # — is what keeps the card from ever pairing one step's name with
+        # another step's percentage. See sync_current_step's docstring.
+        sync_current_step(pipeline)
 
     @staticmethod
     def _audio_output_metadata(session_id: str, audio_path: Path) -> dict[str, Any]:

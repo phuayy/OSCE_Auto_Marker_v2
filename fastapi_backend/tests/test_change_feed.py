@@ -140,6 +140,7 @@ def test_index_projection_matches_legacy_full_read_shape(tmp_path) -> None:
                 "hasVideoClips",
                 "currentStep",
                 "stepProgress",
+                "steps",
                 "pipelineStartedAt",
                 "clipExportStatus",
                 "clipExportCompleted",
