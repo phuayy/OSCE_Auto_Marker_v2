@@ -35,6 +35,9 @@ OSCE-AI-FYP/
 │   ├── lib/
 │   │   ├── llmProviders.js     # Routing + marking-mode form logic (pure)
 │   │   ├── panelReport.js      # Reads a sheet's `panel` block for the results view (pure)
+│   │   ├── clipAssessments.js  # Clip -> its newest child session, run status, stale-cut flag (pure)
+│   │   ├── clipExportOutcome.js # What the editor does when an export/recrop job lands (pure)
+│   │   ├── processingStage.js  # Session card's stage gauge, from the projection's `steps` (pure)
 │   │   ├── navigation.js       # parseRoute / buildRoute (hash-based deep links)
 │   │   └── useHashRoute.js     # React hook for URL <-> state sync
 │   └── auth.js                 # fetchStreamTicket, resolveMediaUrl helpers
@@ -347,13 +350,39 @@ session that was queued under the old one.
 4. Each clip individually assessed via `POST /sessions/{id}/clips/{clipId}/assess` (202; always queued).
 5. Each clip assessment creates a **child** session (`parentSessionId` set), runs full pipeline.
 
+**One clip has one child session, and `assess` maintains that.** The request is
+idempotent: a clip whose child is *in flight* gets that child back
+(`reused: true`) rather than a second one, and a clip whose child has *finished*
+has that child re-run in place — after its `files.video` and `clipSource` are
+repointed at the clip's current MP4, so a clip re-cut since the last run is
+scored as it is now. Only a clip with no child creates one. The find-or-create
+is serialised per clip by `KeyedLocks`, so a double click, a second tab, or
+"Run selected" racing a single run cannot each create a child; the query behind
+it is `SessionRepository.find_clip_children` (indexed parent column plus the
+clip id extracted from `clip_source`, newest first). The child records
+`clipSource.fileName` / `.revision` — *which cut* it assessed — and the browser
+compares that with the clip's current `fileName` to mark a row
+"Clip re-cut since this assessment" (`src/lib/clipAssessments.js`).
+
+**Re-cropping one clip is an export scoped to that clip.** `POST
+/clips/{clipId}/recrop` answers **202**: it moves the clip's boundaries, bumps
+its `revision`, turns it back into a draft (range, no file) and queues the same
+`export_clips` job with `clipExport.scope = "clip"` and `clipIds`. It used to
+run ffmpeg inside the request — minutes on the re-encode fallback, nothing to
+resume, and the superseded MP4 left on disk. The `revision` is what makes the
+job's "an MP4 at the expected path is a finished cut" rule safe for a re-cut:
+the new crop resolves to `clip-N-r<revision>.mp4`, so it can never adopt the
+footage it is replacing. Once the new cut is durable the old file is deleted —
+unless a child session's video still is that file, the same rule
+`_prune_stale_plan_dirs` applies to whole plan directories.
+
 The export job deliberately does **not** own `session.status` (see
 `app/services/job_tasks.py`). The user sits inside the timeline editor while
 clips are cut, and flipping the session to `processing` would eject them — the
 frontend refuses to open in-flight sessions. Progress lives on
-`session.clipExport` (`planId`, `status`, `completed`, `total`, `error`, `jobId`),
-which the session-list projection exposes as `clipExportStatus` /
-`clipExportCompleted` / `clipExportTotal`.
+`session.clipExport` (`planId`, `status`, `scope`, `clipIds`, `completed`,
+`total`, `error`, `jobId`), which the session-list projection exposes as
+`clipExportStatus` / `clipExportCompleted` / `clipExportTotal`.
 
 For the same reason every write the job makes is a **patch, not a document**:
 the checkpoint after each clip copies that clip's file fields and bumps
@@ -365,8 +394,11 @@ stream (every cut clip is a session write) and a 3s poll as a fallback. The
 watch starts when the export is *requested*, not when the response happens to
 carry a `clipExport` record, and it survives the last tick: when it ends the
 editor re-reads the session once — the final clip and the `completed` record
-are two separate writes — then selects the first exported clip, posts a notice
-and scrolls to the Clip Assessments card. Both watchers are gated on that
+are two separate writes — then acts on what the job actually cut
+(`src/lib/clipExportOutcome.js`): a split hands over the first exported clip and
+scrolls to the Clip Assessments card, while a recrop names the re-cut clip and
+leaves the user's selection and scroll position where they were. Both watchers
+are gated on that
 in-flight window: refreshing the session at any other time would re-seed the
 timeline from the server and throw away separators the user is dragging.
 
@@ -460,7 +492,7 @@ Defined in [models.py](fastapi_backend/app/database/models.py):
 | `notifications` | `NotificationRecord` | Task-completion notification history; `read_at` null = unread |
 | `provider_credentials` | `ProviderCredentialRecord` | Per-provider LLM API key as AES-256-GCM ciphertext; never serialised to a client |
 | `llm_providers` | `CustomProviderRecord` | Scoring providers an operator defined at runtime — endpoint, auth placement, versions, extra headers/query/body. No key column: the credential lives in `provider_credentials` like every other provider's |
-| `app_settings` | `AppSettingRecord` | Global key/value settings — model routing, marking mode + panel, transcription engine, preprocess toggle |
+| `app_settings` | `AppSettingRecord` | Global key/value settings — model routing, marking mode + panel, transcription engine, preprocess toggle — written by `PUT /api/settings` (replace) or `PATCH /api/settings` (merge only the keys sent; what the settings cards use, so no card can revert another's save) |
 
 Jobs table (`jobs`, `job_events`) managed by raw SQL via `JobRepository` / `Database`.
 
@@ -506,7 +538,13 @@ read-once-write-many contract). The domain vocabulary — `SessionStatus`,
 `IN_FLIGHT_STATUSES`, `JOB_DRIVEN_STATUSES`, `empty_outputs`, `find_clip`,
 `session_video_path` — lives in
 [domain/sessions.py](fastapi_backend/app/domain/sessions.py) and is imported,
-never re-spelled at a call site.
+never re-spelled at a call site. That rule is enforced rather than trusted:
+`tests/test_status_vocabulary.py` walks the AST of every module under `app/`
+(except `app/domain/`, which defines the vocabulary) and fails on a bare status
+string used as a `status` value, a `status` comparison or a `status in {...}`
+membership test. It is what caught the job queue writing `"processing"` onto a
+session, the legacy upload route's `"uploaded"`, and the upload-file records in
+`app/storage/` that predate `UploadStatus`.
 
 ---
 
@@ -526,6 +564,13 @@ one policy question: does the queue drive `session.status`?
 | `process_session` | `PipelineService.process_session_by_id` | yes |
 | `auto_crop` | `ClipService.auto_crop_session_by_id` | yes |
 | `export_clips` | `ClipService.export_clips_by_id` | **no** — the handler reports on `session.clipExport` |
+
+`export_clips` carries a **scope**: a whole split (`plan`, queued by "Export
+clips") or a re-cut of named clips (`clip`, queued by a recrop). The payload's
+`clipIds` decide what one run cuts, so a retry cuts exactly what the request
+asked for even if the user has dragged another separator since; the progress
+record counts only those clips, and only a `plan` run prunes superseded plan
+directories.
 
 "Queue owns session status" also governs failure: for an owned task, exhausted
 retries mark the session terminally failed. `export_clips` opts out because a
@@ -599,8 +644,17 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
   returns the user to the main page — they can browse other sessions freely.
 - In-flight sessions (`assembling`/`queued`/`processing`) are **not enterable**:
   the session-list card shows a live stage gauge instead
-  (`describeProcessingStage`: status + `currentStep` from the list projection →
-  label + progress bar). The card's button unlocks on a terminal status.
+  (`describeProcessingStage`: status + the list projection's per-step `steps`
+  map → label + progress bar). The card's button unlocks on a terminal status.
+  The gauge reads `steps` rather than the scalar `currentStep`/`stepProgress`
+  because `PARALLEL_SCORING` runs two branches at once: the bar is the sum of
+  completed steps plus each running step's own fraction, so it is monotonic and
+  one branch finishing can never drop it back to a bare "Processing". The
+  scalars remain — they are now a *projection* of `steps`, derived in one place
+  (`sync_current_step` in [domain/session_lifecycle.py](fastapi_backend/app/domain/session_lifecycle.py)),
+  which is what stops the card ever pairing one step's name with another step's
+  percentage. A row with no `steps` (a session recorded before this) falls back
+  to the scalar path unchanged.
 - An 8-second session-index poll drives all live state (cards AND per-clip run
   rows inside a long-session workspace). The backend SSE endpoint still exists
   but the frontend no longer consumes it.
