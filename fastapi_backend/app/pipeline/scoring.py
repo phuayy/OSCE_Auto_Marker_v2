@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.core.artifacts import artifact_metadata
+from app.core.artifacts import ArtifactMetadata, artifact_metadata
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.json_utils import extract_json_object
 from app.core.process import CommandRunner
-from app.pipeline.marking.base import ContentMarkerRunner, MarkingPlan
+from app.llm.panel import MarkingMode
+from app.pipeline.marking.base import ContentMarkerRunner, MarkingPlan, ProgressCallback
+from app.pipeline.marking.panel import PanelAdjudicatorRunner, PanelMarking
+from app.pipeline.marking.sheets import final_sheet_needs_refresh, sheet_needs_refresh
 from app.pipeline.marking.single import SingleModelMarking
 from app.services.auth_service import AuthService
 from app.services.event_service import EventService
@@ -40,6 +45,49 @@ def _require_input(raw_path: Any, description: str) -> Path:
     return path
 
 
+@dataclass
+class ContentMarkingRun:
+    """One session's content marking, with its plan resolved.
+
+    Built by :meth:`ScoringPipeline.prepare_content_marking` and consumed by
+    the pipeline service, which asks it three things in order: does the sheet
+    on disk still count (``needs_refresh``), run if not (``run``), and what to
+    record on the step when it is done (``step_metadata``). The plan is fixed
+    at construction: a toggle flipped between the cache check and the run
+    cannot make them disagree about the mode.
+    """
+
+    session: dict[str, Any]
+    plan: MarkingPlan
+    pipeline: "ScoringPipeline"
+    result: dict[str, Any] | None = field(default=None, repr=False)
+
+    def needs_refresh(self, payload: Any) -> bool:
+        return final_sheet_needs_refresh(payload, self.plan)
+
+    async def run(self, on_progress: ProgressCallback | None = None) -> ArtifactMetadata:
+        artifact = await self.pipeline.run_content_marking(self.session, self.plan, on_progress=on_progress)
+        self.result = await self.pipeline.read_sheet_summary(artifact)
+        return artifact
+
+    def step_metadata(self) -> dict[str, Any]:
+        """What the ``content_scoring`` step records: the mode that ran and,
+        for a panel, how the markers agreed. Credential-free by construction —
+        the plan's ``describe`` never includes an environment."""
+        metadata: dict[str, Any] = {
+            "markingMode": str(self.plan.mode),
+            "selectedMarkingMode": str(self.plan.selected_mode),
+        }
+        if self.plan.warnings:
+            metadata["markingWarnings"] = list(self.plan.warnings)
+        if self.plan.mode is MarkingMode.PANEL:
+            metadata["markers"] = [assignment.describe() for assignment in self.plan.markers]
+            metadata["adjudicator"] = self.plan.adjudicator.describe() if self.plan.adjudicator else None
+        if self.result:
+            metadata["panel"] = self.result
+        return metadata
+
+
 class ScoringPipeline:
     def __init__(
         self,
@@ -62,31 +110,18 @@ class ScoringPipeline:
         # One marker subprocess; the strategy decides how many times it runs.
         self.marker = ContentMarkerRunner(settings, runner, events, auth)
         self.single_marking = SingleModelMarking(self.marker, settings)
+        self.panel_marking = PanelMarking(
+            self.marker,
+            PanelAdjudicatorRunner(settings, runner, events, self.marker),
+            settings,
+            events,
+        )
 
     @staticmethod
     def should_refresh_score_payload(payload: Any) -> bool:
-        if not isinstance(payload, dict):
-            return True
-        criteria = payload.get("criteria")
-        if not isinstance(criteria, list) or len(criteria) < 2:
-            return True
-        if not all(isinstance(item, dict) and "is_critical" in item for item in criteria):
-            return True
-        summary = payload.get("scoring_summary")
-        if not isinstance(summary, dict) or not summary.get("pass_fail"):
-            return True
-        critical_count = len([item for item in criteria if item.get("is_critical") is True])
-        if int(summary.get("total_criteria") or -1) != len(criteria):
-            return True
-        if int(summary.get("critical_total") or -1) != critical_count:
-            return True
-        if str(payload.get("rubric_file") or "") != "embedded_in_case_study_pdf":
-            return True
-        if not payload.get("rubric_source"):
-            return True
-        if "transcript_quality_notes" in payload:
-            return True
-        return not all(isinstance(item.get("timestamp"), str) and item.get("timestamp") for item in criteria if isinstance(item, dict))
+        """Is this content sheet well-formed? Mode-agnostic; the mode-aware
+        check lives on :class:`ContentMarkingRun`, which knows the plan."""
+        return sheet_needs_refresh(payload)
 
     @staticmethod
     def should_refresh_audio_professionalism_payload(payload: Any) -> bool:
@@ -150,7 +185,28 @@ class ScoringPipeline:
             logger.exception("Failed to resolve the marking plan; the scorer will use its environment defaults.")
             return MarkingPlan.single_only()
 
+    async def prepare_content_marking(self, session: dict[str, Any]) -> ContentMarkingRun:
+        """Resolve the plan for this session's content marking, once.
+
+        The pipeline service calls this before it looks at the cached sheet, so
+        the same plan decides both whether that sheet still counts and what
+        runs if it does not.
+        """
+        return ContentMarkingRun(session=session, plan=await self.content_marking_plan(), pipeline=self)
+
     async def run_content_scoring(self, session: dict[str, Any]) -> dict[str, Any]:
+        """Mark content under whatever the operator selected, resolving the
+        plan here. The one-call form; the pipeline service prefers
+        :meth:`prepare_content_marking` so the cache check sees the plan too."""
+        return await self.run_content_marking(session, await self.content_marking_plan())
+
+    async def run_content_marking(
+        self,
+        session: dict[str, Any],
+        plan: MarkingPlan,
+        *,
+        on_progress: ProgressCallback | None = None,
+    ) -> ArtifactMetadata:
         outputs = session.get("outputs") or {}
         # The normalised transcript — the same document the communication
         # branch scores — never the raw engine .srt: hallucination drops and
@@ -163,13 +219,41 @@ class ScoringPipeline:
             ((session.get("files") or {}).get("caseStudy") or {}).get("absolutePath"),
             "This session's case-study PDF",
         )
-        plan = await self.content_marking_plan()
-        return await self.single_marking.run(
+        strategy = self.panel_marking if plan.mode is MarkingMode.PANEL else self.single_marking
+        return await strategy.run(
             str(session["id"]),
             transcript_path=transcript_path,
             case_study_path=case_study_path,
             plan=plan,
+            on_progress=on_progress,
         )
+
+    @staticmethod
+    async def read_sheet_summary(artifact: dict[str, Any]) -> dict[str, Any] | None:
+        """The part of a final sheet worth copying onto the pipeline step: the
+        panel's agreement figures and whether it degraded. ``None`` for a
+        single-model sheet, which has nothing of the kind to say."""
+        path = Path(str(artifact.get("absolutePath") or ""))
+        if not path.is_file():
+            return None
+        try:
+            payload = await asyncio.to_thread(lambda: extract_json_object(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        panel = payload.get("panel") if isinstance(payload, dict) else None
+        if not isinstance(panel, dict):
+            return None
+        return {
+            "markers": [
+                {"key": item.get("key"), "providerId": item.get("provider_id"), "model": item.get("model")}
+                for item in (panel.get("markers") or [])
+                if isinstance(item, dict)
+            ],
+            "agreement": panel.get("agreement"),
+            "adjudicatorCalled": (panel.get("adjudicator") or {}).get("called") if isinstance(panel.get("adjudicator"), dict) else None,
+            "degraded": panel.get("degraded"),
+            "warnings": list(panel.get("warnings") or []),
+        }
 
     async def run_audio_professionalism(self, session: dict[str, Any]) -> dict[str, Any]:
         if not self.settings.audio_professionalism_script_path.exists():

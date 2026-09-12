@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,6 +34,11 @@ logger = logging.getLogger(__name__)
 
 # Where the single-mode sheet, and a panel's final sheet, are served from.
 SCORES_MEDIA_DIRECTORY = "/media/scores"
+
+# A strategy reports how far through the step it is, 0-100. The pipeline turns
+# that into the session card's moving bar; a strategy with nothing to report
+# between start and finish simply never calls it.
+ProgressCallback = Callable[[float], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -183,4 +188,5 @@ __all__ = [
     "ContentMarkerRunner",
     "MarkerAssignment",
     "MarkingPlan",
+    "ProgressCallback",
 ]

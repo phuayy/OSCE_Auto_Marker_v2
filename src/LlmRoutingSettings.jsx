@@ -1,19 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Brain, CheckCircle2, Loader2, PlugZap, XCircle } from 'lucide-react';
+import { AlertTriangle, Brain, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import TargetPicker, { testTarget } from '@/components/TargetPicker.jsx';
 import {
-  CUSTOM_MODEL,
   NO_FALLBACK,
   buildSettingsPayload,
   describeRouting,
   effectiveDiffers,
-  findModelSpec,
   findProvider,
-  formatContextWindow,
-  isCustomModel,
-  isProviderReady,
-  providerList,
   resolveFallbackTarget,
   resolveModelId,
   resolvePrimaryProviderId,
@@ -72,39 +67,12 @@ export default function LlmRoutingSettings({ version = 0, onProvidersChanged }) 
     // therefore which targets would actually run, changes underneath this form.
   }, [version]);
 
-  const primaryProvider = useMemo(
-    () => findProvider(description, primary.providerId),
-    [description, primary.providerId],
-  );
-  const fallbackProvider = useMemo(
-    () => findProvider(description, fallback.providerId),
-    [description, fallback.providerId],
-  );
   const errors = useMemo(() => validateRouting({ description, primary }), [description, primary]);
   const warnings = useMemo(
     () => routingWarnings({ description, primary, fallback }),
     [description, primary, fallback],
   );
   const hasErrors = Object.keys(errors).length > 0;
-
-  function selectProvider(role, providerId) {
-    const provider = findProvider(description, providerId);
-    const next = {
-      providerId,
-      // Switching provider must reset the model: a model id is provider-scoped,
-      // and carrying "gpt-4.1" over to Anthropic would 404 at scoring time.
-      model: provider ? provider.defaultModelId || '' : '',
-    };
-    if (role === 'primary') setPrimary(next);
-    else setFallback(next);
-  }
-
-  function selectModel(role, value) {
-    const setter = role === 'primary' ? setPrimary : setFallback;
-    // The "custom" option clears the field so the operator types an id; it is
-    // never stored as a model name itself.
-    setter((current) => ({ ...current, model: value === CUSTOM_MODEL ? '' : value }));
-  }
 
   async function save() {
     setSaving(true);
@@ -136,183 +104,14 @@ export default function LlmRoutingSettings({ version = 0, onProvidersChanged }) 
     }
   }
 
-  async function testTarget(role) {
+  async function runTest(role) {
     const target = role === 'primary' ? primary : fallback;
     if (!target.providerId) return;
     setTesting(role);
     setTestResults((current) => ({ ...current, [role]: null }));
-    try {
-      const response = await fetch('/api/settings/llm-providers/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ providerId: target.providerId, model: target.model || '' }),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.detail?.[0]?.msg || body.error || 'The connection test could not be run.');
-      }
-      setTestResults((current) => ({ ...current, [role]: body }));
-    } catch (error) {
-      setTestResults((current) => ({
-        ...current,
-        [role]: { ok: false, error: error.message || 'The connection test could not be run.' },
-      }));
-    } finally {
-      setTesting('');
-    }
-  }
-
-  function renderTargetControls(role) {
-    const isPrimary = role === 'primary';
-    const target = isPrimary ? primary : fallback;
-    const provider = isPrimary ? primaryProvider : fallbackProvider;
-    const custom = isCustomModel(provider, target.model);
-    const modelSpec = findModelSpec(provider, target.model);
-    const result = testResults[role];
-    const providerControlId = `llm-${role}-provider`;
-    const modelControlId = `llm-${role}-model`;
-
-    return (
-      <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <div className="text-sm font-semibold text-slate-800">
-              {isPrimary ? 'Primary model' : 'Fallback model'}
-            </div>
-            <div className="text-[11px] text-slate-500">
-              {isPrimary
-                ? 'Tried first for every scoring call.'
-                : 'Used only when the primary keeps failing — a different vendor is the strongest choice.'}
-            </div>
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1"
-            disabled={!target.providerId || testing === role}
-            onClick={() => testTarget(role)}
-            title="Send one small request to this provider"
-          >
-            {testing === role ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <PlugZap className="h-3.5 w-3.5" />
-            )}
-            Test
-          </Button>
-        </div>
-
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="flex flex-col gap-1">
-            <label htmlFor={providerControlId} className="text-xs font-semibold text-slate-700">
-              Provider
-            </label>
-            <select
-              id={providerControlId}
-              value={target.providerId}
-              onChange={(event) => selectProvider(role, event.target.value)}
-              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm"
-            >
-              {!isPrimary ? <option value={NO_FALLBACK}>None — fail instead of switching</option> : null}
-              {providerList(description).map((candidate) => (
-                <option key={candidate.id} value={candidate.id}>
-                  {candidate.label}
-                  {isProviderReady(candidate) ? '' : ' (no API key)'}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <label htmlFor={modelControlId} className="text-xs font-semibold text-slate-700">
-              Model
-            </label>
-            <select
-              id={modelControlId}
-              value={custom ? CUSTOM_MODEL : target.model || ''}
-              disabled={!provider}
-              onChange={(event) => selectModel(role, event.target.value)}
-              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm disabled:bg-slate-100"
-            >
-              {(provider?.models || []).map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.label}
-                </option>
-              ))}
-              {provider?.allowsCustomModel ? (
-                <option value={CUSTOM_MODEL}>Other — type a model id…</option>
-              ) : null}
-            </select>
-          </div>
-        </div>
-
-        {custom ? (
-          <div className="flex flex-col gap-1">
-            <label htmlFor={`${modelControlId}-custom`} className="text-xs font-semibold text-slate-700">
-              Model id
-            </label>
-            <input
-              id={`${modelControlId}-custom`}
-              type="text"
-              value={target.model || ''}
-              placeholder={provider?.defaultModelId || 'vendor/model-name'}
-              onChange={(event) =>
-                (isPrimary ? setPrimary : setFallback)((current) => ({
-                  ...current,
-                  model: event.target.value,
-                }))
-              }
-              className={`rounded-lg border px-3 py-1.5 text-sm ${
-                isPrimary && errors.primaryModel ? 'border-rose-300 bg-rose-50' : 'border-slate-200 bg-white'
-              }`}
-            />
-            <div className="text-[11px] text-slate-500">
-              Sent to {provider?.label || 'the provider'} exactly as typed. An id it does not recognise fails at
-              scoring time with the provider&apos;s own error.
-            </div>
-          </div>
-        ) : null}
-
-        {modelSpec?.notes || formatContextWindow(modelSpec) ? (
-          <div className="text-[11px] text-slate-500">
-            {[formatContextWindow(modelSpec), modelSpec?.notes].filter(Boolean).join(' · ')}
-          </div>
-        ) : null}
-
-        {isPrimary && errors.primaryModel ? (
-          <div className="text-[11px] font-medium text-rose-600">{errors.primaryModel}</div>
-        ) : null}
-
-        {provider && !isProviderReady(provider) ? (
-          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
-            No API key for {provider.label}. Add one in <span className="font-semibold">Provider API keys</span>{' '}
-            below — it applies immediately, with no restart.
-          </div>
-        ) : null}
-
-        {result ? (
-          <div
-            role="status"
-            className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-[11px] ${
-              result.ok
-                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                : 'border-rose-200 bg-rose-50 text-rose-700'
-            }`}
-          >
-            {result.ok ? (
-              <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            ) : (
-              <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            )}
-            <span>
-              {result.ok
-                ? `Reached ${result.model} in ${result.elapsedSeconds}s.`
-                : result.error || 'The provider did not answer.'}
-            </span>
-          </div>
-        ) : null}
-      </div>
-    );
+    const result = await testTarget(target);
+    setTestResults((current) => ({ ...current, [role]: result }));
+    setTesting('');
   }
 
   return (
@@ -342,8 +141,30 @@ export default function LlmRoutingSettings({ version = 0, onProvidersChanged }) 
           </div>
         ) : (
           <div className="flex flex-col gap-4">
-            {renderTargetControls('primary')}
-            {renderTargetControls('fallback')}
+            <TargetPicker
+              id="llm-primary"
+              title="Primary model"
+              hint="Tried first for every scoring call."
+              description={description}
+              target={primary}
+              onChange={setPrimary}
+              error={errors.primaryModel || ''}
+              testing={testing === 'primary'}
+              testResult={testResults.primary}
+              onTest={() => runTest('primary')}
+            />
+            <TargetPicker
+              id="llm-fallback"
+              title="Fallback model"
+              hint="Used only when the primary keeps failing — a different vendor is the strongest choice."
+              description={description}
+              target={fallback}
+              onChange={setFallback}
+              noneOption={{ value: NO_FALLBACK, label: 'None — fail instead of switching' }}
+              testing={testing === 'fallback'}
+              testResult={testResults.fallback}
+              onTest={() => runTest('fallback')}
+            />
 
             {warnings.map((warning) => (
               <div

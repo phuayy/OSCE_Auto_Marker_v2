@@ -1,8 +1,25 @@
 # Multi-model (panel) marking — design and implementation plan
 
-Status: **Phase 0 and Phase 1 steps 4–7 implemented** (backend config surface,
-no panel execution yet). Remaining: step 8 (Settings card), Phases 2–5.
-Baseline: `2bdec8e`.
+Status: **Phases 0–4 implemented** — config surface, Settings card,
+reconciliation, adjudicator script, panel execution in the pipeline, results
+view. Phase 5 step 18 (CLAUDE.md "Marking modes") done; **step 19 (evaluation
+against human marks) is the open item before the default can change**, and
+step 20 lists what comes after. Baseline: `2bdec8e`.
+
+Implementation notes that differ from the draft below:
+
+* Marker/adjudicator sheet links are `outputs.scores.panelArtifacts` on the
+  session (API-owned URLs), not an `artifact` field inside the sheet's `panel`
+  block — the sheet stays ignorant of how storage is mounted.
+* The adjudicator is started `--without-adjudicator` when no adjudicator can
+  run here, rather than being handed an empty routing: an unset
+  `OSCE_LLM_ROUTING` would fall back to the legacy NVIDIA variables and make a
+  marker the judge.
+* `panel.adjudicator` also records `feedback_source` (`merged` or
+  `marker:<key>`), and `panel.criteria[]` carries every marker's `reasons` and
+  `timestamps`, not only the votes.
+* Step 14's optional `markingMode` on the session-list projection was not
+  added; the step metadata carries it and the card gauge needed no new step.
 
 ## 1. Goal
 

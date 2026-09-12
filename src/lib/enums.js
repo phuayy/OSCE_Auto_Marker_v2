@@ -98,4 +98,15 @@ export const OutputKey = Object.freeze({
   "SCORES": "scores"
 });
 
+export const MarkingMode = Object.freeze({
+  "SINGLE": "single",
+  "PANEL": "panel"
+});
+
+export const TieBreak = Object.freeze({
+  "LENIENT": "lenient",
+  "STRICT": "strict",
+  "FIRST_MARKER": "first_marker"
+});
+
 export const IN_FLIGHT_STATUSES = new Set(["assembling", "processing", "queued"]);

@@ -24,6 +24,9 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 
 # Bump on any change to build_system_prompt / build_user_prompt wording.
 PROMPT_VERSION = "content-marking-v1"
+# Bump on any change to the adjudication or feedback-merge wording. Recorded on
+# a panel's adjudication record, separately from the markers' prompt version.
+ADJUDICATION_PROMPT_VERSION = "content-adjudication-v1"
 
 MAX_CASE_STUDY_CONTEXT_CHARS = 36_000
 MAX_RUBRIC_SECTION_CHARS = 48_000
@@ -198,6 +201,34 @@ def extract_rubric_criteria_from_case_study_rubric(rubric_section: str) -> list[
     return [entry for _number, entry in parsed]
 
 
+# The two standards every content prompt shares. The markers are marked
+# against them; the adjudicator is handed the same text verbatim, because a
+# third voice applying a *stricter* standard is the documented way to drag a
+# whole panel's marks down. Extracted as constants so the wording can only
+# ever exist once.
+TRANSCRIPT_RELIABILITY_CONTEXT = """CRITICAL reliability context (read carefully):
+- The transcript and speaker diarization were produced by an automated speech-to-text
+  model. There WILL be transcription errors, incorrect speaker tags, dropped words,
+  misheard medical/drug names (e.g. "clotrimazole" turning into "clarithrolaceae"),
+  garbled numbers, and ambiguous turn boundaries.
+- Interpret garbled lines charitably. If a word sounds like a plausible misheard
+  version of a clinically-relevant term that fits the context, treat it as if the
+  student said the correct term. Do NOT penalise the student for transcription
+  artefacts. Be CONSISTENT across criteria when judging the same evidence."""
+
+LENIENCY_POLICY = """Leniency policy (very important — markers are generally lenient):
+- Real human OSCE markers grade leniently. When the evidence is borderline, lean
+  toward "Yes".
+- You only need PARTIAL or INDIRECT evidence to award "Yes" — e.g. an implied
+  acknowledgment, an indirect question, a paraphrased equivalent, or a fragment of
+  the expected behaviour is enough. Whole-sentence verbatim is NOT required.
+- Default to "Yes" unless there is clear, multi-turn evidence the student did
+  NOT address the criterion at all. Absence of explicit phrasing is not the same
+  as absence of behaviour — if the conversation reasonably implies it, give it.
+- For critical criteria, still apply leniency: indirect or partial evidence still
+  counts as "Yes"."""
+
+
 def build_system_prompt(rubric_criteria: list[dict[str, Any]]) -> str:
     rubric_criteria_text = json.dumps(rubric_criteria, ensure_ascii=False, indent=2)
 
@@ -210,27 +241,9 @@ def build_system_prompt(rubric_criteria: list[dict[str, Any]]) -> str:
     return f"""
 You are an OSCE assessment model evaluating a doctor/student interaction with an actor-patient.
 
-CRITICAL reliability context (read carefully):
-- The transcript and speaker diarization were produced by an automated speech-to-text
-  model. There WILL be transcription errors, incorrect speaker tags, dropped words,
-  misheard medical/drug names (e.g. \"clotrimazole\" turning into \"clarithrolaceae\"),
-  garbled numbers, and ambiguous turn boundaries.
-- Interpret garbled lines charitably. If a word sounds like a plausible misheard
-  version of a clinically-relevant term that fits the context, treat it as if the
-  student said the correct term. Do NOT penalise the student for transcription
-  artefacts. Be CONSISTENT across criteria when judging the same evidence.
+{TRANSCRIPT_RELIABILITY_CONTEXT}
 
-Leniency policy (very important — markers are generally lenient):
-- Real human OSCE markers grade leniently. When the evidence is borderline, lean
-  toward \"Yes\".
-- You only need PARTIAL or INDIRECT evidence to award \"Yes\" — e.g. an implied
-  acknowledgment, an indirect question, a paraphrased equivalent, or a fragment of
-  the expected behaviour is enough. Whole-sentence verbatim is NOT required.
-- Default to \"Yes\" unless there is clear, multi-turn evidence the student did
-  NOT address the criterion at all. Absence of explicit phrasing is not the same
-  as absence of behaviour — if the conversation reasonably implies it, give it.
-- For critical criteria, still apply leniency: indirect or partial evidence still
-  counts as \"Yes\".
+{LENIENCY_POLICY}
 
 Scoring behavior:
 - Score strictly against the rubric section extracted from the end of the case-study PDF.
@@ -550,6 +563,313 @@ def build_follow_up_messages(
     return [*base_messages, assistant_message, {"role": "user", "content": repair_instruction}]
 
 
+# --- panel adjudication ---------------------------------------------------
+#
+# The adjudicator never re-marks a sheet. It is shown only the criteria the
+# markers split on, each with every marker's position and the transcript
+# around the moments they cited, and it answers those and nothing else. The
+# marker positions are labelled by letter in an order the caller shuffled, so
+# "first" carries no information a model could lean on.
+
+ADJUDICATION_MIN_VALID_CONTENT_CHARS = 20
+
+# Values the adjudicator may use for "sided_with", besides a marker letter.
+SIDED_WITH_NEITHER = "neither"
+
+
+def marker_letter(position: int) -> str:
+    """``0 -> "A"``, ``1 -> "B"``… — how the adjudicator refers to a marker."""
+    return chr(ord("A") + position)
+
+
+def build_adjudication_system_prompt() -> str:
+    return f"""
+You are the adjudicating examiner on an OSCE marking panel. Several examiners marked the
+same student consultation independently against the same rubric. They agreed on most
+criteria; those are already settled. You decide ONLY the criteria listed in the request,
+where the examiners disagreed.
+
+{TRANSCRIPT_RELIABILITY_CONTEXT}
+
+{LENIENCY_POLICY}
+
+How to decide:
+- Apply exactly the leniency policy above. You are not a stricter marker than the panel.
+- Decide from the transcript excerpts, not from how confidently an examiner wrote.
+  An examiner's reason is a pointer to evidence, not evidence itself.
+- The examiners are labelled by letter in a random order that carries no meaning.
+  Do not favour the first position, the longer reason, or any letter.
+- Every excerpt is the transcript around the moment that examiner cited. If neither
+  excerpt supports a criterion, the leniency policy still applies: withhold "Yes"
+  only when the evidence clearly shows the student did not address it.
+- Use only the values "Yes" or "No".
+- Give a timestamp (HH:MM:SS) from the excerpts pointing at the decisive moment.
+
+You must return ONLY valid JSON, with no markdown and no additional text.
+
+Required JSON shape:
+{{
+  "resolutions": [
+    {{
+      "index": 1,
+      "value": "Yes",
+      "timestamp": "HH:MM:SS",
+      "reason": "one or two evidence-based sentences",
+      "sided_with": "A",
+      "confidence": 0.8
+    }}
+  ]
+}}
+
+Rules for the fields:
+- "index" is the criterion number exactly as given in the request; return one item per
+  disputed criterion and no others.
+- "sided_with" is the letter of the examiner whose verdict you agree with, or
+  "{SIDED_WITH_NEITHER}" when your reasoning differs from all of them.
+- "confidence" is a number from 0 to 1.
+""".strip()
+
+
+def build_adjudication_user_prompt(session_id: str, disputes: list[dict[str, Any]]) -> str:
+    """``disputes`` items: ``{"index", "label", "is_critical", "positions": [
+    {"letter", "value", "timestamp", "reason", "evidence"}, ...]}`` with the
+    positions already in the shuffled order they should be shown in."""
+    blocks: list[str] = []
+    for dispute in disputes:
+        lines = [
+            f"Criterion {int(dispute['index'])}: {dispute['label']}",
+            f"Critical criterion: {'yes' if dispute.get('is_critical') else 'no'}",
+        ]
+        for position in dispute.get("positions") or []:
+            evidence = str(position.get("evidence") or "").strip()
+            lines.extend(
+                [
+                    "",
+                    f"Examiner {position['letter']} marked: {position['value']} "
+                    f"(cited {position.get('timestamp') or 'no timestamp'})",
+                    f"Examiner {position['letter']} reason: {position.get('reason') or '(none given)'}",
+                    f"Transcript around the moment Examiner {position['letter']} cited:",
+                    "---",
+                    evidence or "(no transcript within the window — the cited moment may be wrong)",
+                    "---",
+                ]
+            )
+        blocks.append("\n".join(lines))
+    body = "\n\n==========\n\n".join(blocks)
+    return f"""
+Session {session_id}. Decide the disputed criteria below and return the required JSON only.
+
+{body}
+""".strip()
+
+
+def build_adjudication_messages(session_id: str, disputes: list[dict[str, Any]]) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": build_adjudication_system_prompt()},
+        {"role": "user", "content": build_adjudication_user_prompt(session_id, disputes)},
+    ]
+
+
+def validate_adjudication_output(
+    payload: dict[str, Any],
+    disputes: list[dict[str, Any]],
+) -> tuple[dict[int, dict[str, Any]], list[str]]:
+    """Check the adjudicator's reply against the disputes it was asked about.
+
+    Returns the usable resolutions keyed by criterion index (1-based, as
+    prompted) and the list of problems. A resolution that is missing or
+    malformed is simply absent from the map; the caller decides whether to
+    re-prompt or fall back to the tie-break for that criterion.
+    """
+    issues: list[str] = []
+    expected = {int(item["index"]): item for item in disputes}
+    letters = {
+        str(position["letter"]).upper()
+        for item in disputes
+        for position in (item.get("positions") or [])
+    }
+
+    raw = payload.get("resolutions")
+    if not isinstance(raw, list) or not raw:
+        return {}, ["Field 'resolutions' must be a non-empty array."]
+
+    resolutions: dict[int, dict[str, Any]] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            issues.append("Every resolution must be an object.")
+            continue
+        try:
+            index = int(item.get("index"))
+        except (TypeError, ValueError):
+            issues.append(f"A resolution has a non-integer index ({item.get('index')!r}).")
+            continue
+        if index not in expected:
+            issues.append(f"Resolution index {index} was not a disputed criterion.")
+            continue
+        value = normalize_yes_no(item.get("value"))
+        if value is None:
+            issues.append(f"resolutions[{index}] value must be exactly Yes or No.")
+            continue
+        reason = str(item.get("reason") or "").strip()
+        if not reason:
+            issues.append(f"resolutions[{index}] missing reason.")
+            continue
+        timestamp = normalize_timestamp(item.get("timestamp"))
+        if timestamp is None:
+            issues.append(f"resolutions[{index}] missing or invalid timestamp (expected HH:MM:SS).")
+            timestamp = "00:00:00"
+        sided_raw = str(item.get("sided_with") or "").strip().upper()
+        sided_with = sided_raw if sided_raw in letters else None
+        if sided_raw and sided_with is None and sided_raw.lower() != SIDED_WITH_NEITHER:
+            issues.append(f"resolutions[{index}] sided_with must be an examiner letter or '{SIDED_WITH_NEITHER}'.")
+        confidence: float | None
+        try:
+            confidence = float(item.get("confidence")) if item.get("confidence") is not None else None
+        except (TypeError, ValueError):
+            confidence = None
+        if confidence is not None:
+            confidence = min(1.0, max(0.0, confidence))
+        resolutions[index] = {
+            "index": index,
+            "value": value,
+            "timestamp": timestamp,
+            "reason": reason,
+            "sided_with": sided_with,
+            "confidence": confidence,
+        }
+
+    for index in expected:
+        if index not in resolutions:
+            issues.append(f"No usable resolution for disputed criterion {index}.")
+    return resolutions, issues
+
+
+def enforce_expected_resolutions_array(raw_content: str, expected_len: int | None) -> None:
+    """Router-level check: a reply whose resolutions array is the wrong length
+    is retried as a transport-class failure, like a short criteria array."""
+    if not expected_len or expected_len <= 0:
+        return
+    try:
+        data = json.loads(raw_content)
+    except (TypeError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    resolutions = data.get("resolutions")
+    if not isinstance(resolutions, list):
+        raise RuntimeError("Model JSON had missing or non-array field 'resolutions'. This is retryable.")
+    if len(resolutions) != expected_len:
+        raise RuntimeError(
+            "Model JSON had an incomplete resolutions array "
+            f"(expected {expected_len}, got {len(resolutions)}). This is retryable."
+        )
+
+
+# --- panel feedback merge ---------------------------------------------------
+#
+# Coaching feedback is free text, and here — unlike the marks — merging is the
+# right operation: the student should get one set of Keep/Start/Stop notes
+# that reflects the final verdicts, not two sets that may contradict them.
+
+
+def build_feedback_merge_system_prompt() -> str:
+    return """
+You are the adjudicating examiner on an OSCE marking panel, writing the student's final
+coaching feedback. Several examiners each wrote Keep/Start/Stop notes and a summary. The
+panel has since settled every rubric criterion; the final verdicts are given.
+
+Write ONE merged set of notes that:
+- reflects the FINAL verdicts (a criterion the panel awarded is not something to "start"),
+- keeps the examiners' points where they agree and reconciles them where they differ,
+- is directed to the STUDENT'S performance and reflects rubric criteria performance,
+- does NOT quote transcript lines, speaker tags (e.g. SPEAKER_01) or timestamps.
+
+You must return ONLY valid JSON, with no markdown and no additional text.
+
+Required JSON shape:
+{
+  "keep_start_stop": {
+    "keep": "1-3 coaching sentences for what the student should continue doing",
+    "start": "1-3 coaching sentences for what the student should start doing",
+    "stop": "1-3 coaching sentences for what the student should stop doing"
+  },
+  "overall_summary": "2-4 concise sentences"
+}
+""".strip()
+
+
+def build_feedback_merge_user_prompt(
+    session_id: str,
+    final_criteria: list[dict[str, Any]],
+    feedback_blocks: list[dict[str, Any]],
+) -> str:
+    """``feedback_blocks`` items: ``{"letter", "keep_start_stop", "overall_summary"}``."""
+    verdict_lines = "\n".join(
+        f"{index}. [{'critical' if item.get('is_critical') else 'non-critical'}] "
+        f"{item.get('label')}: {item.get('value')}"
+        for index, item in enumerate(final_criteria, start=1)
+    )
+    blocks: list[str] = []
+    for block in feedback_blocks:
+        notes = block.get("keep_start_stop") or {}
+        blocks.append(
+            "\n".join(
+                [
+                    f"Examiner {block['letter']}:",
+                    f"- keep: {notes.get('keep') or '(none)'}",
+                    f"- start: {notes.get('start') or '(none)'}",
+                    f"- stop: {notes.get('stop') or '(none)'}",
+                    f"- summary: {block.get('overall_summary') or '(none)'}",
+                ]
+            )
+        )
+    body = "\n\n".join(blocks)
+    return f"""
+Session {session_id}. Merge the examiners' feedback below into one, consistent with the final verdicts, and return the required JSON only.
+
+Final verdicts:
+{verdict_lines}
+
+Examiners' feedback:
+{body}
+""".strip()
+
+
+def build_feedback_merge_messages(
+    session_id: str,
+    final_criteria: list[dict[str, Any]],
+    feedback_blocks: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": build_feedback_merge_system_prompt()},
+        {"role": "user", "content": build_feedback_merge_user_prompt(session_id, final_criteria, feedback_blocks)},
+    ]
+
+
+def validate_feedback_output(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """The merged feedback in the sheet's own shape, with the same checks the
+    marker's Keep/Start/Stop gets."""
+    issues: list[str] = []
+    notes_raw = payload.get("keep_start_stop")
+    if not isinstance(notes_raw, dict):
+        issues.append("Field 'keep_start_stop' must be an object.")
+        notes_raw = {}
+    notes: dict[str, str] = {}
+    for key in ("keep", "start", "stop"):
+        text = str(notes_raw.get(key, "")).strip()
+        if not text:
+            issues.append(f"keep_start_stop.{key} must contain at least one sentence.")
+        elif looks_like_transcript_quote(text):
+            issues.append(
+                f"keep_start_stop.{key} must be coaching feedback for the student, not transcript quotes or speaker-tag snippets."
+            )
+        notes[key] = text
+    summary = str(payload.get("overall_summary", "")).strip()
+    if not summary:
+        issues.append("Field 'overall_summary' must be a non-empty string.")
+    return {"keep_start_stop": notes, "overall_summary": summary}, issues
+
+
 def to_repo_relative(path: Path) -> str:
     try:
         return str(path.resolve().relative_to(ROOT_DIR))
@@ -558,6 +878,9 @@ def to_repo_relative(path: Path) -> str:
 
 
 __all__ = [
+    "ADJUDICATION_MIN_VALID_CONTENT_CHARS",
+    "ADJUDICATION_PROMPT_VERSION",
+    "LENIENCY_POLICY",
     "MAX_CASE_STUDY_CONTEXT_CHARS",
     "MAX_RUBRIC_SECTION_CHARS",
     "MAX_TRANSCRIPT_CHARS",
@@ -576,6 +899,17 @@ __all__ = [
     "read_file_as_context_text",
     "read_pdf_text",
     "read_srt_transcript_text",
+    "SIDED_WITH_NEITHER",
+    "TRANSCRIPT_RELIABILITY_CONTEXT",
+    "build_adjudication_messages",
+    "build_adjudication_system_prompt",
+    "build_adjudication_user_prompt",
+    "build_feedback_merge_messages",
+    "build_feedback_merge_system_prompt",
+    "build_feedback_merge_user_prompt",
+    "enforce_expected_resolutions_array",
+    "marker_letter",
     "to_repo_relative",
-    "validate_output",
+    "validate_adjudication_output",
+    "validate_feedback_output",
 ]

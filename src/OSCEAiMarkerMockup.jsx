@@ -49,6 +49,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import CorporaManager from './CorporaManager.jsx';
 import LongVideoSummaryCharts from './LongVideoSummaryCharts.jsx';
 import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
+import { PanelMarkingSummary, PanelVotes } from '@/PanelMarkingSummary.jsx';
+import { panelCsvColumns, panelReport } from '@/lib/panelReport';
 import {
   INTERMISSION_KIND,
   MIN_BOUNDARY_GAP_SECONDS,
@@ -787,6 +789,7 @@ export default function OSCEAiMarkerMockup({
       const timestampLabel = rawTimestamp || (Number.isFinite(timestampSeconds) ? formatRuntime(timestampSeconds) : '');
 
       return {
+        index,
         key: String(item?.label || `Criterion ${index + 1}`).trim(),
         value: normalizedValue,
         isCritical: normalizedCritical,
@@ -796,6 +799,9 @@ export default function OSCEAiMarkerMockup({
       };
     });
   }, [scoreReport]);
+
+  // How a panel marked this sheet, or null for a single-model sheet.
+  const contentPanel = useMemo(() => panelReport(scoreReport), [scoreReport]);
 
   const communicationPayload = useMemo(() => {
     if (communicationScores && typeof communicationScores === 'object') {
@@ -2345,7 +2351,14 @@ export default function OSCEAiMarkerMockup({
         ],
         [],
         ['Criteria'],
-        ['Criterion', 'Result', 'Critical', 'Timestamp', 'Reason'],
+        [
+          'Criterion',
+          'Result',
+          'Critical',
+          'Timestamp',
+          'Reason',
+          ...(contentPanel ? ['Panel votes', 'Decided by'] : []),
+        ],
       ];
 
       if (aiCriteria.length) {
@@ -2356,10 +2369,22 @@ export default function OSCEAiMarkerMockup({
             criterion.isCritical ? 'Yes' : 'No',
             criterion.timestamp || '',
             criterion.reason || '',
+            ...panelCsvColumns(contentPanel, criterion.index),
           ]);
         });
       } else {
         contentRows.push(['No content rubric criteria were returned.', '', '', '', '']);
+      }
+
+      if (contentPanel) {
+        contentRows.push(
+          [],
+          ['Panel'],
+          ['Markers', contentPanel.markers.map((marker) => `${marker.initial}: ${marker.label}`).join(' / ')],
+          ['Adjudicator', contentPanel.adjudicator.label || 'none'],
+          ['Agreement', contentPanel.agreementLabel || ''],
+          ['Degraded', contentPanel.degraded ? contentPanel.degraded.reason : 'No'],
+        );
       }
 
       contentRows.push(
@@ -4393,6 +4418,11 @@ export default function OSCEAiMarkerMockup({
                           </div>
                         )}
 
+                        <PanelMarkingSummary
+                          report={contentPanel}
+                          artifacts={session?.outputs?.scores?.panelArtifacts || null}
+                        />
+
                         {aiCriteria.length > 0
                           ? aiCriteria.map((criterion) => {
                               const hasEvidence = Number.isFinite(criterion.timestampSeconds);
@@ -4442,6 +4472,7 @@ export default function OSCEAiMarkerMockup({
                                   <div className="text-sm text-slate-700">
                                     {criterion.reason || 'No explicit evidence note provided by the model.'}
                                   </div>
+                                  <PanelVotes report={contentPanel} index={criterion.index} />
                                 </div>
                               );
                             })

@@ -541,6 +541,10 @@ class Settings:
         return self.root_dir / "scripts" / "nvidia_osce_assessor.py"
 
     @property
+    def panel_adjudicator_script_path(self) -> Path:
+        return self.root_dir / "scripts" / "osce_panel_adjudicator.py"
+
+    @property
     def llm_preprocess_script_path(self) -> Path:
         return self.root_dir / "scripts" / "nemotron_transcript_preprocessor.py"
 

@@ -10,7 +10,12 @@ from pathlib import Path
 
 from app.core.artifacts import ArtifactMetadata
 from app.core.config import Settings
-from app.pipeline.marking.base import SCORES_MEDIA_DIRECTORY, ContentMarkerRunner, MarkingPlan
+from app.pipeline.marking.base import (
+    SCORES_MEDIA_DIRECTORY,
+    ContentMarkerRunner,
+    MarkingPlan,
+    ProgressCallback,
+)
 
 
 class SingleModelMarking:
@@ -28,7 +33,11 @@ class SingleModelMarking:
         transcript_path: Path,
         case_study_path: Path,
         plan: MarkingPlan,
+        on_progress: ProgressCallback | None = None,
     ) -> ArtifactMetadata:
+        # One subprocess, one call: there is no intermediate progress to
+        # report, so the callback is accepted for interface parity and unused.
+        del on_progress
         return await self.marker.run(
             session_id,
             transcript_path=transcript_path,

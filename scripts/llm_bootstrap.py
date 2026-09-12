@@ -38,6 +38,8 @@ from app.core.scorer_utils import (  # noqa: E402
     safe_extract_payload,
 )
 from app.core.utils import write_text_atomic  # noqa: E402
+from app.llm.panel import MIN_PANEL_MARKERS, TieBreak  # noqa: E402
+from app.pipeline.marking import reconciliation  # noqa: E402
 from app.llm.base import (  # noqa: E402  (path must be set first)
     AllTargetsFailedError,
     ChatRequest,
@@ -54,6 +56,9 @@ from app.llm.runtime import (  # noqa: E402
 )
 
 __all__ = [
+    "MIN_PANEL_MARKERS",
+    "TieBreak",
+    "reconciliation",
     "AllTargetsFailedError",
     "ChatRequest",
     "ChatResponse",

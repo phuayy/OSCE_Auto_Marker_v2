@@ -28,7 +28,13 @@ OSCE-AI-FYP/
 ├── src/                        # React frontend (Vite)
 │   ├── OSCEAiMarkerMockup.jsx  # ~4500-line monolithic component (main app)
 │   ├── AppShell.jsx            # Root shell, hash-routing driver
+│   ├── MarkingModeSettings.jsx # Settings card: single-model vs panel marking
+│   ├── PanelMarkingSummary.jsx # Score tab: how a panel marked (summary + per-criterion votes)
+│   ├── components/
+│   │   └── TargetPicker.jsx    # One provider+model choice; shared by every settings card that asks for one
 │   ├── lib/
+│   │   ├── llmProviders.js     # Routing + marking-mode form logic (pure)
+│   │   ├── panelReport.js      # Reads a sheet's `panel` block for the results view (pure)
 │   │   ├── navigation.js       # parseRoute / buildRoute (hash-based deep links)
 │   │   └── useHashRoute.js     # React hook for URL <-> state sync
 │   └── auth.js                 # fetchStreamTicket, resolveMediaUrl helpers
@@ -115,7 +121,10 @@ OSCE-AI-FYP/
 │       │   │   └── subtitles.py        # SRT/VTT rendering for engines that write none
 │       │   ├── marking/        # Content-marking strategies
 │       │   │   ├── base.py         # MarkingPlan (resolved once per run) + ContentMarkerRunner (one assessor spawn)
-│       │   │   └── single.py       # SingleModelMarking — default; a panel strategy lands beside it
+│       │   │   ├── single.py       # SingleModelMarking — the default: one marker to scores/<id>.json
+│       │   │   ├── panel.py        # PanelMarking — markers in parallel, adjudicator subprocess, degraded sheet
+│       │   │   ├── reconciliation.py  # Pure: align sheets, settle the unanimous, κ, tie-break, transcript windows
+│       │   │   └── sheets.py       # Reuse predicates: is a sheet well-formed, and is it the one this run would write
 │       │   ├── media.py        # MediaPipeline — ffmpeg, WhisperX, bell detection, clip crop
 │       │   └── scoring.py      # ScoringPipeline — facade over the scorer subprocesses; picks the marking strategy
 │       ├── api/
@@ -138,7 +147,8 @@ OSCE-AI-FYP/
 │   ├── run_api.py                   # Entry point: uvicorn launcher
 │   ├── llm_bootstrap.py             # Puts fastapi_backend on sys.path; re-exports the LLM router
 │   ├── nvidia_osce_assessor.py      # Content scoring subprocess: model call + checkpoint + repair loop
-│   ├── content_marking.py           # Content prompt, rubric extraction, sheet validator (shared by every content marker)
+│   ├── content_marking.py           # Content prompt, rubric extraction, sheet validator, adjudication prompts (shared)
+│   ├── osce_panel_adjudicator.py    # Panel: reconcile marker sheets, adjudicate disputes, merge feedback
 │   ├── scorer_checkpoint.py         # Crash-checkpoint helpers shared by the scoring scripts
 │   ├── nvidia_osce_communication.py           # Communication scoring subprocess
 │   ├── audio_professionalism_extractor.py     # Audio professionalism subprocess
@@ -149,6 +159,7 @@ OSCE-AI-FYP/
 ├── storage/                         # Runtime artefact store (gitignored)
 │   ├── input/                       # Uploaded videos, case studies
 │   └── output/                      # audio/, whisperx/, transcripts/, scores/, clips/, ...
+│       └── scores/panel/<id>/       # a panel run's per-marker sheets + adjudication.json
 └── .env                             # Local secrets/config (not committed)
 ```
 
@@ -239,12 +250,22 @@ Then asyncio.gather over TWO branches (PARALLEL_SCORING env var, default true):
       -> storage/output/communication_scores/<session_id>.json
 
   content_branch — runs in parallel with ENTIRE communication_branch:
-    Step 6: content_scoring
-      scripts/nvidia_osce_assessor.py
-      reads: transcript + case-study PDF rubric
-      calls: the primary LLM provider, falling back per app/llm/router.py
-      checkpoint/repair: saves after each LLM call, up to 2 repair passes
-      -> storage/output/scores/<session_id>.json
+    Step 6: content_scoring  (strategy chosen in Settings -> Marking mode; see "Marking modes")
+      single (default):
+        scripts/nvidia_osce_assessor.py
+        reads: transcript + case-study PDF rubric
+        calls: the primary LLM provider, falling back per app/llm/router.py
+        checkpoint/repair: saves after each LLM call, up to 2 repair passes
+        -> storage/output/scores/<session_id>.json
+      panel:
+        scripts/nvidia_osce_assessor.py x N, in parallel, one model each, same prompt
+        -> storage/output/scores/panel/<session_id>/<markerKey>.json
+        scripts/osce_panel_adjudicator.py
+        reads: every marker sheet + transcript + case-study PDF
+        settles unanimous criteria in code; ONE call to the adjudicator for the disputes;
+        ONE call to merge Keep/Start/Stop; tie-break policy when it cannot answer
+        -> storage/output/scores/<session_id>.json (same schema + "panel" block)
+        stepProgress: 80% shared by the markers, 100% after adjudication
 
   If PARALLEL_SCORING=false: fully sequential (audio_prof -> communication -> content).
 
@@ -439,7 +460,7 @@ Defined in [models.py](fastapi_backend/app/database/models.py):
 | `notifications` | `NotificationRecord` | Task-completion notification history; `read_at` null = unread |
 | `provider_credentials` | `ProviderCredentialRecord` | Per-provider LLM API key as AES-256-GCM ciphertext; never serialised to a client |
 | `llm_providers` | `CustomProviderRecord` | Scoring providers an operator defined at runtime — endpoint, auth placement, versions, extra headers/query/body. No key column: the credential lives in `provider_credentials` like every other provider's |
-| `app_settings` | `AppSettingRecord` | Global key/value settings — model routing, transcription engine, preprocess toggle |
+| `app_settings` | `AppSettingRecord` | Global key/value settings — model routing, marking mode + panel, transcription engine, preprocess toggle |
 
 Jobs table (`jobs`, `job_events`) managed by raw SQL via `JobRepository` / `Database`.
 
@@ -725,7 +746,8 @@ All three scorers are independent Python subprocesses. Read from disk, write JSO
 
 | Script | Input | Output |
 |---|---|---|
-| `nvidia_osce_assessor.py` | `--transcript` normalised JSON + `--case-study` PDF | `scores/<id>.json` |
+| `nvidia_osce_assessor.py` | `--transcript` normalised JSON + `--case-study` PDF | `scores/<id>.json` (single) or `scores/panel/<id>/<markerKey>.json` (one panel marker) |
+| `osce_panel_adjudicator.py` | `--marker` sheet ×N + `--transcript` + `--case-study` (+ `--tie-break`, `--without-adjudicator`, `--warning`) | `scores/<id>.json` + `scores/panel/<id>/adjudication.json` |
 | `audio_professionalism_extractor.py` | `--audio` MP3 + `--transcript` normalised JSON | `audio_professionalism/<id>.json` |
 | `nvidia_osce_communication.py` | `--transcript` normalised JSON + parsed rubric JSON + optional `--audio-professionalism` JSON | `communication_scores/<id>.json` |
 
@@ -827,19 +849,96 @@ Each score file records the model **that actually produced it** (`model`,
 differ, and the content scorer's crash checkpoint carries the same provenance so
 a resumed run does not relabel a half-finished sheet.
 
-**Marking mode (in progress — see [docs/multi-model-marking-plan.md](docs/multi-model-marking-plan.md)).**
-`app_settings` also carries `llmMarkingMode` (`single`, the default, or
-`panel`) and `llmPanel` (markers, adjudicator, tie-break —
-[llm/panel.py](fastapi_backend/app/llm/panel.py)). `LLMSettingsService.
-marking_plan()` resolves both, with the routing, from one credential snapshot
-into a `MarkingPlan`: per-target environments cut by `subprocess_env_for`, each
-naming only its own target and carrying only its own key. A panel that cannot
-run here (a marker with no key, an incoherent stored row) degrades to single
-mode with the reasons on the plan, which `describe()` exposes as
-`marking.effective` / `marking.warnings`. `ScoringPipeline.run_content_scoring`
-reads the plan once per run and hands the spawn to a strategy under
-`app/pipeline/marking/`; only `SingleModelMarking` exists so far, so a stored
-`panel` selection currently runs as single mode.
+### Marking modes
+
+Content is marked by one model or by a **panel**; the operator chooses in
+Settings → Marking mode, stored as `llmMarkingMode` / `llmPanel` in
+`app_settings`. Design and the literature it rests on:
+[docs/multi-model-marking-plan.md](docs/multi-model-marking-plan.md).
+
+| Mode | What runs |
+|---|---|
+| `single` (default) | One assessor subprocess against the routing above, with its fallbacks. Unchanged behaviour. |
+| `panel` | ≥ 2 **markers** — the *same* assessor script, one model each, the same prompt, in parallel — then the **adjudicator** script, which settles every unanimous criterion in code, asks a third model about the disputed ones in one batched call, merges the coaching feedback in another, and writes the final sheet. |
+
+**Why disputes-only, not "compile two sheets".** The judge-panel literature is
+consistent: free-form synthesis of whole answers loses to a single strong model,
+debate rounds converge on a shared *biased* answer, and majority voting is near
+chance on exactly the hard items. What holds up — and matches human OSCE
+double-marking — is independent first passes with escalation only where they
+disagree. So the adjudicator never re-marks a sheet: it sees each disputed
+criterion, every marker's position with the transcript around the moment it
+cited (±45 s, `reconciliation.transcript_window`), marker order **shuffled per
+criterion** (seeded by session + index, so a re-run reproduces the prompt), and
+the markers' leniency policy **verbatim** — `content_marking.LENIENCY_POLICY`
+is one constant, used by both prompts, because a stricter third voice is the
+documented way to drag a panel's marks down.
+
+**The pieces and who owns what.**
+
+| Concern | Where |
+|---|---|
+| Config value (`MarkingMode`, `TieBreak`, `PanelConfig.validate`) | [llm/panel.py](fastapi_backend/app/llm/panel.py) |
+| Plan for one run — mode, per-target environments from **one** credential snapshot, effective-vs-selected reasons | `LLMSettingsService.marking_plan()` → `MarkingPlan` in [marking/base.py](fastapi_backend/app/pipeline/marking/base.py) |
+| Strategy dispatch, mode-aware cache predicate, step metadata | `ScoringPipeline.prepare_content_marking()` → `ContentMarkingRun` in [pipeline/scoring.py](fastapi_backend/app/pipeline/scoring.py) |
+| Parallel markers, reuse, degradation, adjudicator spawn, progress | [marking/panel.py](fastapi_backend/app/pipeline/marking/panel.py) |
+| Model-free reconciliation (align, settle, κ, tie-break, windows, panel block) | [marking/reconciliation.py](fastapi_backend/app/pipeline/marking/reconciliation.py) — imported by the API **and** the script via `llm_bootstrap` |
+| Reuse predicates for marker sheets and the final sheet | [marking/sheets.py](fastapi_backend/app/pipeline/marking/sheets.py) |
+| Prompts + validators for adjudication and feedback merge | [scripts/content_marking.py](scripts/content_marking.py) beside the marker prompt |
+| The third call, checkpointed | [scripts/osce_panel_adjudicator.py](scripts/osce_panel_adjudicator.py) |
+| Settings card / results view / form logic | [src/MarkingModeSettings.jsx](src/MarkingModeSettings.jsx), [src/PanelMarkingSummary.jsx](src/PanelMarkingSummary.jsx), [src/lib/llmProviders.js](src/lib/llmProviders.js), [src/lib/panelReport.js](src/lib/panelReport.js) |
+
+**The plan is read once, at the start of `content_scoring`.** The pipeline
+service calls `prepare_content_marking` *before* the cache check, so the same
+plan decides whether the sheet on disk still counts and what runs if it does
+not; a toggle flipped mid-run applies to the next run. `MarkingMode` and
+`TieBreak` are in the generated browser enums (`scripts/generate_enums.py`).
+
+**Every subprocess gets an environment that names only its own target and
+carries only its own key** — `subprocess_env_for(config, resolved)`, cut from
+the one `resolve()` snapshot. Markers have **no fallback chain**: a fallback
+landing on the other marker's model turns the panel into two samples of one
+model, which measures nothing. The adjudicator runs alone for the same reason —
+falling back to a marker's model would let a marker judge its own dispute. When
+no adjudicator can run here the script is started `--without-adjudicator` and
+disputes fall to the tie-break; `OSCE_LLM_ROUTING` is deliberately not set, so
+the legacy `NVIDIA_MODEL_NAME` path cannot quietly make a marker the judge.
+
+**Failure semantics — a panel never fails an assessment single mode would have
+passed:**
+
+| Event | Outcome |
+|---|---|
+| One marker fails after its own retries | Final sheet = the survivor's, verbatim, with `panel.degraded = {reason, effective_mode: "single", marker}`; the step completes; the results view shows a "Single marker only" banner; the next run refreshes it, reusing the good sheet and re-marking only the failed marker |
+| Every marker fails | The step fails, as single mode would |
+| Adjudicator dead / bad JSON after 2 repairs | Each unsettled dispute falls to `tieBreak` (`lenient` = Yes, the rubric's own borderline rule; `strict`; `first_marker`), labelled `tie_break:<policy>` per criterion; feedback falls back to the marker whose verdicts sit closest to the final ones, and the sheet says whose |
+| A marker sheet from another rubric | `SheetAlignmentError`: the run fails rather than reconcile unrelated criteria item-by-item |
+| Restart mid-panel | Marker sheets on disk are adopted (`marker_sheet_needs_refresh`: well-formed **and** written by the model the marker names — the sheet records the *requested* model id, so the check is exact); a half-finished marker resumes from the assessor's own checkpoint; the adjudicator checkpoints each reply under `.<id>.json.checkpoint.json` and resumes without re-asking |
+| Mode / marker / adjudicator / tie-break changed | `final_sheet_needs_refresh` is mode-aware: a single sheet under panel (and vice versa), a swapped marker key or adjudicator, a degraded sheet, or a tie-break change that actually decided something all refresh; marker sheets are still reused |
+
+**The final sheet is today's schema plus provenance.** `scores/<id>.json` keeps
+`criteria[]`, `scoring_summary`, `keep_start_stop`, `overall_summary`, so the
+frontend, `AssessmentService` and analytics need no change; it adds
+`marking_mode: "panel"`, `model: "panel(A + B -> C)"`, `model_provider: "panel"`
+and a `panel` block (`schema content-panel-v1`): `markers[]` (key, provider,
+model, own pass/fail), `adjudicator` (who, whether called, whether it settled
+everything, `feedback_source`), `agreement` (`total`, `agreed`, `disputed`,
+`percent`, `cohen_kappa` — `null` when undefined, two-rater only —
+`pass_fail_agreed`), `criteria[]` (every vote, every reason, `resolution` ∈
+`agreed | adjudicated | tie_break:<policy> | sole_marker`, `sided_with`,
+`confidence`), `tie_break`, `degraded`, `warnings`. The API adds
+`outputs.scores.panelArtifacts` (URLs of each marker's sheet and the
+adjudication record) so links stay a deployment concern, not the sheet's. The
+`content_scoring` step records `metadata.markingMode`, the marker list and the
+`panel` summary; `stepProgress` moves 80 % across the markers and to 100 %
+after adjudication, so the session card's gauge moves inside the step.
+
+**Adding a marking strategy** = a module beside `single.py` / `panel.py`
+exposing `run(session_id, *, transcript_path, case_study_path, plan,
+on_progress)`, a `MarkingMode` value, a branch in
+`ScoringPipeline.run_content_marking`, and a case in
+`sheets.final_sheet_needs_refresh`. Adding a marker to a *deployment* is a
+dropdown: any provider in the catalogue, custom ones included.
 
 `POST /api/settings/llm-providers/test` makes one small live call to a single
 target (no fallback — the operator is asking about *that* provider) so a bad key

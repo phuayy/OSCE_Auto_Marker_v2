@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import CorporaManager from '@/CorporaManager.jsx';
 import CustomProvidersSettings from '@/CustomProvidersSettings.jsx';
 import LlmRoutingSettings from '@/LlmRoutingSettings.jsx';
+import MarkingModeSettings from '@/MarkingModeSettings.jsx';
 import ProviderKeysSettings from '@/ProviderKeysSettings.jsx';
 import TranscriptionEngineSettings from '@/TranscriptionEngineSettings.jsx';
 import WebhooksManager from '@/WebhooksManager.jsx';
@@ -102,6 +103,11 @@ export default function SettingsPage({ onBack }) {
         <TranscriptionEngineSettings />
 
         <LlmRoutingSettings
+          version={providersVersion}
+          onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
+        />
+
+        <MarkingModeSettings
           version={providersVersion}
           onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
         />

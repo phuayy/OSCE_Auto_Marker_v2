@@ -977,12 +977,42 @@ class PipelineService:
         *,
         lock: asyncio.Lock | None = None,
     ) -> dict[str, Any]:
+        """Content scoring, under the marking mode the operator selected.
+
+        A scoring pipeline that can ``prepare_content_marking`` resolves the
+        plan once, up front, so the cache check and the run agree about the
+        mode — a single-model sheet on disk is refreshed when a panel was
+        selected, and a panel's live progress reaches the session card. The
+        test doubles that only implement ``run_content_scoring`` take the
+        historical path unchanged.
+        """
+        spec = OUTPUT_SPECS[OutputKey.SCORES]
+        prepare = getattr(self.scoring, "prepare_content_marking", None)
+        if not callable(prepare):
+            return await self._refresh_or_load_output(
+                session, spec,
+                enabled=self.media.settings.enable_scoring,
+                run=lambda: self.scoring.run_content_scoring(session),
+                predicate=self._predicate_or_default(self.scoring, "should_refresh_score_payload"),
+                lock=lock,
+            )
+
+        marking = await prepare(session)
+        # Progress writes share the branch lock when there is one; sequential
+        # scoring has no concurrent writer, so a private lock only serialises
+        # the subprocess reader threads against each other.
+        progress_lock = lock or asyncio.Lock()
+
+        async def on_progress(percent: float) -> None:
+            await self._record_step_progress(session, spec.step, percent, lock=progress_lock)
+
         return await self._refresh_or_load_output(
-            session, OUTPUT_SPECS[OutputKey.SCORES],
+            session, spec,
             enabled=self.media.settings.enable_scoring,
-            run=lambda: self.scoring.run_content_scoring(session),
-            predicate=self._predicate_or_default(self.scoring, "should_refresh_score_payload"),
+            run=lambda: marking.run(on_progress),
+            predicate=marking.needs_refresh,
             lock=lock,
+            step_metadata=marking.step_metadata,
         )
 
     async def _refresh_or_load_output(
@@ -994,7 +1024,15 @@ class PipelineService:
         run: Callable[[], Awaitable[dict]],
         predicate: Callable[[object], bool],
         lock: asyncio.Lock | None,
+        step_metadata: Callable[[], dict[str, Any]] | None = None,
     ) -> dict:
+        """Reuse the output on disk when ``predicate`` accepts it, else ``run``.
+
+        ``step_metadata`` is asked, after a fresh run, for anything the step
+        should record beyond the reuse flag — how a panel's markers agreed, for
+        one. It is a callable rather than a value because what there is to say
+        is only known once the run has finished.
+        """
         session_id = str(session["id"])
         if not enabled:
             await self._mark_pipeline_step(session, spec.step, StepStatus.SKIPPED, lock=lock)
@@ -1027,11 +1065,14 @@ class PipelineService:
                 await self._mark_pipeline_step(session, spec.step, StepStatus.FAILED, error=error, lock=lock)
                 raise
             await self._persist_session_output(session, spec.key, output, lock=lock)
+            metadata: dict[str, Any] = {"reusedExistingArtifact": False}
+            if step_metadata is not None:
+                metadata.update(step_metadata())
             await self._mark_pipeline_step(
                 session,
                 spec.step,
                 StepStatus.COMPLETED,
-                metadata={"reusedExistingArtifact": False},
+                metadata=metadata,
                 lock=lock,
             )
             await self.events.publish(
