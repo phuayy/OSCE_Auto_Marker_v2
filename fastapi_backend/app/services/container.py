@@ -312,13 +312,26 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         app_settings=app_settings,
         transcription=transcription,
     )
-    clips = ClipService(sessions, events, media, pipeline, jobs, notifications)
+    videos = VideoRepository(orm_database)
+    # Built before ClipService because a repeat assessment of a clip re-runs
+    # the child session that already exists rather than creating a second one,
+    # and re-running a session is this service's job — not a second copy of it
+    # inside the clip path. The dependency is one-way: maintenance knows
+    # nothing about clips.
+    session_maintenance = SessionMaintenanceService(
+        active_settings,
+        sessions,
+        assessments,
+        jobs,
+        notifications,
+        videos,
+    )
+    clips = ClipService(sessions, events, media, pipeline, jobs, notifications, maintenance=session_maintenance)
     jobs.bind_handlers(pipeline=pipeline, clips=clips)
     login_rate_limiter = FixedWindowRateLimiter(
         max_attempts=active_settings.login_rate_limit_max_attempts,
         window_seconds=active_settings.login_rate_limit_window_seconds,
     )
-    videos = VideoRepository(orm_database)
     async_uploads = AsyncUploadService(
         active_settings,
         UploadRepository(active_settings.paths.uploads_dir),
@@ -330,14 +343,6 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         rubric_assets,
         videos,
         corpora=corpora,
-    )
-    session_maintenance = SessionMaintenanceService(
-        active_settings,
-        sessions,
-        assessments,
-        jobs,
-        notifications,
-        videos,
     )
     return AppContainer(
         settings=active_settings,

@@ -3,25 +3,28 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import shutil
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from app.core.exceptions import AppError
+from app.core.locks import KeyedLocks
 from app.core.logging_utils import log_context
 from app.domain.enums import (
+    ClipExportScope,
     ClipExportStatus,
     ClipKind,
     PipelineStep,
     SegmentationMethod,
+    StepStatus,
     TaskType,
 )
 from app.domain.jobs import ACTIVE_JOB_STATUSES
 from app.domain.notifications import NotificationType
-from app.domain.session_lifecycle import fail_session, record_progress
+from app.domain.session_lifecycle import fail_session, record_progress, sync_current_step
 from app.domain.sessions import (
+    IN_FLIGHT_STATUSES,
     SessionStatus,
     empty_outputs,
     find_clip,
@@ -55,6 +58,13 @@ EXPORT_COMPLETED = ClipExportStatus.COMPLETED
 EXPORT_FAILED = ClipExportStatus.FAILED
 LIVE_EXPORT_STATUSES = frozenset({EXPORT_QUEUED, EXPORT_RUNNING})
 
+# What one export job was asked to cut, recorded on ``session.clipExport``.
+# A recrop is an export of a single clip: same job, same progress record, same
+# watchers in the editor — only the scope, and what the editor says when it
+# finishes, differ.
+EXPORT_SCOPE_PLAN = ClipExportScope.PLAN
+EXPORT_SCOPE_CLIP = ClipExportScope.CLIP
+
 
 def _new_plan_id() -> str:
     """Identity of one clip-export plan.
@@ -76,6 +86,7 @@ class ClipService:
         pipeline: PipelineService,
         jobs: Any | None = None,
         notifications: Any | None = None,
+        maintenance: Any | None = None,
     ) -> None:
         self.sessions = sessions
         self.events = events
@@ -83,6 +94,17 @@ class ClipService:
         self.pipeline = pipeline
         self.jobs = jobs
         self.notifications = notifications
+        # Re-running a clip's existing child session is the same operation the
+        # session list's "Re-run" button performs, so it is borrowed from
+        # SessionMaintenanceService rather than reimplemented here. Optional:
+        # a container built without it simply cannot re-run a finished child.
+        self.maintenance = maintenance
+        # One clip, one child session. Two requests for the same clip — a
+        # double click, a second tab, "Run selected" racing a single run —
+        # must not both pass the "does a child exist?" check and each create
+        # one. Per process, which is where the API accepts requests; a Hatchet
+        # worker takes none.
+        self._assess_locks = KeyedLocks()
 
     # ------------------------------------------------------------------
     # Document updates
@@ -137,14 +159,18 @@ class ClipService:
         segmentation_step = SEGMENTATION_STEP_BY_METHOD.get(method, BELL_DETECTION_STEP)
 
         def start(current: dict[str, Any]) -> Any:
-            # Name the running step in the durable payload. The session-list
-            # projection exposes it as `currentStep`, and the card's stage gauge
-            # only trusts a `stepProgress` reading that belongs to the step it is
-            # currently naming — otherwise a value left over from some other run
-            # would render as a bar that never moves.
+            # Name the running step the same way the standard pipeline does:
+            # record it in `steps` and let sync_current_step project
+            # `currentStep`/`stepProgress` from that — the session-list
+            # projection exposes the latter as `currentStep`/`stepProgress`,
+            # and the card's stage gauge only trusts a `stepProgress` reading
+            # that belongs to the step it is currently naming, otherwise a
+            # value left over from some other run would render as a bar that
+            # never moves.
             pipeline = current.setdefault("pipeline", {})
-            pipeline["currentStep"] = segmentation_step
-            pipeline["stepProgress"] = None
+            steps = pipeline.setdefault("steps", {})
+            steps[segmentation_step] = {"status": StepStatus.RUNNING}
+            sync_current_step(pipeline)
             if current.get("status") != SessionStatus.PROCESSING:
                 current["status"] = SessionStatus.PROCESSING
                 current["error"] = None
@@ -180,7 +206,7 @@ class ClipService:
 
             def fail(current: dict[str, Any]) -> Any:
                 fail_session(current, message)
-                self._clear_segmentation_progress(current)
+                self._clear_segmentation_progress(current, status=StepStatus.FAILED)
                 return None
 
             failed = await self._commit(session, fail)
@@ -303,11 +329,19 @@ class ClipService:
 
                 # The card must stop gauging a step that is no longer running:
                 # the bar would otherwise freeze wherever the failed detector
-                # left it, for the whole of the bell pass.
+                # left it, for the whole of the bell pass. Retiring the person
+                # step to `failed` (rather than deleting it) and re-deriving
+                # through sync_current_step is what makes this the same
+                # mechanism the standard pipeline uses, not a hand-rolled one
+                # that could disagree with it about what "current" means.
                 def switch_step(current: dict[str, Any]) -> Any:
                     pipeline = current.setdefault("pipeline", {})
-                    pipeline["currentStep"] = BELL_DETECTION_STEP
-                    pipeline["stepProgress"] = None
+                    steps = pipeline.setdefault("steps", {})
+                    person_state = steps.get(PERSON_DETECTION_STEP)
+                    if isinstance(person_state, dict):
+                        person_state["status"] = StepStatus.FAILED
+                    steps[BELL_DETECTION_STEP] = {"status": StepStatus.RUNNING}
+                    sync_current_step(pipeline)
                     return None
 
                 async with progress_lock:
@@ -350,18 +384,28 @@ class ClipService:
             await self._commit(session, mutate)
 
     @staticmethod
-    def _clear_segmentation_progress(session: dict[str, Any]) -> None:
-        """Drop the running-step markers once segmentation is over.
+    def _clear_segmentation_progress(session: dict[str, Any], *, status: str = StepStatus.COMPLETED) -> None:
+        """Retire whichever segmentation step is still ``running`` once
+        auto-crop is over, then re-derive `currentStep`/`stepProgress` from
+        `steps` via ``sync_current_step``.
 
-        Leaving them behind would let a terminal session carry a half-finished
-        percentage into whatever reads it next.
+        Leaving a step marked ``running`` behind would let a terminal session
+        carry a half-finished percentage into whatever reads it next, and
+        would leave that step outranking anything a *later* auto-crop run
+        starts. ``status`` lets the two callers say which way this ended:
+        the failure path passes ``StepStatus.FAILED``; a successful crop
+        keeps the default.
         """
         pipeline = session.get("pipeline")
         if not isinstance(pipeline, dict):
             return
-        if pipeline.get("currentStep") in SEGMENTATION_STEPS:
-            pipeline["currentStep"] = None
-        pipeline["stepProgress"] = None
+        steps = pipeline.get("steps")
+        if isinstance(steps, dict):
+            for name in SEGMENTATION_STEPS:
+                state = steps.get(name)
+                if isinstance(state, dict) and state.get("status") == StepStatus.RUNNING:
+                    state["status"] = status
+        sync_current_step(pipeline)
 
     async def _run_bell_segmentation(
         self,
@@ -462,6 +506,9 @@ class ClipService:
             current["clipExport"] = {
                 "planId": plan_id,
                 "status": EXPORT_QUEUED,
+                # A whole split: every session clip in the new plan is cut.
+                "scope": EXPORT_SCOPE_PLAN,
+                "clipIds": None,
                 "total": pending_total,
                 "completed": 0,
                 "requestedAt": requested_at,
@@ -474,7 +521,11 @@ class ClipService:
 
         await self._commit(session, plan)
 
-        job = await self.jobs.enqueue(session_id, TaskType.EXPORT_CLIPS, {"clipCount": pending_total, "planId": plan_id})
+        job = await self.jobs.enqueue(
+            session_id,
+            TaskType.EXPORT_CLIPS,
+            {"clipCount": pending_total, "planId": plan_id, "scope": str(EXPORT_SCOPE_PLAN)},
+        )
         job_id = job.get("id")
 
         def attach_job(current: dict[str, Any]) -> Any:
@@ -511,18 +562,32 @@ class ClipService:
         to "processing" would be closed underneath them. For the same reason
         every write here is a patch: the user's renames must survive the job.
         """
-        _ = payload
         session = await self.sessions.read(session_id)
         clips = session_clips(session)
         if not clips:
             raise AppError("This session has no clip export plan to run.", status_code=400)
         video_path = session_video_path(session)
-        plan_id = str((session.get("clipExport") or {}).get("planId") or "")
+        export_record = session.get("clipExport") or {}
+        plan_id = str(export_record.get("planId") or "")
 
         # Intermissions are timeline markers: no MP4 is cut and none is counted.
         pending = [clip for clip in clips if str(clip.get("kind") or ClipKind.SESSION) != ClipKind.INTERMISSION]
+        # A recrop queues the same job scoped to the clips whose boundaries
+        # changed. The payload carries the ids rather than the service
+        # re-deriving them, so a retry cuts exactly what the request asked for
+        # even if the user has since dragged another separator.
+        requested_ids = self._requested_clip_ids(payload, export_record)
+        if requested_ids is not None:
+            pending = [clip for clip in pending if str(clip.get("id")) in requested_ids]
+            if not pending:
+                raise AppError(
+                    "The clips this export was queued for are no longer on this session.",
+                    status_code=400,
+                    retryable=False,
+                )
         total = len(pending)
-        started_at = str((session.get("clipExport") or {}).get("startedAt") or self.pipeline.now_iso())
+        pending_ids = {str(clip.get("id")) for clip in pending}
+        started_at = str(export_record.get("startedAt") or self.pipeline.now_iso())
 
         def start(current: dict[str, Any]) -> Any:
             export = current.setdefault("clipExport", {})
@@ -530,7 +595,17 @@ class ClipService:
                 {
                     "status": EXPORT_RUNNING,
                     "total": total,
-                    "completed": sum(1 for clip in session_clips(current) if not clip.get("isDraft") and clip.get("kind") != ClipKind.INTERMISSION),
+                    # Only the clips *this* job was asked for count towards its
+                    # progress: a recrop of one clip in a session of twelve
+                    # would otherwise open at 11/1, because every other clip is
+                    # already cut.
+                    "completed": sum(
+                        1
+                        for clip in session_clips(current)
+                        if str(clip.get("id")) in pending_ids
+                        and not clip.get("isDraft")
+                        and clip.get("kind") != ClipKind.INTERMISSION
+                    ),
                     "startedAt": started_at,
                     "endedAt": None,
                     "error": None,
@@ -555,6 +630,7 @@ class ClipService:
                 )
                 materialized = dict(result["clip"])
                 clip_id = str(materialized.get("id"))
+                superseded = str(clip.get("supersededFile") or "")
 
                 # Persist after every clip: this is the checkpoint an interrupted
                 # or retried run resumes from. Only the cut clip's file fields
@@ -566,11 +642,18 @@ class ClipService:
                             for key in ("fileName", "url", "absolutePath", "sizeBytes", "isDraft", "planId"):
                                 if key in materialized:
                                     stored[key] = materialized[key]
+                            # The replaced cut is only forgotten once the new one
+                            # is durable, so an interrupted recrop still knows
+                            # which file it is superseding on the next attempt.
+                            stored.pop("supersededFile", None)
                             break
                     current.setdefault("clipExport", {})["completed"] = _position
                     return None
 
                 await self._commit(session, checkpoint)
+                await self._discard_superseded_cut(
+                    session_id, superseded, replacement=str(materialized.get("absolutePath") or "")
+                )
                 logger.info(
                     "Clip export %d/%d %s for session %s.",
                     position,
@@ -630,15 +713,26 @@ class ClipService:
             return None
 
         await self._commit(session, finish)
-        await self._prune_stale_plan_dirs(session_id, keep_plan_id=plan_id)
+        if requested_ids is None:
+            # Only a whole split supersedes a plan. A recrop touches clips
+            # inside the current plan's directory, so there is nothing to prune
+            # and every other clip in that directory is still the live cut.
+            await self._prune_stale_plan_dirs(session_id, keep_plan_id=plan_id)
 
         if self.notifications is not None:
+            session_name = str(session.get("name") or session_id)
             plural = "s" if total != 1 else ""
+            if requested_ids is None:
+                title = "Clips ready"
+                body = f'"{session_name}" has been split into {total} clip{plural} — ready for assessment.'
+            else:
+                labels = ", ".join(str(clip.get("label") or "clip") for clip in pending)
+                title = "Clip re-cut"
+                body = f'"{session_name}": {labels} re-cut — ready for assessment.'
             await self.notifications.emit(
                 NotificationType.CLIPS_READY,
-                "Clips ready",
-                f"\"{session.get('name') or session_id}\" has been split into "
-                f"{total} clip{plural} — ready for assessment.",
+                title,
+                body,
                 session_id=session_id,
             )
         await self.events.publish(
@@ -732,65 +826,188 @@ class ClipService:
             return False
         return str(job.get("status") or "") in ACTIVE_JOB_STATUSES
 
-    async def recrop_clip(self, session_id: str, clip_id: str, start: float, end: float) -> dict[str, Any]:
+    async def request_clip_recrop(self, session_id: str, clip_id: str, start: float, end: float) -> dict[str, Any]:
+        """Move one clip's boundaries and queue the job that re-cuts its MP4.
+
+        A recrop is an export of a single clip, not a second way to run ffmpeg.
+        Cutting it inside the request held the connection for as long as the
+        crop took (a stream-copy that falls back to a re-encode is minutes on a
+        long station), died with the process, reported no progress and left the
+        superseded file on disk. Routing it through ``export_clips`` gives it
+        the queue's retries and restart recovery, the same ``session.clipExport``
+        progress record the editor already watches, and the same adoption rule
+        that makes a retry cheap — for the price of one field, ``revision``,
+        which is what stops the job adopting the cut it is replacing
+        (see ``MediaPipeline.materialize_clip``).
+
+        Returns as soon as the plan is persisted: the clip becomes a draft with
+        its new range, which the timeline renders immediately.
+        """
         session = await self.sessions.read(session_id)
         clip = find_clip(session, clip_id)
+        if str(clip.get("kind") or ClipKind.SESSION) == ClipKind.INTERMISSION:
+            raise AppError(
+                "This segment is an intermission (no confirmed session detected) and is not cut to a file.",
+                status_code=400,
+            )
         if end <= start:
             raise AppError("`end` must be greater than `start`.", status_code=400)
+        if session.get("status") == SessionStatus.PROCESSING:
+            raise AppError("This session is already being processed.", status_code=409)
+        if self.jobs is None:
+            raise RuntimeError("Durable job queue is not configured for clip export.")
+        if await self._has_live_export(session):
+            raise AppError(
+                "A clip export is already running for this session. Wait for it to finish before re-cutting.",
+                status_code=409,
+            )
+
         video_path = session_video_path(session)
         video_duration = await self.media.get_video_duration_seconds(video_path)
         start_seconds = max(0.0, min(float(start), video_duration))
         end_seconds = max(0.0, min(float(end), video_duration))
         if end_seconds - start_seconds < self.media.settings.auto_crop_min_clip_seconds:
             raise AppError(f"Cropped duration must be at least {self.media.settings.auto_crop_min_clip_seconds}s.", status_code=400)
-        # A recrop lives beside its plan's clips when the clip has one, so the
-        # plan directory stays the unit of ownership for pruning.
-        plan_id = str(clip.get("planId") or "")
-        session_clip_dir = self.media.settings.paths.output_clips_dir / session_id
-        if plan_id:
-            session_clip_dir = session_clip_dir / plan_id
-        session_clip_dir.mkdir(parents=True, exist_ok=True)
-        safe_label = re.sub(r"[^a-zA-Z0-9-_]", "-", str(clip.get("label") or "clip")) or "clip"
-        new_file_name = f"{session_id}-{safe_label}-recrop-{self._epoch_ms()}.mp4"
-        output_path = session_clip_dir / new_file_name
-        await self.media.crop_video_segment(
-            input_path=video_path,
-            start_seconds=start_seconds,
-            end_seconds=end_seconds,
-            output_path=output_path,
-        )
-        stats = output_path.stat()
-        url_dir = f"/media/clips/{session_id}/{plan_id}" if plan_id else f"/media/clips/{session_id}"
-        patch = {
-            "start": start_seconds,
-            "end": end_seconds,
-            "fileName": new_file_name,
-            "absolutePath": str(output_path),
-            "url": f"{url_dir}/{new_file_name}",
-            "sizeBytes": stats.st_size,
-            "createdAt": self.pipeline.now_iso(),
-            "isDraft": False,
-        }
 
-        def apply(current: dict[str, Any]) -> Any:
-            find_clip(current, clip_id).update(patch)
+        # The recrop stays inside the clip's own plan directory, so the plan
+        # remains the unit of ownership for pruning and for child sessions that
+        # play a clip from it.
+        plan_id = str(clip.get("planId") or (session.get("clipExport") or {}).get("planId") or "")
+        requested_at = self.pipeline.now_iso()
+
+        def replan(current: dict[str, Any]) -> Any:
+            target = find_clip(current, clip_id)
+            target["start"] = start_seconds
+            target["end"] = end_seconds
+            target["revision"] = int(target.get("revision") or 0) + 1
+            # A draft is a range with no file — exactly what this clip now is,
+            # and what keeps it out of assessment until the new cut lands.
+            previous = str(target.get("absolutePath") or "")
+            if previous:
+                target["supersededFile"] = previous
+            target["isDraft"] = True
+            for key in ("fileName", "url", "absolutePath", "sizeBytes"):
+                target.pop(key, None)
+            current["clipExport"] = {
+                "planId": plan_id or None,
+                "status": EXPORT_QUEUED,
+                "scope": EXPORT_SCOPE_CLIP,
+                "clipIds": [str(clip_id)],
+                "total": 1,
+                "completed": 0,
+                "requestedAt": requested_at,
+                "startedAt": None,
+                "endedAt": None,
+                "error": None,
+                "jobId": None,
+            }
             return None
 
-        await self._commit(session, apply)
+        await self._commit(session, replan)
+
+        job = await self.jobs.enqueue(
+            session_id,
+            TaskType.EXPORT_CLIPS,
+            {
+                "clipCount": 1,
+                "planId": plan_id or None,
+                "scope": str(EXPORT_SCOPE_CLIP),
+                "clipIds": [str(clip_id)],
+            },
+        )
+        job_id = job.get("id")
+
+        def attach_job(current: dict[str, Any]) -> Any:
+            export = current.setdefault("clipExport", {})
+            if export.get("clipIds") != [str(clip_id)] or export.get("scope") != EXPORT_SCOPE_CLIP:
+                # Another export replaced this one between the two writes; its
+                # job id is not ours to set.
+                return False
+            export["jobId"] = job_id
+            return None
+
+        await self._commit(session, attach_job)
         return {
             "session": self.sessions.public_session(session),
             "clip": self._public_clip(find_clip(session, clip_id)),
+            "clipExport": dict(session.get("clipExport") or {}),
+            "job": self.jobs.public_job(job),
         }
 
+    @staticmethod
+    def _requested_clip_ids(
+        payload: dict[str, Any] | None,
+        export_record: dict[str, Any],
+    ) -> set[str] | None:
+        """Which clips this export job was queued for, or ``None`` for all of them.
+
+        The job payload is the authority — it was written when the request was
+        made and never changes — and the stored record is the fallback for a job
+        row enqueued before the payload carried the ids.
+        """
+        for source in (payload or {}, export_record or {}):
+            raw = source.get("clipIds")
+            if isinstance(raw, (list, tuple)) and raw:
+                return {str(item) for item in raw}
+        return None
+
+    async def _discard_superseded_cut(self, session_id: str, superseded: str, *, replacement: str) -> None:
+        """Delete the MP4 a recrop replaced, unless a child still plays it.
+
+        A child session assessed from the old cut keeps that file as its own
+        source video: deleting it would break playback and any re-run of that
+        assessment, exactly as ``_prune_stale_plan_dirs`` reasons about whole
+        plan directories. Best-effort — a file that will not delete must never
+        fail an export that succeeded.
+        """
+        if not superseded or not replacement or superseded == replacement:
+            return
+        superseded_path = Path(superseded)
+        try:
+            for child_id in await self.sessions.list_child_ids(session_id):
+                try:
+                    child = await self.sessions.read(child_id)
+                except FileNotFoundError:
+                    continue
+                child_video = ((child.get("files") or {}).get("video") or {}).get("absolutePath")
+                if child_video and Path(str(child_video)) == superseded_path:
+                    logger.info(
+                        "Kept the superseded cut %s: clip child %s still plays it.",
+                        superseded_path.name,
+                        child_id,
+                        extra=log_context(session_id, "clip_recrop_keep_superseded"),
+                    )
+                    return
+            await asyncio.to_thread(superseded_path.unlink, True)
+        except Exception:
+            logger.debug(
+                "Could not delete the superseded clip file %s.", superseded, exc_info=True
+            )
+
     async def assess_clip(self, session_id: str, clip_id: str) -> dict[str, Any]:
-        """Create a child session for one exported clip and queue its assessment.
+        """Assess one exported clip — idempotently, one child session per clip.
 
         Always queued, never run in the request. The child is a full pipeline
         run (transcription included), which is minutes to hours of work; the
         job queue owns retries, restart recovery and the session's status while
         it runs, and the clip row in the timeline shows the child's stage from
         the session index.
+
+        *One clip has one child session*, and this method is what maintains
+        that. A second request for a clip already being assessed returns the
+        child that is running rather than minting another one — a double click,
+        a second browser tab, or "Run selected" racing a single run used to
+        create duplicate children, each scoring the same student, and the
+        timeline row could then show whichever the session index happened to
+        order first. A request for a clip whose child has *finished* re-runs
+        that child in place, after refreshing what it points at: a clip re-cut
+        since the last assessment has a new MP4, and re-running against the old
+        one would score footage the user has already replaced.
         """
+        async with self._assess_locks.hold(f"{session_id}:{clip_id}"):
+            return await self._assess_clip_locked(session_id, clip_id)
+
+    async def _assess_clip_locked(self, session_id: str, clip_id: str) -> dict[str, Any]:
         parent_session = await self.sessions.read(session_id)
         clip = find_clip(parent_session, clip_id)
         if str(clip.get("kind") or "").lower() == ClipKind.INTERMISSION:
@@ -810,6 +1027,10 @@ class ClipService:
         if not case_study_path.exists():
             raise AppError("Case study file is missing for this session.", status_code=400)
 
+        existing = await self._existing_clip_child(session_id, clip_id)
+        if existing is not None:
+            return await self._resume_clip_child(parent_session, clip, existing)
+
         new_session_id = str(uuid4())
         preferred_name = f"{parent_session.get('name') or parent_session.get('id') or 'Session'} - {clip.get('label') or 'Clip'}"
         clip_session = {
@@ -824,7 +1045,7 @@ class ClipService:
                 "mode": self.media.settings.whisperx_device,
             },
             "parentSessionId": parent_session["id"],
-            "clipSource": {"clipId": clip.get("id"), "label": clip.get("label"), "planId": clip.get("planId")},
+            "clipSource": self._clip_source(clip),
             # Inherit the parent's transcription-corpus snapshot so the corpus
             # picked at upload biases every clip assessed within the session.
             "corpus": parent_session.get("corpus"),
@@ -875,6 +1096,106 @@ class ClipService:
             "parentSessionId": parent_session["id"],
             "clipId": clip.get("id"),
             "job": public_job,
+            # False when this call created the child; the browser uses it to
+            # say "queued" rather than "already queued".
+            "reused": False,
+        }
+
+    @staticmethod
+    def _clip_source(clip: dict[str, Any]) -> dict[str, Any]:
+        """What a child session records about the clip it assesses.
+
+        ``fileName`` and ``revision`` are the provenance a recrop makes
+        necessary: they say *which cut* of the clip was assessed, so the
+        timeline can tell a current assessment from one of footage that has
+        since been replaced.
+        """
+        return {
+            "clipId": clip.get("id"),
+            "label": clip.get("label"),
+            "planId": clip.get("planId"),
+            "fileName": clip.get("fileName"),
+            "revision": int(clip.get("revision") or 0),
+        }
+
+    async def _existing_clip_child(self, session_id: str, clip_id: str) -> dict[str, Any] | None:
+        """The newest child session assessing this clip, if one exists."""
+        # Looked up rather than called directly so a session store without the
+        # query — a test double, or a build where it is absent — degrades to
+        # the historical "always create a child" behaviour instead of failing
+        # the request.
+        finder = getattr(getattr(self.sessions, "repository", None), "find_clip_children", None)
+        if not callable(finder):
+            return None
+        children = await finder(session_id, str(clip_id))
+        return children[0] if children else None
+
+    async def _resume_clip_child(
+        self,
+        parent_session: dict[str, Any],
+        clip: dict[str, Any],
+        child: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Answer a repeat assessment request with the child that already exists.
+
+        In flight: hand back that child and its job — the work the caller asked
+        for is already happening. Terminal: point the child at the clip's
+        *current* MP4 and re-run it in place, so a clip re-cut since the last
+        assessment is scored as it is now rather than as it was.
+        """
+        child_id = str(child["id"])
+        parent_id = str(parent_session["id"])
+        clip_id = str(clip.get("id"))
+        if str(child.get("status") or "") in IN_FLIGHT_STATUSES:
+            session = await self.sessions.read(child_id)
+            logger.info(
+                "Clip %s is already being assessed by session %s; returning it.",
+                clip_id,
+                child_id,
+                extra=log_context(parent_id, "clip_assess_reuse", clip_id=clip_id),
+            )
+            return {
+                "session": self.sessions.public_session(session),
+                "parentSessionId": parent_id,
+                "clipId": clip.get("id"),
+                "job": (session.get("job") or None),
+                "reused": True,
+            }
+
+        if self.maintenance is None:
+            raise RuntimeError("Session maintenance is not configured; a finished clip child cannot be re-run.")
+
+        clip_path = Path(str(clip.get("absolutePath") or ""))
+        clip_source = self._clip_source(clip)
+        video_meta = {
+            "originalName": clip.get("fileName") or clip_path.name,
+            "fileName": clip.get("fileName") or clip_path.name,
+            "absolutePath": str(clip_path),
+            "sizeBytes": int(clip.get("sizeBytes") or 0),
+            "mimeType": "video/mp4",
+            "url": clip.get("url") or f"/media/clips/{parent_id}/{clip_path.name}",
+        }
+
+        def adopt_current_cut(current: dict[str, Any]) -> Any:
+            current.setdefault("files", {})["video"] = video_meta
+            current["clipSource"] = clip_source
+            return None
+
+        # Before the re-run, not after: the job may be claimed the moment it is
+        # enqueued, and it must read the clip this request is about.
+        await self.sessions.update(child_id, adopt_current_cut)
+        logger.info(
+            "Re-running the existing assessment of clip %s (session %s).",
+            clip_id,
+            child_id,
+            extra=log_context(parent_id, "clip_assess_rerun", clip_id=clip_id),
+        )
+        result = await self.maintenance.rerun_session(child_id)
+        return {
+            **result,
+            "parentSessionId": parent_id,
+            "clipId": clip.get("id"),
+            "reused": True,
         }
 
     async def rename_clip(self, session_id: str, clip_id: str, label: str) -> dict[str, Any]:
@@ -1000,6 +1321,10 @@ class ClipService:
             # True until the export job has cut this clip's MP4. The timeline
             # renders drafts, but nothing can be assessed until they land.
             "isDraft": bool(clip.get("isDraft")),
+            # How many times this clip has been re-cut. 0 for every clip a
+            # split produces; each recrop bumps it, and the browser uses it to
+            # tell a stale child assessment from a current one.
+            "revision": int(clip.get("revision") or 0),
         }
 
     @staticmethod
@@ -1028,9 +1353,3 @@ class ClipService:
             if str(clip.get("id")) == str(clip_id):
                 return index
         return -1
-
-    @staticmethod
-    def _epoch_ms() -> int:
-        import time
-
-        return int(time.time() * 1000)

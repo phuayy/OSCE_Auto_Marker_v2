@@ -725,16 +725,26 @@ class MediaPipeline:
         fixes the directory (a later plan with different boundaries can never
         find — and adopt — this plan's footage). Clips recorded before plans
         existed carry no ``planId`` and keep their flat legacy path.
+
+        ``revision`` is the third part of that identity, and it is what makes a
+        recrop safe. Adoption means "an MP4 at the expected path is a finished
+        cut", so re-cutting one clip with new boundaries *must* resolve to a
+        different path than the cut it replaces — otherwise the job would adopt
+        the old footage and the new bounds would silently never be applied.
+        Revision 0 (every clip a split produces) keeps the historical names
+        untouched; a re-cut clip carries ``-r<revision>``.
         """
         export_index = int(clip.get("exportIndex") or 0)
+        revision = int(clip.get("revision") or 0)
+        revision_suffix = f"-r{revision}" if revision > 0 else ""
         resolved_plan = str(plan_id or clip.get("planId") or "")
         session_dir = self.settings.paths.output_clips_dir / str(session_id)
         if resolved_plan:
-            file_name = f"clip-{export_index + 1}.mp4"
+            file_name = f"clip-{export_index + 1}{revision_suffix}.mp4"
             output_path = session_dir / resolved_plan / file_name
             url = f"/media/clips/{session_id}/{resolved_plan}/{file_name}"
         else:
-            file_name = f"{session_id}-clip-{export_index + 1}.mp4"
+            file_name = f"{session_id}-clip-{export_index + 1}{revision_suffix}.mp4"
             output_path = session_dir / file_name
             url = f"/media/clips/{session_id}/{file_name}"
         output_path.parent.mkdir(parents=True, exist_ok=True)

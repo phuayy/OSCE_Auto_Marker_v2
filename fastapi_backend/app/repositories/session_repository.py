@@ -368,6 +368,47 @@ class SessionRepository:
             )
             return [str(row) for row in result.scalars().all()]
 
+    async def find_clip_children(self, parent_session_id: str, clip_id: str) -> list[dict[str, Any]]:
+        """Assessment children of one *clip*, newest first.
+
+        A clip is meant to have exactly one child session, and this is what
+        makes "find or create" answerable without loading every child's whole
+        payload: the parent is an indexed column and the clip id is extracted
+        from ``clip_source`` inside the database. More than one row here means
+        an older build created duplicates; newest-first ordering makes the most
+        recent one the one the UI and the re-run path act on.
+        """
+        async with self.database.session() as db_session:
+            rows = (
+                await db_session.execute(
+                    select(
+                        SessionRecord.id,
+                        SessionRecord.status,
+                        SessionRecord.created_at,
+                        SessionRecord.clip_source,
+                    )
+                    .where(
+                        SessionRecord.parent_session_id == parent_session_id,
+                        SessionRecord.clip_source["clipId"].as_string() == str(clip_id),
+                    )
+                    .order_by(SessionRecord.created_at.desc())
+                )
+            ).all()
+        children: list[dict[str, Any]] = []
+        for row in rows:
+            created_at = row.created_at
+            if created_at is not None and created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            children.append(
+                {
+                    "id": row.id,
+                    "status": row.status or None,
+                    "createdAt": created_at.isoformat().replace("+00:00", "Z") if created_at else None,
+                    "clipSource": row.clip_source or None,
+                }
+            )
+        return children
+
     async def delete(self, session_id: str) -> bool:
         async with self.database.transaction() as db_session:
             record = await db_session.get(SessionRecord, session_id)

@@ -51,6 +51,11 @@ export const ClipExportStatus = Object.freeze({
   "FAILED": "failed"
 });
 
+export const ClipExportScope = Object.freeze({
+  "PLAN": "plan",
+  "CLIP": "clip"
+});
+
 export const JobStatus = Object.freeze({
   "WAITING_FOR_UPLOAD": "waiting_for_upload",
   "QUEUED": "queued",

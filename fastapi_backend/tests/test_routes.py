@@ -570,3 +570,71 @@ def test_recover_expired_uploads_reclaims_abandoned_and_spares_fresh(tmp_path) -
     assert fresh_parts.exists()
     fresh_session = asyncio.run(container.sessions.read(str(fresh_upload["sessionId"])))
     assert fresh_session["status"] == "waiting_for_upload"
+
+
+def test_recrop_answers_202_with_a_queued_job(tmp_path) -> None:
+    """Re-cutting a clip is queued work, not work done in the request.
+
+    The handler used to run ffmpeg inline and answer 200 with the finished
+    clip; it now answers 202 with the clip as a draft and the export job that
+    will cut it.
+    """
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    container = client.app.state.container
+
+    video_path = tmp_path / "recording.mp4"
+    video_path.write_bytes(b"video")
+    clip_path = tmp_path / "clip-1.mp4"
+    clip_path.write_bytes(b"clip")
+    asyncio.run(
+        container.sessions.write(
+            {
+                "id": "s-recrop",
+                "name": "Long Station",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "status": "cropped",
+                "workflow": "long",
+                "files": {"video": {"absolutePath": str(video_path)}},
+                "outputs": {
+                    "videoClips": [
+                        {
+                            "id": "clip-a",
+                            "label": "Student A",
+                            "kind": "session",
+                            "start": 0.0,
+                            "end": 120.0,
+                            "exportIndex": 0,
+                            "planId": "plan-1",
+                            "fileName": "clip-1.mp4",
+                            "absolutePath": str(clip_path),
+                            "url": "/media/clips/s-recrop/plan-1/clip-1.mp4",
+                            "isDraft": False,
+                        }
+                    ]
+                },
+            }
+        )
+    )
+
+    async def fake_video_duration(_path: Path) -> float:
+        return 600.0
+
+    container.media.get_video_duration_seconds = fake_video_duration
+
+    response = client.post(
+        "/api/sessions/s-recrop/clips/clip-a/recrop",
+        headers=headers,
+        json={"start": 10.0, "end": 140.0},
+    )
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["job"]["taskType"] == "export_clips"
+    assert body["clipExport"]["scope"] == "clip"
+    assert body["clipExport"]["clipIds"] == ["clip-a"]
+    # The clip comes back as a draft: its new range exists, its MP4 does not yet.
+    assert body["clip"]["isDraft"] is True
+    assert body["clip"]["revision"] == 1
+    assert (body["clip"]["start"], body["clip"]["end"]) == (10.0, 140.0)

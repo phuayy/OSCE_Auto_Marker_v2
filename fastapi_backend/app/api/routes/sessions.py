@@ -196,15 +196,23 @@ async def create_manual_clips(
         raise http_error(error, fallback_message="Manual clip split failed.", not_found_message="Session not found.") from error
 
 
-@router.post("/{session_id}/clips/{clip_id}/recrop")
+@router.post("/{session_id}/clips/{clip_id}/recrop", status_code=202)
 async def recrop_clip(
     session_id: str,
     clip_id: str,
     payload: RecropClipRequest,
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
+    """Move a clip's boundaries and queue the job that re-cuts its MP4.
+
+    202, not 200: the response carries the clip as a draft with its new range
+    and a job id; the MP4 is cut afterwards by the same ``export_clips`` job a
+    full split uses. Cutting it here held the connection for minutes on a long
+    station and lost the work on a restart. Poll the session's ``clipExport``
+    for progress.
+    """
     try:
-        return await container.clips.recrop_clip(session_id, clip_id, payload.start, payload.end)
+        return await container.clips.request_clip_recrop(session_id, clip_id, payload.start, payload.end)
     except Exception as error:
         raise http_error(error, fallback_message="Recrop failed.", not_found_message="Session not found.") from error
 
