@@ -69,6 +69,35 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
+def _compact_steps(value: Any) -> dict[str, Any] | None:
+    """Status + live progress for every pipeline step, for the list projection.
+
+    Under ``PARALLEL_SCORING`` more than one step can be ``running`` at once
+    (the content and communication branches), so the card needs every step's
+    own reading — not just the single ``currentStep``/``stepProgress`` pair —
+    to gauge them independently. Metadata, error text and timestamps are
+    dropped: the cards have no use for them, and shipping them would turn a
+    lightweight list poll back into the megabyte-per-row read this projection
+    exists to avoid.
+
+    ``None`` when the session has not recorded a ``pipeline.steps`` object at
+    all (a fresh or pre-migration row); ``{}`` when it has one but it is
+    empty. Progress is coerced with :func:`_optional_float` for the same
+    SQLite-hands-back-a-string reason ``stepProgress`` already needs it.
+    """
+    if not isinstance(value, dict):
+        return None
+    compact: dict[str, Any] = {}
+    for name, state in value.items():
+        if not isinstance(state, dict):
+            continue
+        compact[str(name)] = {
+            "status": state.get("status"),
+            "progress": _optional_float(state.get("progress")),
+        }
+    return compact
+
+
 def _record_to_dict(record: SessionRecord) -> dict[str, Any]:
     result = dict(record.payload or {})
     result["id"] = record.id
@@ -280,6 +309,7 @@ class SessionRepository:
             payload["segmentation"].as_string().label("segmentation"),
             payload["pipeline", "currentStep"].as_string().label("current_step"),
             payload["pipeline", "stepProgress"].as_float().label("step_progress"),
+            payload["pipeline", "steps"].as_json().label("steps"),
             payload["pipeline", "startedAt"].as_string().label("pipeline_started_at"),
             payload["outputs", "videoClips", 0, "id"].as_string().label("first_clip_id"),
             payload["clipExport", "status"].as_string().label("clip_export_status"),
@@ -311,6 +341,9 @@ class SessionRepository:
                     # Live completion of the current step (0-100), present only
                     # while a step that reports progress is running.
                     "stepProgress": _optional_float(row.step_progress),
+                    # Per-step status + progress, so a parallel branch's own
+                    # reading survives even while it is not `currentStep`.
+                    "steps": _compact_steps(row.steps),
                     "pipelineStartedAt": row.pipeline_started_at or None,
                     # Clip-export progress. Unlike the pipeline the export does
                     # not move session.status, so the list poll needs these to

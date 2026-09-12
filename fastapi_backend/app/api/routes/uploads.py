@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from app.api.dependencies import get_container
 from app.core.exceptions import AppError
-from app.domain.sessions import empty_outputs
+from app.domain.sessions import SessionStatus, empty_outputs
 from app.schemas.uploads import LegacyUploadForm
 from app.services.container import AppContainer
 
@@ -72,7 +72,7 @@ async def upload_session(
             "id": session_id,
             "name": form.sessionName or "",
             "createdAt": container.pipeline.now_iso(),
-            "status": "uploaded",
+            "status": SessionStatus.UPLOADED,
             # Persisting the workflow is what lets the frontend render a long
             # session with the clip workflow (and gate it while cropping) even
             # on this legacy path — deriving it from detected clips alone

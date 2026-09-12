@@ -37,6 +37,7 @@ from fastapi import UploadFile
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.utils import atomic_replace, sanitize_file_name
+from app.domain.enums import UploadStatus
 from app.storage.base import (
     PreparedUploadFile,
     SourceFileKind,
@@ -287,7 +288,7 @@ class GcsObjectStorageService:
         actually stored. A declared checksum that does not match is a hard
         failure — the same guarantee the local backend gives at assembly time.
         """
-        if file_record.get("status") == "committed" and file_record.get("storageRef"):
+        if file_record.get("status") == UploadStatus.COMMITTED and file_record.get("storageRef"):
             return dict(file_record["storageRef"])
 
         key = self._safe_key(str(file_record["key"]))

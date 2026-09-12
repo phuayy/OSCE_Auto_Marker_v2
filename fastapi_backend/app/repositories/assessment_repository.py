@@ -15,6 +15,21 @@ from app.database.models import (
     utc_now,
 )
 from app.database.orm import OrmDatabase
+from app.domain.enums import AssessmentResultStatus
+
+
+def _communication_rubric_id(payload: dict[str, Any]) -> str | None:
+    """Which parsed communication rubric produced this session's marks.
+
+    Recorded on the ``communicationScores`` output by the scoring step, so it
+    is written in the same commit as the artefact it describes. Sessions
+    written before that moved carry it at the top level; read both.
+    """
+    output = (payload.get("outputs") or {}).get("communicationScores")
+    if isinstance(output, dict) and output.get("rubricAssetId"):
+        return str(output["rubricAssetId"])
+    legacy = payload.get("communicationRubricAssetId")
+    return str(legacy) if legacy else None
 
 
 class AssessmentRepository:
@@ -119,7 +134,7 @@ class AssessmentRepository:
         video = files.get("video") or {}
         assessment.student_id = student_id
         assessment.case_study_rubric_id = case_study.get("rubricAssetId") or None
-        assessment.communication_rubric_id = payload.get("communicationRubricAssetId") or None
+        assessment.communication_rubric_id = _communication_rubric_id(payload)
         assessment.parent_session_id = payload.get("parentSessionId") or None
         assessment.workflow = payload.get("workflow") or (payload.get("clipSource") or {}).get("workflow")
         assessment.status = str(payload.get("status") or "unknown")
@@ -163,7 +178,7 @@ class AssessmentRepository:
             await session.flush()
 
         result.examiner_id = examiner_id
-        result.status = str(payload.get("status") or "completed")
+        result.status = str(payload.get("status") or AssessmentResultStatus.COMPLETED)
         result.score_total = self._float_or_none(payload.get("scoreTotal"))
         result.score_max = self._float_or_none(payload.get("scoreMax"))
         result.pass_fail = self._str_or_none(payload.get("passFail"))

@@ -20,6 +20,7 @@ from fastapi import UploadFile
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.utils import atomic_replace, sanitize_file_name, utc_now_iso
+from app.domain.enums import UploadStatus
 from app.storage.base import (
     PreparedUploadFile,
     SourceFileKind,
@@ -155,10 +156,10 @@ class LocalObjectStorageService:
     async def put_part(self, upload: dict[str, Any], file_id: str, part_number: int, body: bytes) -> dict[str, Any]:
         if part_number < 1:
             raise AppError("partNumber must be greater than zero.", status_code=400)
-        if upload.get("status") not in {"initiated", "uploading"}:
+        if upload.get("status") not in {UploadStatus.INITIATED, UploadStatus.UPLOADING}:
             raise AppError("Upload is not accepting parts.", status_code=409)
         file_record = find_upload_file(upload, file_id)
-        if file_record.get("status") in {"committed", "aborted"}:
+        if file_record.get("status") in {UploadStatus.COMMITTED, UploadStatus.ABORTED}:
             raise AppError("File upload is already finalized.", status_code=409)
         if len(body) > self.settings.upload_part_size_bytes:
             raise AppError("Uploaded part exceeds configured part size.", status_code=413)
@@ -209,8 +210,8 @@ class LocalObjectStorageService:
         parts.sort(key=lambda item: int(item.get("partNumber") or 0))
         file_record["parts"] = parts
         file_record["uploadedBytes"] = sum(int(part.get("sizeBytes") or 0) for part in parts)
-        file_record["status"] = "uploading"
-        upload["status"] = "uploading"
+        file_record["status"] = UploadStatus.UPLOADING
+        upload["status"] = UploadStatus.UPLOADING
         return {
             "fileId": file_id,
             "partNumber": part_number,
@@ -220,7 +221,7 @@ class LocalObjectStorageService:
         }
 
     async def complete_file(self, upload: dict[str, Any], file_record: dict[str, Any]) -> dict[str, Any]:
-        if file_record.get("status") == "committed" and file_record.get("storageRef"):
+        if file_record.get("status") == UploadStatus.COMMITTED and file_record.get("storageRef"):
             return dict(file_record["storageRef"])
 
         expected_size = int(file_record.get("sizeBytes") or 0)

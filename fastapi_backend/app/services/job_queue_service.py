@@ -21,7 +21,7 @@ from app.domain.jobs import (
     JobStatus,
 )
 from app.domain.session_lifecycle import fail_session
-from app.domain.sessions import JOB_DRIVEN_STATUSES
+from app.domain.sessions import JOB_DRIVEN_STATUSES, SessionStatus
 from app.repositories.job_repository import JobRepository
 from app.services.event_service import EventService
 from app.services.job_tasks import get_task_spec, queue_owns_session_status
@@ -759,10 +759,10 @@ class JobQueueService:
                 # are actively working in.
                 return None
             if job_status == JobStatus.RUNNING:
-                session["status"] = "processing"
+                session["status"] = SessionStatus.PROCESSING
                 session["error"] = None
-            elif job_status == JobStatus.QUEUED and session.get("status") != "completed":
-                session["status"] = JobStatus.QUEUED
+            elif job_status == JobStatus.QUEUED and session.get("status") != SessionStatus.COMPLETED:
+                session["status"] = SessionStatus.QUEUED
                 session["error"] = None
             return None
 

@@ -41,6 +41,29 @@ class ClipExportStatus(StrEnum):
     FAILED = "failed"
 
 
+class ClipExportScope(StrEnum):
+    """How much of a session's clip list one export job cuts.
+
+    ``plan`` is a whole split — every session clip in the current plan, which
+    is what "Export clips" queues. ``clip`` is a re-cut of individual clips
+    whose boundaries changed after the split; it runs through the same job so
+    a recrop is durable, resumable and gauged exactly like an export, but the
+    editor keeps its selection instead of being handed a fresh clip list.
+    """
+
+    PLAN = "plan"
+    CLIP = "clip"
+
+
+class AssessmentResultStatus(StrEnum):
+    """Status of one scorer's row in ``assessment_results`` — a vocabulary of
+    its own, not ``SessionStatus``/``StepStatus``: by the time a scorer's
+    output reaches ``AssessmentService``, the step that produced it has
+    already succeeded, so today this only ever takes one value."""
+
+    COMPLETED = "completed"
+
+
 class TaskType(StrEnum):
     PROCESS_SESSION = "process_session"
     AUTO_CROP = "auto_crop"

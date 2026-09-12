@@ -27,6 +27,7 @@ from fastapi import UploadFile
 
 from app.core.exceptions import AppError
 from app.core.utils import utc_now_iso
+from app.domain.enums import UploadStatus
 
 
 SourceFileKind = Literal["video", "caseStudy"]
@@ -161,7 +162,7 @@ def build_storage_ref(
         "checksumSha256": digest,
         "etag": etag or digest,
         "generation": generation,
-        "status": "committed",
+        "status": UploadStatus.COMMITTED,
         "committedAt": utc_now_iso(),
     }
 
@@ -186,7 +187,7 @@ def mark_file_committed(
     storage_ref: dict[str, Any],
     expected_size: int,
 ) -> None:
-    file_record["status"] = "committed"
+    file_record["status"] = UploadStatus.COMMITTED
     file_record["uploadedBytes"] = expected_size
     file_record["storageRef"] = storage_ref
 

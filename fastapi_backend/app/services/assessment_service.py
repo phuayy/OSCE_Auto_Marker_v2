@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from app.core.artifacts import read_artifact_payload
+from app.domain.enums import AssessmentResultStatus
 from app.repositories.assessment_repository import AssessmentRepository
 
 
@@ -52,7 +53,7 @@ class AssessmentService:
         )
         return {
             "resultType": result_type,
-            "status": "completed",
+            "status": AssessmentResultStatus.COMPLETED,
             # "yes_count" is the achieved score for the content scorer's Yes/No
             # checklist summary, which emits no total_score key.
             "scoreTotal": self._first_value(summary, "total_score", "score", "achieved_score", "yes_count"),
