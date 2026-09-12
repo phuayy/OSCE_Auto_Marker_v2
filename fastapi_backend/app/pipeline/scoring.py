@@ -324,8 +324,9 @@ class ScoringPipeline:
         if audio_prof_path and Path(str(audio_prof_path)).exists():
             args.extend(["--audio-professionalism", str(audio_prof_path)])
         parsed_rubric = await self.rubric_service.ensure_parsed()
-        if isinstance(parsed_rubric, dict) and parsed_rubric.get("rubric_asset_id"):
-            session["communicationRubricAssetId"] = parsed_rubric["rubric_asset_id"]
+        rubric_asset_id = (
+            parsed_rubric.get("rubric_asset_id") if isinstance(parsed_rubric, dict) else None
+        )
         rubric_json_path = self.settings.paths.communication_rubric_json_path
         if rubric_json_path.exists():
             args.extend(["--parsed-rubric", str(rubric_json_path)])
@@ -350,4 +351,11 @@ class ScoringPipeline:
         if not output_path.exists():
             raise RuntimeError("Communication scorer did not produce an output file.")
         await asyncio.to_thread(lambda: extract_json_object(output_path.read_text(encoding="utf-8")))
-        return artifact_metadata(output_path, "/media/communication-scores")
+        artifact: dict[str, Any] = dict(artifact_metadata(output_path, "/media/communication-scores"))
+        if rubric_asset_id:
+            # Which parsed rubric produced these marks. It rides the output
+            # record because PipelineService stores that record through
+            # _assign_output inside _commit: a value written onto the caller's
+            # working dict instead would be wiped by the very next commit.
+            artifact["rubricAssetId"] = str(rubric_asset_id)
+        return artifact
