@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ensureStreamTicket, resolveMediaUrl } from '@/auth';
 import { useChangeStream } from '@/changeStream';
-import { apiJson } from '@/lib/apiFetch';
+import { ApiError, ERROR_KIND, apiJson } from '@/lib/apiFetch';
+import { DEFAULT_PART_CONCURRENCY, recordedPartNumbers, uploadParts } from '@/lib/partUpload';
 import { CONNECTION_STATUS, useConnectionStatus } from '@/lib/connectionStatus';
 import { ConnectionBadge, ConnectionNotice } from '@/components/ConnectionStatus';
 import {
@@ -410,6 +411,7 @@ export default function OSCEAiMarkerMockup({
   const [sessionNameDrafts, setSessionNameDrafts] = useState({});
   const [renamingSessionId, setRenamingSessionId] = useState(null);
   const [deletingSessionId, setDeletingSessionId] = useState(null);
+  const [rerunningSessionId, setRerunningSessionId] = useState(null);
 
   const [session, setSession] = useState(null);
   const [transcript, setTranscript] = useState({ segments: [] });
@@ -1570,11 +1572,57 @@ export default function OSCEAiMarkerMockup({
       );
     }
 
+    if (sessionEntry.status === 'failed') {
+      // A failed session opens (its partial artefacts are worth seeing), and it
+      // can be re-run in place: same id, fresh job. The reason it failed is
+      // rendered on the card itself — see the session list.
+      return (
+        <>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => rerunSession(sessionEntry.id)}
+            disabled={rerunningSessionId === sessionEntry.id}
+            className="gap-1"
+            title="Queue a fresh run of this session under the same id"
+          >
+            {rerunningSessionId === sessionEntry.id ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <RotateCw className="h-3 w-3" />
+            )}
+            Re-run
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => openExistingSession(sessionEntry.id)}>
+            Open
+          </Button>
+        </>
+      );
+    }
+
     return (
       <Button size="sm" variant="outline" onClick={() => openExistingSession(sessionEntry.id)}>
         Open
       </Button>
     );
+  }
+
+  // Queue a fresh run of a failed session. The server resets its outputs and
+  // enqueues a job; the card takes over from there through the list poll.
+  async function rerunSession(sessionId) {
+    setRerunningSessionId(sessionId);
+    try {
+      await apiJson(`/api/sessions/${sessionId}/rerun`, {
+        method: 'POST',
+        fallbackMessage: 'The session could not be re-run.',
+      });
+      setNotice('Re-run queued. Track its stage on the session card.');
+      await refreshSessionIndex({ silent: true });
+    } catch (error) {
+      setSessionIndexError(error.message || 'The session could not be re-run.');
+    } finally {
+      setRerunningSessionId(null);
+    }
   }
 
   function goHome() {
@@ -2061,7 +2109,7 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
-  async function uploadFileParts(file, fileUpload, onProgress) {
+  async function uploadFileParts(file, fileUpload, onProgress, { completedParts } = {}) {
     // The backend picks the transport at initiate: parts relayed through this
     // API on a local deployment, straight at the bucket on a cloud one.
     if (fileUpload.strategy === 'gcs_resumable') {
@@ -2078,49 +2126,55 @@ export default function OSCEAiMarkerMockup({
       throw new Error('Upload plan did not include a valid part size.');
     }
 
-    let uploadedBytes = 0;
-    let partNumber = 1;
-    for (let offset = 0; offset < file.size; offset += partSize) {
-      const chunk = file.slice(offset, Math.min(offset + partSize, file.size));
-      const partUrl = fileUpload.partUrlTemplate.replace('{partNumber}', String(partNumber));
+    // Parts go through the same door as every other API call: a 502 from the
+    // proxy or a dropped socket is retried with jitter instead of ending the
+    // transfer, and storing a part is idempotent on the server, so a retry of
+    // a part whose response was lost is safe. Several parts are in flight at
+    // once — the server serialises them per upload, so none can be lost.
+    return uploadParts({
+      file,
+      partSize,
+      completedParts,
+      concurrency: DEFAULT_PART_CONCURRENCY,
+      putPart: (partNumber, chunk) =>
+        apiJson(fileUpload.partUrlTemplate.replace('{partNumber}', String(partNumber)), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: chunk,
+          idempotent: true,
+          fallbackMessage: `Upload part ${partNumber} failed.`,
+        }),
+      onProgress: (uploadedBytes) => onProgress?.(uploadedBytes, file.size, fileUpload),
+    });
+  }
 
-      // Retry up to 3 attempts with exponential back-off for transient network errors.
-      const delays = [1000, 2000];
-      let lastError;
-      let response;
-      for (let attempt = 0; attempt <= delays.length; attempt++) {
-        try {
-          response = await fetch(partUrl, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/octet-stream' },
-            body: chunk,
-          });
-          lastError = null;
-          break;
-        } catch (networkErr) {
-          lastError = networkErr;
-          if (attempt < delays.length) {
-            await new Promise((r) => setTimeout(r, delays[attempt]));
-          }
-        }
+  // One transfer of one file, resumed once from the server's own ledger if it
+  // breaks. `GET /uploads/{id}` says exactly which parts arrived, so an outage
+  // in the middle of a 2 GB video costs the parts in flight, not the file.
+  // A 4xx is the server refusing the request itself and is not retried.
+  async function uploadFileWithResume(uploadId, file, fileUpload, onProgress) {
+    try {
+      return await uploadFileParts(file, fileUpload, onProgress);
+    } catch (error) {
+      const refused = error instanceof ApiError && (error.kind === ERROR_KIND.CLIENT || error.kind === ERROR_KIND.ABORT);
+      if (refused || fileUpload.strategy !== 'local_multipart') {
+        throw error;
       }
-      if (lastError) throw lastError;
-
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || `Upload part ${partNumber} failed.`);
-      }
-      uploadedBytes += chunk.size;
-      onProgress?.(uploadedBytes, file.size, fileUpload);
-      partNumber += 1;
+      setProcessingMessage('Connection interrupted — resuming upload from the last saved part...');
+      const status = await apiJson(`/api/uploads/${uploadId}`, {
+        fallbackMessage: 'Could not read the upload status to resume.',
+      });
+      return uploadFileParts(file, fileUpload, onProgress, {
+        completedParts: recordedPartNumbers(status, fileUpload.fileId),
+      });
     }
   }
 
   async function runAsyncUploadAssessment() {
-    const initiateResponse = await fetch('/api/uploads/initiate', {
+    const initiateBody = await apiJson('/api/uploads/initiate', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      fallbackMessage: 'Async upload initiation failed.',
+      json: {
         workflow: uploadFlow,
         autoProcess: true,
         sessionName: sessionNameInput.trim() || null,
@@ -2141,14 +2195,8 @@ export default function OSCEAiMarkerMockup({
             sizeBytes: caseStudyFile.size,
           },
         ],
-      }),
+      },
     });
-    const initiateBody = await initiateResponse.json().catch(() => ({}));
-    if (!initiateResponse.ok) {
-      const error = new Error(initiateBody.error || 'Async upload initiation failed.');
-      error.status = initiateResponse.status;
-      throw error;
-    }
 
     const sessionId = initiateBody.session?.id;
     if (!sessionId) {
@@ -2184,21 +2232,20 @@ export default function OSCEAiMarkerMockup({
       uploadTracker.reportProgress(sessionId, bytesFromCompletedFiles + uploadedBytes, label);
     };
 
-    await uploadFileParts(videoFile, videoPlan, updateUploadProgress);
+    await uploadFileWithResume(initiateBody.uploadId, videoFile, videoPlan, updateUploadProgress);
     bytesFromCompletedFiles += videoFile.size;
-    await uploadFileParts(caseStudyFile, caseStudyPlan, updateUploadProgress);
+    await uploadFileWithResume(initiateBody.uploadId, caseStudyFile, caseStudyPlan, updateUploadProgress);
 
     uploadTracker.setPhase(sessionId, UPLOAD_PHASE.FINALIZING);
     setProcessingMessage('Finalizing upload and verifying media...');
-    const completeResponse = await fetch(`/api/uploads/${initiateBody.uploadId}/complete`, {
+    // `complete` is idempotent on the server (a repeat returns the same
+    // assembling/committed record), so a lost response is safe to retry.
+    await apiJson(`/api/uploads/${initiateBody.uploadId}/complete`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ autoProcess: true }),
+      json: { autoProcess: true },
+      idempotent: true,
+      fallbackMessage: 'Upload finalization failed.',
     });
-    const completeBody = await completeResponse.json().catch(() => ({}));
-    if (!completeResponse.ok) {
-      throw new Error(completeBody.error || 'Upload finalization failed.');
-    }
     // Upload is committed and the job is queued. Return the user to the main
     // page: the session card shows the live stage, other sessions stay fully
     // browsable, and this session unlocks when processing completes.
@@ -2209,69 +2256,6 @@ export default function OSCEAiMarkerMockup({
     uploadTracker.setPhase(sessionId, UPLOAD_PHASE.DONE);
     uploadTracker.forget(sessionId);
     activeUploadSessionIdRef.current = null;
-    setSession(null);
-    setIsUploading(false);
-    setIsProcessing(false);
-    setSessionNameInput('');
-    setNotice('Assessment started. Track its stage on the session card — it unlocks when finished.');
-    await refreshSessionIndex();
-    setShowWorkspace(false);
-  }
-
-  async function runLegacyUploadAssessment() {
-    const formData = new FormData();
-    formData.append('video', videoFile);
-    formData.append('caseStudy', caseStudyFile);
-    // The backend persists the workflow so a long session renders the clip
-    // workflow (and is gated while cropping) even via this legacy path.
-    formData.append('workflow', uploadFlow);
-    if (sessionNameInput.trim()) {
-      formData.append('sessionName', sessionNameInput.trim());
-    }
-    if (uploadFlow === 'long') {
-      formData.append('segmentation', segmentationMethod);
-      const options = buildSegmentationOptions();
-      if (options) {
-        // Multipart cannot carry a nested object; the backend parses this
-        // field through the same validated model the JSON path uses.
-        formData.append('segmentationOptions', JSON.stringify(options));
-      }
-    }
-    if (selectedCorpusId) {
-      formData.append('corpusId', selectedCorpusId);
-    }
-
-    const uploadResponse = await fetch('/api/upload', {
-      method: 'POST',
-      body: formData,
-    });
-
-    const uploadBody = await uploadResponse.json().catch(() => ({}));
-    if (!uploadResponse.ok) {
-      throw new Error(uploadBody.error || 'Upload failed.');
-    }
-
-    // The legacy backend runs processing synchronously inside the request, so
-    // it is deliberately NOT awaited: kick it off, return the user to the main
-    // page, and let the 8-second list poll drive the session card's stage
-    // gauge. The card unlocks (button becomes "Open") on a terminal status.
-    const sessionId = uploadBody.session?.id;
-    if (!sessionId) {
-      throw new Error('Upload did not return a session ID.');
-    }
-    const kickoff =
-      uploadFlow === 'long'
-        ? fetch(`/api/sessions/${sessionId}/auto-crop`, { method: 'POST' })
-        : fetch(`/api/sessions/${sessionId}/process`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode: 'gpu' }),
-          });
-    kickoff
-      .catch(() => {})
-      // Success or failure, the durable session status is the source of truth.
-      .then(() => refreshSessionIndex());
-
     setSession(null);
     setIsUploading(false);
     setIsProcessing(false);
@@ -2344,15 +2328,7 @@ export default function OSCEAiMarkerMockup({
     setProcessingMessage('Preparing cloud-ready upload...');
 
     try {
-      try {
-        await runAsyncUploadAssessment();
-      } catch (asyncError) {
-        if (![404, 405, 501].includes(Number(asyncError.status || 0))) {
-          throw asyncError;
-        }
-        setProcessingMessage('Async upload unavailable. Falling back to compatibility upload...');
-        await runLegacyUploadAssessment();
-      }
+      await runAsyncUploadAssessment();
     } catch (requestError) {
       const message = requestError.message || 'Unknown error. Check that the backend is running.';
       // The overlay may well be dismissed by now, so the failure has to be
@@ -3008,14 +2984,12 @@ export default function OSCEAiMarkerMockup({
     }));
 
     try {
-      const response = await fetch(`/api/sessions/${session.id}/clips/${clip.id}/assess?defer=1`, {
+      // 202: the child session is created and its job queued; nothing is
+      // scored inside the request.
+      const body = await apiJson(`/api/sessions/${session.id}/clips/${clip.id}/assess`, {
         method: 'POST',
+        fallbackMessage: 'Clip assessment could not be queued.',
       });
-
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Clip assessment failed.');
-      }
 
       const clipSession = body.session;
       if (!clipSession?.id) {
@@ -4071,6 +4045,15 @@ export default function OSCEAiMarkerMockup({
                                 </div>
                               );
                             })()}
+                            {sessionEntry.status === 'failed' && sessionEntry.error ? (
+                              // The list projection carries the failure reason so a
+                              // session the user cannot usefully open still says why —
+                              // including "interrupted by a server restart", which the
+                              // startup reconciliation writes for jobs that died.
+                              <div className="mt-2 rounded border border-rose-100 bg-rose-50 px-2 py-1 text-[11px] leading-snug text-rose-700">
+                                {sessionEntry.error}
+                              </div>
+                            ) : null}
                           </div>
                           <div className="flex shrink-0 items-center gap-1">
                             {renderSessionAction(sessionEntry)}
