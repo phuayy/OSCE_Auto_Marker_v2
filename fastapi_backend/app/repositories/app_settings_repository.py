@@ -30,6 +30,12 @@ TRANSCRIPTION_OPTIONS_KEY = "transcriptionEngineOptions"
 # is dumped verbatim to anyone who can open the settings screen.
 LLM_PRIMARY_KEY = "llmPrimary"
 LLM_FALLBACKS_KEY = "llmFallbacks"
+# How content is marked: "single" (one model, the routing above) or "panel"
+# (several markers plus an adjudicator, described by the panel key). The panel
+# value has the shape of app.llm.panel.PanelConfig.to_public() minus the
+# schema field: {"markers": [...], "adjudicator": {...}, "tieBreak": "..."}.
+LLM_MARKING_MODE_KEY = "llmMarkingMode"
+LLM_PANEL_KEY = "llmPanel"
 
 # Known settings and their defaults. GET merges stored rows over these so the
 # API response shape stays stable as settings are added. An empty engine id
@@ -43,6 +49,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # an install that predates the LLM router behave identically.
     LLM_PRIMARY_KEY: {},
     LLM_FALLBACKS_KEY: [],
+    # Single-model marking is what every deployment ran before the panel
+    # existed, so a missing row must mean exactly that.
+    LLM_MARKING_MODE_KEY: "single",
+    LLM_PANEL_KEY: {},
 }
 
 
@@ -163,6 +173,23 @@ class AppSettingsRepository:
         if not isinstance(fallbacks, list):
             fallbacks = []
         return dict(primary), [dict(item) for item in fallbacks if isinstance(item, dict)]
+
+    async def marking_selection(self) -> tuple[str, dict[str, Any]]:
+        """Live read for the scoring pipeline: the marking mode and the raw
+        panel configuration.
+
+        Same freshness contract as ``llm_routing_selection`` — the snapshot is
+        evicted by this process's own writes and by the table's change
+        announcement in every other one — and the same refusal to swallow a
+        read failure: silently marking with one model when the operator chose
+        a panel changes what a student's sheet means.
+        """
+        settings = await self._snapshot()
+        mode = str(settings.get(LLM_MARKING_MODE_KEY) or "single")
+        panel = settings.get(LLM_PANEL_KEY)
+        if not isinstance(panel, dict):
+            panel = {}
+        return mode, dict(panel)
 
     async def llm_preprocess_enabled(self) -> bool:
         """Live read for the pipeline. A read failure means 'off' — a settings

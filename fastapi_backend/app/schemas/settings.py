@@ -18,6 +18,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.llm.panel import MarkingMode, TieBreak
 from app.pipeline.transcription import registry
 
 
@@ -111,6 +112,41 @@ class SetProviderKeyRequest(BaseModel):
         return key
 
 
+class PanelPayload(BaseModel):
+    """The multi-model marking panel as the settings screen submits it.
+
+    Shape only, like every other payload here: the markers exist as
+    provider/model pairs, the tie-break is one of the known policies. Whether
+    the panel is *coherent* — enough markers, no duplicates, an adjudicator —
+    is ``PanelConfig.validate()``'s question, asked by the route only when the
+    mode is ``panel``: an operator must be able to save a half-built panel
+    while single mode is selected.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    markers: list[LLMTargetPayload] = []
+    adjudicator: LLMTargetPayload = LLMTargetPayload()
+    tieBreak: str = str(TieBreak.LENIENT)
+
+    @field_validator("markers")
+    @classmethod
+    def usable_markers(cls, value: list[LLMTargetPayload]) -> list[LLMTargetPayload]:
+        # Same rule as fallbacks: a blank dropdown row is "no marker", not an
+        # error, and is not stored.
+        return [target for target in (value or []) if target.providerId]
+
+    @field_validator("tieBreak")
+    @classmethod
+    def known_tie_break(cls, value: str) -> str:
+        token = str(value or "").strip().lower() or str(TieBreak.LENIENT)
+        try:
+            return str(TieBreak(token))
+        except ValueError:
+            known = ", ".join(str(policy) for policy in TieBreak)
+            raise ValueError(f"Unknown tie-break policy '{token}'. Available: {known}.") from None
+
+
 class UpdateSettingsRequest(BaseModel):
     # extra="forbid" so an unknown key 422s instead of being silently dropped —
     # a typo'd setting name should be loud, not a no-op.
@@ -127,6 +163,20 @@ class UpdateSettingsRequest(BaseModel):
     # provider"; fallbacks are tried in order when the primary fails.
     llmPrimary: LLMTargetPayload = LLMTargetPayload()
     llmFallbacks: list[LLMTargetPayload] = []
+    # How content is marked. "single" is the routing above; "panel" runs the
+    # markers in llmPanel and settles their disagreements with its adjudicator.
+    llmMarkingMode: str = str(MarkingMode.SINGLE)
+    llmPanel: PanelPayload = PanelPayload()
+
+    @field_validator("llmMarkingMode")
+    @classmethod
+    def known_marking_mode(cls, value: str) -> str:
+        token = str(value or "").strip().lower() or str(MarkingMode.SINGLE)
+        try:
+            return str(MarkingMode(token))
+        except ValueError:
+            known = ", ".join(str(mode) for mode in MarkingMode)
+            raise ValueError(f"Unknown marking mode '{token}'. Available: {known}.") from None
 
     @field_validator("llmFallbacks")
     @classmethod

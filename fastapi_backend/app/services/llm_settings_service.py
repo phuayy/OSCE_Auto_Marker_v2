@@ -31,9 +31,11 @@ from app.llm import credentials as credential_resolver
 from app.llm import registry
 from app.llm.base import ChatRequest, LLMError, ProviderCredentials, ReasoningPolicy
 from app.llm.catalog import ProviderCatalog, builtin_catalog
+from app.llm.panel import MarkingMode, PanelConfig, TieBreak, marker_key, parse_marking_mode
 from app.llm.router import LLMRouter
 from app.llm.routing import LLMTarget, RoutingConfig
 from app.llm.runtime import retry_policy_from_env
+from app.pipeline.marking.base import MarkerAssignment, MarkingPlan
 from app.repositories.app_settings_repository import AppSettingsRepository
 from app.services.custom_provider_service import CustomProviderService
 from app.services.provider_credential_service import CredentialSnapshot, ProviderCredentialService
@@ -302,16 +304,15 @@ class LLMSettingsService:
 
     # --- subprocess handoff ------------------------------------------------
 
-    async def subprocess_env(self) -> dict[str, str]:
+    @staticmethod
+    def subprocess_env_for(config: RoutingConfig, resolved: ResolvedProviders) -> dict[str, str]:
         """Routing plus the credentials that routing needs, as env variables.
 
-        One credential read for the whole handoff. The resolved set decides both
-        which targets survive filtering and which keys are forwarded, so reading
-        it twice could — on a rotation landing between the two — forward a key
-        for a target chosen against the other snapshot.
+        Parameterised on the routing so a panel can hand each marker, and the
+        adjudicator, an environment naming only *its* target and carrying only
+        *its* key — all cut from the same ``resolved`` snapshot, which is what
+        stops two markers holding keys from different worlds.
         """
-        resolved = await self.resolve()
-        config = self.filter_routing(await self.stored_routing(), resolved)
         env = dict(config.to_env())
         # The definitions travel with the routing, not separately: a subprocess
         # told to call "our-gateway" has to be able to find out what that means,
@@ -325,6 +326,118 @@ class LLMSettingsService:
             )
         )
         return env
+
+    async def subprocess_env(self) -> dict[str, str]:
+        """The single-mode handoff: the filtered routing and its credentials.
+
+        One credential read for the whole handoff. The resolved set decides both
+        which targets survive filtering and which keys are forwarded, so reading
+        it twice could — on a rotation landing between the two — forward a key
+        for a target chosen against the other snapshot.
+        """
+        resolved = await self.resolve()
+        return self.subprocess_env_for(self.filter_routing(await self.stored_routing(), resolved), resolved)
+
+    # --- marking mode ------------------------------------------------------
+
+    async def stored_marking(self) -> tuple[MarkingMode, PanelConfig]:
+        """The operator's raw marking selection, before any usability filtering."""
+        try:
+            mode_raw, panel_raw = await self.app_settings.marking_selection()
+        except Exception:
+            # A settings lookup must never be the thing that fails a run.
+            logger.exception("Failed to read the marking-mode settings; using single-model marking.")
+            return MarkingMode.SINGLE, PanelConfig()
+        return parse_marking_mode(mode_raw), PanelConfig.from_raw(panel_raw)
+
+    def build_marking_plan(
+        self,
+        selected_mode: MarkingMode,
+        panel: PanelConfig,
+        routing: RoutingConfig,
+        resolved: ResolvedProviders,
+    ) -> MarkingPlan:
+        """``marking_plan()``'s decision, against already-resolved inputs.
+
+        Pure and synchronous so the effective-vs-selected cases are testable
+        without a database. The rules mirror ``filter_routing``: a target with
+        no usable provider here is dropped with a reason rather than failing the
+        run, and if that leaves fewer markers than a panel needs, the run is
+        single mode against the ordinary routing — with the reasons carried on
+        the plan so the settings screen can say so before a run proves it.
+        """
+        single_env = self.subprocess_env_for(routing, resolved)
+        if selected_mode is not MarkingMode.PANEL:
+            return MarkingPlan(single=routing, single_env=single_env)
+
+        validation = panel.validate()
+        reasons: list[str] = list(validation.warnings)
+        if not validation.ok:
+            reasons.extend(validation.errors)
+            reasons.append("Panel marking is not configured correctly; this run marks with a single model.")
+            return MarkingPlan(
+                selected_mode=MarkingMode.PANEL, single=routing, single_env=single_env,
+                tie_break=panel.tie_break, warnings=tuple(reasons),
+            )
+
+        usable = resolved.configured_ids()
+        markers: list[MarkerAssignment] = []
+        for target in panel.markers:
+            if target.provider_id not in usable:
+                reasons.append(f"Marker {target.key} has no API key configured here and was dropped.")
+                continue
+            markers.append(
+                MarkerAssignment(
+                    target=target,
+                    key=marker_key(target),
+                    llm_env=self.subprocess_env_for(RoutingConfig(primary=target, retry=routing.retry), resolved),
+                )
+            )
+        if len(markers) < 2:
+            reasons.append("Fewer than two markers can run here; this run marks with a single model.")
+            return MarkingPlan(
+                selected_mode=MarkingMode.PANEL, single=routing, single_env=single_env,
+                tie_break=panel.tie_break, warnings=tuple(reasons),
+            )
+
+        adjudicator: MarkerAssignment | None = None
+        if panel.adjudicator is not None and panel.adjudicator.provider_id in usable:
+            adjudicator = MarkerAssignment(
+                target=panel.adjudicator,
+                key=marker_key(panel.adjudicator),
+                llm_env=self.subprocess_env_for(
+                    RoutingConfig(primary=panel.adjudicator, retry=routing.retry), resolved
+                ),
+            )
+        elif panel.adjudicator is not None:
+            reasons.append(
+                f"Adjudicator {panel.adjudicator.key} has no API key configured here; "
+                f"disputed criteria fall to the '{panel.tie_break}' tie-break."
+            )
+
+        return MarkingPlan(
+            mode=MarkingMode.PANEL,
+            selected_mode=MarkingMode.PANEL,
+            single=routing,
+            single_env=single_env,
+            markers=tuple(markers),
+            adjudicator=adjudicator,
+            tie_break=panel.tie_break,
+            warnings=tuple(reasons),
+        )
+
+    async def marking_plan(self) -> MarkingPlan:
+        """What this run should do to mark content, resolved once.
+
+        Read live like ``routing()`` — a mode switched in the settings screen
+        applies to the next assessment in every process — and built from one
+        ``resolve()`` so every marker's environment comes from the same
+        credential snapshot.
+        """
+        resolved = await self.resolve()
+        routing = self.filter_routing(await self.stored_routing(), resolved)
+        selected_mode, panel = await self.stored_marking()
+        return self.build_marking_plan(selected_mode, panel, routing, resolved)
 
     # --- settings screen ---------------------------------------------------
 
@@ -341,6 +454,8 @@ class LLMSettingsService:
         resolved = await self.resolve()
         stored = await self.stored_routing()
         effective = self.filter_routing(stored, resolved)
+        selected_mode, panel = await self.stored_marking()
+        plan = self.build_marking_plan(selected_mode, panel, effective, resolved)
         sources = resolved.sources
         statuses = resolved.statuses
         providers: list[dict[str, Any]] = []
@@ -373,6 +488,17 @@ class LLMSettingsService:
             "effective": effective.to_public(),
             "retry": effective.retry.to_public(),
             "credentialStorage": self.credential_storage_status(),
+            # How content is marked. ``selected`` is the stored panel as the
+            # operator entered it; ``effective`` is what a run would do right
+            # now, after credential filtering, with the reasons it differs.
+            "marking": {
+                "mode": str(selected_mode),
+                "modes": [str(mode) for mode in MarkingMode],
+                "tieBreaks": [str(policy) for policy in TieBreak],
+                "selected": panel.to_public(),
+                "effective": plan.describe(),
+                "warnings": list(plan.warnings),
+            },
         }
 
     async def credential_statuses(self) -> dict[str, dict[str, Any]]:

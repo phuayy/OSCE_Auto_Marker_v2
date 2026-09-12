@@ -99,6 +99,7 @@ OSCE-AI-FYP/
 │       │   ├── custom.py           # CustomProviderSpec — the union of connection fields
 │       │   ├── catalog.py          # ProviderCatalog: shipped ∪ custom, per run (+ env codec)
 │       │   ├── routing.py          # LLMTarget / RetryPolicy / RoutingConfig (+ env codec)
+│       │   ├── panel.py            # MarkingMode / TieBreak / PanelConfig — multi-model marking config value
 │       │   ├── retry.py            # Jittered backoff + per-provider circuit breaker
 │       │   ├── router.py           # LLMRouter: targets x modes x attempts
 │       │   ├── credentials.py      # Per-provider key/base-URL resolution from env
@@ -112,8 +113,11 @@ OSCE-AI-FYP/
 │       │   │   ├── canary_qwen_engine.py  # NVIDIA Canary-Qwen via scripts/canary_qwen_transcribe.py
 │       │   │   ├── diarization.py      # pyannote pass + overlap-based speaker assignment
 │       │   │   └── subtitles.py        # SRT/VTT rendering for engines that write none
+│       │   ├── marking/        # Content-marking strategies
+│       │   │   ├── base.py         # MarkingPlan (resolved once per run) + ContentMarkerRunner (one assessor spawn)
+│       │   │   └── single.py       # SingleModelMarking — default; a panel strategy lands beside it
 │       │   ├── media.py        # MediaPipeline — ffmpeg, WhisperX, bell detection, clip crop
-│       │   └── scoring.py      # ScoringPipeline — wraps the three scorer subprocesses
+│       │   └── scoring.py      # ScoringPipeline — facade over the scorer subprocesses; picks the marking strategy
 │       ├── api/
 │       │   ├── dependencies.py          # get_container, authorize_request
 │       │   └── routes/
@@ -133,7 +137,9 @@ OSCE-AI-FYP/
 ├── scripts/
 │   ├── run_api.py                   # Entry point: uvicorn launcher
 │   ├── llm_bootstrap.py             # Puts fastapi_backend on sys.path; re-exports the LLM router
-│   ├── nvidia_osce_assessor.py      # Content scoring subprocess (provider chosen in Settings)
+│   ├── nvidia_osce_assessor.py      # Content scoring subprocess: model call + checkpoint + repair loop
+│   ├── content_marking.py           # Content prompt, rubric extraction, sheet validator (shared by every content marker)
+│   ├── scorer_checkpoint.py         # Crash-checkpoint helpers shared by the scoring scripts
 │   ├── nvidia_osce_communication.py           # Communication scoring subprocess
 │   ├── audio_professionalism_extractor.py     # Audio professionalism subprocess
 │   ├── scorer_inputs.py                       # Shared input contract: required flags, exit 2, no guessing
@@ -820,6 +826,20 @@ Each score file records the model **that actually produced it** (`model`,
 `model_provider`) rather than the configured primary — after a fallback those
 differ, and the content scorer's crash checkpoint carries the same provenance so
 a resumed run does not relabel a half-finished sheet.
+
+**Marking mode (in progress — see [docs/multi-model-marking-plan.md](docs/multi-model-marking-plan.md)).**
+`app_settings` also carries `llmMarkingMode` (`single`, the default, or
+`panel`) and `llmPanel` (markers, adjudicator, tie-break —
+[llm/panel.py](fastapi_backend/app/llm/panel.py)). `LLMSettingsService.
+marking_plan()` resolves both, with the routing, from one credential snapshot
+into a `MarkingPlan`: per-target environments cut by `subprocess_env_for`, each
+naming only its own target and carrying only its own key. A panel that cannot
+run here (a marker with no key, an incoherent stored row) degrades to single
+mode with the reasons on the plan, which `describe()` exposes as
+`marking.effective` / `marking.warnings`. `ScoringPipeline.run_content_scoring`
+reads the plan once per run and hands the spawn to a strategy under
+`app/pipeline/marking/`; only `SingleModelMarking` exists so far, so a stored
+`panel` selection currently runs as single mode.
 
 `POST /api/settings/llm-providers/test` makes one small live call to a single
 target (no fallback — the operator is asking about *that* provider) so a bad key

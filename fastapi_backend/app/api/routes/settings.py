@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.api.dependencies import get_auth_payload, get_container
 from app.llm import custom as custom_providers
+from app.llm.panel import MarkingMode, PanelConfig
 from app.pipeline import person_presets
 from app.schemas.settings import (
     CustomProviderRequest,
@@ -296,11 +297,26 @@ async def update_settings(
     check simply moved to where the answer lives.
     """
     catalog = await container.llm_settings.catalog()
-    for target in [payload.llmPrimary, *payload.llmFallbacks]:
+    for target in [
+        payload.llmPrimary,
+        *payload.llmFallbacks,
+        *payload.llmPanel.markers,
+        payload.llmPanel.adjudicator,
+    ]:
         if target.providerId and not catalog.contains(target.providerId):
             known = ", ".join(catalog.provider_ids())
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"Unknown LLM provider '{target.providerId}'. Available: {known}.",
+            )
+    # A panel is only required to be coherent when it is the mode that will
+    # run. Saving an incomplete panel under single mode is how an operator
+    # builds one up before switching over.
+    if payload.llmMarkingMode == MarkingMode.PANEL:
+        validation = PanelConfig.from_raw(payload.llmPanel.model_dump()).validate()
+        if not validation.ok:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=" ".join(validation.errors),
             )
     return {"settings": await container.app_settings.set_values(payload.model_dump())}

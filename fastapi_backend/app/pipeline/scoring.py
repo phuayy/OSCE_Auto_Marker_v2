@@ -9,8 +9,10 @@ from typing import Any
 from app.core.artifacts import artifact_metadata
 from app.core.config import Settings
 from app.core.exceptions import AppError
-from app.core.json_utils import extract_json_object, write_json_file
+from app.core.json_utils import extract_json_object
 from app.core.process import CommandRunner
+from app.pipeline.marking.base import ContentMarkerRunner, MarkingPlan
+from app.pipeline.marking.single import SingleModelMarking
 from app.services.auth_service import AuthService
 from app.services.event_service import EventService
 
@@ -57,6 +59,9 @@ class ScoringPipeline:
         # environment the scorer subprocesses read. Optional so tests can build
         # a ScoringPipeline without a database.
         self.llm_settings = llm_settings
+        # One marker subprocess; the strategy decides how many times it runs.
+        self.marker = ContentMarkerRunner(settings, runner, events, auth)
+        self.single_marking = SingleModelMarking(self.marker, settings)
 
     @staticmethod
     def should_refresh_score_payload(payload: Any) -> bool:
@@ -109,11 +114,7 @@ class ScoringPipeline:
         return not all(isinstance(summary.get(key), (int, float)) for key in ("total_score", "max_score", "pass_threshold"))
 
     def python_env(self, extra_env: dict[str, str] | None = None) -> dict[str, str]:
-        env = self.settings.subprocess_env()
-        if self.auth.runtime.nvidia_api_key:
-            env["NVIDIA_API_KEY"] = self.auth.runtime.nvidia_api_key
-        env.update(extra_env or {})
-        return env
+        return self.marker.python_env(extra_env)
 
     async def scoring_env(self, extra_env: dict[str, str] | None = None) -> dict[str, str]:
         """``python_env`` plus the resolved LLM routing for this run.
@@ -133,9 +134,23 @@ class ScoringPipeline:
             logger.exception("Failed to resolve LLM routing; the scorer will use its environment defaults.")
         return env
 
+    async def content_marking_plan(self) -> MarkingPlan:
+        """The marking plan for this run, resolved once.
+
+        Same contract as ``scoring_env``: read per run, never per process, and
+        a failure to resolve is logged and replaced by a plan that lets the
+        subprocess fall back to its own environment variables rather than
+        failing the step.
+        """
+        if self.llm_settings is None:
+            return MarkingPlan.single_only()
+        try:
+            return await self.llm_settings.marking_plan()
+        except Exception:
+            logger.exception("Failed to resolve the marking plan; the scorer will use its environment defaults.")
+            return MarkingPlan.single_only()
+
     async def run_content_scoring(self, session: dict[str, Any]) -> dict[str, Any]:
-        if not self.settings.scorer_script_path.exists():
-            raise RuntimeError(f"Scorer script not found at {self.settings.scorer_script_path}")
         outputs = session.get("outputs") or {}
         # The normalised transcript — the same document the communication
         # branch scores — never the raw engine .srt: hallucination drops and
@@ -148,40 +163,13 @@ class ScoringPipeline:
             ((session.get("files") or {}).get("caseStudy") or {}).get("absolutePath"),
             "This session's case-study PDF",
         )
-        output_path = self.settings.paths.output_scores_dir / f"{session['id']}.json"
-        args = [
-            str(self.settings.scorer_script_path),
-            "--session-id",
+        plan = await self.content_marking_plan()
+        return await self.single_marking.run(
             str(session["id"]),
-            "--transcript",
-            str(transcript_path),
-            "--case-study",
-            str(case_study_path),
-            "--output",
-            str(output_path),
-        ]
-        await self.events.publish(
-            str(session["id"]),
-            "log",
-            {"source": "scorer", "message": f"{self.settings.scorer_python_bin} {' '.join(args)}"},
+            transcript_path=transcript_path,
+            case_study_path=case_study_path,
+            plan=plan,
         )
-        result = await self.runner.run(
-            self.settings.scorer_python_bin,
-            args,
-            "Content scoring",
-            env=await self.scoring_env(),
-            on_output=lambda stream, text: self.events.publish(
-                str(session["id"]),
-                "log",
-                {"source": f"scorer-{stream}", "message": text},
-            ),
-        )
-        if output_path.exists():
-            payload = await asyncio.to_thread(lambda: extract_json_object(output_path.read_text(encoding="utf-8")))
-        else:
-            payload = extract_json_object(result.stdout)
-            await asyncio.to_thread(write_json_file, output_path, payload)
-        return artifact_metadata(output_path, "/media/scores")
 
     async def run_audio_professionalism(self, session: dict[str, Any]) -> dict[str, Any]:
         if not self.settings.audio_professionalism_script_path.exists():

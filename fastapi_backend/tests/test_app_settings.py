@@ -24,9 +24,13 @@ def test_settings_repository_roundtrip(tmp_path: Path) -> None:
         # {} / [] = use this deployment's default scoring provider, no fallback.
         "llmPrimary": {},
         "llmFallbacks": [],
+        # "single" / {} = one model marks, no panel configured.
+        "llmMarkingMode": "single",
+        "llmPanel": {},
     }
     assert asyncio.run(repository.llm_preprocess_enabled()) is False
     assert asyncio.run(repository.llm_routing_selection()) == ({}, [])
+    assert asyncio.run(repository.marking_selection()) == ("single", {})
 
     updated = asyncio.run(repository.set_values({"llmTranscriptPreprocess": True}))
     assert updated["llmTranscriptPreprocess"] is True
@@ -67,6 +71,8 @@ def test_settings_routes_get_put_and_reject_unknown_keys(tmp_path: Path) -> None
         "transcriptionEngineOptions": {},
         "llmPrimary": {},
         "llmFallbacks": [],
+        "llmMarkingMode": "single",
+        "llmPanel": {},
     }
 
     updated = client.put("/api/settings", json={"llmTranscriptPreprocess": True})
