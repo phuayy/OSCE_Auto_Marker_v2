@@ -3,7 +3,7 @@ import { AlertTriangle, Check, Loader2, Mic, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import {
-  buildEngineOptionsPayload,
+  buildTranscriptionPatch,
   effectiveValue,
   engineWarnings,
   findEngine,
@@ -18,7 +18,7 @@ import {
 // GET /api/settings/transcription-engines, so a newly shipped engine appears
 // here without a frontend change. The chosen engine applies to every future
 // run, including per-student clip runs and the Hatchet worker.
-export default function TranscriptionEngineSettings() {
+export default function TranscriptionEngineSettings({ onSettingsChanged }) {
   const [description, setDescription] = useState(null); // null = never loaded
   const [loadError, setLoadError] = useState('');
   const [saveError, setSaveError] = useState('');
@@ -78,20 +78,9 @@ export default function TranscriptionEngineSettings() {
     setSaving(true);
     setSaveError('');
     try {
-      const current = await fetch('/api/settings');
-      const currentBody = await current.json().catch(() => ({}));
-      if (!current.ok) throw new Error(currentBody.error || 'Failed to read current settings.');
-
-      const payload = {
-        ...currentBody.settings,
-        transcriptionEngine: selectedEngineId,
-        transcriptionEngineOptions: {
-          ...(currentBody.settings?.transcriptionEngineOptions || {}),
-          [selectedEngineId]: buildEngineOptionsPayload(engine, overrides),
-        },
-      };
+      const payload = buildTranscriptionPatch(description, selectedEngineId, optionsByEngine);
       const response = await fetch('/api/settings', {
-        method: 'PUT',
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
@@ -101,6 +90,7 @@ export default function TranscriptionEngineSettings() {
       }
       setOptionsByEngine(body.settings?.transcriptionEngineOptions || {});
       setSavedAt(Date.now());
+      if (onSettingsChanged) onSettingsChanged(body.settings);
     } catch (error) {
       setSaveError(error.message || 'Failed to save the transcription engine.');
     } finally {

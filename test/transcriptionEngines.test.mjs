@@ -6,6 +6,7 @@ import { test } from 'node:test';
 
 import {
   buildEngineOptionsPayload,
+  buildTranscriptionPatch,
   coerceParameterValue,
   effectiveValue,
   engineWarnings,
@@ -151,4 +152,29 @@ test('advanced parameters are separated from the everyday ones', () => {
   assert.deepEqual(basic.map((parameter) => parameter.name), ['model', 'batchSize', 'chunkSize']);
   assert.deepEqual(advanced.map((parameter) => parameter.name), ['initialPrompt']);
   assert.deepEqual(splitParameters(null), { basic: [], advanced: [] });
+});
+
+test("the engine patch carries only the engine keys, with every engine's bag coerced", () => {
+  const payload = buildTranscriptionPatch(DESCRIPTION, 'canary-qwen', {
+    whisperx: { batchSize: '8' },
+    'canary-qwen': { chunkSeconds: '25' },
+  });
+
+  assert.deepEqual(Object.keys(payload).sort(), ['transcriptionEngine', 'transcriptionEngineOptions']);
+  assert.equal(payload.transcriptionEngine, 'canary-qwen');
+  assert.deepEqual(payload.transcriptionEngineOptions, {
+    whisperx: { batchSize: 8 },
+    'canary-qwen': { chunkSeconds: 25 },
+  });
+});
+
+test('an engine this build no longer ships is left out of the engine patch', () => {
+  const payload = buildTranscriptionPatch(DESCRIPTION, 'canary-qwen', {
+    'retired-engine': { foo: '1' },
+  });
+
+  // The retired engine's bag is dropped entirely, and the selected engine is
+  // still present — with an empty bag, since no overrides were given for it.
+  assert.deepEqual(Object.keys(payload.transcriptionEngineOptions).sort(), ['canary-qwen']);
+  assert.deepEqual(payload.transcriptionEngineOptions['canary-qwen'], {});
 });

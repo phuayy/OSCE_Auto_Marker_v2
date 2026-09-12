@@ -24,7 +24,7 @@ import {
 // the criteria they disagree on. Everything the card shows — the modes, the
 // tie-break policies, what the server would actually run — comes from
 // GET /api/settings/llm-providers, so this file knows no vendor names.
-export default function MarkingModeSettings({ version = 0, onProvidersChanged }) {
+export default function MarkingModeSettings({ version = 0, onProvidersChanged, onSettingsChanged }) {
   const [description, setDescription] = useState(null); // null = never loaded
   const [loadError, setLoadError] = useState('');
   const [saveError, setSaveError] = useState('');
@@ -75,13 +75,11 @@ export default function MarkingModeSettings({ version = 0, onProvidersChanged })
     setSaving(true);
     setSaveError('');
     try {
-      const current = await fetch('/api/settings');
-      const currentBody = await current.json().catch(() => ({}));
-      if (!current.ok) throw new Error(currentBody.error || 'Failed to read current settings.');
-
-      const payload = buildMarkingPayload(currentBody.settings, { mode, markers, adjudicator, tieBreak });
+      // A patch of this card's two keys. The GET-then-PUT that used to sit
+      // here re-sent every other card's values as this tab last saw them.
+      const payload = buildMarkingPayload({ mode, markers, adjudicator, tieBreak });
       const response = await fetch('/api/settings', {
-        method: 'PUT',
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
@@ -92,6 +90,7 @@ export default function MarkingModeSettings({ version = 0, onProvidersChanged })
       setSavedAt(Date.now());
       await loadProviders();
       if (onProvidersChanged) onProvidersChanged();
+      if (onSettingsChanged) onSettingsChanged(body.settings);
     } catch (error) {
       setSaveError(error.message || 'Failed to save the marking mode.');
     } finally {

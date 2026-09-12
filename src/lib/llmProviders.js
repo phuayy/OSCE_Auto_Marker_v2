@@ -132,10 +132,12 @@ export function validateRouting({ description, primary }) {
   return errors;
 }
 
-// The settings body to PUT. Merges onto the settings the server currently
-// holds so saving the model choice never clobbers an unrelated setting the
-// screen does not render.
-export function buildSettingsPayload(currentSettings, { primary, fallback }) {
+// The routing card's patch: the two keys it owns and nothing else. Sent with
+// PATCH, so the server merges it over what is stored — nothing this card does
+// not render travels with it, and nothing it does not render can be reverted
+// by it. (It used to spread the whole document; see SettingsPage.updateSetting
+// for what that cost.)
+export function buildSettingsPayload({ primary, fallback }) {
   const fallbacks = [];
   if (fallback?.providerId) {
     fallbacks.push({
@@ -144,7 +146,6 @@ export function buildSettingsPayload(currentSettings, { primary, fallback }) {
     });
   }
   return {
-    ...(currentSettings || {}),
     llmPrimary: {
       providerId: String(primary?.providerId || ''),
       model: String(primary?.model || '').trim(),
@@ -182,7 +183,7 @@ export function formatContextWindow(model) {
 // --- marking mode ------------------------------------------------------------
 //
 // The panel card's logic: which markers and adjudicator to show, what to warn
-// about, what to refuse, and what to PUT. The mode and tie-break vocabulary
+// about, what to refuse, and what to PATCH. The mode and tie-break vocabulary
 // come from the generated enums so the browser and the backend cannot drift.
 
 // Sentinel for "no adjudicator chosen yet" in the picker. Never stored: the
@@ -322,12 +323,10 @@ export function panelWarnings({ description, mode, markers, adjudicator }) {
   return warnings;
 }
 
-// The settings body to PUT for the marking card. Merges onto the settings the
-// server currently holds, like buildSettingsPayload, so saving the mode never
-// clobbers the routing or anything else this card does not render.
-export function buildMarkingPayload(currentSettings, { mode, markers, adjudicator, tieBreak }) {
+// The marking card's patch: the mode and the panel, nothing else — see
+// buildSettingsPayload.
+export function buildMarkingPayload({ mode, markers, adjudicator, tieBreak }) {
   return {
-    ...(currentSettings || {}),
     llmMarkingMode: Object.values(MarkingMode).includes(mode) ? mode : MarkingMode.SINGLE,
     llmPanel: {
       markers: (markers || [])

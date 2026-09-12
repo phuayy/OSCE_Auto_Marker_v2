@@ -120,3 +120,20 @@ export function splitParameters(engine) {
     advanced: parameters.filter((parameter) => parameter.advanced),
   };
 }
+
+// The engine card's patch: the selected engine and the whole per-engine option
+// map, nothing else. The map is a single key on the server, so a patch replaces
+// it wholesale — every engine's bag is rebuilt here, not just the selected
+// one, or switching engines would drop the tuning done for the other. Each bag
+// is coerced and stripped of defaults the same way, and an engine this build no
+// longer ships is left out: the server refuses its bag, which used to make
+// every save 422 until the row was hand-edited.
+export function buildTranscriptionPatch(description, selectedEngineId, optionsByEngine) {
+  const transcriptionEngineOptions = {};
+  for (const engineId of new Set([...Object.keys(optionsByEngine || {}), selectedEngineId])) {
+    const engine = findEngine(description, engineId);
+    if (!engine) continue;
+    transcriptionEngineOptions[engineId] = buildEngineOptionsPayload(engine, optionsByEngine?.[engineId] || {});
+  }
+  return { transcriptionEngine: selectedEngineId, transcriptionEngineOptions };
+}

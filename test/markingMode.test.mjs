@@ -142,26 +142,22 @@ test('warnings name keyless markers, shared vendors and a self-judging adjudicat
   assert.deepEqual(panelWarnings({ ...form, mode: MarkingMode.SINGLE }), []);
 });
 
-test('the PUT body merges onto current settings and drops blank marker rows', () => {
-  const payload = buildMarkingPayload(
-    { llmPrimary: { providerId: 'nvidia', model: 'm' }, transcriptionEngine: 'whisperx' },
-    {
-      mode: MarkingMode.PANEL,
-      markers: [{ providerId: 'nvidia', model: ' a ' }, { providerId: '', model: '' }, { providerId: 'gemini', model: 'b' }],
-      adjudicator: { providerId: 'deepseek', model: 'c' },
-      tieBreak: TieBreak.STRICT,
-    },
-  );
-  assert.equal(payload.transcriptionEngine, 'whisperx');
-  assert.deepEqual(payload.llmPrimary, { providerId: 'nvidia', model: 'm' });
+test('the marking patch carries only the marking keys and drops blank marker rows', () => {
+  const payload = buildMarkingPayload({
+    mode: MarkingMode.PANEL,
+    markers: [{ providerId: 'nvidia', model: ' a ' }, { providerId: '', model: '' }, { providerId: 'gemini', model: 'b' }],
+    adjudicator: { providerId: 'deepseek', model: 'c' },
+    tieBreak: TieBreak.STRICT,
+  });
+  assert.deepEqual(Object.keys(payload).sort(), ['llmMarkingMode', 'llmPanel']);
   assert.equal(payload.llmMarkingMode, 'panel');
   assert.deepEqual(payload.llmPanel, {
     markers: [{ providerId: 'nvidia', model: 'a' }, { providerId: 'gemini', model: 'b' }],
     adjudicator: { providerId: 'deepseek', model: 'c' },
     tieBreak: 'strict',
   });
-  assert.equal(buildMarkingPayload({}, { mode: 'bogus', markers: [], adjudicator: null, tieBreak: 'bogus' }).llmMarkingMode, 'single');
-  assert.equal(buildMarkingPayload({}, { mode: 'bogus', markers: [], adjudicator: null, tieBreak: 'bogus' }).llmPanel.tieBreak, 'lenient');
+  assert.equal(buildMarkingPayload({ mode: 'bogus', markers: [], adjudicator: null, tieBreak: 'bogus' }).llmMarkingMode, 'single');
+  assert.equal(buildMarkingPayload({ mode: 'bogus', markers: [], adjudicator: null, tieBreak: 'bogus' }).llmPanel.tieBreak, 'lenient');
 });
 
 test('panel summaries read as markers then adjudicator', () => {

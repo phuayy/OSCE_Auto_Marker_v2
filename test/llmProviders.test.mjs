@@ -144,23 +144,22 @@ test('a primary with no key warns that scoring will fail over', () => {
   assert.ok(warnings.some((warning) => warning.includes('OPENAI_API_KEY')));
 });
 
-test('the saved payload preserves unrelated settings and drops an empty fallback', () => {
-  const payload = buildSettingsPayload(
-    { llmTranscriptPreprocess: true, transcriptionEngine: 'whisperx' },
-    { primary: { providerId: 'nvidia', model: '  m1  ' }, fallback: { providerId: NO_FALLBACK, model: 'x' } },
-  );
+test('the routing patch carries only the routing keys and drops an empty fallback', () => {
+  const payload = buildSettingsPayload({
+    primary: { providerId: 'nvidia', model: '  m1  ' },
+    fallback: { providerId: NO_FALLBACK, model: 'x' },
+  });
 
-  assert.equal(payload.llmTranscriptPreprocess, true);
-  assert.equal(payload.transcriptionEngine, 'whisperx');
+  assert.deepEqual(Object.keys(payload).sort(), ['llmFallbacks', 'llmPrimary']);
   assert.deepEqual(payload.llmPrimary, { providerId: 'nvidia', model: 'm1' });
   assert.deepEqual(payload.llmFallbacks, []);
 });
 
 test('the saved payload keeps a real fallback', () => {
-  const payload = buildSettingsPayload(
-    {},
-    { primary: { providerId: 'nvidia', model: 'm1' }, fallback: { providerId: 'openai', model: 'gpt-4.1' } },
-  );
+  const payload = buildSettingsPayload({
+    primary: { providerId: 'nvidia', model: 'm1' },
+    fallback: { providerId: 'openai', model: 'gpt-4.1' },
+  });
 
   assert.deepEqual(payload.llmFallbacks, [{ providerId: 'openai', model: 'gpt-4.1' }]);
 });

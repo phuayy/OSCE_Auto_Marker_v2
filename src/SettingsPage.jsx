@@ -42,6 +42,14 @@ export default function SettingsPage({ onBack }) {
     loadSettings();
   }, []);
 
+  // A card's save answers with the whole stored document; adopting it keeps
+  // this page's copy current without a second request. With no body to adopt,
+  // re-read.
+  function adoptSettings(next) {
+    if (next && typeof next === 'object') setSettings(next);
+    else loadSettings();
+  }
+
   async function updateSetting(key, value) {
     const previous = settings;
     const next = { ...settings, [key]: value };
@@ -49,10 +57,15 @@ export default function SettingsPage({ onBack }) {
     setSaving(true);
     setSaveError('');
     try {
+      // PATCH, not PUT: this page holds a copy of the document loaded at mount,
+      // and the cards above save their own keys without telling it. Sending
+      // that copy back put those keys to their mount-time values — a marking
+      // mode saved as "panel" reverted to "single" the moment this toggle was
+      // flipped. A patch carries only the key that changed.
       const response = await fetch('/api/settings', {
-        method: 'PUT',
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(next),
+        body: JSON.stringify({ [key]: value }),
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -100,16 +113,18 @@ export default function SettingsPage({ onBack }) {
           </div>
         ) : null}
 
-        <TranscriptionEngineSettings />
+        <TranscriptionEngineSettings onSettingsChanged={adoptSettings} />
 
         <LlmRoutingSettings
           version={providersVersion}
           onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
+          onSettingsChanged={adoptSettings}
         />
 
         <MarkingModeSettings
           version={providersVersion}
           onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
+          onSettingsChanged={adoptSettings}
         />
 
         <ProviderKeysSettings
