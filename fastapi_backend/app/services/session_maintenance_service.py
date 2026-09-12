@@ -8,6 +8,7 @@ from typing import Any
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.logging_utils import log_context
+from app.domain.sessions import IN_FLIGHT_STATUSES, SessionStatus, session_video_path
 from app.repositories.notification_repository import NotificationRepository
 from app.repositories.video_repository import VideoRepository
 from app.services.assessment_service import AssessmentService
@@ -16,10 +17,6 @@ from app.services.session_service import SessionService
 
 
 logger = logging.getLogger(__name__)
-
-# Session statuses that mean a job is (or is about to be) actively touching the
-# session — rerunning one now would race the running pipeline.
-_IN_FLIGHT_STATUSES = {"assembling", "queued", "processing"}
 
 # Output artifacts whose files are owned by the session and safe to remove on
 # delete/rerun. Deliberately excludes the case study (a shared, ref-counted
@@ -105,19 +102,100 @@ class SessionMaintenanceService:
         if session is not None:
             self._delete_artifacts(session)
 
+    # ------------------------------------------------------------------
+    # Starting work on an existing session
+    #
+    # Every path that runs the pipeline against a stored session goes through
+    # the job queue: ``POST /process``, ``POST /auto-crop`` and re-run. None of
+    # them does the work in the request. A handler that awaited transcription
+    # held the connection for an hour, and when the process died with it the
+    # session stayed ``processing`` with no job row for startup recovery to
+    # find: un-openable, un-rerunnable, only deletable.
+    # ------------------------------------------------------------------
+
+    async def start_processing(self, session_id: str) -> dict[str, Any]:
+        """Queue the standard pipeline for a session that already has its sources.
+
+        Resumable by design: the pipeline reuses whatever artifacts are already
+        on disk, so this is also how a failed run is picked up where it stopped.
+        Use :meth:`rerun_session` to score from scratch instead.
+        """
+        session = await self._ready_to_start(session_id)
+        return await self._queue_job(
+            session_id,
+            "process_session",
+            {
+                "parentSessionId": session.get("parentSessionId"),
+                "clipId": (session.get("clipSource") or {}).get("clipId"),
+            },
+            stage="session_process",
+        )
+
+    async def start_auto_crop(self, session_id: str) -> dict[str, Any]:
+        """Queue segmentation (bells or person detection) for a long recording."""
+        session = await self._ready_to_start(session_id)
+        return await self._queue_job(
+            session_id,
+            "auto_crop",
+            {"workflow": session.get("workflow"), "segmentation": session.get("segmentation")},
+            stage="session_auto_crop",
+        )
+
+    async def _ready_to_start(self, session_id: str) -> dict[str, Any]:
+        """The session, once it is safe to queue work on it: not already in
+        flight, and with its source video where the job will look for it."""
+        session = await self.sessions.read(session_id)
+        if str(session.get("status") or "").lower() in IN_FLIGHT_STATUSES:
+            raise AppError("This session is already being processed.", status_code=409)
+        session_video_path(session)
+        return session
+
+    async def _queue_job(
+        self,
+        session_id: str,
+        task_type: str,
+        payload: dict[str, Any],
+        *,
+        stage: str,
+    ) -> dict[str, Any]:
+        """Move the session to ``queued`` and enqueue ``task_type`` for it.
+
+        The status flips before the job exists so the card gauges "queued" and
+        the workspace refuses to open the session from the first moment; the
+        job's public record is attached afterwards through ``update``, because
+        the local runner may already have claimed the job and written the
+        session by the time the enqueue call returns.
+        """
+
+        def to_queued(current: dict[str, Any]) -> Any:
+            current["status"] = SessionStatus.QUEUED
+            current["error"] = None
+            return None
+
+        await self.sessions.update(session_id, to_queued)
+        job = await self.jobs.enqueue(session_id, task_type, payload)
+        public_job = self.jobs.public_job(job)
+
+        def attach(current: dict[str, Any]) -> Any:
+            current["job"] = public_job
+            return None
+
+        session = await self.sessions.update(session_id, attach)
+        logger.info(
+            "%s queued for session %s (job %s).",
+            task_type,
+            session_id,
+            job.get("id"),
+            extra=log_context(session_id, stage, job_id=str(job.get("id")), task_type=task_type),
+        )
+        return {"session": self.sessions.public_session(session), "job": public_job}
+
     async def rerun_session(self, session_id: str) -> dict[str, Any]:
         """Re-run a session's full pipeline in place under the SAME id: reset its
         outputs/pipeline, wipe the old assessment rows and score artifacts, then
         enqueue a fresh ``process_session`` job. On completion the pipeline
         upserts results under the same session id, overwriting the old scores."""
-        session = await self.sessions.read(session_id)
-        status = str(session.get("status") or "").lower()
-        if status in _IN_FLIGHT_STATUSES:
-            raise AppError("This session is already being processed.", status_code=409)
-
-        video_path = Path(str(((session.get("files") or {}).get("video") or {}).get("absolutePath") or ""))
-        if not video_path.exists():
-            raise AppError("Source video is missing — cannot re-run this session.", status_code=400)
+        session = await self._ready_to_start(session_id)
 
         # Remove stale score artifacts + old assessment rows so a failed re-run
         # never leaves last run's scores behind masquerading as current.
@@ -128,18 +206,21 @@ class SessionMaintenanceService:
         self._rmtree(self.settings.paths.output_whisperx_dir / session_id)
         await self._safe("delete assessments", session_id, self.assessments.delete_session_results(session_id))
 
-        session["outputs"] = {}
-        session["error"] = None
-        session["pipeline"] = {
+        reset_pipeline = {
             "startedAt": None,
             "endedAt": None,
             "runtimeSeconds": None,
             "mode": self.settings.whisperx_device,
         }
-        session["status"] = "queued"
-        await self.sessions.write(session)
 
-        job = await self.jobs.enqueue(
+        def reset(current: dict[str, Any]) -> Any:
+            current["outputs"] = {}
+            current["error"] = None
+            current["pipeline"] = dict(reset_pipeline)
+            return None
+
+        await self.sessions.update(session_id, reset)
+        return await self._queue_job(
             session_id,
             "process_session",
             {
@@ -147,19 +228,8 @@ class SessionMaintenanceService:
                 "clipId": (session.get("clipSource") or {}).get("clipId"),
                 "rerun": True,
             },
+            stage="session_rerun",
         )
-        session["job"] = self.jobs.public_job(job)
-        await self.sessions.write(session)
-        logger.info(
-            "Re-run enqueued for session %s (job %s).",
-            session_id,
-            job.get("id"),
-            extra=log_context(session_id, "session_rerun", job_id=str(job.get("id"))),
-        )
-        return {
-            "session": self.sessions.public_session(session),
-            "job": self.jobs.public_job(job),
-        }
 
     def _delete_artifacts(
         self,

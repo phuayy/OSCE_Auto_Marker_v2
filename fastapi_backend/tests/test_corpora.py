@@ -117,8 +117,9 @@ def test_clip_child_session_inherits_parent_corpus(tmp_path: Path) -> None:
 
     from app.core.utils import utc_now_iso
     from app.services.clip_service import ClipService
+    from tests.fixtures.session_store import SessionUpdateMixin
 
-    class FakeSessions:
+    class FakeSessions(SessionUpdateMixin):
         def __init__(self, initial: dict) -> None:
             self.sessions = {str(initial["id"]): copy.deepcopy(initial)}
 
@@ -175,7 +176,7 @@ def test_clip_child_session_inherits_parent_corpus(tmp_path: Path) -> None:
         jobs=FakeJobs(),
     )
 
-    result = asyncio.run(service.assess_clip("parent-1", "clip-1", defer=True))
+    result = asyncio.run(service.assess_clip("parent-1", "clip-1"))
 
     child = sessions.sessions[str(result["session"]["id"])]
     assert child["corpus"] == corpus_snapshot

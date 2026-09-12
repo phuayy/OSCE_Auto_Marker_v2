@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 
 from app.core.logging_utils import log_context
 from app.services.pipeline_service import PipelineService
+from tests.fixtures.session_store import SessionUpdateMixin
 
 
-class _FakeSessions:
+class _FakeSessions(SessionUpdateMixin):
     def __init__(self, session: dict | None = None) -> None:
         self.session = session
         self.writes = 0
 
     async def read(self, _session_id: str) -> dict:
-        return self.session or {}
+        return copy.deepcopy(self.session or {})
 
     async def write(self, session: dict) -> None:
         self.writes += 1
@@ -34,8 +36,8 @@ def test_log_context_has_correlation_keys() -> None:
 
 
 def test_pipeline_step_completion_emits_structured_log(caplog) -> None:
-    service = PipelineService(_FakeSessions(), events=None, media=None, scoring=None)
     session = {"id": "sess-123", "pipeline": {}}
+    service = PipelineService(_FakeSessions(session), events=None, media=None, scoring=None)
 
     with caplog.at_level(logging.INFO, logger="app.services.pipeline_service"):
         asyncio.run(service._mark_pipeline_step(session, "whisperx", "completed"))
@@ -47,8 +49,8 @@ def test_pipeline_step_completion_emits_structured_log(caplog) -> None:
 
 def test_pipeline_step_running_logs_start(caplog) -> None:
     """Step starts are logged so the pipeline's progress is visible in logs."""
-    service = PipelineService(_FakeSessions(), events=None, media=None, scoring=None)
     session = {"id": "sess-123", "pipeline": {}}
+    service = PipelineService(_FakeSessions(session), events=None, media=None, scoring=None)
 
     with caplog.at_level(logging.INFO, logger="app.services.pipeline_service"):
         asyncio.run(service._mark_pipeline_step(session, "whisperx", "running"))

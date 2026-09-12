@@ -19,6 +19,7 @@ from app.core.exceptions import AppError
 from app.pipeline.media import MediaPipeline
 from app.services.clip_service import ClipService
 from app.services.job_tasks import get_task_spec, queue_owns_session_status
+from tests.fixtures.session_store import SessionUpdateMixin
 
 
 class FakeEvents:
@@ -29,7 +30,7 @@ class FakeEvents:
         self.items.append((session_id, event_type, payload))
 
 
-class FakeSessions:
+class FakeSessions(SessionUpdateMixin):
     """Session store that records every write, so checkpointing is observable."""
 
     def __init__(self, initial_session: dict[str, Any]) -> None:
@@ -47,6 +48,9 @@ class FakeSessions:
 
     def public_session(self, session: dict[str, Any]) -> dict[str, Any]:
         return copy.deepcopy(session)
+
+    async def list_child_ids(self, _parent_session_id: str) -> list[str]:
+        return []
 
 
 class FakeJobRepository:
@@ -131,10 +135,13 @@ def test_request_only_plans_and_queues_no_cropping_in_the_request(tmp_path) -> N
     result = asyncio.run(service.request_clip_export("sess-1", [200.0, 400.0], [], None))
 
     assert media.crops == [], "the request cut clips inline"
-    assert jobs.enqueued == [("sess-1", "export_clips", {"clipCount": 3})]
+    assert [(sid, kind, payload["clipCount"]) for sid, kind, payload in jobs.enqueued] == [("sess-1", "export_clips", 3)]
     assert result["clipCount"] == 3
     export = sessions.current["clipExport"]
     assert export["status"] == "queued"
+    # The plan's identity travels with the job and with every clip, so the
+    # export cuts into this plan's own directory (see F1 tests below).
+    assert export["planId"] and jobs.enqueued[0][2]["planId"] == export["planId"]
     assert (export["total"], export["completed"]) == (3, 0)
     assert export["jobId"] == "job-1"
     # Drafts are persisted immediately so the timeline can render the split.
@@ -206,7 +213,7 @@ def test_intermissions_are_planned_but_never_cut(tmp_path) -> None:
     )
     asyncio.run(service.export_clips_by_id("sess-1"))
 
-    assert jobs.enqueued[0][2] == {"clipCount": 2}
+    assert jobs.enqueued[0][2]["clipCount"] == 2
     assert len(media.crops) == 2
     clips = sessions.current["outputs"]["videoClips"]
     intermission = next(clip for clip in clips if clip["kind"] == "intermission")

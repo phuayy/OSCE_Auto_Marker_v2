@@ -6,7 +6,7 @@ from pydantic import ValidationError
 from app.api.dependencies import get_container
 from app.core.exceptions import AppError
 from app.schemas.uploads import LegacyUploadForm
-from app.services.clip_service import ClipService
+from app.domain.sessions import empty_outputs
 from app.services.container import AppContainer
 
 
@@ -93,7 +93,7 @@ async def upload_session(
                 "mode": container.settings.whisperx_device,
             },
             "files": {"video": video_meta, "caseStudy": case_study_meta},
-            "outputs": ClipService.empty_outputs(),
+            "outputs": empty_outputs(),
             "error": None,
         }
         await container.sessions.write(session)

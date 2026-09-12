@@ -8,6 +8,7 @@ previous step's reading.
 from __future__ import annotations
 
 import asyncio
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,9 @@ def build_service(tmp_path: Path) -> tuple[PipelineService, FakeSessions]:
 def running_session(service: PipelineService, step: str = "whisperx") -> dict[str, Any]:
     session: dict[str, Any] = {"id": "session-1"}
     service._set_pipeline_step_state(session, step, "running")
+    # Progress is committed against the stored row (SessionService.update), so
+    # the double has to hold the document the test is driving.
+    service.sessions.current = copy.deepcopy(session)
     return session
 
 
@@ -96,6 +100,7 @@ def test_progress_for_a_step_that_is_not_running_is_ignored(tmp_path: Path) -> N
     service, sessions = build_service(tmp_path)
     session = running_session(service)
     service._set_pipeline_step_state(session, "whisperx", "completed")
+    sessions.current = copy.deepcopy(session)
     writes_before = len(sessions.writes)
 
     record(service, session, "whisperx", 88.0)

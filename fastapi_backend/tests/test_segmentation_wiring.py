@@ -15,6 +15,7 @@ from app.core.config import Settings
 from app.services.clip_service import ClipService
 
 from .test_routes import build_test_client
+from tests.fixtures.session_store import SessionUpdateMixin
 
 
 class FakeEvents:
@@ -25,7 +26,7 @@ class FakeEvents:
         self.items.append((session_id, event_type, payload))
 
 
-class FakeSessions:
+class FakeSessions(SessionUpdateMixin):
     def __init__(self, initial_session: dict[str, Any]) -> None:
         self.current = copy.deepcopy(initial_session)
 
@@ -463,7 +464,7 @@ def test_assess_clip_rejects_intermission_segments(tmp_path) -> None:
     }
 
     with pytest.raises(AppError) as exc_info:
-        asyncio.run(service.assess_clip("session-long-1", "clip-gap", defer=True))
+        asyncio.run(service.assess_clip("session-long-1", "clip-gap"))
     assert exc_info.value.status_code == 400
     assert "intermission" in str(exc_info.value).lower()
 

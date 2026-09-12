@@ -44,7 +44,9 @@ def test_triggers_bump_version_on_insert_update_and_delete(tmp_path) -> None:
             await repository.write(_session("s1", "Alpha"))
             after_insert = await changes.token(("sessions",))
 
-            await repository.write(_session("s1", "Alpha", status="processing"))
+            stored = await repository.read("s1")
+            stored["status"] = "processing"
+            await repository.write(stored)
             after_update = await changes.token(("sessions",))
             assert after_update != after_insert
 
@@ -142,6 +144,7 @@ def test_index_projection_matches_legacy_full_read_shape(tmp_path) -> None:
                 "clipExportStatus",
                 "clipExportCompleted",
                 "clipExportTotal",
+                "error",
             }
         finally:
             await changes.stop()

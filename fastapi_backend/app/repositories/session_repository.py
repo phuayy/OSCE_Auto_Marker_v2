@@ -9,6 +9,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from app.core.exceptions import SessionWriteContractError, StaleSessionError
 from app.core.json_utils import read_json_file
 from app.database.models import SessionRecord, utc_now
 from app.database.orm import OrmDatabase
@@ -18,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 # Sentinel key stamped onto every session dict on read, holding the row's
 # ``updated_at`` at load time. ``write`` uses it as an optimistic-concurrency
-# token to detect (and log) lost updates. It is stripped before persistence.
+# token: a mismatch is refused, not logged over. It is stripped before
+# persistence.
 LOADED_VERSION_KEY = "_loadedUpdatedAt"
 
 # Keys that map to dedicated columns (or are transient) and therefore must not
@@ -103,26 +105,35 @@ class SessionRepository:
             return _record_to_dict(record)
 
     async def write(self, session: dict[str, Any]) -> None:
+        """Persist ``session`` whole, under the write contract.
+
+        * A row that does not exist yet is created from any dict — that is how
+          uploads and clip children are born.
+        * A row that exists is replaced only by a dict that was ``read`` from it
+          (it carries ``_loadedUpdatedAt``) **and** whose stamp still matches
+          the row. A mismatch means another writer committed in between, and
+          the caller's document would erase that change; it raises
+          :class:`StaleSessionError` so the caller can re-read and re-apply
+          (see :meth:`SessionService.update`).
+        * A dict with no stamp aimed at an existing row is refused outright:
+          it was built by hand or is a projection, and storing it would replace
+          the payload with whatever keys it happens to carry.
+        """
         session_id = str(session["id"])
         now = utc_now()
         loaded_version = session.get(LOADED_VERSION_KEY)
         payload = {k: v for k, v in session.items() if k not in _NON_PAYLOAD_KEYS}
         async with self.database.transaction() as db_session:
             existing = await db_session.get(SessionRecord, session_id)
-            if existing is not None and loaded_version is not None:
+            if existing is not None:
+                if loaded_version is None:
+                    raise SessionWriteContractError(session_id)
                 current_version = _version_token(existing.updated_at)
                 if current_version is not None and current_version != loaded_version:
-                    # The row changed between this caller's read and write — a
-                    # concurrent writer's update is about to be overwritten
-                    # (last-writer-wins). Surface it so the race is observable.
-                    logger.warning(
-                        "Concurrent session modification detected; overwriting newer state.",
-                        extra={
-                            "trace_id": session_id,
-                            "stage": "session_write",
-                            "loaded_version": loaded_version,
-                            "current_version": current_version,
-                        },
+                    raise StaleSessionError(
+                        session_id,
+                        loaded_version=str(loaded_version),
+                        current_version=current_version,
                     )
             if existing is None:
                 record = SessionRecord(
@@ -144,9 +155,9 @@ class SessionRepository:
                 existing.payload = payload
                 existing.updated_at = now
 
-        # Re-stamp the in-memory dict to the version we just persisted, so the
-        # common read-once-write-many pattern (the pipeline marks many steps on a
-        # single session object) is NOT flagged as a concurrent modification. A
+        # Re-stamp the in-memory dict to the version just persisted, so the
+        # read-once-write-many pattern (one caller marking several steps on one
+        # object, with no other writer in between) keeps passing the check. A
         # genuinely stale writer holds a different dict whose stamp won't match.
         session[LOADED_VERSION_KEY] = _version_token(now)
 
@@ -186,6 +197,7 @@ class SessionRepository:
             payload["clipExport", "status"].as_string().label("clip_export_status"),
             payload["clipExport", "completed"].as_float().label("clip_export_completed"),
             payload["clipExport", "total"].as_float().label("clip_export_total"),
+            payload["error"].as_string().label("error"),
         ).order_by(SessionRecord.created_at.desc())
 
         async with self.database.session() as db_session:
@@ -218,6 +230,10 @@ class SessionRepository:
                     "clipExportStatus": row.clip_export_status or None,
                     "clipExportCompleted": _optional_int(row.clip_export_completed),
                     "clipExportTotal": _optional_int(row.clip_export_total),
+                    # Why a failed session failed. The card is the only place a
+                    # user sees a session they cannot open, so the reason has
+                    # to travel with the list, not just the full document.
+                    "error": row.error or None,
                 }
             )
         return projections

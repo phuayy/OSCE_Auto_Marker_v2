@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app.core.config import Settings
+from app.core.exceptions import StaleSessionError
 from app.core.json_utils import extract_json_object
 from app.core.utils import normalize_session_name, session_name_key
 from app.core.versioned_cache import VersionedCache
@@ -15,7 +17,30 @@ from app.repositories.session_repository import SessionEntry, SessionRepository
 from app.services.change_feed_service import ChangeFeedService
 
 
+logger = logging.getLogger(__name__)
+
 SESSION_INDEX_CACHE_KEY = "session_index"
+
+# A mutation applied to a freshly-read session document. Return ``False`` to
+# say "nothing to write" (the document is returned as read); anything else
+# commits. Must be synchronous and side-effect free apart from the document:
+# it is re-run from scratch when another writer got in first.
+SessionMutator = Callable[[dict[str, Any]], Any]
+
+# How many times ``update`` re-reads and re-applies before giving up. Contention
+# on one session is a handful of writers (pipeline, queue, the user), so a
+# mutation that still cannot land after this many rounds is a bug, not load.
+UPDATE_MAX_ATTEMPTS = 8
+
+
+def _set_name(name: str) -> SessionMutator:
+    def mutate(session: dict[str, Any]) -> Any:
+        if session.get("name") == name:
+            return False
+        session["name"] = name
+        return None
+
+    return mutate
 
 
 class SessionService:
@@ -41,10 +66,51 @@ class SessionService:
         return await self.repository.read(session_id)
 
     async def write(self, session: dict[str, Any]) -> None:
+        """Persist a document that was either just created or ``read`` by this
+        caller and not touched by anyone else since. For every other write —
+        anything long-lived, anything racing a job — use :meth:`update`."""
         await self.repository.write(session)
+
+    async def update(self, session_id: str, mutate: SessionMutator) -> dict[str, Any]:
+        """Read → mutate → write, retried until the write lands on the version it read.
+
+        This is the one way to change a session that another process may also be
+        changing. The mutator sees the *current* document, so a rename landing
+        while the pipeline marks a step keeps both: the pipeline's mutator is
+        replayed on top of the renamed document instead of overwriting it with
+        the copy it loaded an hour earlier.
+
+        Returns the document as persisted (stamped), so a caller that keeps a
+        working copy can adopt it and stay current.
+        """
+        last_error: StaleSessionError | None = None
+        for attempt in range(1, UPDATE_MAX_ATTEMPTS + 1):
+            session = await self.repository.read(session_id)
+            if mutate(session) is False:
+                return session
+            try:
+                await self.repository.write(session)
+                return session
+            except StaleSessionError as error:
+                last_error = error
+                logger.debug(
+                    "Session %s changed under an update (attempt %d/%d); re-applying.",
+                    session_id,
+                    attempt,
+                    UPDATE_MAX_ATTEMPTS,
+                )
+                # Yield so the writer that beat us can finish its own sequence
+                # before we re-read; a hot loop here would just lose again.
+                await asyncio.sleep(0)
+        assert last_error is not None  # the loop only exits via return or here
+        raise last_error
 
     async def read_all_entries(self) -> list[SessionEntry]:
         return await self.repository.read_all()
+
+    async def list_child_ids(self, parent_session_id: str) -> list[str]:
+        """Ids of the clip-assessment children of a long-video session."""
+        return await self.repository.list_child_ids(parent_session_id)
 
     async def ensure_names_for_index(self, entries: list[SessionEntry]) -> tuple[list[SessionEntry], set[str]]:
         used_keys: set[str] = set()
@@ -72,7 +138,14 @@ class SessionService:
             entry.session["name"] = self.reserve_unique_session_name(used_keys, preferred)
             changed.append(entry)
 
-        await asyncio.gather(*(self.repository.write_entry(entry) for entry in changed))
+        # Through ``update``: a session being backfilled may be mid-pipeline in
+        # another process, and its job must not lose a step to a name repair.
+        await asyncio.gather(
+            *(
+                self.update(str(entry.session["id"]), _set_name(str(entry.session["name"])))
+                for entry in changed
+            )
+        )
         ordered.reverse()  # callers (list_sessions, ensure_session_name) expect newest-first
         return ordered, used_keys
 
@@ -156,9 +229,7 @@ class SessionService:
             for entry in entries
         ):
             raise FileExistsError("Session name must be unique.")
-        target.session["name"] = next_name_raw
-        await self.repository.write_entry(target)
-        return target.session
+        return await self.update(str(session_id), _set_name(next_name_raw))
 
     def reserve_unique_session_name(self, used_keys: set[str], preferred_name: str = "") -> str:
         base_preferred = normalize_session_name(preferred_name)[: self.settings.session_name_max_length]

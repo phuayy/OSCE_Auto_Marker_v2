@@ -18,6 +18,7 @@ from app.pipeline.media import MediaPipeline
 from app.pipeline.scoring import ScoringPipeline
 from app.services.job_queue_service import JobQueueService
 from app.services.storage_service import LocalObjectStorageService
+from tests.fixtures.session_store import SessionUpdateMixin
 
 
 class CapturingEvents:
@@ -28,7 +29,7 @@ class CapturingEvents:
         self.items.append((session_id, event_name, payload))
 
 
-class InMemorySessions:
+class InMemorySessions(SessionUpdateMixin):
     def __init__(self, session: dict[str, Any]) -> None:
         self.session = dict(session)
 

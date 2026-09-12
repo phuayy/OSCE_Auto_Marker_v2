@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import asyncio
 import json
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 from app.core.json_utils import read_json_file
 from app.pipeline.llm_preprocess import diff_replacements, merge_corrected_segments
 from app.services.pipeline_service import PipelineService
+from tests.fixtures.session_store import SessionUpdateMixin
 
 
 def build_transcript() -> dict[str, Any]:
@@ -66,14 +68,17 @@ def test_diff_replacements_word_level() -> None:
     assert diff_replacements("same text", "same text") == []
 
 
-class _FakeSessions:
-    def __init__(self) -> None:
-        self.session: dict[str, Any] | None = None
+class _FakeSessions(SessionUpdateMixin):
+    def __init__(self, session: dict[str, Any] | None = None) -> None:
+        self.session: dict[str, Any] | None = session
         self.writes = 0
+
+    async def read(self, _session_id: str) -> dict[str, Any]:
+        return copy.deepcopy(self.session or {})
 
     async def write(self, session: dict[str, Any]) -> None:
         self.writes += 1
-        self.session = session
+        self.session = copy.deepcopy(session)
 
 
 class _FakeEvents:
@@ -105,10 +110,10 @@ class _FakePreprocessor:
         return self.payload or {}
 
 
-def build_service(preprocessor: Any, enabled: bool | None) -> PipelineService:
+def build_service(preprocessor: Any, enabled: bool | None, session: dict[str, Any] | None = None) -> PipelineService:
     app_settings = _FakeAppSettings(enabled) if enabled is not None else None
     return PipelineService(
-        _FakeSessions(),
+        _FakeSessions(session),
         events=_FakeEvents(),
         media=None,
         scoring=None,
@@ -140,12 +145,12 @@ def test_step_completes_rewrites_transcript_and_patches_subtitles(tmp_path: Path
             ],
         }
     )
-    service = build_service(preprocessor, enabled=True)
     session = {
         "id": "sess-1",
         "pipeline": {},
         "outputs": {"transcript": {"absolutePath": str(transcript_path), "sizeBytes": 1}},
     }
+    service = build_service(preprocessor, enabled=True, session=session)
 
     asyncio.run(
         service._run_llm_preprocess(session, transcript, {"srtAbsolutePath": str(srt_path)}, transcript_path)
@@ -166,8 +171,8 @@ def test_step_skipped_when_toggle_off(tmp_path: Path) -> None:
     transcript, transcript_path = write_transcript(tmp_path)
     original_bytes = transcript_path.read_bytes()
     preprocessor = _FakePreprocessor()
-    service = build_service(preprocessor, enabled=False)
     session = {"id": "sess-1", "pipeline": {}, "outputs": {}}
+    service = build_service(preprocessor, enabled=False, session=session)
 
     asyncio.run(service._run_llm_preprocess(session, transcript, {}, transcript_path))
 
@@ -178,8 +183,8 @@ def test_step_skipped_when_toggle_off(tmp_path: Path) -> None:
 
 def test_step_skipped_when_not_wired() -> None:
     # Constructor defaults (no preprocessor/app_settings) never break the run.
-    service = PipelineService(_FakeSessions(), events=_FakeEvents(), media=None, scoring=None)
     session = {"id": "sess-1", "pipeline": {}, "outputs": {}}
+    service = PipelineService(_FakeSessions(session), events=_FakeEvents(), media=None, scoring=None)
 
     asyncio.run(service._run_llm_preprocess(session, {"segments": []}, {}, Path("missing.json")))
 
@@ -189,8 +194,8 @@ def test_step_skipped_when_not_wired() -> None:
 def test_step_failure_is_recorded_but_does_not_raise(tmp_path: Path) -> None:
     transcript, transcript_path = write_transcript(tmp_path)
     original_bytes = transcript_path.read_bytes()
-    service = build_service(_FakePreprocessor(error=RuntimeError("model exploded")), enabled=True)
     session = {"id": "sess-1", "pipeline": {}, "outputs": {}}
+    service = build_service(_FakePreprocessor(error=RuntimeError("model exploded")), enabled=True, session=session)
 
     asyncio.run(service._run_llm_preprocess(session, transcript, {}, transcript_path))
 
