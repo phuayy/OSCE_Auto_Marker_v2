@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 from app.core.config import Settings
 from app.core.logging_utils import log_context
 from app.core.process import CommandRunner
 from app.core.rate_limit import FixedWindowRateLimiter
+from app.core.resources import ResourceLease
 from app.core.tasks import BackgroundTaskRegistry
 from app.core.versioned_cache import VersionedCache
 from app.database import Database
@@ -55,6 +57,22 @@ from app.services.transcription_router import TranscriptionRouter
 logger = logging.getLogger(__name__)
 
 
+class ContainerRole(StrEnum):
+    """Which process this container is booting in.
+
+    The same wiring serves two processes with different duties. The API owns
+    the schema, the seed data and the startup sweeps that decide what a
+    restart interrupted; a Hatchet worker only runs jobs. Running the API's
+    sweeps in a worker is not merely wasteful: ``recover_stale_assembling_uploads``
+    reasons "an upload still assembling at boot was killed by the restart",
+    which is true for the process that assembles and false for a worker booting
+    beside a live API that is assembling right now.
+    """
+
+    API = "api"
+    WORKER = "worker"
+
+
 @dataclass
 class AppContainer:
     settings: Settings
@@ -89,16 +107,45 @@ class AppContainer:
     login_rate_limiter: FixedWindowRateLimiter
     changes: ChangeFeedService
     read_cache: VersionedCache
+    # The one accelerator lease every GPU step in this process contends on.
+    gpu: ResourceLease
     # Startup work that must not hold the boot: currently the transcription
     # weight prefetch, which can run for minutes on a cold machine.
     background: BackgroundTaskRegistry = field(default_factory=BackgroundTaskRegistry)
 
-    async def startup(self, *, dispatch_queued_jobs: bool = True, recover_interrupted_jobs: bool | None = None) -> None:
-        should_recover = (
-            self.settings.recover_running_jobs_on_startup and self.settings.job_queue_backend == "local"
-            if recover_interrupted_jobs is None
-            else recover_interrupted_jobs
-        )
+    def runs_jobs(self, role: ContainerRole) -> bool:
+        """Whether this process executes job handlers (and so needs model weights)."""
+        return role is ContainerRole.WORKER or self.settings.job_queue_backend == "local"
+
+    async def startup(
+        self,
+        *,
+        role: ContainerRole = ContainerRole.API,
+        dispatch_queued_jobs: bool | None = None,
+        recover_interrupted_jobs: bool | None = None,
+    ) -> None:
+        """Bring the container up for ``role``.
+
+        API only: schema migration, seed data, rubric parse, the upload
+        recovery sweeps and startup job recovery. The process that accepts
+        uploads is the only one that can tell an interrupted assembly from a
+        live one, and the only one that should touch the schema.
+
+        Both: storage layout, table initialisation, change tracking, auth, and
+        the job queue's own startup (a worker starts it without recovering or
+        dispatching, since Hatchet drives its jobs).
+
+        Whichever role executes jobs prefetches the transcription weights.
+        """
+        api = role is ContainerRole.API
+        if dispatch_queued_jobs is None:
+            dispatch_queued_jobs = api
+        if recover_interrupted_jobs is None:
+            recover_interrupted_jobs = (
+                api
+                and self.settings.recover_running_jobs_on_startup
+                and self.settings.job_queue_backend == "local"
+            )
         for warning in self.settings.collect_runtime_warnings():
             logger.warning("Configuration warning: %s", warning, extra=log_context("startup", "config_validation"))
         await self.artifacts.ensure_storage_layout()
@@ -107,7 +154,8 @@ class AppContainer:
         # database built by the older create_all path. Everything below is then
         # a no-op on a migrated database, and kept because it is what still
         # builds the schema when DB_AUTO_MIGRATE is off or Alembic is absent.
-        if self.settings.db_auto_migrate:
+        # One process migrates; a worker booting alongside must not race it.
+        if api and self.settings.db_auto_migrate:
             await run_database_migrations(self.settings.resolved_database_source)
         await self.database.initialize()
         await self.orm_database.initialize()
@@ -119,25 +167,29 @@ class AppContainer:
         # attached once both initialisers have run.
         push_enabled = await install_change_tracking(self.orm_database.engine)
         await self.changes.start(push_enabled=push_enabled)
-        await self.sessions.migrate_legacy_sessions()
-        await self.corpora.seed_defaults()
         await self.auth.initialize()
-        await self.rubrics.ensure_parsed()
-        # Recover uploads/sessions stuck in "assembling" before dispatching
-        # queued jobs, so no job is started for a session in a bad state.
-        await self.async_uploads.recover_stale_assembling_uploads()
-        # Reclaim uploads abandoned mid-transfer (parts on disk, session pinned at
-        # waiting_for_upload) once their TTL has elapsed — frees leaked bytes and
-        # clears dead session cards.
-        await self.async_uploads.recover_expired_uploads()
-        await self.jobs.startup(dispatch_queued=dispatch_queued_jobs, recover_interrupted=should_recover)
-        # Weights are fetched after the API is otherwise ready, never before:
-        # a deployment must serve requests while a multi-gigabyte checkpoint
-        # downloads, and the download is optional for correctness.
-        self.background.spawn(
-            self.transcription.prefetch_selected_engine(),
-            name="transcription-model-prefetch",
-        )
+        if api:
+            await self.sessions.migrate_legacy_sessions()
+            await self.corpora.seed_defaults()
+            await self.rubrics.ensure_parsed()
+            # Resume uploads whose assembly a restart cut short, and fail the
+            # ones that cannot be resumed, before dispatching queued jobs so no
+            # job starts for a session in a bad state.
+            await self.async_uploads.recover_stale_assembling_uploads()
+            # Reclaim uploads abandoned mid-transfer (parts on disk, session
+            # pinned at waiting_for_upload) once their TTL has elapsed. Frees
+            # leaked bytes and clears dead session cards.
+            await self.async_uploads.recover_expired_uploads()
+        await self.jobs.startup(dispatch_queued=dispatch_queued_jobs, recover_interrupted=recover_interrupted_jobs)
+        # Weights are fetched after the process is otherwise ready, never
+        # before: a deployment must serve requests while a multi-gigabyte
+        # checkpoint downloads, and the download is optional for correctness.
+        # Only a process that will transcribe needs them.
+        if self.runs_jobs(role):
+            self.background.spawn(
+                self.transcription.prefetch_selected_engine(),
+                name="transcription-model-prefetch",
+            )
 
     async def shutdown(self) -> None:
         # Cancelled rather than drained: a half-finished weight download is
@@ -192,7 +244,10 @@ def create_container(settings: Settings | None = None) -> AppContainer:
     rubric_assets = RubricAssetService(RubricAssetRepository(orm_database))
     assessments = AssessmentService(AssessmentRepository(orm_database))
     rubrics = RubricService(active_settings, runner, artifacts, rubric_assets)
-    media = MediaPipeline(active_settings, runner, events, auth)
+    # One lease per process: transcription (any engine) and person detection
+    # both load a model into the same card and must take turns on it.
+    gpu = ResourceLease(active_settings.gpu_slots, "gpu")
+    media = MediaPipeline(active_settings, runner, events, auth, gpu=gpu)
     # The change feed is what lets this cache the per-run selections instead of
     # re-querying them: a settings write anywhere fires the table's trigger, and
     # the announcement evicts every process's copy.
@@ -244,6 +299,7 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         events,
         EngineDependencies(active_settings, runner, events, auth, media),
         app_settings=app_settings,
+        gpu=gpu,
     )
     pipeline = PipelineService(
         sessions,
@@ -316,4 +372,5 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         login_rate_limiter=login_rate_limiter,
         changes=changes,
         read_cache=read_cache,
+        gpu=gpu,
     )

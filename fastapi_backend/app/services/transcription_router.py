@@ -26,6 +26,7 @@ from typing import Any
 
 from app.core.config import Settings
 from app.core.exceptions import TranscriptionResourceError
+from app.core.resources import ResourceLease
 from app.pipeline.transcription import registry
 from app.pipeline.transcription.base import (
     ProgressCallback,
@@ -47,11 +48,18 @@ class TranscriptionRouter:
         events: EventService,
         dependencies: registry.EngineDependencies,
         app_settings: AppSettingsRepository | None = None,
+        gpu: ResourceLease | None = None,
     ) -> None:
         self.settings = settings
         self.events = events
         self.app_settings = app_settings
         self.engines: dict[str, TranscriptionEngine] = registry.build_all(dependencies)
+        # Every engine loads a model into the accelerator (WhisperX, Canary,
+        # and the pyannote pass behind either), so the lease is taken here,
+        # once, around whichever engine runs — engines stay lease-unaware.
+        # Falls back to the media pipeline's lease so the two GPU consumers in
+        # a process (transcription, person detection) share one bound.
+        self.gpu = gpu or getattr(dependencies.media, "gpu", None) or ResourceLease.unbounded("gpu")
 
     # --- selection ---------------------------------------------------------
 
@@ -208,10 +216,14 @@ class TranscriptionRouter:
                 "message": f"Transcribing with {engine.descriptor.label} ({engine_id}).",
             },
         )
-        try:
-            result = await engine.transcribe(request)
-        except TranscriptionResourceError as error:
-            result = await self._transcribe_with_fallback_engine(engine_id, request, error)
+        # Held for the whole engine run, fallback included: the fallback engine
+        # is a second model load on the same card, and releasing between the
+        # two would let another job slip in and OOM both.
+        async with self.gpu.hold("Transcription", session_id):
+            try:
+                result = await engine.transcribe(request)
+            except TranscriptionResourceError as error:
+                result = await self._transcribe_with_fallback_engine(engine_id, request, error)
         if not result.diarized:
             # Loud, because unlabelled dialogue changes what the scorers can
             # conclude — not a silent quality regression.

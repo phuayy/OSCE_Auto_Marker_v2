@@ -21,9 +21,10 @@ from app.database import Database
 from app.repositories.job_repository import JobRepository
 from app.services.event_service import EventService
 from app.services.job_queue_service import JobQueueService, JobRunResult, is_retryable_failure
+from tests.fixtures.session_store import SessionUpdateMixin
 
 
-class FakeSessions:
+class FakeSessions(SessionUpdateMixin):
     """Minimal session store: the queue only reads, mutates and writes back."""
 
     def __init__(self) -> None:

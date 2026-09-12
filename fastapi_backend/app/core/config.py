@@ -303,6 +303,12 @@ class Settings:
     job_queue_backend: str = os.getenv("JOB_QUEUE_BACKEND", "local").strip().lower() or "local"
     local_job_auto_start: bool = read_bool_env("LOCAL_JOB_AUTO_START", True)
     job_worker_concurrency: int = read_int_env("JOB_WORKER_CONCURRENCY", 2)
+    # How many jobs may hold the accelerator at once. Concurrency above bounds
+    # jobs, which are mostly network-bound and cheap to overlap; this bounds the
+    # one step that is not. Transcription and person detection each load a
+    # model into the same card, so with one GPU this stays at 1 and the second
+    # job waits for the lease instead of dying of CUDA OOM. 0 = unbounded.
+    gpu_slots: int = read_int_env("GPU_SLOTS", 1)
     recover_running_jobs_on_startup: bool = read_bool_env("RECOVER_RUNNING_JOBS_ON_STARTUP", True)
     app_database_url: str = os.getenv("APP_DATABASE_URL", "").strip()
     database_url: str = os.getenv("DATABASE_URL", "").strip()

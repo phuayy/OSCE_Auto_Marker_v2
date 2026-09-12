@@ -12,6 +12,7 @@ from app.core.config import Settings
 from app.core.exceptions import EmptyTranscriptError
 from app.core.json_utils import extract_json_object
 from app.core.process import CommandRunner
+from app.core.resources import ResourceLease
 from app.core.utils import atomic_replace, clamp_number, format_timestamp, utc_now_iso
 from app.pipeline import person_presets
 from app.pipeline.whisperx_options import WhisperxRunOptions
@@ -30,17 +31,25 @@ ENGINE_MARKER_WHISPERX = "whisperx"
 
 
 class MediaPipeline:
+    # The accelerator lease. Class-level default so a test double that skips
+    # ``__init__`` still has one; the container replaces it with the shared,
+    # bounded lease every GPU step in the process contends on.
+    gpu: ResourceLease = ResourceLease.unbounded("gpu")
+
     def __init__(
         self,
         settings: Settings,
         runner: CommandRunner,
         events: EventService,
         auth: AuthService,
+        gpu: ResourceLease | None = None,
     ) -> None:
         self.settings = settings
         self.runner = runner
         self.events = events
         self.auth = auth
+        if gpu is not None:
+            self.gpu = gpu
 
     @staticmethod
     def count_usable_segments(payload: Any) -> int:
@@ -606,20 +615,24 @@ class MediaPipeline:
 
         # The handler is worth installing for the progress readings alone, so it
         # is no longer conditional on there being a session to log against.
-        result = await self.runner.run(
-            self.settings.scorer_python_bin,
-            args,
-            "Human detection (RT-DETR)",
-            env=self.settings.subprocess_env(
-                {
-                    # Pin the script to the binaries the backend already resolved
-                    # (Windows PATH quirks are handled once, in Settings.load).
-                    "FFMPEG_BIN": self.settings.ffmpeg_bin,
-                    "FFPROBE_BIN": self.settings.ffprobe_bin,
-                }
-            ),
-            on_output=stream_progress,
-        )
+        # The detector loads RT-DETR into the same card WhisperX uses, so it
+        # runs under the accelerator lease: a second GPU job waits its turn
+        # rather than pushing this one (or itself) into CUDA OOM.
+        async with self.gpu.hold("Human detection", session_id):
+            result = await self.runner.run(
+                self.settings.scorer_python_bin,
+                args,
+                "Human detection (RT-DETR)",
+                env=self.settings.subprocess_env(
+                    {
+                        # Pin the script to the binaries the backend already resolved
+                        # (Windows PATH quirks are handled once, in Settings.load).
+                        "FFMPEG_BIN": self.settings.ffmpeg_bin,
+                        "FFPROBE_BIN": self.settings.ffprobe_bin,
+                    }
+                ),
+                on_output=stream_progress,
+            )
 
         payload = extract_json_object(result.stdout)
         clip_ranges = self.normalize_clip_ranges(payload.get("clip_ranges") or [], video_duration_seconds)
@@ -705,6 +718,7 @@ class MediaPipeline:
         session_id: str,
         clip: dict[str, Any],
         video_path: Path,
+        plan_id: str | None = None,
     ) -> dict[str, Any]:
         """Cut one draft clip out of the source video, in place on ``clip``.
 
@@ -712,15 +726,26 @@ class MediaPipeline:
         each one durably recorded, so a crash or a retry resumes at the clip it
         stopped on instead of re-cutting the whole recording.
 
-        Idempotent. ``crop_video_segment`` publishes its output atomically, so an
-        MP4 already sitting at the expected path is by definition a finished
-        crop and is adopted rather than repeated. The file name is derived from
-        the clip's ``exportIndex``, which is fixed when the export plan is
-        written, so the same clip resolves to the same path on every attempt.
+        Idempotent *within a plan*. ``crop_video_segment`` publishes its output
+        atomically, so an MP4 already sitting at the expected path is by
+        definition a finished crop and is adopted rather than repeated. The path
+        is ``clips/<session>/<planId>/clip-N.mp4``: ``exportIndex`` fixes N for
+        the life of the plan (a retry finds its own clips), and ``planId``
+        fixes the directory (a later plan with different boundaries can never
+        find — and adopt — this plan's footage). Clips recorded before plans
+        existed carry no ``planId`` and keep their flat legacy path.
         """
         export_index = int(clip.get("exportIndex") or 0)
-        file_name = f"{session_id}-clip-{export_index + 1}.mp4"
-        output_path = self.settings.paths.output_clips_dir / str(session_id) / file_name
+        resolved_plan = str(plan_id or clip.get("planId") or "")
+        session_dir = self.settings.paths.output_clips_dir / str(session_id)
+        if resolved_plan:
+            file_name = f"clip-{export_index + 1}.mp4"
+            output_path = session_dir / resolved_plan / file_name
+            url = f"/media/clips/{session_id}/{resolved_plan}/{file_name}"
+        else:
+            file_name = f"{session_id}-clip-{export_index + 1}.mp4"
+            output_path = session_dir / file_name
+            url = f"/media/clips/{session_id}/{file_name}"
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         reused = await asyncio.to_thread(self._is_finished_clip_file, output_path)
@@ -736,12 +761,14 @@ class MediaPipeline:
         clip.update(
             {
                 "fileName": file_name,
-                "url": f"/media/clips/{session_id}/{file_name}",
+                "url": url,
                 "absolutePath": str(output_path),
                 "sizeBytes": stats.st_size,
                 "isDraft": False,
             }
         )
+        if resolved_plan:
+            clip["planId"] = resolved_plan
         return {"clip": clip, "reused": reused}
 
     @staticmethod

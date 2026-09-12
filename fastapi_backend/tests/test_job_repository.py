@@ -54,10 +54,11 @@ def test_job_repository_claims_queued_job_once(tmp_path) -> None:
     first_claim = asyncio.run(repository.claim_queued("job-1", "worker-1"))
     second_claim = asyncio.run(repository.claim_queued("job-1", "worker-2"))
 
-    assert first_claim is not None
-    assert first_claim["status"] == "running"
-    assert first_claim["attempts"] == 1
-    assert second_claim is None
+    assert first_claim.claimed
+    assert first_claim.job["status"] == "running"
+    assert first_claim.job["attempts"] == 1
+    assert not second_claim.claimed
+    assert second_claim.outcome == "not_queued"
 
 
 def test_job_repository_prepares_failed_job_for_hatchet_retry(tmp_path) -> None:

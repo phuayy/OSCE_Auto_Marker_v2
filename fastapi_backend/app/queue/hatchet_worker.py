@@ -10,8 +10,8 @@ from app.core.asyncio_compat import (
     configure_windows_signal_compatibility,
 )
 from app.core.config import Settings
-from app.queue.hatchet_tasks import hatchet, process_job
-from app.services.container import AppContainer, create_container
+from app.queue.hatchet_tasks import bind_worker_container, hatchet, process_job
+from app.services.container import AppContainer, ContainerRole, create_container
 
 
 configure_windows_selector_event_loop_policy()
@@ -52,8 +52,13 @@ async def _worker_lifespan() -> AsyncGenerator[None, None]:
     Hatchet client's internal gRPC channel in a stale state and caused the
     worker to silently fail to receive dispatched jobs.
     """
+    # WORKER role: no schema migration, no seed data, none of the API's upload
+    # sweeps (which would fail an upload the API is assembling right now), and
+    # no startup job recovery — Hatchet owns dispatch. Bound once so every job
+    # this process runs shares these connections, caches and the GPU lease.
     container = create_container(settings)
-    await container.startup(dispatch_queued_jobs=False, recover_interrupted_jobs=False)
+    await container.startup(role=ContainerRole.WORKER)
+    bind_worker_container(container)
     logger.info("Hatchet worker runtime initialized.")
     redispatch_task: asyncio.Task[None] | None = None
     try:
@@ -70,6 +75,7 @@ async def _worker_lifespan() -> AsyncGenerator[None, None]:
             redispatch_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await redispatch_task
+        bind_worker_container(None)
         await container.shutdown()
         logger.info("Hatchet worker runtime shut down.")
 

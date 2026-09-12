@@ -73,6 +73,31 @@ class JobRecord:
         }
 
 
+@dataclass(frozen=True)
+class JobClaim:
+    """Outcome of trying to take a queued job for execution.
+
+    ``claimed``    — ``job`` is now ``running`` under this worker.
+    ``not_queued`` — the row is no longer queued (another worker took it, it was
+                     cancelled, or it already finished); ``job`` is the current row.
+    ``exhausted``  — the row was queued but had no attempts left, so it has just
+                     been marked ``failed``; ``job`` is that failed row. The caller
+                     owns the consequence: a session waiting on this job must be
+                     failed too, or it sits in flight forever.
+    """
+
+    outcome: str
+    job: dict[str, Any]
+
+    @property
+    def claimed(self) -> bool:
+        return self.outcome == "claimed"
+
+    @property
+    def exhausted(self) -> bool:
+        return self.outcome == "exhausted"
+
+
 class JobRepository:
     def __init__(self, database: Database | Path, legacy_jobs_dir: Path | None = None) -> None:
         if isinstance(database, Database):
@@ -336,15 +361,15 @@ class JobRepository:
 
         return await self.database.run(_list)
 
-    async def claim_queued(self, job_id: str, worker_id: str) -> dict[str, Any] | None:
+    async def claim_queued(self, job_id: str, worker_id: str) -> JobClaim:
         now = utc_now_iso()
 
-        def _claim(connection: sqlite3.Connection) -> dict[str, Any] | None:
+        def _claim(connection: sqlite3.Connection) -> JobClaim:
             row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if row is None:
                 raise FileNotFoundError(f"Job not found: {job_id}")
             if str(row["status"]) != "queued":
-                return None
+                return JobClaim("not_queued", self._row_to_job(row))
             if int(row["attempts"] or 0) >= int(row["max_attempts"] or 1):
                 connection.execute(
                     """
@@ -357,7 +382,8 @@ class JobRepository:
                     """,
                     (now, "Maximum retry attempts reached.", now, job_id),
                 )
-                return None
+                failed = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                return JobClaim("exhausted", self._row_to_job(failed))
 
             next_attempt = int(row["attempts"] or 0) + 1
             cursor = connection.execute(
@@ -375,11 +401,14 @@ class JobRepository:
                 """,
                 (next_attempt, now, worker_id, now, now, job_id),
             )
-            if cursor.rowcount != 1:
-                return None
             claimed = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-            if claimed is None or str(claimed["status"]) != "running" or str(claimed["locked_by"] or "") != worker_id:
-                return None
+            if (
+                cursor.rowcount != 1
+                or claimed is None
+                or str(claimed["status"]) != "running"
+                or str(claimed["locked_by"] or "") != worker_id
+            ):
+                return JobClaim("not_queued", self._row_to_job(claimed if claimed is not None else row))
             connection.execute(
                 """
                 INSERT INTO job_attempts (job_id, attempt_number, worker_id, status, started_at)
@@ -387,9 +416,27 @@ class JobRepository:
                 """,
                 (job_id, next_attempt, worker_id, now),
             )
-            return self._row_to_job(claimed)
+            return JobClaim("claimed", self._row_to_job(claimed))
 
         return await self.database.run(_claim, write=True)
+
+    async def active_session_ids(self) -> set[str]:
+        """Sessions that some job row still intends to run.
+
+        The startup reconciliation compares this against sessions whose status
+        claims a job is working on them; a session in that state with no row
+        here has nothing left that could ever move it.
+        """
+        placeholders = ",".join("?" for _ in ACTIVE_JOB_STATUSES)
+
+        def _list(connection: sqlite3.Connection) -> set[str]:
+            rows = connection.execute(
+                f"SELECT DISTINCT session_id FROM jobs WHERE status IN ({placeholders})",
+                sorted(ACTIVE_JOB_STATUSES),
+            ).fetchall()
+            return {str(row["session_id"]) for row in rows}
+
+        return await self.database.run(_list)
 
     async def mark_succeeded(self, job_id: str) -> dict[str, Any]:
         return await self._finish(job_id, "succeeded", None)

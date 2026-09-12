@@ -14,6 +14,7 @@ from app.core.exceptions import AppError
 from app.core.logging_utils import log_context
 from app.core.utils import utc_now_iso
 from app.domain.jobs import ACTIVE_JOB_STATUSES
+from app.domain.sessions import JOB_DRIVEN_STATUSES
 from app.repositories.job_repository import JobRepository
 from app.services.event_service import EventService
 from app.services.session_service import SessionService
@@ -114,11 +115,55 @@ class JobQueueService:
         await self.repository.initialize()
         if recover_interrupted:
             queued_jobs = await self.repository.recover_interrupted_jobs()
+            # Only the process that owns recovery may declare sessions orphaned:
+            # a Hatchet worker booting beside a live API would otherwise fail
+            # sessions whose jobs are running in the other process. Runs after
+            # recovery (so requeued rows count as active) and before dispatch
+            # (so a job that fails on claim finds its session already reconciled).
+            await self.reconcile_orphaned_sessions()
         else:
             queued_jobs = await self.repository.list_queued()
         if dispatch_queued:
             for job in queued_jobs:
                 await self._dispatch(job)
+
+    async def reconcile_orphaned_sessions(self) -> list[str]:
+        """Fail sessions that say a job is working on them when no job row is.
+
+        A session reaches ``queued``/``processing`` in three ways: the queue
+        moved it there, an inline request path (``POST /process``) set it and
+        died with the process, or a job exhausted its retries in a way that
+        never reached ``_fail_session``. In the last two cases nothing will ever
+        write the session again — it shows "Processing…" forever, cannot be
+        opened, and ``/rerun`` refuses it as in-flight. The job table is the
+        authority on "in progress"; a session claiming it without a row is
+        terminal, and saying so is what hands it back to the user.
+        """
+        active = await self.repository.active_session_ids()
+        orphaned: list[str] = []
+        for entry in await self.sessions.list_sessions():
+            status = str(entry.get("status") or "")
+            session_id = str(entry.get("id") or "")
+            if status not in JOB_DRIVEN_STATUSES or not session_id or session_id in active:
+                continue
+            orphaned.append(session_id)
+            await self._fail_session(
+                session_id,
+                AppError(
+                    "Processing was interrupted by a server restart and no job remains to resume it. "
+                    "Re-run the session to score it again.",
+                    status_code=503,
+                    retryable=False,
+                ),
+                "Processing was interrupted by a server restart.",
+            )
+        if orphaned:
+            logger.warning(
+                "Startup reconciliation: %d session(s) were in flight with no active job and were marked failed: %s",
+                len(orphaned),
+                ", ".join(orphaned),
+            )
+        return orphaned
 
     async def shutdown(self) -> None:
         tasks = list(self._tasks.values())
@@ -587,15 +632,34 @@ class JobQueueService:
         return True
 
     async def _execute_job(self, job_id: str, *, raise_on_error: bool = False) -> JobRunResult:
-        job = await self.repository.claim_queued(job_id, self._worker_id)
-        if job is None:
+        claim = await self.repository.claim_queued(job_id, self._worker_id)
+        if claim.exhausted:
+            # The row just went terminal without ever running. The session it
+            # belongs to is still waiting on it and nothing else will ever touch
+            # it, so this is the moment it has to be failed — otherwise it is a
+            # zombie: un-openable, un-rerunnable, only deletable.
+            failed = claim.job
+            message = str(failed.get("error") or "Maximum retry attempts reached.")
+            exhausted_session = str(failed.get("sessionId"))
+            exhausted_type = str(failed.get("taskType") or "")
+            await self.repository.append_event(
+                job_id, "exhausted", message, {"sessionId": exhausted_session, "attempts": failed.get("attempts")}
+            )
+            await self._sync_session_job(failed)
+            error = AppError(message, status_code=500, retryable=False)
+            if queue_owns_session_status(exhausted_type):
+                await self._fail_session(exhausted_session, error, message)
             if raise_on_error:
-                current = await self.repository.read(job_id)
-                status = str(current.get("status") or "")
+                raise error
+            return JobRunResult(job=failed, error=error)
+        if not claim.claimed:
+            if raise_on_error:
+                status = str(claim.job.get("status") or "")
                 if status in {"succeeded", "cancelled"}:
                     return JobRunResult()
                 raise RuntimeError(f"Job {job_id} could not be claimed for execution (status={status or 'unknown'}).")
             return JobRunResult()
+        job = claim.job
 
         session_id = str(job.get("sessionId"))
         task_type = str(job.get("taskType"))
@@ -609,9 +673,19 @@ class JobQueueService:
             await self._sync_session_job(job)
             await self.events.publish(session_id, "status", {"code": "running", "message": f"{task_type} running"})
 
-            session = await self.sessions.read(session_id)
-            session = await self.storage.prepare_session_sources(session)
-            await self.sessions.write(session)
+            # Source fixup (a path rewrite on local storage, a checksum-verified
+            # download on a bucket) is applied through ``update`` so the write
+            # cannot clobber a rename or a status the API committed meanwhile.
+            prepared = await self.storage.prepare_session_sources(await self.sessions.read(session_id))
+            prepared_files = prepared.get("files")
+
+            def adopt_sources(current: dict[str, Any]) -> Any:
+                if current.get("files") == prepared_files:
+                    return False
+                current["files"] = prepared_files
+                return None
+
+            await self.sessions.update(session_id, adopt_sources)
 
             spec = get_task_spec(task_type)
             payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
@@ -668,25 +742,40 @@ class JobQueueService:
         await self.events.publish(session_id, "status", {"code": "failed", "message": message})
 
     async def _sync_session_job(self, job: dict[str, Any]) -> None:
-        try:
-            session = await self.sessions.read(str(job.get("sessionId")))
-        except Exception:
-            return
-        session["job"] = self.public_job(job)
-        if not queue_owns_session_status(str(job.get("taskType") or "")):
-            # The handler reports its own progress (see app.services.job_tasks).
-            # Overwriting status here would eject a user from a session they are
-            # actively working in.
-            await self.sessions.write(session)
-            return
+        """Mirror the job row onto its session — through ``update``, because the
+        pipeline in this or another process may be writing the same document."""
+        session_id = str(job.get("sessionId"))
+        public_job = self.public_job(job)
+        owns_status = queue_owns_session_status(str(job.get("taskType") or ""))
         job_status = str(job.get("status") or "")
-        if job_status == "running":
-            session["status"] = "processing"
-            session["error"] = None
-        elif job_status == "queued" and session.get("status") != "completed":
-            session["status"] = "queued"
-            session["error"] = None
-        await self.sessions.write(session)
+
+        def mutate(session: dict[str, Any]) -> Any:
+            session["job"] = public_job
+            if not owns_status:
+                # The handler reports its own progress (see app.services.job_tasks).
+                # Overwriting status here would eject a user from a session they
+                # are actively working in.
+                return None
+            if job_status == "running":
+                session["status"] = "processing"
+                session["error"] = None
+            elif job_status == "queued" and session.get("status") != "completed":
+                session["status"] = "queued"
+                session["error"] = None
+            return None
+
+        try:
+            await self.sessions.update(session_id, mutate)
+        except FileNotFoundError:
+            return
+        except Exception:
+            logger.warning(
+                "Could not mirror job %s onto session %s.",
+                job.get("id"),
+                session_id,
+                exc_info=True,
+                extra=log_context(session_id, "job_session_sync"),
+            )
 
     @staticmethod
     def _exception_message(error: Exception, fallback: str) -> str:

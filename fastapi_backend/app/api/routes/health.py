@@ -58,6 +58,10 @@ async def readiness(response: Response, container: AppContainer = Depends(get_co
             "customProviders": container.llm_settings.custom_provider_cache_stats(),
             "changeFeedPushActive": container.changes.push_active,
         },
+        # The accelerator lease: how many GPU steps run now and how many wait.
+        # A steady "waiting" above zero says the machine is transcription-bound,
+        # not that anything is wrong.
+        "leases": {"gpu": container.gpu.stats()},
     }
 
 

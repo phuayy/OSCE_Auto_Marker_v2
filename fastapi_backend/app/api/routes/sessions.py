@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import get_container
 from app.api.errors import http_error
-from app.core.exceptions import AppError
 from app.schemas.sessions import ManualClipsRequest, RecropClipRequest, RenameClipRequest, RenameSessionRequest
 from app.services.container import AppContainer
 
@@ -139,23 +138,28 @@ async def session_events(session_id: str, container: AppContainer = Depends(get_
     )
 
 
-@router.post("/{session_id}/auto-crop")
+# Work on a stored session is queued, never run in the request. The three
+# routes below answer 202 with the session (already ``queued``) and the job;
+# the session card gauges progress from the list poll and unlocks on a
+# terminal status. Running a pipeline inside a handler held the connection
+# for as long as transcription took, and a restart mid-way left the session
+# ``processing`` with no job row for startup recovery to find.
+
+
+@router.post("/{session_id}/auto-crop", status_code=202)
 async def auto_crop_session(session_id: str, container: AppContainer = Depends(get_container)) -> dict[str, object]:
     try:
-        return await container.clips.auto_crop_session_by_id(session_id)
+        return await container.session_maintenance.start_auto_crop(session_id)
     except Exception as error:
-        raise http_error(error, fallback_message="Auto-crop failed.", not_found_message="Session not found.") from error
+        raise http_error(error, fallback_message="Auto-crop could not be queued.", not_found_message="Session not found.") from error
 
 
-@router.post("/{session_id}/process")
+@router.post("/{session_id}/process", status_code=202)
 async def process_session(session_id: str, container: AppContainer = Depends(get_container)) -> dict[str, object]:
     try:
-        return await container.pipeline.process_session_by_id(session_id)
-    except AppError as error:
-        raise HTTPException(status_code=error.status_code, detail=error.message) from error
+        return await container.session_maintenance.start_processing(session_id)
     except Exception as error:
-        await container.pipeline.mark_session_failed(session_id, error)
-        raise HTTPException(status_code=500, detail=str(error) or "Processing failed.") from error
+        raise http_error(error, fallback_message="Processing could not be queued.", not_found_message="Session not found.") from error
 
 
 @router.post("/{session_id}/clips/manual", status_code=202)
@@ -192,18 +196,21 @@ async def recrop_clip(
         raise http_error(error, fallback_message="Recrop failed.", not_found_message="Session not found.") from error
 
 
-@router.post("/{session_id}/clips/{clip_id}/assess")
+@router.post("/{session_id}/clips/{clip_id}/assess", status_code=202)
 async def assess_clip(
     session_id: str,
     clip_id: str,
-    defer: str | None = Query(None),
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
-    defer_enabled = str(defer or "").lower() in {"1", "true", "yes"}
+    """Create the clip's child session and queue its assessment.
+
+    Always deferred: the former ``?defer`` switch is accepted and ignored so
+    older clients keep working, but nothing scores inside the request any more.
+    """
     try:
-        return await container.clips.assess_clip(session_id, clip_id, defer_enabled)
+        return await container.clips.assess_clip(session_id, clip_id)
     except Exception as error:
-        raise http_error(error, fallback_message="Clip assessment failed.", not_found_message="Session not found.") from error
+        raise http_error(error, fallback_message="Clip assessment could not be queued.", not_found_message="Session not found.") from error
 
 
 @router.patch("/{session_id}/clips/{clip_id}")
