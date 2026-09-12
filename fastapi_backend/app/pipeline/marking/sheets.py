@@ -17,6 +17,7 @@ from typing import Any
 
 from app.llm.panel import MarkingMode
 from app.pipeline.marking.base import MarkerAssignment, MarkingPlan
+from app.pipeline.marking.fingerprint import sheet_marked_from
 from app.pipeline.marking.reconciliation import (
     MARKING_MODE_PANEL,
     MARKING_MODE_SINGLE,
@@ -30,6 +31,14 @@ def sheet_needs_refresh(payload: Any) -> bool:
     The historical ``ScoringPipeline.should_refresh_score_payload`` check,
     unchanged: it recognises the shape the assessor writes today and treats
     anything else as a reason to mark again.
+
+    Deliberately *not* the place for the input fingerprint, even though it
+    would close the same hole for the single-mode sheet. This predicate also
+    runs over the final sheet (through ``final_sheet_needs_refresh``), and a
+    panel's final sheet is written by ``osce_panel_adjudicator.py``, which
+    carries no fingerprint — the check here would refresh every panel session
+    forever. It belongs to ``marker_sheet_needs_refresh``, which knows it is
+    looking at a sheet this API wrote.
     """
     if not isinstance(payload, dict):
         return True
@@ -81,8 +90,23 @@ def sheet_matches_marker(payload: Any, assignment: MarkerAssignment) -> bool:
     return not wanted or str(payload.get("model") or "").strip() == wanted
 
 
-def marker_sheet_needs_refresh(payload: Any, assignment: MarkerAssignment) -> bool:
-    return sheet_needs_refresh(payload) or not sheet_matches_marker(payload, assignment)
+def marker_sheet_needs_refresh(
+    payload: Any,
+    assignment: MarkerAssignment,
+    inputs: Mapping[str, Any] | None,
+) -> bool:
+    """Well-formed, written by the model this marker names, **and** marked from
+    the files this run is handing it.
+
+    The third clause has no default, so no call site can forget it. A marker
+    sheet lives in ``scores/panel/<id>/``, which a re-run used not to remove:
+    without this, a re-transcribed session was "marked" by adopting the sheets
+    the markers wrote against the previous recording, and the adjudicator then
+    reconciled marks describing two different conversations. Silently.
+    """
+    if sheet_needs_refresh(payload) or not sheet_matches_marker(payload, assignment):
+        return True
+    return not sheet_marked_from(payload, inputs)
 
 
 def _panel_marker_keys(payload: Mapping[str, Any]) -> set[str]:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from app.core.process import CommandResult
 from app.llm.panel import MarkingMode, TieBreak
 from app.llm.routing import ROUTING_ENV_VAR, LLMTarget, RoutingConfig
 from app.pipeline.marking.base import MarkerAssignment, MarkingPlan
+from app.pipeline.marking.fingerprint import SHEET_INPUTS_KEY, input_signature
 from app.pipeline.marking.reconciliation import MARKING_MODE_PANEL
 from app.pipeline.marking.sheets import final_sheet_needs_refresh, marker_sheet_needs_refresh
 from app.pipeline.scoring import ScoringPipeline
@@ -69,12 +71,17 @@ def panel_plan(*, adjudicator: MarkerAssignment | None = DEEPSEEK, warnings: tup
     )
 
 
-def valid_sheet(provider: str, model: str, values: tuple[str, ...] = ("Yes", "Yes", "No")) -> dict[str, Any]:
+def valid_sheet(
+    provider: str,
+    model: str,
+    values: tuple[str, ...] = ("Yes", "Yes", "No"),
+    inputs: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     criteria = [
         {"label": label, "is_critical": critical, "value": value, "timestamp": "00:00:05", "reason": "because"}
         for (label, critical), value in zip(RUBRIC, values, strict=True)
     ]
-    return {
+    sheet = {
         "session_id": "s1",
         "rubric_file": "embedded_in_case_study_pdf",
         "rubric_source": "case.pdf#rubric-section",
@@ -86,6 +93,9 @@ def valid_sheet(provider: str, model: str, values: tuple[str, ...] = ("Yes", "Ye
         "prompt_version": "content-marking-v1",
         "scoring_summary": {"total_criteria": 3, "yes_count": 2, "no_count": 1, "critical_total": 1, "critical_yes": 1, "critical_no": 0, "pass_fail": "Pass"},
     }
+    if inputs is not None:
+        sheet[SHEET_INPUTS_KEY] = dict(inputs)
+    return sheet
 
 
 def panel_sheet(marker_keys=("nvidia__nemotron", "gemini__gemini-pro"), *, adjudicator=("deepseek", "deepseek-chat"), degraded=None, tie_break="lenient", resolutions=("agreed", "adjudicated", "agreed")) -> dict[str, Any]:
@@ -204,6 +214,15 @@ def panel_dir(tmp_path: Path) -> Path:
     return tmp_path / "storage" / "output" / "scores" / "panel" / "s1"
 
 
+def session_inputs(tmp_path: Path) -> dict[str, Any]:
+    """The fingerprint of the transcript + case study ``build_session`` writes."""
+    session = build_session(tmp_path)
+    return input_signature(
+        transcript_path=Path(session["outputs"]["transcript"]["absolutePath"]),
+        case_study_path=Path(session["files"]["caseStudy"]["absolutePath"]),
+    )
+
+
 # --- execution -----------------------------------------------------------------
 
 
@@ -274,17 +293,108 @@ def test_panel_artifacts_round_trip_through_the_public_session(tmp_path: Path) -
 def test_a_marker_sheet_already_on_disk_is_reused_not_remarked(tmp_path: Path) -> None:
     runner = FakeScorerRunner()
     pipeline = build_pipeline(tmp_path, runner, panel_plan())
+    session = build_session(tmp_path)
+    inputs = session_inputs(tmp_path)
     panel_dir(tmp_path).mkdir(parents=True)
-    (panel_dir(tmp_path) / "nvidia__nemotron.json").write_text(json.dumps(valid_sheet("nvidia", "nemotron")), encoding="utf-8")
+    (panel_dir(tmp_path) / "nvidia__nemotron.json").write_text(
+        json.dumps(valid_sheet("nvidia", "nemotron", inputs=inputs)), encoding="utf-8"
+    )
     # A stale sheet under gemini's key but written by another model is not reused.
-    (panel_dir(tmp_path) / "gemini__gemini-pro.json").write_text(json.dumps(valid_sheet("gemini", "gemini-flash")), encoding="utf-8")
+    (panel_dir(tmp_path) / "gemini__gemini-pro.json").write_text(
+        json.dumps(valid_sheet("gemini", "gemini-flash", inputs=inputs)), encoding="utf-8"
+    )
 
-    asyncio.run(pipeline.run_content_marking(build_session(tmp_path), panel_plan()))
+    asyncio.run(pipeline.run_content_marking(session, panel_plan()))
 
     markers = runner.spawned("nvidia_osce_assessor.py")
     assert len(markers) == 1
     assert RoutingConfig.from_json(markers[0]["env"][ROUTING_ENV_VAR], default_provider_id="x").primary.provider_id == "gemini"
     assert len(runner.spawned("osce_panel_adjudicator.py")) == 1
+
+
+def test_a_marker_sheet_marked_from_a_different_transcript_is_not_reused(tmp_path: Path) -> None:
+    runner = FakeScorerRunner()
+    pipeline = build_pipeline(tmp_path, runner, panel_plan())
+    session = build_session(tmp_path)
+
+    asyncio.run(pipeline.run_content_marking(session, panel_plan()))
+    assert len(runner.spawned("nvidia_osce_assessor.py")) == 2
+
+    transcript_path = Path(session["outputs"]["transcript"]["absolutePath"])
+    transcript_path.write_text(
+        json.dumps({"segments": [{"text": "a completely different recording", "start": 0, "end": 1}]}),
+        encoding="utf-8",
+    )
+
+    asyncio.run(pipeline.run_content_marking(session, panel_plan()))
+
+    assert len(runner.spawned("nvidia_osce_assessor.py")) == 4, "every marker re-ran against the new transcript"
+
+
+def test_a_marker_sheet_marked_from_a_different_case_study_is_not_reused(tmp_path: Path) -> None:
+    runner = FakeScorerRunner()
+    pipeline = build_pipeline(tmp_path, runner, panel_plan())
+    session = build_session(tmp_path)
+
+    asyncio.run(pipeline.run_content_marking(session, panel_plan()))
+    assert len(runner.spawned("nvidia_osce_assessor.py")) == 2
+
+    case_study_path = Path(session["files"]["caseStudy"]["absolutePath"])
+    case_study_path.write_bytes(b"%PDF-1.4\n%a different rubric entirely")
+
+    asyncio.run(pipeline.run_content_marking(session, panel_plan()))
+
+    assert len(runner.spawned("nvidia_osce_assessor.py")) == 4, "every marker re-ran against the new case study"
+
+
+def test_a_marker_sheet_from_the_same_inputs_is_still_reused_across_a_restart(tmp_path: Path) -> None:
+    runner = FakeScorerRunner()
+    pipeline = build_pipeline(tmp_path, runner, panel_plan())
+    session = build_session(tmp_path)
+
+    asyncio.run(pipeline.run_content_marking(session, panel_plan()))
+    assert len(runner.spawned("nvidia_osce_assessor.py")) == 2
+
+    # Simulate a restart materialising the very same bytes at the very same
+    # paths (e.g. GCS object cache re-population): content is unchanged.
+    transcript_path = Path(session["outputs"]["transcript"]["absolutePath"])
+    transcript_path.write_text(transcript_path.read_text(encoding="utf-8"), encoding="utf-8")
+    case_study_path = Path(session["files"]["caseStudy"]["absolutePath"])
+    case_study_path.write_bytes(case_study_path.read_bytes())
+
+    asyncio.run(pipeline.run_content_marking(session, panel_plan()))
+
+    assert len(runner.spawned("nvidia_osce_assessor.py")) == 2, "byte-identical inputs are still reused"
+
+
+def test_a_marker_sheet_with_no_input_signature_is_refreshed(tmp_path: Path) -> None:
+    runner = FakeScorerRunner()
+    pipeline = build_pipeline(tmp_path, runner, panel_plan())
+    session = build_session(tmp_path)
+    panel_dir(tmp_path).mkdir(parents=True)
+    # A sheet from a build before the fingerprint existed: well-formed and
+    # attributed to the right model, but no input_signature key at all.
+    (panel_dir(tmp_path) / "nvidia__nemotron.json").write_text(
+        json.dumps(valid_sheet("nvidia", "nemotron")), encoding="utf-8"
+    )
+
+    asyncio.run(pipeline.run_content_marking(session, panel_plan()))
+
+    markers = runner.spawned("nvidia_osce_assessor.py")
+    assert len(markers) == 2, "both markers ran; the pre-fingerprint sheet was not trusted"
+
+
+def test_each_marker_sheet_records_the_inputs_it_was_marked_from(tmp_path: Path) -> None:
+    runner = FakeScorerRunner()
+    pipeline = build_pipeline(tmp_path, runner, panel_plan())
+    session = build_session(tmp_path)
+
+    asyncio.run(pipeline.run_content_marking(session, panel_plan()))
+
+    expected = session_inputs(tmp_path)
+    for name in ("nvidia__nemotron.json", "gemini__gemini-pro.json"):
+        payload = json.loads((panel_dir(tmp_path) / name).read_text(encoding="utf-8"))
+        assert payload[SHEET_INPUTS_KEY] == expected
 
 
 def test_one_marker_failing_degrades_to_the_survivor_and_a_rerun_retries_only_it(tmp_path: Path) -> None:
@@ -357,13 +467,23 @@ def test_a_single_mode_plan_still_runs_one_marker_to_the_final_path(tmp_path: Pa
 # --- the cache predicate -------------------------------------------------------
 
 
-def test_marker_sheet_reuse_requires_the_named_model() -> None:
-    assert not marker_sheet_needs_refresh(valid_sheet("nvidia", "nemotron"), NVIDIA)
-    assert marker_sheet_needs_refresh(valid_sheet("nvidia", "llama"), NVIDIA), "another model's sheet"
-    assert marker_sheet_needs_refresh(valid_sheet("openai", "nemotron"), NVIDIA), "another provider's sheet"
-    assert marker_sheet_needs_refresh({"criteria": []}, NVIDIA), "malformed"
+def test_marker_sheet_reuse_requires_the_named_model(tmp_path: Path) -> None:
+    inputs = session_inputs(tmp_path)
+    other_inputs = dict(inputs)
+    other_inputs["transcript"] = {"size_bytes": 0, "sha256": "0" * 64}
+
+    assert not marker_sheet_needs_refresh(valid_sheet("nvidia", "nemotron", inputs=inputs), NVIDIA, inputs)
+    assert marker_sheet_needs_refresh(valid_sheet("nvidia", "llama", inputs=inputs), NVIDIA, inputs), "another model's sheet"
+    assert marker_sheet_needs_refresh(valid_sheet("openai", "nemotron", inputs=inputs), NVIDIA, inputs), "another provider's sheet"
+    assert marker_sheet_needs_refresh({"criteria": []}, NVIDIA, inputs), "malformed"
     default_model = MarkerAssignment(target=LLMTarget("nvidia", ""), key="nvidia__default", llm_env={})
-    assert not marker_sheet_needs_refresh(valid_sheet("nvidia", "whatever-default"), default_model)
+    assert not marker_sheet_needs_refresh(valid_sheet("nvidia", "whatever-default", inputs=inputs), default_model, inputs)
+
+    # The fingerprint clause: matching signature reused, a different one or a
+    # missing one refreshed, and no expected signature at all always refreshes.
+    assert marker_sheet_needs_refresh(valid_sheet("nvidia", "nemotron", inputs=other_inputs), NVIDIA, inputs), "a different input signature"
+    assert marker_sheet_needs_refresh(valid_sheet("nvidia", "nemotron"), NVIDIA, inputs), "no input signature recorded"
+    assert marker_sheet_needs_refresh(valid_sheet("nvidia", "nemotron", inputs=inputs), NVIDIA, None), "inputs=None always refreshes"
 
 
 def test_final_sheet_reuse_is_mode_aware() -> None:

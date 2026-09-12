@@ -27,6 +27,7 @@ from app.core.json_utils import extract_json_object, write_json_file
 from app.core.process import CommandRunner
 from app.llm.panel import MarkingMode, TieBreak
 from app.llm.routing import LLMTarget, RoutingConfig
+from app.pipeline.marking.fingerprint import SHEET_INPUTS_KEY
 from app.services.auth_service import AuthService
 from app.services.event_service import EventService
 
@@ -142,10 +143,13 @@ class ContentMarkerRunner:
         case_study_path: Path,
         output_path: Path,
         llm_env: Mapping[str, str],
+        inputs: Mapping[str, Any] | None = None,
         media_directory: str = SCORES_MEDIA_DIRECTORY,
         label: str = "Content scoring",
         log_source: str = "scorer",
     ) -> ArtifactMetadata:
+        """``inputs`` is the fingerprint of the transcript and case study this
+        run handed the script; when given it is recorded on the sheet."""
         if not self.settings.scorer_script_path.exists():
             raise RuntimeError(f"Scorer script not found at {self.settings.scorer_script_path}")
         args = [
@@ -176,9 +180,21 @@ class ContentMarkerRunner:
             ),
         )
         if output_path.exists():
-            await asyncio.to_thread(lambda: extract_json_object(output_path.read_text(encoding="utf-8")))
+            payload = await asyncio.to_thread(lambda: extract_json_object(output_path.read_text(encoding="utf-8")))
+            rewrite = inputs is not None
         else:
             payload = extract_json_object(result.stdout)
+            rewrite = True
+        if inputs is not None:
+            # Stamp what this sheet was marked *from*, so a reuse predicate can
+            # refuse it against different inputs. Written here rather than by
+            # the script so producer and consumer are always the same build: a
+            # skew between them would surface as PanelMarking._mark's post-run
+            # re-check rejecting a sheet the marker just produced, i.e. as
+            # "every marker failed". A caller that passes nothing (single mode)
+            # gets the script's file back untouched.
+            payload[SHEET_INPUTS_KEY] = dict(inputs)
+        if rewrite:
             await asyncio.to_thread(write_json_file, output_path, payload)
         return artifact_metadata(output_path, media_directory)
 

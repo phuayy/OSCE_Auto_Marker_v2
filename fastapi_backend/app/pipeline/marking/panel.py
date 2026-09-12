@@ -12,24 +12,26 @@ Two properties this strategy keeps:
   marker that dies after its own retries is reported and the run goes on with
   the rest; with one marker left the final sheet is that marker's, labelled as
   a degraded panel. Only every marker failing fails the step.
-* **Nothing is paid for twice.** A marker sheet already on disk that passes
-  the reuse predicate — well-formed, and written by the model this marker
-  names — is adopted rather than re-marked, so a retry after one marker's
-  failure re-runs that marker alone, and a restart mid-panel loses at most
-  the call in flight (the assessor's own checkpoint covers the rest).
+* **Nothing is paid for twice, and nothing is reused across inputs.** A marker
+  sheet already on disk that passes the reuse predicate — well-formed, written
+  by the model this marker names, and marked from the very transcript and case
+  study this run is handing over — is adopted rather than re-marked, so a retry
+  after one marker's failure re-runs that marker alone, and a restart mid-panel
+  loses at most the call in flight (the assessor's own checkpoint covers the
+  rest).
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from app.core.artifacts import artifact_metadata
-from app.core.config import Settings
+from app.core.config import SCORES_PANEL_SUBDIRECTORY, Settings
 from app.core.json_utils import extract_json_object, write_json_file
 from app.core.process import CommandRunner
 from app.llm.panel import MIN_PANEL_MARKERS, MarkingMode
@@ -40,6 +42,7 @@ from app.pipeline.marking.base import (
     MarkingPlan,
     ProgressCallback,
 )
+from app.pipeline.marking.fingerprint import input_signature
 from app.pipeline.marking.reconciliation import MarkerSheet, degraded_panel_sheet
 from app.pipeline.marking.sheets import marker_sheet_needs_refresh
 from app.services.event_service import EventService
@@ -48,7 +51,10 @@ logger = logging.getLogger(__name__)
 
 # Sub-directory of the scores directory holding each session's marker sheets
 # and adjudication record. Served by the existing /media/scores mount.
-PANEL_SUBDIRECTORY = "panel"
+# The name itself lives in the storage layout because session teardown has to
+# find this directory without importing this module (which would pull the LLM
+# stack and app.services.event_service into a delete).
+PANEL_SUBDIRECTORY = SCORES_PANEL_SUBDIRECTORY
 ADJUDICATION_FILE_NAME = "adjudication.json"
 
 # How the step's progress bar is divided: the markers share the first part of
@@ -166,7 +172,7 @@ class PanelMarking:
     # --- layout ------------------------------------------------------------
 
     def panel_dir(self, session_id: str) -> Path:
-        return self.settings.paths.output_scores_dir / PANEL_SUBDIRECTORY / session_id
+        return self.settings.paths.output_scores_panel_dir / session_id
 
     def marker_output_path(self, session_id: str, key: str) -> Path:
         return self.panel_dir(session_id) / f"{key}.json"
@@ -200,6 +206,12 @@ class PanelMarking:
             raise ValueError("PanelMarking needs a plan in panel mode with at least two markers.")
         self.panel_dir(session_id).mkdir(parents=True, exist_ok=True)
 
+        # Hashed once per run and shared by every marker: a sheet on disk is
+        # adopted only if it was marked from these exact bytes.
+        inputs = await asyncio.to_thread(
+            input_signature, transcript_path=transcript_path, case_study_path=case_study_path
+        )
+
         completed = 0
         progress_lock = asyncio.Lock()
 
@@ -217,6 +229,7 @@ class PanelMarking:
                     assignment,
                     transcript_path=transcript_path,
                     case_study_path=case_study_path,
+                    inputs=inputs,
                 )
             finally:
                 await marker_done()
@@ -286,10 +299,11 @@ class PanelMarking:
         *,
         transcript_path: Path,
         case_study_path: Path,
+        inputs: Mapping[str, Any],
     ) -> MarkerOutcome:
         path = self.marker_output_path(session_id, assignment.key)
         existing = await self._read_sheet(path)
-        if existing is not None and not marker_sheet_needs_refresh(existing, assignment):
+        if existing is not None and not marker_sheet_needs_refresh(existing, assignment, inputs):
             await self.events.publish(
                 session_id,
                 "log",
@@ -306,12 +320,13 @@ class PanelMarking:
             case_study_path=case_study_path,
             output_path=path,
             llm_env=assignment.llm_env,
+            inputs=inputs,
             media_directory=self.media_directory(session_id),
             label=f"Content scoring ({assignment.target.key})",
             log_source=f"scorer-{assignment.key}",
         )
         payload = await self._read_sheet(path)
-        if payload is None or marker_sheet_needs_refresh(payload, assignment):
+        if payload is None or marker_sheet_needs_refresh(payload, assignment, inputs):
             # A sheet the reuse predicate would reject next time is not a
             # result — most often a fallback answered instead of the marker,
             # which a panel must not silently accept.

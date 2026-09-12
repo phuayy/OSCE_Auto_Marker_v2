@@ -18,6 +18,7 @@ from typing import Any
 from app.core.config import Settings
 from app.core.process import CommandResult
 from app.pipeline.marking.base import MarkingPlan
+from app.pipeline.marking.fingerprint import SHEET_INPUTS_KEY
 from app.pipeline.scoring import ScoringPipeline
 
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
@@ -123,6 +124,18 @@ def test_no_settings_service_means_the_legacy_environment(tmp_path: Path) -> Non
     assert plan == MarkingPlan.single_only()
     asyncio.run(pipeline.run_content_scoring(_session(tmp_path)))
     assert "OSCE_LLM_ROUTING" not in runner.calls[0]["env"]
+
+
+def test_a_single_mode_sheet_is_left_exactly_as_the_script_wrote_it(tmp_path: Path) -> None:
+    """Single mode never passes ``inputs`` to the marker runner, so the sheet
+    the script wrote is persisted untouched — no fingerprint stamped on it."""
+    runner = EnvRecordingRunner()
+    pipeline = _pipeline(tmp_path, runner, _PlanSettings(MarkingPlan.single_only()))
+
+    result = asyncio.run(pipeline.run_content_scoring(_session(tmp_path)))
+
+    payload = json.loads(Path(result["absolutePath"]).read_text(encoding="utf-8"))
+    assert SHEET_INPUTS_KEY not in payload
 
 
 def test_stdout_json_is_persisted_when_the_script_writes_no_file(tmp_path: Path) -> None:
