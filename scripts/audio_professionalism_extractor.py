@@ -2,17 +2,18 @@
 from __future__ import annotations
 
 import argparse
-from bisect import bisect_left
 import json
 import math
 import os
 import re
 import subprocess
+from bisect import bisect_left
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
 from env_loader import load_env_file
+from llm_bootstrap import write_text_atomic
 from scorer_inputs import required_file, run_main, session_id_from
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -43,16 +44,6 @@ NOT_OBSERVABLE_FROM_AUDIO = [
     "Absence of barriers",
     "Visual aids",
 ]
-
-
-def write_text_atomic(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        tmp_path.write_text(text, encoding="utf-8")
-        os.replace(tmp_path, path)
-    finally:
-        tmp_path.unlink(missing_ok=True)
 
 
 def parse_args() -> argparse.Namespace:

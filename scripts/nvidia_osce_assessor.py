@@ -3,28 +3,35 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 import time
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from env_loader import load_env_file
 from llm_bootstrap import (
-    ChatResponse,
-    LLMRouter,
-    build_chat_request,
     build_router_from_env,
+    clip_text,
     describe_routing,
-    validator_from,
+    normalize_timestamp,
+    read_generic_text,
+    read_json_transcript_text,
+    safe_extract_payload,
+    write_text_atomic,
 )
-from scorer_inputs import required_file, run_main, session_id_from
+from llm_bootstrap import (
+    create_completion as complete_scoring,
+)
+from llm_bootstrap import (
+    enforce_expected_criteria_array as enforce_expected_criteria_array_or_raise_retry,
+)
 from rubric_section import (
     diagnose_missing_rubric_section,
     split_case_study_context_and_rubric,
 )
-
+from scorer_inputs import required_file, run_main, session_id_from
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 load_env_file(ROOT_DIR)
@@ -61,16 +68,6 @@ class CheckpointMessage:
         self.content = content
         self.model = model
         self.provider_id = provider_id
-
-
-def write_text_atomic(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        tmp_path.write_text(text, encoding="utf-8")
-        os.replace(tmp_path, path)
-    finally:
-        tmp_path.unlink(missing_ok=True)
 
 
 def checkpoint_path_for_output(output_path: Path) -> Path:
@@ -185,29 +182,9 @@ def read_pdf_text(path: Path) -> str:
     return "\n\n".join(parts)
 
 
-def read_generic_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return path.read_text(encoding="latin-1", errors="ignore")
-
-
 SRT_TIMESTAMP_PATTERN = re.compile(
     r"(?P<start>\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(?P<end>\d{2}:\d{2}:\d{2}[,\.]\d{3})"
 )
-
-
-def format_timestamp_seconds(seconds: float, include_ms: bool = True) -> str:
-    safe_seconds = max(0.0, float(seconds or 0.0))
-    total_ms = int(round(safe_seconds * 1000))
-    hours = total_ms // 3_600_000
-    minutes = (total_ms % 3_600_000) // 60_000
-    whole_seconds = (total_ms % 60_000) // 1_000
-    milliseconds = total_ms % 1_000
-
-    if include_ms:
-        return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d}.{milliseconds:03d}"
-    return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d}"
 
 
 def read_srt_transcript_text(path: Path) -> str:
@@ -256,59 +233,6 @@ def read_srt_transcript_text(path: Path) -> str:
     return raw_text
 
 
-def read_json_transcript_text(path: Path) -> str:
-    raw_text = read_generic_text(path)
-
-    try:
-        parsed = json.loads(raw_text)
-    except json.JSONDecodeError:
-        return raw_text
-
-    if isinstance(parsed, dict):
-        segments = parsed.get("segments")
-        if isinstance(segments, list):
-            lines: list[str] = []
-            def to_float(value: Any) -> float | None:
-                try:
-                    return float(value)
-                except (TypeError, ValueError):
-                    return None
-
-            for segment in segments:
-                if not isinstance(segment, dict):
-                    continue
-                text = str(segment.get("text", "")).strip()
-                if not text:
-                    continue
-                speaker = str(segment.get("speaker", "SPEAKER_UNKNOWN")).strip() or "SPEAKER_UNKNOWN"
-                start_value = to_float(segment.get("start"))
-                end_value = to_float(segment.get("end"))
-                start_label = str(segment.get("startLabel") or "").strip()
-                end_label = str(segment.get("endLabel") or "").strip()
-
-                if start_value is not None:
-                    start_label = format_timestamp_seconds(start_value)
-                if end_value is not None:
-                    end_label = format_timestamp_seconds(end_value)
-
-                if start_label and end_label:
-                    timestamp_label = f"{start_label} - {end_label}"
-                elif start_label:
-                    timestamp_label = start_label
-                else:
-                    timestamp_label = ""
-
-                if timestamp_label:
-                    lines.append(f"[{speaker}] {timestamp_label}: {text}")
-                else:
-                    lines.append(f"[{speaker}]: {text}")
-
-            if lines:
-                return "\n".join(lines)
-
-    return json.dumps(parsed, indent=2, ensure_ascii=False)
-
-
 def read_file_as_context_text(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
@@ -318,15 +242,6 @@ def read_file_as_context_text(path: Path) -> str:
     if suffix == ".json":
         return read_json_transcript_text(path)
     return read_generic_text(path)
-
-
-def clip_text(value: str, max_chars: int, label: str) -> str:
-    text = str(value or "").strip()
-    if len(text) <= max_chars:
-        return text
-
-    kept = text[:max_chars]
-    return f"{kept}\n\n[TRUNCATED {label}: original_length={len(text)} chars, kept={max_chars}]"
 
 
 def normalize_is_critical(value: Any) -> bool:
@@ -540,133 +455,12 @@ Transcript content (timestamps included):
 """.strip()
 
 
-def format_response_content_for_log(content: str, max_chars: int = 4000) -> str:
-    text = str(content or "")
-    if not text:
-        return "(empty)"
-    if len(text) <= max_chars:
-        return text
-    return f"{text[:max_chars]}... [truncated, total {len(text)} chars]"
-
-
-def extract_primary_json_dict_from_model_output(raw_text: str) -> dict[str, Any]:
-    """Prefer the richest JSON dict that contains `criteria` (fixes first-{ … last-}
-    slicing when the assistant emits analysis text before / after JSON)."""
-
-    text = str(raw_text or "").strip()
-    if not text:
-        raise ValueError("Model returned empty content.")
-
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            return parsed
-        raise ValueError("Top-level JSON was not an object.")
-    except json.JSONDecodeError:
-        pass
-
-    decoder = json.JSONDecoder()
-    dict_candidates: list[dict[str, Any]] = []
-    for index, character in enumerate(text):
-        if character != "{":
-            continue
-        try:
-            candidate, _end = decoder.raw_decode(text[index:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(candidate, dict):
-            dict_candidates.append(candidate)
-
-    if not dict_candidates:
-        first_brace = text.find("{")
-        last_brace = text.rfind("}")
-        if first_brace < 0 or last_brace <= first_brace:
-            raise ValueError("Model output did not contain a JSON object.")
-        try:
-            parsed = json.loads(text[first_brace : last_brace + 1])
-        except json.JSONDecodeError as error:
-            raise ValueError("Could not decode JSON object from model output.") from error
-        if not isinstance(parsed, dict):
-            raise ValueError("Extracted JSON was not an object.")
-        return parsed
-
-    with_criteria = [item for item in dict_candidates if isinstance(item.get("criteria"), list)]
-    ranked = with_criteria or dict_candidates
-
-    def rank_key(item: dict[str, Any]) -> tuple[int, int]:
-        crit = item.get("criteria") if isinstance(item.get("criteria"), list) else None
-        return (len(crit) if crit is not None else -1, len(json.dumps(item, ensure_ascii=False)))
-
-    return max(ranked, key=rank_key)
-
-
-def enforce_expected_criteria_array_or_raise_retry(raw_content: str, expected_len: int | None) -> None:
-    """`response_format=json_object` occasionally returns `{}` / `{\"schema\":\"\"}`
-    scaffolding. Retry at the HTTP layer instead of burning repair rounds."""
-
-    if not expected_len or expected_len <= 0:
-        return
-
-    try:
-        data = extract_primary_json_dict_from_model_output(raw_content)
-    except Exception:
-        return
-
-    crit = data.get("criteria")
-    if not isinstance(crit, list):
-        raise RuntimeError(
-            "Model JSON had missing or non-array field 'criteria' (often a provider-side "
-            f"structured-output scaffolding bug). This is retryable. "
-            f"response_content={format_response_content_for_log(raw_content)!r}"
-        )
-
-    if len(crit) != expected_len:
-        raise RuntimeError(
-            "Model JSON had an incomplete criteria array "
-            f"(expected {expected_len} items for this rubric, got {len(crit)}). This is retryable. "
-            f"response_content={format_response_content_for_log(raw_content)!r}"
-        )
-
-
-def create_completion(
-    router: LLMRouter,
-    messages: list[dict[str, Any]],
-    *,
-    expected_rubric_items: int | None = None,
-) -> ChatResponse:
-    """One scored completion, across whichever providers are configured.
-
-    Everything this function used to do by hand — the model fallback list, the
-    request-shape ladder, the backoff, the retryability rules — now lives in the
-    shared router, so the communication scorer and the transcript preprocessor
-    behave identically without a second copy of it.
-
-    What stays here is the part only this script knows: a response whose
-    ``criteria`` array is missing or short is a provider-side structured-output
-    bug, not a scoring result, and must be retried rather than validated into a
-    sheet of defaults.
-    """
-
-    def check(content: str) -> None:
-        enforce_expected_criteria_array_or_raise_retry(content, expected_rubric_items)
-
-    request = build_chat_request(
-        messages,
-        label="content-scoring",
-        min_content_chars=MIN_VALID_CONTENT_CHARS,
-    )
-    return router.complete(request, validate=validator_from(check))
-
-
-def extract_json_from_text(raw_text: str) -> dict[str, Any]:
-    return extract_primary_json_dict_from_model_output(raw_text)
-
-
-def safe_extract_payload(raw_text: str) -> tuple[dict[str, Any], str | None]:
-    try:
-        return extract_json_from_text(raw_text), None
-    except Exception as error:
-        return {}, f"Model JSON parse error: {error}"
+create_completion = partial(
+    complete_scoring,
+    label="content-scoring",
+    criteria_validator=enforce_expected_criteria_array_or_raise_retry,
+    min_content_chars=MIN_VALID_CONTENT_CHARS,
+)
 
 
 def normalize_yes_no(value: Any) -> str | None:
@@ -675,38 +469,6 @@ def normalize_yes_no(value: Any) -> str | None:
         return "Yes"
     if token == "no":
         return "No"
-    return None
-
-
-TIMESTAMP_HMS_PATTERN = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})(?:[\.,](\d{1,3}))?")
-TIMESTAMP_MS_PATTERN = re.compile(r"(\d{1,2}):(\d{2})(?:[\.,](\d{1,3}))?")
-
-
-def normalize_timestamp(value: Any) -> str | None:
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return format_timestamp_seconds(float(value), include_ms=False)
-
-    text = str(value or "").strip()
-    if not text:
-        return None
-
-    match = TIMESTAMP_HMS_PATTERN.search(text)
-    if match:
-        hours = int(match.group(1))
-        minutes = int(match.group(2))
-        seconds = int(match.group(3))
-        millis = int(match.group(4) or 0)
-        total_seconds = hours * 3600 + minutes * 60 + seconds + (millis / 1000)
-        return format_timestamp_seconds(total_seconds, include_ms=False)
-
-    match = TIMESTAMP_MS_PATTERN.search(text)
-    if match:
-        minutes = int(match.group(1))
-        seconds = int(match.group(2))
-        millis = int(match.group(3) or 0)
-        total_seconds = minutes * 60 + seconds + (millis / 1000)
-        return format_timestamp_seconds(total_seconds, include_ms=False)
-
     return None
 
 
@@ -1056,7 +818,7 @@ def main() -> int:
             checkpoint_state = None
 
     if not checkpoint_state:
-        first_message = create_completion(router, base_messages, expected_rubric_items=len(rubric_criteria))
+        first_message = create_completion(router, base_messages, expected_items=len(rubric_criteria))
         write_checkpoint(
             checkpoint_path,
             checkpoint_context,
@@ -1092,7 +854,7 @@ def main() -> int:
         repair_attempts += 1
         follow_up_messages = build_follow_up_messages(base_messages, last_message, issues)
         try:
-            next_message = create_completion(router, follow_up_messages, expected_rubric_items=len(rubric_criteria))
+            next_message = create_completion(router, follow_up_messages, expected_items=len(rubric_criteria))
         except Exception as repair_error:
             issues.append(f"Repair attempt {repair_attempts} failed: {repair_error}")
             print(

@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
 
-
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
@@ -137,6 +136,10 @@ class AllTargetsFailedError(LLMError):
         self.attempts = attempts
 
 
+class LLMDeadlineError(AllTargetsFailedError):
+    """The completion exhausted its shared wall-clock budget."""
+
+
 # ---------------------------------------------------------------------------
 # Request / response
 # ---------------------------------------------------------------------------
@@ -189,6 +192,7 @@ class ChatRequest:
     top_p: float = 0.9
     max_tokens: int = 24_576
     timeout_seconds: float = 360.0
+    total_timeout_seconds: float = 900.0
     # Ask for a single JSON object. Providers that expose a JSON mode get it;
     # the rest are steered by the prompt and the ladder.
     json_mode: bool = True

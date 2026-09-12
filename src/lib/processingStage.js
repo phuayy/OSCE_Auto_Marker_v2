@@ -1,3 +1,4 @@
+import { PipelineStep, SessionStatus, Workflow } from './enums.js';
 // Stage gauge for in-flight sessions.
 //
 // Lives outside the main component because it is pure: it maps one row of the
@@ -9,20 +10,20 @@
 // Statuses for which a session has live work in flight. In-flight sessions are
 // NOT enterable — the session card shows their stage until a terminal status
 // unlocks them.
-export const IN_FLIGHT_STATUSES = new Set(['assembling', 'queued', 'processing']);
+export { IN_FLIGHT_STATUSES } from './enums.js';
 
 // Ordered standard-pipeline steps used to gauge progress on the session cards.
 // Mirrors the backend's pipeline.steps keys (session_service list projection
 // exposes pipeline.currentStep as `currentStep`).
 export const PIPELINE_STAGE_SEQUENCE = [
-  ['audio_extraction', 'Extracting audio'],
-  ['transcription', 'Transcribing speech'],
-  ['transcript_normalization', 'Normalizing transcript'],
-  ['llm_preprocess', 'Cleaning transcript (LLM)'],
-  ['audio_professionalism', 'Analyzing audio professionalism'],
-  ['communication_scoring', 'Scoring communication'],
-  ['content_scoring', 'Scoring content'],
-  ['assessment_persistence', 'Saving results'],
+  [PipelineStep.AUDIO_EXTRACTION, 'Extracting audio'],
+  [PipelineStep.TRANSCRIPTION, 'Transcribing speech'],
+  [PipelineStep.TRANSCRIPT_NORMALIZATION, 'Normalizing transcript'],
+  [PipelineStep.LLM_PREPROCESS, 'Cleaning transcript (LLM)'],
+  [PipelineStep.AUDIO_PROFESSIONALISM, 'Analyzing audio professionalism'],
+  [PipelineStep.COMMUNICATION_SCORING, 'Scoring communication'],
+  [PipelineStep.CONTENT_SCORING, 'Scoring content'],
+  [PipelineStep.ASSESSMENT_PERSISTENCE, 'Saving results'],
 ];
 
 // Denominator for the per-step fractions: the steps themselves plus a final
@@ -33,7 +34,7 @@ const STAGE_SLICES = PIPELINE_STAGE_SEQUENCE.length + 1;
 // Steps renamed in the backend, old key -> current key. Sessions recorded
 // before the transcription engine became selectable still carry 'whisperx' in
 // their payload, and their cards must keep gauging correctly.
-const LEGACY_STEP_ALIASES = { whisperx: 'transcription' };
+const LEGACY_STEP_ALIASES = { whisperx: PipelineStep.TRANSCRIPTION };
 
 // The long workflow's own steps. It never runs the pipeline sequence above —
 // its single job is to split the recording — so it is gauged separately.
@@ -41,8 +42,8 @@ const LEGACY_STEP_ALIASES = { whisperx: 'transcription' };
 // a stepProgress left over from an unrelated step, and a stale reading is
 // worse than no reading: it would show a bar that never moves.
 export const SEGMENTATION_STEPS = new Map([
-  ['person_detection', 'Detecting student boundaries'],
-  ['bell_detection', 'Detecting bell boundaries'],
+  [PipelineStep.PERSON_DETECTION, 'Detecting student boundaries'],
+  [PipelineStep.BELL_DETECTION, 'Detecting bell boundaries'],
 ]);
 
 const DEFAULT_SEGMENTATION_LABEL = 'Detecting student boundaries';
@@ -72,16 +73,16 @@ function readStepPercent(entry) {
 // render nothing.
 export function describeProcessingStage(entry) {
   const status = String(entry?.status || '').toLowerCase();
-  if (status === 'assembling') {
+  if (status === SessionStatus.ASSEMBLING) {
     return { label: 'Assembling upload', fraction: 0.05, stepPercent: null };
   }
-  if (status === 'queued') {
+  if (status === SessionStatus.QUEUED) {
     return { label: 'Queued for processing', fraction: 0.1, stepPercent: null };
   }
-  if (status !== 'processing') {
+  if (status !== SessionStatus.PROCESSING) {
     return null;
   }
-  if (entry?.workflow === 'long') {
+  if (entry?.workflow === Workflow.LONG) {
     const segmentationStep = canonicalStepId(entry?.currentStep);
     const label = SEGMENTATION_STEPS.get(segmentationStep) || DEFAULT_SEGMENTATION_LABEL;
     // Only a recognised segmentation step may contribute a reading.

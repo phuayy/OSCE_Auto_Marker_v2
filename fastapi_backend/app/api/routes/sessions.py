@@ -5,9 +5,13 @@ from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import get_container
 from app.api.errors import http_error
-from app.schemas.sessions import ManualClipsRequest, RecropClipRequest, RenameClipRequest, RenameSessionRequest
+from app.schemas.sessions import (
+    ManualClipsRequest,
+    RecropClipRequest,
+    RenameClipRequest,
+    RenameSessionRequest,
+)
 from app.services.container import AppContainer
-
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -126,6 +130,15 @@ async def get_clip_summaries(session_id: str, container: AppContainer = Depends(
 
 @router.get("/{session_id}/events")
 async def session_events(session_id: str, container: AppContainer = Depends(get_container)) -> StreamingResponse:
+    if not container.settings.session_sse_enabled:
+        raise HTTPException(
+            status_code=410,
+            detail="Per-session event streaming is disabled. Poll session status and fetch artifacts separately.",
+        )
+    try:
+        await container.sessions.read(session_id)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Session not found.") from error
     stream = await container.events.connect(session_id)
     return StreamingResponse(
         stream,

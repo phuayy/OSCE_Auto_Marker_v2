@@ -29,35 +29,16 @@ from llm_bootstrap import (
     build_chat_request,
     build_router_from_env,
     describe_routing,
+    read_float_env,
+    read_int_env,
     validator_from,
 )
-
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 load_env_file(ROOT_DIR)
 
 # Provider and model come from the settings-driven router, the same selection
 # the scorers use. See scripts/llm_bootstrap.py.
-
-
-def read_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return default
-
-
-def read_float_env(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return default
 
 
 REQUEST_TIMEOUT_SECONDS = read_int_env("NVIDIA_REQUEST_TIMEOUT_SECONDS", 360)

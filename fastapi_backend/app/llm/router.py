@@ -21,8 +21,10 @@ connection test, which it runs on a thread.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any, Mapping
 
 from app.llm.base import (
@@ -31,12 +33,14 @@ from app.llm.base import (
     ChatRequest,
     ChatResponse,
     LLMConfigError,
+    LLMDeadlineError,
     LLMError,
     LLMProvider,
     LLMValidationError,
     RequestMode,
     classify_error_text,
 )
+from app.llm.deadline import bounded_completion
 from app.llm.retry import CircuitBreaker, backoff_delay
 from app.llm.routing import LLMTarget, RoutingConfig
 
@@ -90,6 +94,12 @@ class LLMRouter:
     # --- execution ---------------------------------------------------------
 
     def complete(self, request: ChatRequest, *, validate: Validator | None = None) -> ChatResponse:
+        if any(
+            not math.isfinite(value) or value <= 0
+            for value in (request.timeout_seconds, request.total_timeout_seconds)
+        ):
+            raise LLMConfigError("LLM timeouts must be finite positive numbers.")
+        deadline = self._clock() + request.total_timeout_seconds
         targets = self.resolved_targets()
         if not targets:
             raise LLMConfigError(
@@ -111,7 +121,7 @@ class LLMRouter:
                 )
                 skipped_by_breaker.append(target)
                 continue
-            response = self._run_target(target, request, validate, attempts)
+            response = self._run_target(target, request, validate, attempts, deadline)
             if response is not None:
                 return response
 
@@ -119,10 +129,11 @@ class LLMRouter:
             if attempts and any(record.ok for record in attempts):
                 break
             logger.warning("Every LLM target was circuit-broken; retrying %s anyway.", target.key)
-            response = self._run_target(target, request, validate, attempts)
+            response = self._run_target(target, request, validate, attempts, deadline)
             if response is not None:
                 return response
 
+        self._remaining(deadline, attempts)
         summary = "; ".join(
             f"{record.provider_id}:{record.model} [{record.mode} #{record.attempt}] {record.error}"
             for record in attempts[-4:]
@@ -141,17 +152,29 @@ class LLMRouter:
         request: ChatRequest,
         validate: Validator | None,
         attempts: list[AttemptRecord],
+        deadline: float,
     ) -> ChatResponse | None:
         provider = self.providers[target.provider_id]
         model = target.model or provider.descriptor.default_model_id()
 
         for mode in request.modes():
             for attempt_index in range(1, self.config.retry.max_attempts_per_mode + 1):
+                remaining = self._remaining(deadline, attempts)
                 started = self._clock()
-                try:
-                    response = provider.complete(request, model, mode)
+                bounded_request = replace(request, timeout_seconds=min(request.timeout_seconds, remaining))
+
+                def invoke(
+                    attempt_request: ChatRequest = bounded_request,
+                    attempt_mode: RequestMode = mode,
+                ) -> ChatResponse:
+                    response = provider.complete(attempt_request, model, attempt_mode)
                     if validate is not None:
                         validate(response.content)
+                    return response
+
+                try:
+                    response = bounded_completion(invoke, bounded_request.timeout_seconds)
+                    self._remaining(deadline, attempts)
                 except Exception as error:
                     elapsed = self._clock() - started
                     normalized = self._normalize(error, target.provider_id, model)
@@ -177,6 +200,7 @@ class LLMRouter:
                         self.config.retry.max_attempts_per_mode,
                         normalized,
                     )
+                    remaining = self._remaining(deadline, attempts)
 
                     if isinstance(normalized, LLMConfigError):
                         # Bad key or unusable endpoint: no mode and no retry
@@ -188,13 +212,17 @@ class LLMRouter:
                         break
                     if attempt_index >= self.config.retry.max_attempts_per_mode:
                         break
-                    self._sleep(
-                        backoff_delay(
-                            attempt_index,
-                            self.config.retry,
-                            retry_after_seconds=normalized.retry_after_seconds,
-                        )
+                    delay = backoff_delay(
+                        attempt_index,
+                        self.config.retry,
+                        retry_after_seconds=normalized.retry_after_seconds,
                     )
+                    if delay >= remaining:
+                        raise LLMDeadlineError(
+                            "LLM total deadline cannot accommodate the required retry delay.",
+                            tuple(attempts),
+                        ) from error
+                    self._sleep(delay)
                     continue
 
                 elapsed = self._clock() - started
@@ -226,6 +254,12 @@ class LLMRouter:
                     attempts=tuple(attempts),
                 )
         return None
+
+    def _remaining(self, deadline: float, attempts: list[AttemptRecord]) -> float:
+        remaining = deadline - self._clock()
+        if remaining <= 0:
+            raise LLMDeadlineError("LLM total deadline exhausted.", tuple(attempts))
+        return remaining
 
     @staticmethod
     def _normalize(error: Exception, provider_id: str, model: str) -> LLMError:

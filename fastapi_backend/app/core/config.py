@@ -5,6 +5,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.core.env import read_bool_env, read_csv_env, read_float_env, read_int_env
+
 
 def load_env_file(root_dir: Path, file_name: str = ".env") -> bool:
     env_path = root_dir / file_name
@@ -33,46 +35,6 @@ def load_env_file(root_dir: Path, file_name: str = ".env") -> bool:
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 load_env_file(PROJECT_ROOT)
-
-
-def read_bool_env(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    token = str(raw).strip().lower()
-    if token in {"1", "true", "yes", "y", "on"}:
-        return True
-    if token in {"0", "false", "no", "n", "off"}:
-        return False
-    return default
-
-
-def read_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return default
-
-
-def read_float_env(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return default
-
-
-def read_csv_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    values = tuple(item.strip() for item in str(raw).split(",") if item.strip())
-    return values or default
 
 
 def winget_packages_dir() -> Path:
@@ -274,6 +236,7 @@ class Settings:
     # supplied and anything beyond your own proxies is forgeable.
     trusted_proxy_count: int = read_int_env("TRUSTED_PROXY_COUNT", 0)
     session_event_history_limit: int = read_int_env("SESSION_EVENT_HISTORY_LIMIT", 500)
+    session_sse_enabled: bool = read_bool_env("SESSION_SSE_ENABLED", False)
     # Max events buffered per connected SSE client before the oldest is dropped
     # (bounds memory when a consumer stalls). 0 disables the bound.
     sse_client_queue_maxsize: int = read_int_env("SSE_CLIENT_QUEUE_MAXSIZE", 1000)

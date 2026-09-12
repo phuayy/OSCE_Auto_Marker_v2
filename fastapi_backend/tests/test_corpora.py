@@ -3,10 +3,6 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from fastapi.testclient import TestClient
-
 from app.api.routes import corpora
 from app.core.config import Settings
 from app.core.exceptions import AppError
@@ -14,6 +10,9 @@ from app.database.orm import OrmDatabase
 from app.repositories.corpus_repository import SEED_CORPORA, CorpusRepository
 from app.schemas.corpora import normalize_corpus_terms
 from app.services.container import create_container
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
 
 
 def make_repository(tmp_path: Path) -> CorpusRepository:
@@ -117,6 +116,7 @@ def test_clip_child_session_inherits_parent_corpus(tmp_path: Path) -> None:
 
     from app.core.utils import utc_now_iso
     from app.services.clip_service import ClipService
+
     from tests.fixtures.session_store import SessionUpdateMixin
 
     class FakeSessions(SessionUpdateMixin):
@@ -129,14 +129,8 @@ def test_clip_child_session_inherits_parent_corpus(tmp_path: Path) -> None:
         async def write(self, session: dict) -> None:
             self.sessions[str(session["id"])] = copy.deepcopy(session)
 
-        async def read_all_entries(self) -> list:
-            return []
-
-        async def ensure_names_for_index(self, entries: list) -> tuple[list, set]:
-            return [], set()
-
-        def reserve_unique_session_name(self, used_keys: set, preferred: str = "") -> str:
-            return preferred or "Child"
+        async def create_named(self, session: dict) -> None:
+            await self.write(session)
 
         def public_session(self, session: dict) -> dict:
             return copy.deepcopy(session)

@@ -6,18 +6,16 @@
 #   uv sync --group canary       # ...plus the optional Canary-Qwen engine
 #   uv sync --no-dev             # deployment install, no test tooling
 #
-# Supported target: Python 3.10-3.13.
+# Supported target: Python 3.11-3.13 (native StrEnum).
 # - Python 3.12 is the tested runtime and is pinned in .python-version.
 # - Python 3.14 is intentionally excluded because WhisperX 3.8.6 declares
 #   Python <3.14 support.
-# - NumPy uses environment markers so Python 3.10 receives the latest
-#   Python-3.10-compatible line while Python 3.11+ gets the current fastest line.
 
 [project]
 name = "osce-ai-marker"
 version = "0.1.0"
 description = "Automated OSCE video marking: transcription, diarisation and LLM scoring"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.11,<3.14"
 
 dependencies = [
     # FastAPI application server and request parsing.
@@ -55,10 +53,9 @@ dependencies = [
 
     # Rubric parsing and audio/bell-analysis pipeline scripts.
     "pypdf==6.13.2",
-    "numpy==2.2.6; python_version == '3.10'",
     # 2.4.4 (not 2.4.6) is what the CUDA torch 2.8.0+cu128 stack was installed
     # and tested against locally; keep the two moving in lockstep.
-    "numpy==2.4.4; python_version >= '3.11'",
+    "numpy==2.4.4",
     "librosa==0.11.0",
     "soundfile==0.14.0",
     "opensmile==2.6.0",
@@ -93,6 +90,7 @@ dependencies = [
 dev = [
     "pytest==9.0.3",
     "httpx==0.28.1",
+    "ruff==0.11.13",
 ]
 
 # Optional transcription engine: NVIDIA Canary-Qwen 2.5B (NeMo SALM).
@@ -145,3 +143,9 @@ url = "https://download.pytorch.org/whl/cu128"
 # "explicit" keeps every other package coming from PyPI; only the three named
 # in [tool.uv.sources] are resolved here.
 explicit = true
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]

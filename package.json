@@ -22,6 +22,11 @@
     "db:check": "uv run --no-sync python scripts/check_database.py",
     "test:api": "uv run --no-sync python -m pytest fastapi_backend/tests",
     "test:ui": "node --test \"test/*.test.mjs\"",
+    "lint": "npm run lint:ui && npm run lint:api && npm run enums:check",
+    "lint:ui": "eslint src",
+    "lint:api": "uv run --no-sync ruff check fastapi_backend/app scripts",
+    "enums:generate": "uv run --no-sync python scripts/generate_enums.py",
+    "enums:check": "uv run --no-sync python scripts/generate_enums.py --check",
     "build": "vite build",
     "preview": "vite preview"
   },
@@ -34,6 +39,9 @@
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.0",
     "autoprefixer": "^10.4.20",
+    "eslint": "10.9.1",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "16.0.0",
     "postcss": "^8.4.45",
     "tailwindcss": "^3.4.10",
     "vite": "^5.4.0"

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from app.core.artifacts import artifact_metadata
 from app.core.config import Settings
 from app.core.exceptions import EmptyTranscriptError
 from app.core.json_utils import extract_json_object
@@ -15,8 +16,8 @@ from app.core.process import CommandRunner
 from app.core.resources import ResourceLease
 from app.core.utils import atomic_replace, clamp_number, format_timestamp, utc_now_iso
 from app.pipeline import person_presets
-from app.pipeline.whisperx_options import WhisperxRunOptions
 from app.pipeline.progress_tracker import ProgressTracker
+from app.pipeline.whisperx_options import WhisperxRunOptions
 from app.services.auth_service import AuthService
 from app.services.event_service import EventService
 
@@ -157,13 +158,9 @@ class MediaPipeline:
             return False
 
         vtt_path = await self.create_vtt_from_srt(srt_path)
-        stats = vtt_path.stat()
-        session.setdefault("outputs", {})["subtitleTrack"] = {
-            "fileName": vtt_path.name,
-            "absolutePath": str(vtt_path),
-            "url": f"/media/whisperx/{session['id']}/{vtt_path.name}",
-            "sizeBytes": stats.st_size,
-        }
+        session.setdefault("outputs", {})["subtitleTrack"] = artifact_metadata(
+            vtt_path, f"/media/whisperx/{session['id']}",
+        )
         return True
 
     async def find_latest_output_file(
@@ -249,13 +246,7 @@ class MediaPipeline:
             str(audio_path),
         ]
         await self.runner.run(self.settings.ffmpeg_bin, args, "Audio extraction (ffmpeg)")
-        stats = audio_path.stat()
-        return {
-            "fileName": audio_file_name,
-            "absolutePath": str(audio_path),
-            "url": f"/media/audio/{audio_file_name}",
-            "sizeBytes": stats.st_size,
-        }
+        return artifact_metadata(audio_path, "/media/audio")
 
     async def create_bell_detection_wav(self, source_path: Path, sample_rate: int) -> Path:
         wav_path = source_path.with_name(f"{source_path.stem}.bell.wav")

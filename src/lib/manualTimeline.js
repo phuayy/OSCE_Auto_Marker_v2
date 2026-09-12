@@ -8,8 +8,10 @@
 // boundary i-1 and boundary i). Kinds: 'session' (assessable student clip) or
 // 'intermission' (greyed break — empty room / lone person).
 
-export const SESSION_KIND = 'session';
-export const INTERMISSION_KIND = 'intermission';
+import { ClipKind } from './enums.js';
+
+export const SESSION_KIND = ClipKind.SESSION;
+export const INTERMISSION_KIND = ClipKind.INTERMISSION;
 
 /** Minimum spacing between separators, matching the drag clamp in the editor. */
 export const MIN_BOUNDARY_GAP_SECONDS = 0.2;

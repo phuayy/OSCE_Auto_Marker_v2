@@ -5,10 +5,9 @@ from pydantic import ValidationError
 
 from app.api.dependencies import get_container
 from app.core.exceptions import AppError
-from app.schemas.uploads import LegacyUploadForm
 from app.domain.sessions import empty_outputs
+from app.schemas.uploads import LegacyUploadForm
 from app.services.container import AppContainer
-
 
 router = APIRouter(tags=["uploads"])
 
@@ -56,10 +55,6 @@ async def upload_session(
         raise HTTPException(status_code=400, detail="A case study PDF file is required.")
     session_id = container.artifacts.new_session_id()
     try:
-        entries, used_keys = await container.sessions.ensure_names_for_index(
-            await container.sessions.read_all_entries()
-        )
-        _ = entries
         video_meta = await container.storage.save_uploaded_source(
             video,
             session_id=session_id,
@@ -75,7 +70,7 @@ async def upload_session(
         case_study_meta = await container.rubric_assets.register_case_study_meta(case_study_meta)
         session = {
             "id": session_id,
-            "name": container.sessions.reserve_unique_session_name(used_keys, form.sessionName or ""),
+            "name": form.sessionName or "",
             "createdAt": container.pipeline.now_iso(),
             "status": "uploaded",
             # Persisting the workflow is what lets the frontend render a long
@@ -96,7 +91,7 @@ async def upload_session(
             "outputs": empty_outputs(),
             "error": None,
         }
-        await container.sessions.write(session)
+        await container.sessions.create_named(session)
         return {"session": container.sessions.public_session(session)}
     except AppError as error:
         raise HTTPException(status_code=error.status_code, detail=error.message) from error

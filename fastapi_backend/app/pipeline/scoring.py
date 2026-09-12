@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from app.core.artifacts import artifact_metadata
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.json_utils import extract_json_object, write_json_file
@@ -180,14 +181,7 @@ class ScoringPipeline:
         else:
             payload = extract_json_object(result.stdout)
             await asyncio.to_thread(write_json_file, output_path, payload)
-        stats = output_path.stat()
-        return {
-            "fileName": output_path.name,
-            "absolutePath": str(output_path),
-            "url": f"/media/scores/{output_path.name}",
-            "sizeBytes": stats.st_size,
-            "payload": payload,
-        }
+        return artifact_metadata(output_path, "/media/scores")
 
     async def run_audio_professionalism(self, session: dict[str, Any]) -> dict[str, Any]:
         if not self.settings.audio_professionalism_script_path.exists():
@@ -230,15 +224,8 @@ class ScoringPipeline:
         )
         if not output_path.exists():
             raise RuntimeError("Audio professionalism extractor did not produce an output file.")
-        payload = await asyncio.to_thread(lambda: extract_json_object(output_path.read_text(encoding="utf-8")))
-        stats = output_path.stat()
-        return {
-            "fileName": output_path.name,
-            "absolutePath": str(output_path),
-            "url": f"/media/audio-professionalism/{output_path.name}",
-            "sizeBytes": stats.st_size,
-            "payload": payload,
-        }
+        await asyncio.to_thread(lambda: extract_json_object(output_path.read_text(encoding="utf-8")))
+        return artifact_metadata(output_path, "/media/audio-professionalism")
 
     async def run_communication_scoring(
         self,
@@ -290,12 +277,5 @@ class ScoringPipeline:
         )
         if not output_path.exists():
             raise RuntimeError("Communication scorer did not produce an output file.")
-        payload = await asyncio.to_thread(lambda: extract_json_object(output_path.read_text(encoding="utf-8")))
-        stats = output_path.stat()
-        return {
-            "fileName": output_path.name,
-            "absolutePath": str(output_path),
-            "url": f"/media/communication-scores/{output_path.name}",
-            "sizeBytes": stats.st_size,
-            "payload": payload,
-        }
+        await asyncio.to_thread(lambda: extract_json_object(output_path.read_text(encoding="utf-8")))
+        return artifact_metadata(output_path, "/media/communication-scores")

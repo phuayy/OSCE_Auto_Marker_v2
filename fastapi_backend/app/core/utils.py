@@ -5,10 +5,30 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def parse_iso(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def runtime_seconds(started_at: object, ended_at: object) -> float:
+    start, end = parse_iso(started_at), parse_iso(ended_at)
+    if start is None or end is None:
+        return 0.0
+    return round(max(0.0, (end - start).total_seconds()), 2)
+
+
+def exception_message(error: BaseException, fallback: str) -> str:
+    return str(error) or type(error).__name__ or fallback
 
 
 def atomic_replace(
@@ -46,6 +66,16 @@ def atomic_replace(
             if attempt == attempts - 1:
                 raise
             time.sleep(base_delay * (2 ** attempt))
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        tmp_path.write_text(text, encoding="utf-8")
+        atomic_replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def sanitize_file_name(original_name: str | None) -> str:

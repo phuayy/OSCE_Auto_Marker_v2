@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 import json
-from pathlib import Path
 from typing import Any
 
-from app.core.json_utils import extract_json_object
+from app.core.artifacts import read_artifact_payload
 from app.repositories.assessment_repository import AssessmentRepository
 
 
@@ -38,17 +36,7 @@ class AssessmentService:
     async def _load_payload(self, output: Any) -> dict[str, Any] | None:
         if not isinstance(output, dict):
             return None
-        payload = output.get("payload")
-        if isinstance(payload, dict):
-            return payload
-        absolute_path = output.get("absolutePath")
-        if not absolute_path:
-            return None
-        path = Path(str(absolute_path))
-        if not path.exists():
-            return None
-        raw = await asyncio.to_thread(path.read_text, encoding="utf-8")
-        return extract_json_object(raw)
+        return await read_artifact_payload(output, prefer_legacy=True)
 
     def _result_payload(self, result_type: str, output: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         summary = payload.get("scoring_summary") if isinstance(payload.get("scoring_summary"), dict) else {}

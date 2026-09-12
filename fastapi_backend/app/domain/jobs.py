@@ -1,10 +1,20 @@
 from __future__ import annotations
 
-from typing import Literal
+from enum import StrEnum
 
 
-JobStatus = Literal["waiting_for_upload", "queued", "running", "succeeded", "failed", "cancelled"]
+class JobStatus(StrEnum):
+    WAITING_FOR_UPLOAD = "waiting_for_upload"
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
-ACTIVE_JOB_STATUSES = {"waiting_for_upload", "queued", "running"}
-DISPATCHABLE_JOB_STATUSES = {"queued"}
-TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled"}
+
+ACTIVE_JOB_STATUSES = frozenset({JobStatus.WAITING_FOR_UPLOAD, JobStatus.QUEUED, JobStatus.RUNNING})
+DISPATCHABLE_JOB_STATUSES = frozenset({JobStatus.QUEUED})
+TERMINAL_JOB_STATUSES = frozenset({JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED})
+IN_PROGRESS_JOB_STATUSES = frozenset({JobStatus.QUEUED, JobStatus.RUNNING})
+FINISHED_JOB_STATUSES = frozenset({JobStatus.SUCCEEDED, JobStatus.CANCELLED})
+RECOVERABLE_JOB_STATUSES = frozenset({JobStatus.FAILED, JobStatus.RUNNING})

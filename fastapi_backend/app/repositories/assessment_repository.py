@@ -121,7 +121,7 @@ class AssessmentRepository:
         assessment.case_study_rubric_id = case_study.get("rubricAssetId") or None
         assessment.communication_rubric_id = payload.get("communicationRubricAssetId") or None
         assessment.parent_session_id = payload.get("parentSessionId") or None
-        assessment.workflow = payload.get("workflow") or payload.get("clipSource", {}).get("workflow")
+        assessment.workflow = payload.get("workflow") or (payload.get("clipSource") or {}).get("workflow")
         assessment.status = str(payload.get("status") or "unknown")
         assessment.session_name = payload.get("name") or None
         assessment.video_file_name = video.get("fileName") or video.get("originalName")

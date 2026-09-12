@@ -1,8 +1,11 @@
+import { SegmentationMethod, SessionStatus, Workflow } from '@/lib/enums';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ensureStreamTicket, resolveMediaUrl } from '@/auth';
 import { useChangeStream } from '@/changeStream';
-import { ApiError, ERROR_KIND, apiJson } from '@/lib/apiFetch';
+import { ApiError, ERROR_KIND, apiFetch, apiJson } from '@/lib/apiFetch';
+import { loadSessionWorkspace } from '@/lib/sessionWorkspace';
+import { uploadFileToResumableSession } from '@/lib/resumableUpload';
 import { DEFAULT_PART_CONCURRENCY, recordedPartNumbers, uploadParts } from '@/lib/partUpload';
 import { CONNECTION_STATUS, useConnectionStatus } from '@/lib/connectionStatus';
 import { ConnectionBadge, ConnectionNotice } from '@/components/ConnectionStatus';
@@ -195,7 +198,7 @@ function debugPipeline(message) {
 }
 
 async function readBundledDemoJson(fileName, label) {
-  const response = await fetch(`${DEMO_RESOURCE_BASE}/${fileName}`);
+  const response = await apiFetch(`${DEMO_RESOURCE_BASE}/${fileName}`, { reportConnection: false });
   if (!response.ok) {
     throw new Error(`Failed to load ${label}. HTTP ${response.status}`);
   }
@@ -212,7 +215,7 @@ function buildBundledDemoSession(rawSession, scoresPayload, communicationScoresP
   return {
     ...safeSession,
     id: DEMO_SESSION_ID,
-    status: 'completed',
+    status: SessionStatus.COMPLETED,
     pipeline: {
       ...(safeSession.pipeline || {}),
       startedAt: safeSession.pipeline?.startedAt || nowIso,
@@ -304,7 +307,7 @@ function buildLongDemoChildSession(rawSession, scoresPayload, communicationScore
     ...safeSession,
     id: childId || LONG_DEMO_SESSION_ID,
     parentSessionId: LONG_DEMO_SESSION_ID,
-    status: 'completed',
+    status: SessionStatus.COMPLETED,
     pipeline: {
       ...(safeSession.pipeline || {}),
       mode: 'demo',
@@ -371,11 +374,11 @@ export default function OSCEAiMarkerMockup({
   const [communicationScores, setCommunicationScores] = useState(null);
   const [caseStudyFile, setCaseStudyFile] = useState(null);
   const [showWorkspace, setShowWorkspace] = useState(false);
-  const [uploadFlow, setUploadFlow] = useState('standard');
+  const [uploadFlow, setUploadFlow] = useState(Workflow.STANDARD);
   // Long-workflow auto-crop method: 'bells' (audio bell detection) or
   // 'person' (RT-DETR human detection). Sent with the upload; the backend
   // worker reads it from the session when the auto_crop job runs.
-  const [segmentationMethod, setSegmentationMethod] = useState('bells');
+  const [segmentationMethod, setSegmentationMethod] = useState(SegmentationMethod.BELLS);
   // Occupancy rule for human detection: which camera scenario this recording
   // is. The catalogue (labels + the numbers each preset stands for) comes from
   // the backend, so retuning a preset never needs a frontend release; only the
@@ -491,6 +494,9 @@ export default function OSCEAiMarkerMockup({
   const manualTimelineRef = useRef(null);
   const timelineMenuRef = useRef(null);
   const timelineSegmentRefs = useRef(new Map());
+  const workspaceLoadRef = useRef(null);
+
+  useEffect(() => () => workspaceLoadRef.current?.abort(), []);
 
   const transcriptSegments = useMemo(() => {
     const segmentList = Array.isArray(transcript?.segments) ? transcript.segments : [];
@@ -512,13 +518,8 @@ export default function OSCEAiMarkerMockup({
       return audioProfessionalism;
     }
 
-    const payload = session?.outputs?.audioProfessionalism?.payload;
-    if (payload && typeof payload === 'object') {
-      return payload;
-    }
-
     return null;
-  }, [audioProfessionalism, session]);
+  }, [audioProfessionalism]);
 
   const audioProfMetrics = audioProfPayload?.metrics || null;
   const audioProfFeatures = audioProfPayload?.audio_features || null;
@@ -553,11 +554,11 @@ export default function OSCEAiMarkerMockup({
       }
 
       let status = 'idle';
-      if (entry.status === 'completed') {
-        status = 'completed';
-      } else if (entry.status === 'failed') {
-        status = 'failed';
-      } else if (['queued', 'assembling', 'processing'].includes(entry.status)) {
+      if (entry.status === SessionStatus.COMPLETED) {
+        status = SessionStatus.COMPLETED;
+      } else if (entry.status === SessionStatus.FAILED) {
+        status = SessionStatus.FAILED;
+      } else if ([SessionStatus.QUEUED, SessionStatus.ASSEMBLING, SessionStatus.PROCESSING].includes(entry.status)) {
         // A child clip session that is queued/assembling/processing is already
         // in flight — surface it as 'running' so the UI blocks re-queueing the
         // same clip (the button becomes "View progress", not "Run assessment").
@@ -577,7 +578,7 @@ export default function OSCEAiMarkerMockup({
   // and this record — not the response body — is what says when they are all in.
   const clipExport = session?.clipExport || null;
   const clipExportStatus = String(clipExport?.status || '');
-  const isClipExportRunning = ['queued', 'running'].includes(clipExportStatus);
+  const isClipExportRunning = [SessionStatus.QUEUED, 'running'].includes(clipExportStatus);
   // Watch a bit wider than "the record says running": an export we just
   // requested counts too, so a response that never carried the clipExport
   // record still leaves the editor watching for the clips instead of sitting
@@ -609,7 +610,7 @@ export default function OSCEAiMarkerMockup({
   const isPersonSegmentedSession = useMemo(
     () =>
       Boolean(
-        session?.segmentation === 'person' ||
+        session?.segmentation === SegmentationMethod.PERSON ||
           videoClips.some(
             (clip) =>
               clip?.kind === INTERMISSION_KIND || clip?.source?.type === 'person_detection_rtdetr'
@@ -622,8 +623,8 @@ export default function OSCEAiMarkerMockup({
   // which is only correct right after picking it. This guarantees a long session
   // always shows the clip/auto-crop workflow (never the single-student panels),
   // regardless of how it was opened (reload, "View progress", deep link, etc.).
-  const sessionIsLong = Boolean(session?.workflow === 'long' || videoClips.length > 0);
-  const isLongWorkflow = showWorkspace ? sessionIsLong : uploadFlow === 'long';
+  const sessionIsLong = Boolean(session?.workflow === Workflow.LONG || videoClips.length > 0);
+  const isLongWorkflow = showWorkspace ? sessionIsLong : uploadFlow === Workflow.LONG;
   // A clip assessment view is any child session (durable parentSessionId), or —
   // for the in-memory demo path where children may lack it — a snapshot whose id
   // differs from the current session. Deriving from parentSessionId means the
@@ -702,11 +703,11 @@ export default function OSCEAiMarkerMockup({
         // Keep an optimistic 'running' until the backend reports a terminal
         // state — but DO let it advance to completed/failed (e.g. when the run
         // finished via the "View progress" overlay, which doesn't set this map).
-        if (existing?.status === 'running' && mapped.status !== 'completed' && mapped.status !== 'failed') {
+        if (existing?.status === 'running' && mapped.status !== SessionStatus.COMPLETED && mapped.status !== SessionStatus.FAILED) {
           return;
         }
 
-        if (existing?.status === 'completed' && existing.sessionId) {
+        if (existing?.status === SessionStatus.COMPLETED && existing.sessionId) {
           return;
         }
 
@@ -725,7 +726,7 @@ export default function OSCEAiMarkerMockup({
       return '';
     }
     const completedIds = Object.values(clipAssessmentRuns || {})
-      .filter((entry) => entry?.status === 'completed' && entry?.sessionId)
+      .filter((entry) => entry?.status === SessionStatus.COMPLETED && entry?.sessionId)
       .map((entry) => String(entry.sessionId))
       .sort();
     return `${session.id}::${completedIds.join(',')}`;
@@ -749,13 +750,7 @@ export default function OSCEAiMarkerMockup({
 
     let cancelled = false;
     setIsLoadingClipSummaries(true);
-    fetch(`/api/sessions/${session.id}/clip-summaries`)
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error(`Failed to load clip summaries (${response.status}).`);
-        }
-        return response.json();
-      })
+    apiJson(`/api/sessions/${session.id}/clip-summaries`)
       .then((body) => {
         if (cancelled) return;
         setClipSummaries(body || null);
@@ -801,12 +796,8 @@ export default function OSCEAiMarkerMockup({
     if (communicationScores && typeof communicationScores === 'object') {
       return communicationScores;
     }
-    const sessionPayload = session?.outputs?.communicationScores?.payload;
-    if (sessionPayload && typeof sessionPayload === 'object') {
-      return sessionPayload;
-    }
     return null;
-  }, [communicationScores, session]);
+  }, [communicationScores]);
 
   const communicationCriteria = useMemo(() => {
     const list = Array.isArray(communicationPayload?.criteria) ? communicationPayload.criteria : [];
@@ -975,7 +966,7 @@ export default function OSCEAiMarkerMockup({
       if (cancelled || !fresh) {
         return;
       }
-      if (String(fresh?.clipExport?.status) === 'failed') {
+      if (String(fresh?.clipExport?.status) === SessionStatus.FAILED) {
         setError(fresh.clipExport.error || 'Clip export failed.');
       }
     }
@@ -1028,7 +1019,7 @@ export default function OSCEAiMarkerMockup({
       }
       const clips = Array.isArray(fresh?.outputs?.videoClips) ? fresh.outputs.videoClips : [];
       const exported = clips.filter((clip) => clip.kind !== INTERMISSION_KIND && clip.url);
-      if (String(fresh?.clipExport?.status) === 'failed' || exported.length === 0) {
+      if (String(fresh?.clipExport?.status) === SessionStatus.FAILED || exported.length === 0) {
         return;
       }
       setSelectedClipId((previous) =>
@@ -1052,7 +1043,7 @@ export default function OSCEAiMarkerMockup({
     if (!awaitingClipExportFor) {
       return;
     }
-    if (!showWorkspace || clipExportStatus === 'completed' || clipExportStatus === 'failed') {
+    if (!showWorkspace || clipExportStatus === SessionStatus.COMPLETED || clipExportStatus === SessionStatus.FAILED) {
       setAwaitingClipExportFor(null);
     }
   }, [awaitingClipExportFor, showWorkspace, clipExportStatus]);
@@ -1161,17 +1152,12 @@ export default function OSCEAiMarkerMockup({
 
     const loadAudioProfessionalism = async () => {
       try {
-        const response = await fetch(`/api/sessions/${session.id}/audio-professionalism`);
-        const body = await response.json().catch(() => ({}));
-
-        if (!response.ok) {
-          throw new Error(body.error || 'Audio professionalism fetch failed.');
-        }
+        const body = await apiJson(`/api/sessions/${session.id}/audio-professionalism`, {
+          fallbackMessage: 'Audio professionalism fetch failed.',
+        });
 
         if (!cancelled) {
-          setAudioProfessionalism(
-            body.audioProfessionalism || body?.session?.outputs?.audioProfessionalism?.payload || null
-          );
+          setAudioProfessionalism(body.audioProfessionalism || null);
           setAudioProfLoadError('');
         }
       } catch (error) {
@@ -1296,11 +1282,9 @@ export default function OSCEAiMarkerMockup({
 
   async function refreshSegmentationPresets() {
     try {
-      const response = await fetch('/api/settings/segmentation-presets');
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to load segmentation presets.');
-      }
+      const body = await apiJson('/api/settings/segmentation-presets', {
+        fallbackMessage: 'Failed to load segmentation presets.',
+      });
       const presets = Array.isArray(body.presets) ? body.presets : [];
       setSegmentationPresets(presets);
       // Seed the custom form from the backend's own custom defaults so the
@@ -1328,7 +1312,7 @@ export default function OSCEAiMarkerMockup({
   // The options object sent with an upload — null unless human detection is
   // the chosen method, in which case the backend also validates it.
   function buildSegmentationOptions() {
-    if (uploadFlow !== 'long' || segmentationMethod !== 'person') {
+    if (uploadFlow !== Workflow.LONG || segmentationMethod !== SegmentationMethod.PERSON) {
       return null;
     }
     if (segmentationPreset !== 'custom') {
@@ -1344,11 +1328,7 @@ export default function OSCEAiMarkerMockup({
 
   async function refreshCorpora() {
     try {
-      const response = await fetch('/api/corpora');
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to load corpora.');
-      }
+      const body = await apiJson('/api/corpora', { fallbackMessage: 'Failed to load corpora.' });
       setCorpora(Array.isArray(body.corpora) ? body.corpora : []);
     } catch (corpusLoadError) {
       // Non-fatal: the picker simply offers "None" and transcription still runs.
@@ -1429,59 +1409,24 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
-  async function loadSessionWorkspace(sessionId) {
-    const sessionBody = await apiJson(`/api/sessions/${sessionId}`, {
-      fallbackMessage: 'Session not found.',
-    });
+  function applyWorkspace(payload) {
+    setSession(payload.session);
+    setTranscript(payload.transcript || { segments: [] });
+    setScoreReport(payload.scores || null);
+    setAudioProfessionalism(payload.audioProfessionalism || null);
+    setCommunicationScores(payload.communicationScores || null);
+    setRuntimeSeconds(Math.round(payload.session?.pipeline?.runtimeSeconds || 0));
+  }
 
-    const sessionPayload = sessionBody.session;
-    let transcriptPayload = { segments: [] };
-
-    if (sessionPayload?.outputs?.transcript?.fileName) {
-      const transcriptResponse = await fetch(`/api/sessions/${sessionId}/transcript`);
-      const transcriptBody = await transcriptResponse.json().catch(() => ({}));
-      if (transcriptResponse.ok && transcriptBody?.transcript) {
-        transcriptPayload = transcriptBody.transcript;
-      }
-    }
-
-    let scoresPayload = sessionPayload?.outputs?.scores?.payload || null;
-    if (!scoresPayload && sessionPayload?.outputs?.scores?.fileName) {
-      const scoresResponse = await fetch(`/api/sessions/${sessionId}/scores`);
-      const scoresBody = await scoresResponse.json().catch(() => ({}));
-      if (scoresResponse.ok && scoresBody?.scores) {
-        scoresPayload = scoresBody.scores;
-      }
-    }
-
-    let audioProfPayload = sessionPayload?.outputs?.audioProfessionalism?.payload || null;
-    if (!audioProfPayload && sessionPayload?.outputs?.audioProfessionalism?.fileName) {
-      const audioProfResponse = await fetch(`/api/sessions/${sessionId}/audio-professionalism`);
-      const audioProfBody = await audioProfResponse.json().catch(() => ({}));
-      if (audioProfResponse.ok && audioProfBody?.audioProfessionalism) {
-        audioProfPayload = audioProfBody.audioProfessionalism;
-      }
-    }
-
-    let commScoresPayload = sessionPayload?.outputs?.communicationScores?.payload || null;
-    if (!commScoresPayload && sessionPayload?.outputs?.communicationScores?.fileName) {
-      const commResponse = await fetch(`/api/sessions/${sessionId}/communication-scores`);
-      const commBody = await commResponse.json().catch(() => ({}));
-      if (commResponse.ok && commBody?.communicationScores) {
-        commScoresPayload = commBody.communicationScores;
-      }
-    }
-
-    return {
-      session: sessionPayload,
-      transcript: transcriptPayload,
-      scores: scoresPayload,
-      audioProfessionalism: audioProfPayload,
-      communicationScores: commScoresPayload,
-    };
+  function beginWorkspaceLoad() {
+    workspaceLoadRef.current?.abort();
+    const controller = new AbortController();
+    workspaceLoadRef.current = controller;
+    return controller;
   }
 
   async function openExistingSession(sessionId) {
+    const controller = beginWorkspaceLoad();
     setError('');
     setNotice('');
     setIsDemoFallback(false);
@@ -1494,7 +1439,8 @@ export default function OSCEAiMarkerMockup({
     setSelectedClipAssessmentIds(new Set());
 
     try {
-      const payload = await loadSessionWorkspace(sessionId);
+      const payload = await loadSessionWorkspace(sessionId, { signal: controller.signal });
+      if (controller.signal.aborted) return;
 
       // Gate: an in-flight session (assembling/queued/processing) cannot be
       // entered — its results are empty/partial until processing finishes.
@@ -1514,16 +1460,7 @@ export default function OSCEAiMarkerMockup({
         return;
       }
 
-      setSession(payload.session);
-      setTranscript(payload.transcript || { segments: [] });
-      setScoreReport(payload.scores || payload?.session?.outputs?.scores?.payload || null);
-      setAudioProfessionalism(
-        payload.audioProfessionalism || payload?.session?.outputs?.audioProfessionalism?.payload || null
-      );
-      setCommunicationScores(
-        payload.communicationScores || payload?.session?.outputs?.communicationScores?.payload || null
-      );
-      setRuntimeSeconds(Math.round(payload.session?.pipeline?.runtimeSeconds || 0));
+      applyWorkspace(payload);
       setVideoFile(null);
       setCaseStudyFile(null);
 
@@ -1532,12 +1469,12 @@ export default function OSCEAiMarkerMockup({
         : [];
       // Select the first SESSION clip — intermissions are greyed markers.
       setSelectedClipId(nextClips.find((clip) => clip.kind !== INTERMISSION_KIND)?.id || null);
-      setUploadFlow(nextClips.length > 0 ? 'long' : 'standard');
+      setUploadFlow(nextClips.length > 0 ? Workflow.LONG : Workflow.STANDARD);
       setShowWorkspace(true);
     } catch (error) {
-      setSessionIndexError(error.message || 'Failed to open session.');
+      if (!controller.signal.aborted) setSessionIndexError(error.message || 'Failed to open session.');
     } finally {
-      setIsProcessing(false);
+      if (workspaceLoadRef.current === controller) setIsProcessing(false);
     }
   }
 
@@ -1572,7 +1509,7 @@ export default function OSCEAiMarkerMockup({
       );
     }
 
-    if (sessionEntry.status === 'failed') {
+    if (sessionEntry.status === SessionStatus.FAILED) {
       // A failed session opens (its partial artefacts are worth seeing), and it
       // can be re-run in place: same id, fresh job. The reason it failed is
       // rendered on the card itself — see the session list.
@@ -1626,6 +1563,7 @@ export default function OSCEAiMarkerMockup({
   }
 
   function goHome() {
+    workspaceLoadRef.current?.abort();
     setShowWorkspace(false);
     setSession(null);
     setTranscript({ segments: [] });
@@ -1641,7 +1579,7 @@ export default function OSCEAiMarkerMockup({
     setClipSummaries(null);
     setDemoLongVideoSummaries(null);
     setIsLoadingClipSummaries(false);
-    setUploadFlow('standard');
+    setUploadFlow(Workflow.STANDARD);
     setError('');
     setNotice('');
     setIsDemoFallback(false);
@@ -1668,15 +1606,11 @@ export default function OSCEAiMarkerMockup({
     setRenamingSessionId(sessionId);
     setSessionIndexError('');
     try {
-      const response = await fetch(`/api/sessions/${sessionId}/name`, {
+      const body = await apiJson(`/api/sessions/${sessionId}/name`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: trimmed }),
+        json: { name: trimmed },
+        fallbackMessage: 'Failed to rename session.',
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to rename session.');
-      }
 
       if (body?.session?.name) {
         setSessionIndex((previous) =>
@@ -1711,11 +1645,9 @@ export default function OSCEAiMarkerMockup({
     setDeletingSessionId(sessionId);
     setSessionIndexError('');
     try {
-      const response = await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to delete session.');
-      }
+      const body = await apiJson(`/api/sessions/${sessionId}`, {
+        method: 'DELETE', fallbackMessage: 'Failed to delete session.',
+      });
       const removed = new Set(
         Array.isArray(body.deletedSessionIds) ? body.deletedSessionIds.map(String) : [String(sessionId)]
       );
@@ -1780,7 +1712,7 @@ export default function OSCEAiMarkerMockup({
       const demoBundle = await loadBundledDemoResources();
       setIsDemoFallback(true);
       setShowWorkspace(true);
-      setUploadFlow('standard');
+      setUploadFlow(Workflow.STANDARD);
       setSession(demoBundle.session);
       setTranscript(demoBundle.transcript);
       setScoreReport(demoBundle.scores);
@@ -1829,7 +1761,7 @@ export default function OSCEAiMarkerMockup({
   // session ships its own scores/communication-scores/audio-professionalism/
   // transcript so the user can drill into any student without a backend.
   async function loadBundledLongDemoResources() {
-    const parentResponse = await fetch(`${LONG_DEMO_RESOURCE_BASE}/parent-session.json`);
+    const parentResponse = await apiFetch(`${LONG_DEMO_RESOURCE_BASE}/parent-session.json`, { reportConnection: false });
     if (!parentResponse.ok) {
       throw new Error(`Failed to load long demo parent session. HTTP ${parentResponse.status}`);
     }
@@ -1851,7 +1783,7 @@ export default function OSCEAiMarkerMockup({
     const parentSession = {
       ...parentSessionRaw,
       id: LONG_DEMO_SESSION_ID,
-      status: 'cropped',
+      status: SessionStatus.CROPPED,
       pipeline: {
         ...(parentSessionRaw.pipeline || {}),
         mode: 'demo',
@@ -1879,11 +1811,11 @@ export default function OSCEAiMarkerMockup({
       LONG_DEMO_CHILD_IDS.map(async (childId) => {
         const base = `${LONG_DEMO_RESOURCE_BASE}/children/${childId}`;
         const [sessionRes, transcriptRes, scoresRes, commRes, audioRes] = await Promise.all([
-          fetch(`${base}/session.json`),
-          fetch(`${base}/transcript.json`),
-          fetch(`${base}/scores.json`),
-          fetch(`${base}/communication-scores.json`),
-          fetch(`${base}/audio-professionalism.json`),
+          apiFetch(`${base}/session.json`, { reportConnection: false }),
+          apiFetch(`${base}/transcript.json`, { reportConnection: false }),
+          apiFetch(`${base}/scores.json`, { reportConnection: false }),
+          apiFetch(`${base}/communication-scores.json`, { reportConnection: false }),
+          apiFetch(`${base}/audio-professionalism.json`, { reportConnection: false }),
         ]);
         if (!sessionRes.ok || !transcriptRes.ok || !scoresRes.ok || !commRes.ok) {
           throw new Error(`Failed to load long demo child ${childId}.`);
@@ -1953,7 +1885,7 @@ export default function OSCEAiMarkerMockup({
         clipLabel: child.session?.clipSource?.label || child.session?.name || `Clip ${childId.slice(0, 8)}`,
         clipId: child.session?.clipSource?.clipId || null,
         clipOrder: -1,
-        status: 'completed',
+        status: SessionStatus.COMPLETED,
         content: {
           totalCriteria: contentTotalCriteria,
           yesCount: contentYes,
@@ -2003,7 +1935,7 @@ export default function OSCEAiMarkerMockup({
 
       setIsDemoFallback(true);
       setShowWorkspace(true);
-      setUploadFlow('long');
+      setUploadFlow(Workflow.LONG);
       // Stash the demo bundle on the parent session itself so other handlers
       // (openClipAssessmentView, runClipAssessment) can locate the demo data
       // without a network round-trip.
@@ -2032,7 +1964,7 @@ export default function OSCEAiMarkerMockup({
         if (!child) return;
         const clipId = child.session?.clipSource?.clipId;
         if (clipId) {
-          runs[clipId] = { status: 'completed', sessionId: childId };
+          runs[clipId] = { status: SessionStatus.COMPLETED, sessionId: childId };
         }
       });
       setClipAssessmentRuns(runs);
@@ -2048,64 +1980,6 @@ export default function OSCEAiMarkerMockup({
     } finally {
       setIsUploading(false);
       setIsProcessing(false);
-    }
-  }
-
-  // Direct-to-bucket upload against a resumable session URI the backend minted
-  // at initiate. The bytes never touch the API process, so restarting or
-  // redeploying the API mid-upload no longer kills the transfer, and a chunk
-  // that fails is retried against the offset the bucket reports rather than
-  // restarting the whole file.
-  async function uploadFileToResumableSession(file, fileUpload, onProgress) {
-    if (!fileUpload.uploadUrl) {
-      throw new Error('Upload plan did not include a resumable session URL.');
-    }
-    const chunkSize = Number(fileUpload.partSizeBytes || 0);
-    if (!Number.isFinite(chunkSize) || chunkSize <= 0) {
-      throw new Error('Upload plan did not include a valid chunk size.');
-    }
-
-    let offset = 0;
-    while (offset < file.size) {
-      const end = Math.min(offset + chunkSize, file.size);
-      const chunk = file.slice(offset, end);
-      const delays = [1000, 2000];
-      let response;
-      let lastError;
-
-      for (let attempt = 0; attempt <= delays.length; attempt++) {
-        try {
-          response = await fetch(fileUpload.uploadUrl, {
-            method: 'PUT',
-            headers: {
-              'Content-Range': `bytes ${offset}-${end - 1}/${file.size}`,
-            },
-            body: chunk,
-          });
-          lastError = null;
-          break;
-        } catch (networkErr) {
-          lastError = networkErr;
-          if (attempt < delays.length) {
-            await new Promise((r) => setTimeout(r, delays[attempt]));
-          }
-        }
-      }
-      if (lastError) throw lastError;
-
-      // 308 means "chunk stored, send more" and carries the byte range the
-      // bucket actually holds. Trusting that Range header over a local counter
-      // is what makes a partially-accepted chunk resume correctly.
-      if (response.status === 308) {
-        const range = response.headers.get('Range');
-        const lastByte = range ? Number(range.split('-').pop()) : NaN;
-        offset = Number.isFinite(lastByte) ? lastByte + 1 : end;
-      } else if (response.ok) {
-        offset = file.size;
-      } else {
-        throw new Error(`Upload failed at byte ${offset} (HTTP ${response.status}).`);
-      }
-      onProgress?.(offset, file.size, fileUpload);
     }
   }
 
@@ -2178,7 +2052,7 @@ export default function OSCEAiMarkerMockup({
         workflow: uploadFlow,
         autoProcess: true,
         sessionName: sessionNameInput.trim() || null,
-        segmentation: uploadFlow === 'long' ? segmentationMethod : null,
+        segmentation: uploadFlow === Workflow.LONG ? segmentationMethod : null,
         segmentationOptions: buildSegmentationOptions(),
         corpusId: selectedCorpusId || null,
         files: [
@@ -2317,7 +2191,7 @@ export default function OSCEAiMarkerMockup({
       transcriptionComplete: false,
       scored: false,
     });
-    setProcessingStage(uploadFlow === 'long' ? 'autocrop' : 'pipeline');
+    setProcessingStage(uploadFlow === Workflow.LONG ? 'autocrop' : 'pipeline');
     debugPipeline('[pipeline] started');
     // A new run always opens with the overlay visible, whatever the user did
     // with the previous one.
@@ -2594,16 +2468,11 @@ export default function OSCEAiMarkerMockup({
         end: Number(cropDraft.end),
       };
 
-      const res = await fetch(`/api/sessions/${session.id}/clips/${selectedClip.id}/recrop`, {
+      const body = await apiJson(`/api/sessions/${session.id}/clips/${selectedClip.id}/recrop`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        json: payload,
+        fallbackMessage: 'Recrop failed.',
       });
-
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(body.error || 'Recrop failed.');
-      }
 
       if (body?.session) {
         setSession(body.session);
@@ -2828,15 +2697,11 @@ export default function OSCEAiMarkerMockup({
     setRenamingClipId(clipId);
     setError('');
     try {
-      const response = await fetch(`/api/sessions/${session.id}/clips/${clipId}`, {
+      const body = await apiJson(`/api/sessions/${session.id}/clips/${clipId}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ label: trimmed }),
+        json: { label: trimmed },
+        fallbackMessage: 'Failed to rename clip.',
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to rename clip.');
-      }
       if (body?.session) {
         setSession(body.session);
       }
@@ -2894,15 +2759,11 @@ export default function OSCEAiMarkerMockup({
         // splits have no intermissions, so the field is omitted (all sessions).
         ...(isPersonSegmentedSession ? { kinds } : {}),
       };
-      const response = await fetch(`/api/sessions/${session.id}/clips/manual`, {
+      const body = await apiJson(`/api/sessions/${session.id}/clips/manual`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        json: payload,
+        fallbackMessage: 'Failed to save manual segments.',
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to save manual segments.');
-      }
       // 202: the backend persisted the segmentation and queued an export job.
       // The draft clips come back immediately so the timeline re-renders, and
       // the MP4s land one at a time — watched by the clipExport poll below.
@@ -2962,7 +2823,7 @@ export default function OSCEAiMarkerMockup({
       await new Promise((resolve) => setTimeout(resolve, 900));
       setClipAssessmentRuns((previous) => ({
         ...previous,
-        [clip.id]: { status: 'completed', sessionId: demoChildId },
+        [clip.id]: { status: SessionStatus.COMPLETED, sessionId: demoChildId },
       }));
       setIsProcessing(false);
       setProcessingMessage('');
@@ -3008,7 +2869,7 @@ export default function OSCEAiMarkerMockup({
     } catch (assessmentError) {
       setClipAssessmentRuns((previous) => ({
         ...previous,
-        [clip.id]: { status: 'failed', error: assessmentError.message || 'Clip assessment failed.' },
+        [clip.id]: { status: SessionStatus.FAILED, error: assessmentError.message || 'Clip assessment failed.' },
       }));
       setError(assessmentError.message || 'Clip assessment failed.');
       return false;
@@ -3035,18 +2896,16 @@ export default function OSCEAiMarkerMockup({
       [clip.id]: { status: 'running', sessionId: childSessionId },
     }));
     try {
-      const response = await fetch(`/api/sessions/${childSessionId}/rerun`, { method: 'POST' });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Re-run failed.');
-      }
+      await apiJson(`/api/sessions/${childSessionId}/rerun`, {
+        method: 'POST', fallbackMessage: 'Re-run failed.',
+      });
       setNotice(`Re-running assessment for "${clip.label || 'clip'}" — its row updates as it progresses.`);
       refreshSessionIndex();
       return true;
     } catch (rerunError) {
       setClipAssessmentRuns((previous) => ({
         ...previous,
-        [clip.id]: { status: 'failed', sessionId: childSessionId, error: rerunError.message || 'Re-run failed.' },
+        [clip.id]: { status: SessionStatus.FAILED, sessionId: childSessionId, error: rerunError.message || 'Re-run failed.' },
       }));
       setError(rerunError.message || 'Re-run failed.');
       return false;
@@ -3087,7 +2946,7 @@ export default function OSCEAiMarkerMockup({
 
     // Re-scoring a completed clip costs real assessor calls and replaces its
     // scores — make that explicit instead of silently re-running.
-    const completedCount = plans.filter(([, plan]) => plan.status === 'completed').length;
+    const completedCount = plans.filter(([, plan]) => plan.status === SessionStatus.COMPLETED).length;
     if (
       completedCount > 0 &&
       !window.confirm(
@@ -3153,6 +3012,7 @@ export default function OSCEAiMarkerMockup({
     if (!clipSessionId) {
       return;
     }
+    const controller = beginWorkspaceLoad();
 
     if (!parentSessionSnapshot) {
       setParentSessionSnapshot({
@@ -3178,36 +3038,24 @@ export default function OSCEAiMarkerMockup({
       const demoChildren = session?._demoChildren;
       if (demoChildren && demoChildren[clipSessionId]) {
         const childBundle = demoChildren[clipSessionId];
-        setSession(childBundle.session);
-        setTranscript(childBundle.transcript || { segments: [] });
-        setScoreReport(childBundle.scores || null);
-        setAudioProfessionalism(childBundle.audioProfessionalism || null);
-        setCommunicationScores(childBundle.communicationScores || null);
-        setRuntimeSeconds(Math.round(childBundle.session?.pipeline?.runtimeSeconds || 0));
+        applyWorkspace(childBundle);
         setNotice(`Demo mode: showing pre-assessed clip "${clip.label || childBundle.session?.name || ''}"`);
         return;
       }
 
-      const loaded = await loadSessionWorkspace(clipSessionId);
-      setSession(loaded.session);
-      setTranscript(loaded.transcript || { segments: [] });
-      setScoreReport(loaded.scores || loaded?.session?.outputs?.scores?.payload || null);
-      setAudioProfessionalism(
-        loaded.audioProfessionalism || loaded?.session?.outputs?.audioProfessionalism?.payload || null
-      );
-      setCommunicationScores(
-        loaded.communicationScores || loaded?.session?.outputs?.communicationScores?.payload || null
-      );
-      setRuntimeSeconds(Math.round(loaded.session?.pipeline?.runtimeSeconds || 0));
+      const loaded = await loadSessionWorkspace(clipSessionId, { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      applyWorkspace(loaded);
       setNotice('');
     } catch (error) {
-      setError(error.message || 'Failed to load clip assessment.');
+      if (!controller.signal.aborted) setError(error.message || 'Failed to load clip assessment.');
     } finally {
-      setIsProcessing(false);
+      if (workspaceLoadRef.current === controller) setIsProcessing(false);
     }
   }
 
   function restoreParentSession() {
+    workspaceLoadRef.current?.abort();
     // Fast path: restore the parent from the in-memory snapshot captured when
     // the user drilled into a clip (no refetch, preserves prior UI state).
     if (parentSessionSnapshot?.session) {
@@ -3295,7 +3143,7 @@ export default function OSCEAiMarkerMockup({
         </div>
       ) : null}
 
-      {clipExport?.status === 'failed' ? (
+      {clipExport?.status === SessionStatus.FAILED ? (
         <div className="mb-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-900">
           Clip export failed after {Number(clipExport?.completed || 0)}/{Number(clipExport?.total || 0)} clips:{' '}
           {clipExport?.error || 'unknown error'}. Export again to resume — finished clips are reused.
@@ -3632,12 +3480,12 @@ export default function OSCEAiMarkerMockup({
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
-                <Tabs defaultValue="standard" className="w-full">
+                <Tabs defaultValue={Workflow.STANDARD} className="w-full">
                   <TabsList className="grid w-full grid-cols-2 border border-slate-200 bg-slate-50">
-                    <TabsTrigger value="standard" onClick={() => setUploadFlow('standard')}>
+                    <TabsTrigger value={Workflow.STANDARD} onClick={() => setUploadFlow(Workflow.STANDARD)}>
                       Standard Upload
                     </TabsTrigger>
-                    <TabsTrigger value="long" onClick={() => setUploadFlow('long')}>
+                    <TabsTrigger value={Workflow.LONG} onClick={() => setUploadFlow(Workflow.LONG)}>
                       Long Video Upload (5+ min)
                     </TabsTrigger>
                   </TabsList>
@@ -3645,17 +3493,17 @@ export default function OSCEAiMarkerMockup({
 
                 <div
                   className={`rounded-xl border p-3 text-sm ${
-                    uploadFlow === 'long'
+                    uploadFlow === Workflow.LONG
                       ? 'border-violet-200 bg-violet-50 text-violet-900'
                       : 'border-cyan-200 bg-cyan-50 text-cyan-900'
                   }`}
                 >
-                  {uploadFlow === 'long'
+                  {uploadFlow === Workflow.LONG
                     ? 'Long-video mode selected. Upload multi-student recordings to auto-detect clip ranges, adjust them manually, then run assessments per student.'
                     : 'Standard mode selected. Best for single-student recordings; cropping tools are hidden.'}
                 </div>
 
-                {uploadFlow === 'long' && (
+                {uploadFlow === Workflow.LONG && (
                   <div className="rounded-xl border border-slate-200 bg-white p-3">
                     <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Auto-split method
@@ -3664,10 +3512,10 @@ export default function OSCEAiMarkerMockup({
                       <button
                         type="button"
                         role="radio"
-                        aria-checked={segmentationMethod === 'bells'}
-                        onClick={() => setSegmentationMethod('bells')}
+                        aria-checked={segmentationMethod === SegmentationMethod.BELLS}
+                        onClick={() => setSegmentationMethod(SegmentationMethod.BELLS)}
                         className={`flex items-start gap-2 rounded-lg border p-3 text-left transition ${
-                          segmentationMethod === 'bells'
+                          segmentationMethod === SegmentationMethod.BELLS
                             ? 'border-violet-400 bg-violet-50 ring-2 ring-violet-200'
                             : 'border-slate-200 bg-white hover:border-slate-300'
                         }`}
@@ -3683,10 +3531,10 @@ export default function OSCEAiMarkerMockup({
                       <button
                         type="button"
                         role="radio"
-                        aria-checked={segmentationMethod === 'person'}
-                        onClick={() => setSegmentationMethod('person')}
+                        aria-checked={segmentationMethod === SegmentationMethod.PERSON}
+                        onClick={() => setSegmentationMethod(SegmentationMethod.PERSON)}
                         className={`flex items-start gap-2 rounded-lg border p-3 text-left transition ${
-                          segmentationMethod === 'person'
+                          segmentationMethod === SegmentationMethod.PERSON
                             ? 'border-violet-400 bg-violet-50 ring-2 ring-violet-200'
                             : 'border-slate-200 bg-white hover:border-slate-300'
                         }`}
@@ -3700,7 +3548,7 @@ export default function OSCEAiMarkerMockup({
                         </span>
                       </button>
                     </div>
-                    {segmentationMethod === 'person' && segmentationPresets.length > 0 && (
+                    {segmentationMethod === SegmentationMethod.PERSON && segmentationPresets.length > 0 && (
                       <div className="mt-3 border-t border-slate-100 pt-3">
                         <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                           Who is on screen during a station
@@ -3803,7 +3651,7 @@ export default function OSCEAiMarkerMockup({
                         )}
                       </div>
                     )}
-                    {segmentationMethod === 'person' && (
+                    {segmentationMethod === SegmentationMethod.PERSON && (
                       <p className="mt-2 text-[11px] text-slate-400">
                         Falls back to bell detection automatically if the vision model is unavailable on the worker.
                       </p>
@@ -3814,8 +3662,8 @@ export default function OSCEAiMarkerMockup({
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                   <UploadCard
                     icon={<Video className="h-5 w-5" />}
-                    title={uploadFlow === 'long' ? 'Long Station Video' : 'Station Video'}
-                    subtitle={uploadFlow === 'long' ? '5+ min preferred (MP4 / MOV / MKV)' : 'MP4 / MOV / MKV'}
+                    title={uploadFlow === Workflow.LONG ? 'Long Station Video' : 'Station Video'}
+                    subtitle={uploadFlow === Workflow.LONG ? '5+ min preferred (MP4 / MOV / MKV)' : 'MP4 / MOV / MKV'}
                     fileName={videoFile?.name || null}
                     onPick={() => videoInputRef.current?.click()}
                   />
@@ -3853,7 +3701,7 @@ export default function OSCEAiMarkerMockup({
                     disabled={!videoFile || !caseStudyFile || isUploading || isProcessing}
                   >
                     <Wand2 className="h-4 w-4" />
-                    {uploadFlow === 'long' ? 'Start Long Video Assessment' : 'Start Assessment'}
+                    {uploadFlow === Workflow.LONG ? 'Start Long Video Assessment' : 'Start Assessment'}
                   </Button>
                   <Button
                     size="lg"
@@ -3972,27 +3820,27 @@ export default function OSCEAiMarkerMockup({
                             </div>
                             <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]">
                               {(uploadTracker.isActive(sessionEntry.id) ||
-                                sessionEntry.status === 'assembling' ||
-                                sessionEntry.status === 'queued' ||
-                                sessionEntry.status === 'processing') && (
+                                sessionEntry.status === SessionStatus.ASSEMBLING ||
+                                sessionEntry.status === SessionStatus.QUEUED ||
+                                sessionEntry.status === SessionStatus.PROCESSING) && (
                                 <Loader2 className="h-3 w-3 animate-spin text-cyan-600" />
                               )}
                               <span className={
-                                sessionEntry.status === 'completed' || sessionEntry.status === 'succeeded'
+                                sessionEntry.status === SessionStatus.COMPLETED || sessionEntry.status === 'succeeded'
                                   ? 'font-semibold text-emerald-600'
-                                  : sessionEntry.status === 'failed'
+                                  : sessionEntry.status === SessionStatus.FAILED
                                   ? 'font-semibold text-rose-600'
-                                  : sessionEntry.status === 'processing'
+                                  : sessionEntry.status === SessionStatus.PROCESSING
                                   ? 'font-semibold text-cyan-700'
-                                  : sessionEntry.status === 'queued'
+                                  : sessionEntry.status === SessionStatus.QUEUED
                                   ? 'font-semibold text-amber-600'
-                                  : sessionEntry.status === 'assembling'
+                                  : sessionEntry.status === SessionStatus.ASSEMBLING
                                   ? 'font-semibold text-sky-600'
                                   : 'text-slate-500'
                               }>
                                 {sessionEntry.status || 'unknown'}
                               </span>
-                              {sessionEntry.hasVideoClips || sessionEntry.status === 'cropped' ? (
+                              {sessionEntry.hasVideoClips || sessionEntry.status === SessionStatus.CROPPED ? (
                                 <Badge className="bg-violet-100 text-violet-700">
                                   Folder • Long upload
                                 </Badge>
@@ -4045,7 +3893,7 @@ export default function OSCEAiMarkerMockup({
                                 </div>
                               );
                             })()}
-                            {sessionEntry.status === 'failed' && sessionEntry.error ? (
+                            {sessionEntry.status === SessionStatus.FAILED && sessionEntry.error ? (
                               // The list projection carries the failure reason so a
                               // session the user cannot usefully open still says why —
                               // including "interrupted by a server restart", which the
@@ -4138,7 +3986,7 @@ export default function OSCEAiMarkerMockup({
                     Session: <span title={session?.id || ''}>{session?.name || session?.id || 'Pending'}</span>
                   </div>
                   <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-emerald-700">
-                    Status: {session?.status || (isProcessing ? 'processing' : 'uploaded')}
+                    Status: {session?.status || (isProcessing ? SessionStatus.PROCESSING : SessionStatus.UPLOADED)}
                   </div>
                 </div>
                 {isClipAssessmentView ? (
@@ -4478,7 +4326,7 @@ export default function OSCEAiMarkerMockup({
                           </Button>
                         </div>
 
-                        {!scoringSummary && !isDemoFallback && session?.status === 'completed' && !aiCriteria.length ? (
+                        {!scoringSummary && !isDemoFallback && session?.status === SessionStatus.COMPLETED && !aiCriteria.length ? (
                           <div className="rounded-xl border border-amber-200 bg-gradient-to-br from-amber-50 to-white p-4 text-sm leading-relaxed text-amber-950 shadow-sm">
                             <p className="font-semibold text-amber-900">No rubric JSON attached to this session.</p>
                             <p className="mt-2 text-amber-900/85">
@@ -4756,7 +4604,7 @@ export default function OSCEAiMarkerMockup({
                           ? 'Demo bundle'
                           : session?.outputs?.scores?.fileName
                             ? 'Completed'
-                            : session?.status === 'completed'
+                            : session?.status === SessionStatus.COMPLETED
                               ? 'Not produced — check OpenRouter key'
                               : 'Runs after transcription'
                       }
@@ -4886,21 +4734,21 @@ export default function OSCEAiMarkerMockup({
                           );
                         }
                         const runState = clipAssessmentRuns[clip.id] || { status: 'idle' };
-                        const isCompleted = runState.status === 'completed' && Boolean(runState.sessionId);
+                        const isCompleted = runState.status === SessionStatus.COMPLETED && Boolean(runState.sessionId);
                         // Child session id backing a running clip, used to re-open its progress overlay.
                         const progressSessionId = runState.sessionId || clipAssessmentIndex[clip.id]?.sessionId || null;
                         const statusLabel =
                           runState.status === 'running'
                             ? 'Running'
-                            : runState.status === 'completed'
+                            : runState.status === SessionStatus.COMPLETED
                               ? 'Completed'
-                              : runState.status === 'failed'
+                              : runState.status === SessionStatus.FAILED
                                 ? 'Failed'
                                 : 'Ready';
                         const statusClass =
-                          runState.status === 'completed'
+                          runState.status === SessionStatus.COMPLETED
                             ? 'bg-emerald-100 text-emerald-700'
-                            : runState.status === 'failed'
+                            : runState.status === SessionStatus.FAILED
                               ? 'bg-rose-100 text-rose-700'
                               : runState.status === 'running'
                                 ? 'bg-amber-100 text-amber-700'
@@ -5009,7 +4857,7 @@ export default function OSCEAiMarkerMockup({
                                     </Button>
                                   );
                                 }
-                                if (runState.status === 'failed' && progressSessionId) {
+                                if (runState.status === SessionStatus.FAILED && progressSessionId) {
                                   // A failed child still exists as a record —
                                   // offer to re-run it in place or delete it.
                                   return (
@@ -5029,7 +4877,7 @@ export default function OSCEAiMarkerMockup({
                                   </Button>
                                 );
                               })()}
-                              {runState.status === 'failed' && runState.error ? (
+                              {runState.status === SessionStatus.FAILED && runState.error ? (
                                 <span className="text-xs text-rose-600">{runState.error}</span>
                               ) : null}
                             </div>
@@ -5199,9 +5047,9 @@ export default function OSCEAiMarkerMockup({
                         </div>
                       </div>
                     </div>
-                    {uploadFlow === 'long' && (
+                    {uploadFlow === Workflow.LONG && (
                       <div className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
-                        {segmentationMethod === 'person' ? (
+                        {segmentationMethod === SegmentationMethod.PERSON ? (
                           <Users className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" />
                         ) : (
                           <BellRing className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" />
@@ -5211,11 +5059,11 @@ export default function OSCEAiMarkerMockup({
                             Auto-split method
                           </div>
                           <div className="text-sm text-slate-800">
-                            {segmentationMethod === 'person'
+                            {segmentationMethod === SegmentationMethod.PERSON
                               ? 'Human detection (AI vision, RT-DETR)'
                               : 'Bell detection (audio)'}
                           </div>
-                          {segmentationMethod === 'person' && (
+                          {segmentationMethod === SegmentationMethod.PERSON && (
                             <div className="text-xs text-slate-500">
                               {segmentationPreset === 'custom'
                                 ? `Custom rule — ${customOccupancy.minPeople}+ on screen, min height `

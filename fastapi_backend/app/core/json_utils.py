@@ -3,9 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
-from app.core.utils import atomic_replace
+from app.core.utils import write_text_atomic
 
 
 def read_json_file(path: Path) -> dict[str, Any] | None:
@@ -40,10 +39,4 @@ def extract_json_object(raw_text: str) -> dict[str, Any]:
 
 
 def write_json_file(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    try:
-        tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        atomic_replace(tmp_path, path)
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    write_text_atomic(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")

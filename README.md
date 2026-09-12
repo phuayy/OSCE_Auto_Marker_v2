@@ -133,8 +133,8 @@ OSCE-AI-FYP/
 | --- | --- |
 | **Windows 10/11** (primary target) | Linux/macOS work; PowerShell commands below |
 | **[uv](https://docs.astral.sh/uv/) 0.6+** | Manages the Python environment. `winget install --id=astral-sh.uv` |
-| **Python 3.10–3.13** | 3.12 is the tested runtime. 3.14 excluded (WhisperX constraint). uv downloads it for you if it is missing |
-| **Node.js 18+** | Frontend + dev orchestration |
+| **Python 3.11–3.13** | 3.12 is the tested runtime. Native `StrEnum` requires 3.11+. 3.14 excluded (WhisperX constraint). uv downloads it for you if it is missing |
+| **Node.js 22.13+ (LTS) or 24+** | Frontend, dev orchestration, and ESLint 10 |
 | **ffmpeg + ffprobe** | On PATH, or auto-detected at `C:\ffmpeg\bin\` etc., or set `FFMPEG_BIN`/`FFPROBE_BIN` |
 | **NVIDIA GPU (optional)** | 4 GB+ VRAM (RTX 3050 tested). CPU works — slower transcription |
 | **Docker Desktop (optional)** | Only for PostgreSQL and/or the Hatchet queue |
@@ -493,7 +493,10 @@ AI assistants with the CodeGraph MCP tool use this same index automatically.
 npm run dev            # frontend + dev orchestration (port 5173)
 npm run dev:api        # FastAPI backend (port 8787)
 npm run dev:worker     # Hatchet worker (hatchet mode only)
-npm run test:api       # pytest suite (fastapi_backend/tests, 98 tests)
+npm run test:api       # pytest suite (fastapi_backend/tests)
+npm run test:ui        # Node regression tests
+npm run lint           # focused JS/Python correctness checks + enum drift
+npm run enums:generate # regenerate src/lib/enums.js after changing domain enums
 npm run build          # production frontend build
 npm run db:up|down|logs|ps|check|reset   # PostgreSQL helpers
 ```
@@ -501,6 +504,13 @@ npm run db:up|down|logs|ps|check|reset   # PostgreSQL helpers
 - All configuration lives in [.env.example](.env.example) (copy → `.env`).
 - Architecture deep-dive for contributors/AI agents: [CLAUDE.md](CLAUDE.md).
 - Extended local setup notes: [LOCAL_SETUP.md](LOCAL_SETUP.md).
+- Pipeline diagram, failure simulations, and remaining risks: [pipeline audit](docs/pipeline-audit.md).
+
+Run `uv sync --group dev` and `npm ci` before linting. These checks target
+undefined names, syntax errors, invalid control flow, hook placement, and enum
+drift; they are not a whole-project static type check. The frontend remains
+plain JavaScript. Backend tests that exercise the seeded development login
+expect `DEFAULT_ADMIN_PASSWORD=admin` in their isolated test database.
 
 *Academic FYP: current auth (single admin, in-process token revocation) suits
 local/internal use; production healthcare deployment would need RBAC, audit
