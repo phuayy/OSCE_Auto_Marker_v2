@@ -168,6 +168,7 @@ export async function apiFetch(input, options = {}) {
     idempotent = false,
     json,
     fetchImpl,
+    reportConnection = true,
     sleep = defaultSleep,
     random = Math.random,
     ...init
@@ -205,7 +206,7 @@ export async function apiFetch(input, options = {}) {
         kind: ERROR_KIND.NETWORK,
         cause: error,
       });
-      reportUnreachable(failure.message);
+      if (reportConnection) reportUnreachable(failure.message);
       throw failure;
     }
 
@@ -215,10 +216,12 @@ export async function apiFetch(input, options = {}) {
       continue;
     }
 
-    if (gatewayDown) {
-      reportUnreachable('The server is not responding.');
-    } else {
-      reportReachable();
+    if (reportConnection) {
+      if (gatewayDown) {
+        reportUnreachable('The server is not responding.');
+      } else {
+        reportReachable();
+      }
     }
     return response;
   }

@@ -24,6 +24,15 @@ import {
 const instantSleep = async () => {};
 const noJitter = () => 0;
 
+test('external storage and demo requests do not change API reachability', async () => {
+  const initial = getConnectionSnapshot();
+  await apiFetch('https://storage.example/upload', {
+    reportConnection: false, retries: 0,
+    fetchImpl: async () => jsonResponse(503, {}),
+  });
+  assert.deepEqual(getConnectionSnapshot(), initial);
+});
+
 function jsonResponse(status, body, headers = {}) {
   return {
     ok: status >= 200 && status < 300,

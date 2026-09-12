@@ -7,15 +7,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from app.core.artifacts import read_artifact_payload
 from app.core.config import Settings
 from app.core.exceptions import StaleSessionError
-from app.core.json_utils import extract_json_object
-from app.core.utils import normalize_session_name, session_name_key
+from app.core.utils import normalize_session_name, parse_iso, session_name_key
 from app.core.versioned_cache import VersionedCache
 from app.domain.constants import SESSION_NAME_ADJECTIVES, SESSION_NAME_NOUNS
 from app.repositories.session_repository import SessionEntry, SessionRepository
 from app.services.change_feed_service import ChangeFeedService
-
 
 logger = logging.getLogger(__name__)
 
@@ -31,16 +30,6 @@ SessionMutator = Callable[[dict[str, Any]], Any]
 # on one session is a handful of writers (pipeline, queue, the user), so a
 # mutation that still cannot land after this many rounds is a bug, not load.
 UPDATE_MAX_ATTEMPTS = 8
-
-
-def _set_name(name: str) -> SessionMutator:
-    def mutate(session: dict[str, Any]) -> Any:
-        if session.get("name") == name:
-            return False
-        session["name"] = name
-        return None
-
-    return mutate
 
 
 class SessionService:
@@ -112,9 +101,16 @@ class SessionService:
         """Ids of the clip-assessment children of a long-video session."""
         return await self.repository.list_child_ids(parent_session_id)
 
+    async def create_named(self, session: dict) -> None:
+        preferred_name = str(session.get("name") or "")
+        await self.repository.write(
+            session, allocate_name=lambda used: self.reserve_unique_session_name(used, preferred_name),
+        )
+
     async def ensure_names_for_index(self, entries: list[SessionEntry]) -> tuple[list[SessionEntry], set[str]]:
         used_keys: set[str] = set()
-        changed: list[SessionEntry] = []
+        reserved_keys = {session_name_key(entry.session.get("name")) for entry in entries}
+        changed: list[tuple[SessionEntry, str | None]] = []
         # Walk oldest-first so an existing (historical) session always keeps its
         # name and a later duplicate is the one that gets suffixed — renaming
         # history out from under the user is far more surprising than adjusting
@@ -135,15 +131,15 @@ class SessionService:
             # creation date) so reserve_unique_session_name suffixes it instead
             # of inventing a random one.
             preferred = current_name or self._derive_fallback_name(entry.session)
-            entry.session["name"] = self.reserve_unique_session_name(used_keys, preferred)
-            changed.append(entry)
+            previous_name = entry.session.get("name")
+            entry.session["name"] = self.reserve_unique_session_name(used_keys | reserved_keys, preferred)
+            used_keys.add(session_name_key(entry.session["name"]))
+            changed.append((entry, previous_name))
 
-        # Through ``update``: a session being backfilled may be mid-pipeline in
-        # another process, and its job must not lose a step to a name repair.
         await asyncio.gather(
             *(
-                self.update(str(entry.session["id"]), _set_name(str(entry.session["name"])))
-                for entry in changed
+                self.repository.update_name(str(entry.session["id"]), previous_name, str(entry.session["name"]))
+                for entry, previous_name in changed
             )
         )
         ordered.reverse()  # callers (list_sessions, ensure_session_name) expect newest-first
@@ -157,20 +153,14 @@ class SessionService:
         stem = Path(str(video.get("originalName") or "")).stem.strip()
         if stem:
             return stem
-        raw = str(session.get("createdAt") or "").replace("Z", "+00:00")
-        try:
-            return f"Session {datetime.fromisoformat(raw).strftime('%Y-%m-%d %H:%M')}"
-        except ValueError:
-            return ""
+        created = parse_iso(session.get("createdAt"))
+        return f"Session {created.strftime('%Y-%m-%d %H:%M')}" if created else ""
 
     async def ensure_session_name(self, session_id: str, session: dict[str, Any]) -> dict[str, Any]:
         if session.get("name"):
             return session
-        entries, _used = await self.ensure_names_for_index(await self.repository.read_all())
-        for entry in entries:
-            if str(entry.session.get("id")) == str(session_id):
-                return entry.session
-        return session
+        await self.ensure_names_for_index(await self.repository.read_name_entries())
+        return await self.read(session_id)
 
     async def list_sessions(self) -> list[dict[str, Any]]:
         """The session-list projection, served from cache while nothing changed.
@@ -198,10 +188,7 @@ class SessionService:
         if not self._needs_name_backfill(projections):
             return projections
 
-        # Legacy rows without a (unique) name still need the naming pass, which
-        # reads and rewrites full payloads. It repairs every row in one go, so
-        # this branch stops being taken after the first call.
-        await self.ensure_names_for_index(await self.repository.read_all())
+        await self.ensure_names_for_index(await self.repository.read_name_entries())
         return await self.repository.read_index_projection()
 
     @staticmethod
@@ -218,18 +205,8 @@ class SessionService:
         next_name_raw = normalize_session_name(next_name)[: self.settings.session_name_max_length]
         if not next_name_raw:
             raise ValueError("Session name is required.")
-        entries, _used = await self.ensure_names_for_index(await self.repository.read_all())
-        target = next((entry for entry in entries if str(entry.session.get("id")) == str(session_id)), None)
-        if target is None:
-            raise FileNotFoundError("Session not found.")
-        next_key = session_name_key(next_name_raw)
-        if any(
-            str(entry.session.get("id")) != str(session_id)
-            and session_name_key(entry.session.get("name")) == next_key
-            for entry in entries
-        ):
-            raise FileExistsError("Session name must be unique.")
-        return await self.update(str(session_id), _set_name(next_name_raw))
+        await self.repository.rename(str(session_id), next_name_raw)
+        return await self.read(session_id)
 
     def reserve_unique_session_name(self, used_keys: set[str], preferred_name: str = "") -> str:
         base_preferred = normalize_session_name(preferred_name)[: self.settings.session_name_max_length]
@@ -239,7 +216,8 @@ class SessionService:
                 used_keys.add(base_key)
                 return base_preferred
             for index in range(2, 51):
-                candidate = f"{base_preferred} {index}"[: self.settings.session_name_max_length]
+                suffix = f" {index}"
+                candidate = f"{base_preferred[:self.settings.session_name_max_length - len(suffix)]}{suffix}"
                 key = session_name_key(candidate)
                 if key not in used_keys:
                     used_keys.add(key)
@@ -270,7 +248,7 @@ class SessionService:
         video = files.get("video") or {}
         case_study = files.get("caseStudy")
 
-        def output_meta(key: str, include_url: bool = True, include_payload: bool = False) -> dict[str, Any] | None:
+        def output_meta(key: str, include_url: bool = True) -> dict[str, Any] | None:
             item = outputs.get(key)
             if not item:
                 return None
@@ -280,8 +258,6 @@ class SessionService:
             }
             if include_url:
                 payload["url"] = item.get("url")
-            if include_payload:
-                payload["payload"] = item.get("payload") or None
             return payload
 
         def public_storage_ref(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -370,8 +346,8 @@ class SessionService:
                 "whisperxJson": output_meta("whisperxJson", include_url=False),
                 "subtitle": output_meta("subtitle"),
                 "subtitleTrack": output_meta("subtitleTrack"),
-                "audioProfessionalism": output_meta("audioProfessionalism", include_payload=True),
-                "communicationScores": output_meta("communicationScores", include_payload=True),
+                "audioProfessionalism": output_meta("audioProfessionalism"),
+                "communicationScores": output_meta("communicationScores"),
                 "videoClips": [
                     {
                         "id": clip.get("id"),
@@ -393,25 +369,16 @@ class SessionService:
                 ]
                 if isinstance(clips, list)
                 else None,
-                "scores": output_meta("scores", include_payload=True),
+                "scores": output_meta("scores"),
             },
             "error": session.get("error") or None,
         }
 
     async def read_output_payload(self, session: dict[str, Any], output_key: str) -> dict[str, Any]:
         output = (session.get("outputs") or {}).get(output_key) or {}
-        absolute_path = output.get("absolutePath")
-        if not absolute_path:
-            raise FileNotFoundError(f"{output_key} output is not available yet.")
-        path = Path(str(absolute_path))
-        if not path.exists():
-            raise FileNotFoundError(f"{output_key} output file not found.")
-        return await asyncio.to_thread(lambda: extract_json_object(path.read_text(encoding="utf-8")))
+        return await read_artifact_payload(output)
 
     @staticmethod
     def _parse_date(value: Any) -> float:
-        try:
-            text = str(value or "").replace("Z", "+00:00")
-            return datetime.fromisoformat(text).timestamp()
-        except Exception:
-            return 0.0
+        parsed = parse_iso(value)
+        return parsed.timestamp() if parsed else 0.0

@@ -2,18 +2,14 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.domain.enums import SegmentationMethod, UploadFileKind, Workflow
 from app.pipeline import person_presets
 
-
-UploadWorkflow = Literal["standard", "long"]
-UploadFileKind = Literal["video", "caseStudy"]
-# How a long upload is auto-split into student clips: bell sounds (audio) or
-# person presence (RT-DETR vision). None lets the server default decide.
-SegmentationMethod = Literal["bells", "person"]
+UploadWorkflow = Workflow
 
 
 class PersonSegmentationOptions(BaseModel):
@@ -124,7 +120,7 @@ SESSION_NAME_MAX_LENGTH = 80
 class UploadMetadataMixin(BaseModel):
     """Shared, validated upload metadata (async initiate + legacy multipart)."""
 
-    workflow: UploadWorkflow = "standard"
+    workflow: UploadWorkflow = Workflow.STANDARD
     # Optional user-chosen session name; blank/None falls back to an
     # auto-generated name. The session service de-duplicates it on save.
     # Over-long names are silently truncated by the validator, not rejected.
@@ -142,7 +138,7 @@ class UploadMetadataMixin(BaseModel):
     @classmethod
     def normalize_workflow(cls, value: Any) -> str:
         cleaned = str(value or "").strip().lower()
-        return cleaned or "standard"
+        return cleaned or Workflow.STANDARD
 
     @field_validator("sessionName", mode="before")
     @classmethod
@@ -170,7 +166,7 @@ class UploadMetadataMixin(BaseModel):
         cleaned = str(value).strip().lower()
         # Accept the natural synonym from older clients/scripts.
         if cleaned == "human":
-            return "person"
+            return SegmentationMethod.PERSON
         return cleaned or None
 
     @field_validator("segmentationOptions", mode="before")
@@ -180,11 +176,11 @@ class UploadMetadataMixin(BaseModel):
 
     @model_validator(mode="after")
     def segmentation_only_for_long_workflow(self) -> "UploadMetadataMixin":
-        if self.workflow != "long":
+        if self.workflow != Workflow.LONG:
             self.segmentation = None
         # The occupancy rule only means anything to the person detector. Kept
         # when no method was chosen: the server default may itself be "person".
-        if self.segmentation == "bells" or self.workflow != "long":
+        if self.segmentation == SegmentationMethod.BELLS or self.workflow != Workflow.LONG:
             self.segmentationOptions = None
         return self
 
@@ -215,8 +211,8 @@ class LegacyUploadForm(UploadMetadataMixin):
             return None
         cleaned = str(value).strip().lower()
         if cleaned == "human":
-            cleaned = "person"
-        return cleaned if cleaned in {"bells", "person"} else None
+            cleaned = SegmentationMethod.PERSON
+        return cleaned if cleaned in {SegmentationMethod.BELLS, SegmentationMethod.PERSON} else None
 
     @field_validator("segmentationOptions", mode="before")
     @classmethod

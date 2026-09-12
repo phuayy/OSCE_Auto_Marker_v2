@@ -98,6 +98,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from llm_bootstrap import read_int_env  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Environment helpers.
 #
@@ -113,16 +116,6 @@ def read_float_env(name: str, default: float) -> float:
         return default
     try:
         return float(raw)
-    except ValueError:
-        return default
-
-
-def read_int_env(name: str, default: int) -> int:
-    raw = str(os.getenv(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
     except ValueError:
         return default
 
@@ -158,7 +151,6 @@ _BACKEND_ROOT = Path(__file__).resolve().parent.parent / "fastapi_backend"
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 from app.pipeline import person_presets  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Configuration

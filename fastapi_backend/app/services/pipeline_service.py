@@ -3,33 +3,41 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from app.core.artifacts import artifact_metadata, read_artifact_payload
 from app.core.exceptions import AppError, EmptyTranscriptError
 from app.core.json_utils import extract_json_object, write_json_file
 from app.core.logging_utils import log_context
-from app.core.utils import utc_now_iso
+from app.core.utils import exception_message, runtime_seconds, utc_now_iso
+from app.domain.enums import OutputKey, PipelineStep, StepStatus
 from app.domain.notifications import NotificationType
+from app.domain.outputs import OUTPUT_SPECS, OutputSpec
+from app.domain.session_lifecycle import fail_session, record_progress
 from app.domain.sessions import SessionStatus
-from app.pipeline.llm_preprocess import TranscriptPreprocessor, diff_replacements, merge_corrected_segments
+from app.pipeline.hallucination_filter import screen_segments
+from app.pipeline.llm_preprocess import (
+    TranscriptPreprocessor,
+    diff_replacements,
+    merge_corrected_segments,
+)
 from app.pipeline.media import MediaPipeline
 from app.pipeline.scoring import ScoringPipeline
-from app.pipeline.hallucination_filter import screen_segments
 from app.pipeline.transcript_correction import (
     CorrectionPolicy,
     apply_replacements_to_file,
     correct_segments,
 )
+from app.pipeline.transcription.base import TranscriptionResult
+from app.pipeline.transcription.registry import EngineDependencies
 from app.repositories.app_settings_repository import AppSettingsRepository
 from app.services.assessment_service import AssessmentService
 from app.services.event_service import EventService
 from app.services.session_service import SessionMutator, SessionService
-from app.pipeline.transcription.base import TranscriptionResult
-from app.pipeline.transcription.registry import EngineDependencies
 from app.services.transcription_router import TranscriptionRouter
-
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard
     from app.services.notification_service import NotificationService
@@ -41,7 +49,7 @@ logger = logging.getLogger(__name__)
 # because the engine behind it is operator-selectable; sessions recorded before
 # the router shipped carry the older "whisperx" key, which the frontend stage
 # gauge still recognises.
-TRANSCRIPTION_STEP = "transcription"
+TRANSCRIPTION_STEP = PipelineStep.TRANSCRIPTION
 
 
 def _assign_output(key: str, value: Any) -> SessionMutator:
@@ -162,13 +170,7 @@ class PipelineService:
 
         def mutate(session: dict[str, Any]) -> Any:
             found["step"] = self._find_failed_step(session) or "unknown"
-            session["status"] = SessionStatus.FAILED
-            pipeline = session.setdefault("pipeline", {})
-            pipeline["endedAt"] = self.now_iso()
-            if pipeline.get("startedAt"):
-                pipeline["runtimeSeconds"] = self.runtime_seconds(str(pipeline["startedAt"]), pipeline["endedAt"])
-            session["error"] = message
-            return None
+            return fail_session(session, message)
 
         try:
             await self.sessions.update(session_id, mutate)
@@ -180,12 +182,12 @@ class PipelineService:
             "Session processing failed at step '%s': %s",
             failed_step,
             message,
-            extra=log_context(session_id, failed_step, status="failed"),
+            extra=log_context(session_id, failed_step, status=StepStatus.FAILED),
         )
         await self.events.publish(
             session_id,
             "status",
-            {"code": "failed", "message": message, "failedStep": failed_step},
+            {"code": StepStatus.FAILED, "message": message, "failedStep": failed_step},
         )
         await self._notify_session_failed(session_id, message, failed_step)
 
@@ -198,7 +200,7 @@ class PipelineService:
         failed = [
             (str(name), str((state or {}).get("updatedAt") or ""))
             for name, state in steps.items()
-            if isinstance(state, dict) and state.get("status") == "failed"
+            if isinstance(state, dict) and state.get("status") == StepStatus.FAILED
         ]
         if failed:
             failed.sort(key=lambda item: item[1], reverse=True)
@@ -228,7 +230,7 @@ class PipelineService:
         to full transcription and the session record stops advertising an
         artifact that is gone.
         """
-        transcript = (session.get("outputs") or {}).get("transcript")
+        transcript = (session.get("outputs") or {}).get(OutputKey.TRANSCRIPT)
         raw_path = transcript.get("absolutePath") if isinstance(transcript, dict) else None
         if not raw_path:
             return False
@@ -238,7 +240,7 @@ class PipelineService:
             "Recorded transcript artifact is missing from disk; falling back to full transcription.",
             extra=log_context(str(session.get("id") or ""), "transcript_cache_check", path=str(raw_path)),
         )
-        session.setdefault("outputs", {})["transcript"] = None
+        session.setdefault("outputs", {})[OutputKey.TRANSCRIPT] = None
         return False
 
     @staticmethod
@@ -261,8 +263,8 @@ class PipelineService:
     async def _process_cached_transcript(self, session: dict[str, Any]) -> dict[str, Any]:
         session_id = str(session["id"])
         if await self.media.ensure_session_subtitle_track(session):
-            await self._commit(session, _assign_output("subtitleTrack", session["outputs"]["subtitleTrack"]))
-        transcript_path = Path(str(session["outputs"]["transcript"]["absolutePath"]))
+            await self._commit(session, _assign_output(OutputKey.SUBTITLE_TRACK, session["outputs"][OutputKey.SUBTITLE_TRACK]))
+        transcript_path = Path(str(session["outputs"][OutputKey.TRANSCRIPT]["absolutePath"]))
         transcript = await self._read_json(transcript_path)
         self._assert_transcript_has_segments(transcript, f"Cached transcript {transcript_path.name}")
 
@@ -282,10 +284,10 @@ class PipelineService:
 
         return {
             "session": self.sessions.public_session(session),
-            "transcript": transcript,
-            "audioProfessionalism": scoring_outputs.get("audioProfessionalism"),
-            "communicationScores": scoring_outputs.get("communicationScores"),
-            "scores": scoring_outputs.get("scores"),
+            OutputKey.TRANSCRIPT: transcript,
+            OutputKey.AUDIO_PROFESSIONALISM: scoring_outputs.get(OutputKey.AUDIO_PROFESSIONALISM),
+            OutputKey.COMMUNICATION_SCORES: scoring_outputs.get(OutputKey.COMMUNICATION_SCORES),
+            OutputKey.SCORES: scoring_outputs.get(OutputKey.SCORES),
         }
 
     async def _screen_hallucinations(
@@ -399,16 +401,16 @@ class PipelineService:
         clip children and Hatchet workers included. Best-effort: a failure is
         recorded on the step but never fails the run; scoring proceeds with
         the uncorrected transcript (same policy as corpus corrections)."""
-        step = "llm_preprocess"
+        step = PipelineStep.LLM_PREPROCESS
         enabled = (
             self.preprocessor is not None
             and self.app_settings is not None
             and await self.app_settings.llm_preprocess_enabled()
         )
         if not enabled:
-            await self._mark_pipeline_step(session, step, "skipped")
+            await self._mark_pipeline_step(session, step, StepStatus.SKIPPED)
             return
-        await self._mark_pipeline_step(session, step, "running")
+        await self._mark_pipeline_step(session, step, StepStatus.RUNNING)
         try:
             payload = await self.preprocessor.run(session, transcript_path)
             changes = merge_corrected_segments(transcript, payload.get("segments") or [])
@@ -423,7 +425,7 @@ class PipelineService:
             size_bytes = transcript_path.stat().st_size
 
             def record_size(current: dict[str, Any]) -> Any:
-                info = (current.get("outputs") or {}).get("transcript")
+                info = (current.get("outputs") or {}).get(OutputKey.TRANSCRIPT)
                 if not isinstance(info, dict) or info.get("sizeBytes") == size_bytes:
                     return False
                 info["sizeBytes"] = size_bytes
@@ -450,13 +452,13 @@ class PipelineService:
                     "message": f"LLM transcript preprocess corrected {len(changes)} segment(s).",
                 },
             )
-            await self._mark_pipeline_step(session, step, "completed", metadata={"changedSegments": len(changes)})
+            await self._mark_pipeline_step(session, step, StepStatus.COMPLETED, metadata={"changedSegments": len(changes)})
         except Exception as error:
             logger.exception(
                 "LLM transcript preprocess failed for session %s; scoring uses the uncorrected transcript.",
                 session.get("id"),
             )
-            await self._mark_pipeline_step(session, step, "failed", error=error)
+            await self._mark_pipeline_step(session, step, StepStatus.FAILED, error=error)
 
     async def _process_from_video(self, session: dict[str, Any]) -> dict[str, Any]:
         session_id = str(session["id"])
@@ -479,7 +481,7 @@ class PipelineService:
         if self.transcription is None:
             raise AppError("No transcription engine is configured for this pipeline.", status_code=500)
 
-        await self._mark_pipeline_step(session, TRANSCRIPTION_STEP, "running")
+        await self._mark_pipeline_step(session, TRANSCRIPTION_STEP, StepStatus.RUNNING)
         # Transcription is the longest step by far, and the only one that
         # reports its own progress; the lock guards the session document
         # against the output callbacks that carry those readings.
@@ -493,22 +495,22 @@ class PipelineService:
                 ),
             )
         except Exception as error:
-            await self._mark_pipeline_step(session, TRANSCRIPTION_STEP, "failed", error=error)
+            await self._mark_pipeline_step(session, TRANSCRIPTION_STEP, StepStatus.FAILED, error=error)
             raise
         whisperx_outputs = transcription.to_outputs()
         engine_metadata = self._describe_transcription(transcription)
-        await self._commit(session, lambda current: current.__setitem__("transcription", engine_metadata))
+        await self._commit(session, lambda current: current.__setitem__(PipelineStep.TRANSCRIPTION, engine_metadata))
         await self._mark_pipeline_step(
-            session, TRANSCRIPTION_STEP, "completed", metadata=engine_metadata
+            session, TRANSCRIPTION_STEP, StepStatus.COMPLETED, metadata=engine_metadata
         )
 
-        await self._mark_pipeline_step(session, "transcript_normalization", "running")
+        await self._mark_pipeline_step(session, PipelineStep.TRANSCRIPT_NORMALIZATION, StepStatus.RUNNING)
         whisperx_raw = await self._read_json(Path(str(whisperx_outputs["jsonAbsolutePath"])))
         normalized_transcript = self.media.normalize_whisperx_transcript(whisperx_raw)
         try:
             self._assert_transcript_has_segments(normalized_transcript, "The normalized transcript")
         except EmptyTranscriptError as error:
-            await self._mark_pipeline_step(session, "transcript_normalization", "failed", error=error)
+            await self._mark_pipeline_step(session, PipelineStep.TRANSCRIPT_NORMALIZATION, StepStatus.FAILED, error=error)
             raise
         await self._screen_hallucinations(session, normalized_transcript)
         await self._apply_corpus_corrections(session, normalized_transcript, whisperx_outputs)
@@ -518,42 +520,24 @@ class PipelineService:
         await asyncio.to_thread(write_json_file, transcript_path, normalized_transcript)
 
         whisperx_stats = Path(str(whisperx_outputs["jsonAbsolutePath"])).stat()
-        transcript_stats = transcript_path.stat()
         outputs_patch: dict[str, Any] = {
-            "whisperxJson": {
+            OutputKey.WHISPERX_JSON: {
                 "fileName": Path(str(whisperx_outputs["jsonAbsolutePath"])).name,
                 "absolutePath": str(whisperx_outputs["jsonAbsolutePath"]),
                 "sizeBytes": whisperx_stats.st_size,
             },
-            "subtitle": None,
-            "subtitleTrack": None,
-            "transcript": {
-                "fileName": transcript_file_name,
-                "absolutePath": str(transcript_path),
-                "url": f"/media/transcripts/{transcript_file_name}",
-                "sizeBytes": transcript_stats.st_size,
-            },
+            OutputKey.SUBTITLE: None,
+            OutputKey.SUBTITLE_TRACK: None,
+            OutputKey.TRANSCRIPT: artifact_metadata(transcript_path, "/media/transcripts"),
         }
         srt_path = whisperx_outputs.get("srtAbsolutePath")
         if srt_path:
-            srt_stats = Path(str(srt_path)).stat()
-            outputs_patch["subtitle"] = {
-                "fileName": Path(str(srt_path)).name,
-                "absolutePath": str(srt_path),
-                "url": f"/media/whisperx/{session_id}/{Path(str(srt_path)).name}",
-                "sizeBytes": srt_stats.st_size,
-            }
+            outputs_patch[OutputKey.SUBTITLE] = artifact_metadata(Path(str(srt_path)), f"/media/whisperx/{session_id}")
         vtt_path = whisperx_outputs.get("vttAbsolutePath")
         if vtt_path:
-            vtt_stats = Path(str(vtt_path)).stat()
-            outputs_patch["subtitleTrack"] = {
-                "fileName": Path(str(vtt_path)).name,
-                "absolutePath": str(vtt_path),
-                "url": f"/media/whisperx/{session_id}/{Path(str(vtt_path)).name}",
-                "sizeBytes": vtt_stats.st_size,
-            }
+            outputs_patch[OutputKey.SUBTITLE_TRACK] = artifact_metadata(Path(str(vtt_path)), f"/media/whisperx/{session_id}")
         await self._commit(session, _merge_outputs(outputs_patch))
-        await self._mark_pipeline_step(session, "transcript_normalization", "completed")
+        await self._mark_pipeline_step(session, PipelineStep.TRANSCRIPT_NORMALIZATION, StepStatus.COMPLETED)
         await self.events.publish(
             session_id,
             "milestone",
@@ -563,9 +547,9 @@ class PipelineService:
         await self._run_llm_preprocess(session, normalized_transcript, whisperx_outputs, transcript_path)
 
         scoring_outputs = await self._run_fresh_scoring_branches(session)
-        audio_prof_payload = scoring_outputs.get("audioProfessionalism")
-        communication_payload = scoring_outputs.get("communicationScores")
-        scoring_payload = scoring_outputs.get("scores")
+        audio_prof_payload = scoring_outputs.get(OutputKey.AUDIO_PROFESSIONALISM)
+        communication_payload = scoring_outputs.get(OutputKey.COMMUNICATION_SCORES)
+        scoring_payload = scoring_outputs.get(OutputKey.SCORES)
 
         # Persist results first, then declare the session complete, then tell
         # the world — see _process_cached_transcript for why this order.
@@ -575,14 +559,14 @@ class PipelineService:
         await self.events.publish(
             session_id,
             "status",
-            {"code": "completed", "message": "Processing completed successfully."},
+            {"code": StepStatus.COMPLETED, "message": "Processing completed successfully."},
         )
         return {
             "session": self.sessions.public_session(session),
-            "transcript": normalized_transcript,
-            "audioProfessionalism": audio_prof_payload,
-            "communicationScores": communication_payload,
-            "scores": scoring_payload,
+            OutputKey.TRANSCRIPT: normalized_transcript,
+            OutputKey.AUDIO_PROFESSIONALISM: audio_prof_payload,
+            OutputKey.COMMUNICATION_SCORES: communication_payload,
+            OutputKey.SCORES: scoring_payload,
         }
 
     def _complete_mutator(self, started_at: str | None = None) -> SessionMutator:
@@ -621,36 +605,36 @@ class PipelineService:
     async def _record_assessment_results(self, session: dict[str, Any]) -> None:
         if self.assessments is None:
             return
-        await self._mark_pipeline_step(session, "assessment_persistence", "running")
+        await self._mark_pipeline_step(session, PipelineStep.ASSESSMENT_PERSISTENCE, StepStatus.RUNNING)
         try:
             await self.assessments.record_session_results(session)
         except Exception as error:
-            await self._mark_pipeline_step(session, "assessment_persistence", "failed", error=error)
+            await self._mark_pipeline_step(session, PipelineStep.ASSESSMENT_PERSISTENCE, StepStatus.FAILED, error=error)
             raise
-        await self._mark_pipeline_step(session, "assessment_persistence", "completed")
+        await self._mark_pipeline_step(session, PipelineStep.ASSESSMENT_PERSISTENCE, StepStatus.COMPLETED)
 
     async def _ensure_audio_output(self, session: dict[str, Any]) -> dict[str, Any]:
-        audio_path_raw = ((session.get("outputs") or {}).get("audio") or {}).get("absolutePath")
+        audio_path_raw = ((session.get("outputs") or {}).get(OutputKey.AUDIO) or {}).get("absolutePath")
         session_id = str(session["id"])
         if audio_path_raw:
             audio_path = Path(str(audio_path_raw))
             if audio_path.exists() and audio_path.stat().st_size > 0:
                 await self._mark_pipeline_step(
                     session,
-                    "audio_extraction",
-                    "completed",
+                    PipelineStep.AUDIO_EXTRACTION,
+                    StepStatus.COMPLETED,
                     metadata={"reusedExistingArtifact": True},
                 )
-                return dict(session["outputs"]["audio"])
+                return dict(session["outputs"][OutputKey.AUDIO])
 
         deterministic_audio_path = self.media.settings.paths.output_audio_dir / f"{session_id}.mp3"
         if deterministic_audio_path.exists() and deterministic_audio_path.stat().st_size > 0:
             audio_info = self._audio_output_metadata(session_id, deterministic_audio_path)
-            await self._commit(session, _assign_output("audio", audio_info))
+            await self._commit(session, _assign_output(OutputKey.AUDIO, audio_info))
             await self._mark_pipeline_step(
                 session,
-                "audio_extraction",
-                "completed",
+                PipelineStep.AUDIO_EXTRACTION,
+                StepStatus.COMPLETED,
                 metadata={"reusedExistingArtifact": True},
             )
             await self.events.publish(
@@ -660,17 +644,17 @@ class PipelineService:
             )
             return audio_info
 
-        await self._mark_pipeline_step(session, "audio_extraction", "running")
+        await self._mark_pipeline_step(session, PipelineStep.AUDIO_EXTRACTION, StepStatus.RUNNING)
         try:
             audio_info = await self.media.extract_audio_to_mp3(session)
         except Exception as error:
-            await self._mark_pipeline_step(session, "audio_extraction", "failed", error=error)
+            await self._mark_pipeline_step(session, PipelineStep.AUDIO_EXTRACTION, StepStatus.FAILED, error=error)
             raise
-        await self._commit(session, _assign_output("audio", audio_info))
+        await self._commit(session, _assign_output(OutputKey.AUDIO, audio_info))
         await self._mark_pipeline_step(
             session,
-            "audio_extraction",
-            "completed",
+            PipelineStep.AUDIO_EXTRACTION,
+            StepStatus.COMPLETED,
             metadata={"reusedExistingArtifact": False},
         )
         await self.events.publish(
@@ -719,14 +703,7 @@ class PipelineService:
         step ended is dropped rather than resurrecting a finished step.
         """
         def mutate(current: dict[str, Any]) -> Any:
-            pipeline = current.setdefault("pipeline", {})
-            steps = pipeline.get("steps") if isinstance(pipeline.get("steps"), dict) else {}
-            state = steps.get(step)
-            if not isinstance(state, dict) or state.get("status") != "running":
-                return False
-            state["progress"] = percent
-            pipeline["stepProgress"] = percent
-            return None
+            return record_progress(current, step, percent, tracked_step=True)
 
         async with lock:
             await self._commit(session, mutate)
@@ -747,14 +724,14 @@ class PipelineService:
         from logs alone, not just the (in-process, non-durable) SSE stream.
         """
         session_id = str(session.get("id") or "")
-        if status == "running":
+        if status == StepStatus.RUNNING:
             logger.info(
                 "Pipeline step started: %s",
                 step,
                 extra=log_context(session_id, step, status=status),
             )
             return
-        if status not in {"completed", "failed", "skipped"}:
+        if status not in {StepStatus.COMPLETED, StepStatus.FAILED, StepStatus.SKIPPED}:
             return
         step_state = ((session.get("pipeline") or {}).get("steps") or {}).get(step) or {}
         context = log_context(
@@ -763,7 +740,7 @@ class PipelineService:
             status=status,
             runtime_seconds=step_state.get("runtimeSeconds"),
         )
-        if status == "failed":
+        if status == StepStatus.FAILED:
             logger.error("Pipeline step failed: %s (%s)", step, error, extra=context)
         else:
             logger.info("Pipeline step %s: %s", status, step, extra=context)
@@ -777,6 +754,8 @@ class PipelineService:
         metadata: dict[str, Any] | None = None,
         error: Exception | str | None = None,
     ) -> None:
+        step = PipelineStep(step)
+        status = StepStatus(status)
         now = self.now_iso()
         pipeline = session.setdefault("pipeline", {})
         steps = pipeline.setdefault("steps", {})
@@ -784,7 +763,7 @@ class PipelineService:
         current["status"] = status
         current["updatedAt"] = now
 
-        if status == "running":
+        if status == StepStatus.RUNNING:
             current.setdefault("startedAt", now)
             current.pop("endedAt", None)
             current.pop("runtimeSeconds", None)
@@ -793,7 +772,7 @@ class PipelineService:
             # A fresh step starts with no progress reading; a stale one from
             # the previous step would otherwise be projected onto this one.
             pipeline["stepProgress"] = None
-        elif status in {"completed", "failed", "skipped"}:
+        elif status in {StepStatus.COMPLETED, StepStatus.FAILED, StepStatus.SKIPPED}:
             current.setdefault("startedAt", now)
             current["endedAt"] = now
             current["runtimeSeconds"] = self.runtime_seconds(str(current["startedAt"]), now)
@@ -808,44 +787,27 @@ class PipelineService:
 
         if error is not None:
             current["error"] = str(error) or type(error).__name__
-        elif status in {"running", "completed", "skipped"}:
+        elif status in {StepStatus.RUNNING, StepStatus.COMPLETED, StepStatus.SKIPPED}:
             current.pop("error", None)
 
         steps[step] = current
 
     @staticmethod
     def _audio_output_metadata(session_id: str, audio_path: Path) -> dict[str, Any]:
-        stats = audio_path.stat()
-        return {
-            "fileName": audio_path.name,
-            "absolutePath": str(audio_path),
-            "url": f"/media/audio/{audio_path.name}",
-            "sizeBytes": stats.st_size,
-        }
+        return artifact_metadata(audio_path, "/media/audio")
 
     def _expected_json_output_path(self, session_id: str, key: str) -> Path | None:
-        if key == "audioProfessionalism":
+        if key == OutputKey.AUDIO_PROFESSIONALISM:
             return self.media.settings.paths.output_audio_professionalism_dir / f"{session_id}.json"
-        if key == "communicationScores":
+        if key == OutputKey.COMMUNICATION_SCORES:
             return self.media.settings.paths.output_communication_scores_dir / f"{session_id}.json"
-        if key == "scores":
+        if key == OutputKey.SCORES:
             return self.media.settings.paths.output_scores_dir / f"{session_id}.json"
         return None
 
     @staticmethod
     def _json_output_metadata(key: str, path: Path) -> dict[str, Any]:
-        url_by_key = {
-            "audioProfessionalism": "/media/audio-professionalism",
-            "communicationScores": "/media/communication-scores",
-            "scores": "/media/scores",
-        }
-        stats = path.stat()
-        return {
-            "fileName": path.name,
-            "absolutePath": str(path),
-            "url": f"{url_by_key[key]}/{path.name}",
-            "sizeBytes": stats.st_size,
-        }
+        return artifact_metadata(path, OUTPUT_SPECS[key].media_directory)
 
     async def _discover_existing_json_output(
         self,
@@ -870,9 +832,7 @@ class PipelineService:
             )
             return None
 
-        output = self._json_output_metadata(key, path)
-        output["payload"] = payload
-        return output
+        return self._json_output_metadata(key, path)
 
     @staticmethod
     def _predicate_or_default(scoring: Any, name: str):
@@ -903,20 +863,15 @@ class PipelineService:
         if not isinstance(output, dict):
             return None, None, False
 
-        raw = await self._read_text_if_exists(self._output_absolute_path(output))
-        if raw:
-            payload = extract_json_object(raw)
-        else:
-            payload = output.get("payload")
-
-        if payload is None:
+        try:
+            payload = await read_artifact_payload(output)
+        except FileNotFoundError:
             return output, None, False
-        if output.get("payload") is not None:
-            return output, payload, False
-
         updated_output = dict(output)
-        updated_output["payload"] = payload
-        return updated_output, payload, True
+        raw_path = self._output_absolute_path(output)
+        if raw_path and Path(raw_path).is_file():
+            updated_output.pop("payload", None)
+        return updated_output, payload, updated_output != output
 
     async def _run_cached_scoring_branches(self, session: dict[str, Any]) -> dict[str, Any]:
         if not self.media.settings.parallel_scoring:
@@ -931,9 +886,9 @@ class PipelineService:
         )
         content_result = await self._refresh_or_load_content_scores(session)
         return {
-            "audioProfessionalism": audio_result.get("payload"),
-            "communicationScores": communication_result.get("payload"),
-            "scores": content_result.get("payload"),
+            OutputKey.AUDIO_PROFESSIONALISM: audio_result.get("payload"),
+            OutputKey.COMMUNICATION_SCORES: communication_result.get("payload"),
+            OutputKey.SCORES: content_result.get("payload"),
         }
 
     async def _run_cached_scoring_branches_parallel(self, session: dict[str, Any]) -> dict[str, Any]:
@@ -941,28 +896,28 @@ class PipelineService:
 
         async def communication_branch() -> dict[str, Any]:
             branch: dict[str, Any] = {
-                "audioProfessionalism": None,
-                "communicationScores": None,
+                OutputKey.AUDIO_PROFESSIONALISM: None,
+                OutputKey.COMMUNICATION_SCORES: None,
                 "error": None,
             }
             try:
                 audio_result = await self._refresh_or_load_audio_professionalism(session, lock=output_lock)
-                branch["audioProfessionalism"] = audio_result.get("payload")
+                branch[OutputKey.AUDIO_PROFESSIONALISM] = audio_result.get("payload")
                 communication_result = await self._refresh_or_load_communication_scores(
                     session,
                     audio_result.get("output"),
                     lock=output_lock,
                 )
-                branch["communicationScores"] = communication_result.get("payload")
+                branch[OutputKey.COMMUNICATION_SCORES] = communication_result.get("payload")
             except Exception as error:
                 branch["error"] = error
             return branch
 
         async def content_branch() -> dict[str, Any]:
-            branch: dict[str, Any] = {"scores": None, "error": None}
+            branch: dict[str, Any] = {OutputKey.SCORES: None, "error": None}
             try:
                 content_result = await self._refresh_or_load_content_scores(session, lock=output_lock)
-                branch["scores"] = content_result.get("payload")
+                branch[OutputKey.SCORES] = content_result.get("payload")
             except Exception as error:
                 branch["error"] = error
             return branch
@@ -982,9 +937,9 @@ class PipelineService:
             raise RuntimeError(f"Post-transcription scoring failed: {messages}") from errors[0]
 
         return {
-            "audioProfessionalism": communication_result.get("audioProfessionalism"),
-            "communicationScores": communication_result.get("communicationScores"),
-            "scores": content_result.get("scores"),
+            OutputKey.AUDIO_PROFESSIONALISM: communication_result.get(OutputKey.AUDIO_PROFESSIONALISM),
+            OutputKey.COMMUNICATION_SCORES: communication_result.get(OutputKey.COMMUNICATION_SCORES),
+            OutputKey.SCORES: content_result.get(OutputKey.SCORES),
         }
 
     async def _refresh_or_load_audio_professionalism(
@@ -993,69 +948,13 @@ class PipelineService:
         *,
         lock: asyncio.Lock | None = None,
     ) -> dict[str, Any]:
-        session_id = str(session["id"])
-        if not self.media.settings.enable_audio_professionalism:
-            await self._mark_pipeline_step(session, "audio_professionalism", "skipped", lock=lock)
-            await self.events.publish(
-                session_id,
-                "milestone",
-                {"code": "audio_professionalism_complete", "message": "audio professionalism disabled"},
-            )
-            return {"output": None, "payload": None}
-
-        predicate = self._predicate_or_default(self.scoring, "should_refresh_audio_professionalism_payload")
-        output = (session.get("outputs") or {}).get("audioProfessionalism")
-        if not isinstance(output, dict):
-            output = await self._discover_existing_json_output(session, "audioProfessionalism", predicate)
-            if output is not None:
-                await self._persist_session_output(session, "audioProfessionalism", output, lock=lock)
-        existing = self._output_absolute_path(output)
-        needs_refresh = await self._payload_needs_refresh(
-            existing,
-            predicate,
+        return await self._refresh_or_load_output(
+            session, OUTPUT_SPECS[OutputKey.AUDIO_PROFESSIONALISM],
+            enabled=self.media.settings.enable_audio_professionalism,
+            run=lambda: self.scoring.run_audio_professionalism(session),
+            predicate=self._predicate_or_default(self.scoring, "should_refresh_audio_professionalism_payload"),
+            lock=lock,
         )
-        if needs_refresh:
-            await self._mark_pipeline_step(session, "audio_professionalism", "running", lock=lock)
-            await self.events.publish(
-                session_id,
-                "milestone",
-                {
-                    "code": "audio_professionalism_started",
-                    "message": "refreshing audio professionalism" if existing else "extracting audio professionalism",
-                },
-            )
-            try:
-                output = await self.scoring.run_audio_professionalism(session)
-            except Exception as error:
-                await self._persist_session_output(session, "audioProfessionalism", None, lock=lock)
-                await self._mark_pipeline_step(session, "audio_professionalism", "failed", error=error, lock=lock)
-                raise
-            await self._persist_session_output(session, "audioProfessionalism", output, lock=lock)
-            await self._mark_pipeline_step(
-                session,
-                "audio_professionalism",
-                "completed",
-                metadata={"reusedExistingArtifact": False},
-                lock=lock,
-            )
-            await self.events.publish(
-                session_id,
-                "milestone",
-                {"code": "audio_professionalism_complete", "message": "audio professionalism ready"},
-            )
-        else:
-            await self._mark_pipeline_step(
-                session,
-                "audio_professionalism",
-                "completed",
-                metadata={"reusedExistingArtifact": True},
-                lock=lock,
-            )
-
-        output, payload, updated = await self._load_output_payload(output)
-        if updated:
-            await self._persist_session_output(session, "audioProfessionalism", output, lock=lock)
-        return {"output": output, "payload": payload}
 
     async def _refresh_or_load_communication_scores(
         self,
@@ -1064,66 +963,13 @@ class PipelineService:
         *,
         lock: asyncio.Lock | None = None,
     ) -> dict[str, Any]:
-        session_id = str(session["id"])
-        if not self.media.settings.enable_communication_scoring:
-            await self._mark_pipeline_step(session, "communication_scoring", "skipped", lock=lock)
-            await self.events.publish(
-                session_id,
-                "milestone",
-                {"code": "communication_scoring_complete", "message": "communication scoring disabled"},
-            )
-            return {"output": None, "payload": None}
-
-        predicate = self._predicate_or_default(self.scoring, "should_refresh_communication_payload")
-        output = (session.get("outputs") or {}).get("communicationScores")
-        if not isinstance(output, dict):
-            output = await self._discover_existing_json_output(session, "communicationScores", predicate)
-            if output is not None:
-                await self._persist_session_output(session, "communicationScores", output, lock=lock)
-        existing = self._output_absolute_path(output)
-        needs_refresh = await self._payload_needs_refresh(existing, predicate)
-        if needs_refresh:
-            await self._mark_pipeline_step(session, "communication_scoring", "running", lock=lock)
-            await self.events.publish(
-                session_id,
-                "milestone",
-                {
-                    "code": "communication_scoring_started",
-                    "message": "refreshing communication scores" if existing else "running communication scoring",
-                },
-            )
-            try:
-                output = await self.scoring.run_communication_scoring(session, audio_professionalism)
-            except Exception as error:
-                await self._persist_session_output(session, "communicationScores", None, lock=lock)
-                await self._mark_pipeline_step(session, "communication_scoring", "failed", error=error, lock=lock)
-                raise
-            await self._persist_session_output(session, "communicationScores", output, lock=lock)
-            await self._mark_pipeline_step(
-                session,
-                "communication_scoring",
-                "completed",
-                metadata={"reusedExistingArtifact": False},
-                lock=lock,
-            )
-            await self.events.publish(
-                session_id,
-                "milestone",
-                {"code": "communication_scoring_complete", "message": "communication scores ready"},
-            )
-        else:
-            await self._mark_pipeline_step(
-                session,
-                "communication_scoring",
-                "completed",
-                metadata={"reusedExistingArtifact": True},
-                lock=lock,
-            )
-
-        output, payload, updated = await self._load_output_payload(output)
-        if updated:
-            await self._persist_session_output(session, "communicationScores", output, lock=lock)
-        return {"output": output, "payload": payload}
+        return await self._refresh_or_load_output(
+            session, OUTPUT_SPECS[OutputKey.COMMUNICATION_SCORES],
+            enabled=self.media.settings.enable_communication_scoring,
+            run=lambda: self.scoring.run_communication_scoring(session, audio_professionalism),
+            predicate=self._predicate_or_default(self.scoring, "should_refresh_communication_payload"),
+            lock=lock,
+        )
 
     async def _refresh_or_load_content_scores(
         self,
@@ -1131,62 +977,78 @@ class PipelineService:
         *,
         lock: asyncio.Lock | None = None,
     ) -> dict[str, Any]:
-        session_id = str(session["id"])
-        if not self.media.settings.enable_scoring:
-            await self._mark_pipeline_step(session, "content_scoring", "skipped", lock=lock)
-            await self.events.publish(session_id, "milestone", {"code": "scored", "message": "scoring disabled"})
-            return {"output": None, "payload": None}
+        return await self._refresh_or_load_output(
+            session, OUTPUT_SPECS[OutputKey.SCORES],
+            enabled=self.media.settings.enable_scoring,
+            run=lambda: self.scoring.run_content_scoring(session),
+            predicate=self._predicate_or_default(self.scoring, "should_refresh_score_payload"),
+            lock=lock,
+        )
 
-        predicate = self._predicate_or_default(self.scoring, "should_refresh_score_payload")
-        output = (session.get("outputs") or {}).get("scores")
+    async def _refresh_or_load_output(
+        self,
+        session: dict,
+        spec: OutputSpec,
+        *,
+        enabled: bool,
+        run: Callable[[], Awaitable[dict]],
+        predicate: Callable[[object], bool],
+        lock: asyncio.Lock | None,
+    ) -> dict:
+        session_id = str(session["id"])
+        if not enabled:
+            await self._mark_pipeline_step(session, spec.step, StepStatus.SKIPPED, lock=lock)
+            await self.events.publish(
+                session_id, "milestone",
+                {"code": spec.completed_event, "message": f"{spec.step} disabled"},
+            )
+            return {"output": None, "payload": None}
+        output = (session.get("outputs") or {}).get(spec.key)
         if not isinstance(output, dict):
-            output = await self._discover_existing_json_output(session, "scores", predicate)
+            output = await self._discover_existing_json_output(session, spec.key, predicate)
             if output is not None:
-                await self._persist_session_output(session, "scores", output, lock=lock)
+                await self._persist_session_output(session, spec.key, output, lock=lock)
         existing = self._output_absolute_path(output)
         needs_refresh = await self._payload_needs_refresh(existing, predicate)
         if needs_refresh:
-            await self._mark_pipeline_step(session, "content_scoring", "running", lock=lock)
-            await self.events.publish(
-                session_id,
-                "milestone",
-                {"code": "transcription_complete", "message": "transcription/diarization already available"},
-            )
+            await self._mark_pipeline_step(session, spec.step, StepStatus.RUNNING, lock=lock)
             await self.events.publish(
                 session_id,
                 "milestone",
                 {
-                    "code": "scoring_started",
-                    "message": "refreshing AI scoring output" if existing else "running AI scoring",
+                    "code": spec.started_event,
+                    "message": f"{'Refreshing' if existing else 'Running'} {spec.step}",
                 },
             )
             try:
-                output = await self.scoring.run_content_scoring(session)
+                output = await run()
             except Exception as error:
-                await self._persist_session_output(session, "scores", None, lock=lock)
-                await self._mark_pipeline_step(session, "content_scoring", "failed", error=error, lock=lock)
+                await self._persist_session_output(session, spec.key, None, lock=lock)
+                await self._mark_pipeline_step(session, spec.step, StepStatus.FAILED, error=error, lock=lock)
                 raise
-            await self._persist_session_output(session, "scores", output, lock=lock)
+            await self._persist_session_output(session, spec.key, output, lock=lock)
             await self._mark_pipeline_step(
                 session,
-                "content_scoring",
-                "completed",
+                spec.step,
+                StepStatus.COMPLETED,
                 metadata={"reusedExistingArtifact": False},
                 lock=lock,
             )
-            await self.events.publish(session_id, "milestone", {"code": "scored", "message": "scored"})
+            await self.events.publish(
+                session_id, "milestone", {"code": spec.completed_event, "message": f"{spec.step} ready"},
+            )
         else:
             await self._mark_pipeline_step(
                 session,
-                "content_scoring",
-                "completed",
+                spec.step,
+                StepStatus.COMPLETED,
                 metadata={"reusedExistingArtifact": True},
                 lock=lock,
             )
 
         output, payload, updated = await self._load_output_payload(output)
         if updated:
-            await self._persist_session_output(session, "scores", output, lock=lock)
+            await self._persist_session_output(session, spec.key, output, lock=lock)
         return {"output": output, "payload": payload}
 
     async def _run_fresh_scoring_branches(self, session: dict[str, Any]) -> dict[str, Any]:
@@ -1235,15 +1097,5 @@ class PipelineService:
 
     now_iso = staticmethod(utc_now_iso)
 
-    @staticmethod
-    def runtime_seconds(started_at: str, ended_at: str) -> float:
-        try:
-            start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-            end = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
-            return round(max(0.0, (end - start).total_seconds()), 2)
-        except Exception:
-            return 0.0
-
-    @staticmethod
-    def _exception_message(error: Exception, fallback: str) -> str:
-        return str(error) or type(error).__name__ or fallback
+    runtime_seconds = staticmethod(runtime_seconds)
+    _exception_message = staticmethod(exception_message)

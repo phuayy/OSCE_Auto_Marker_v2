@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from app.core.exceptions import AppError
-
+from app.domain.enums import TaskType
 
 # (pipeline, clips, session_id, job_payload) -> None
 JobHandler = Callable[[Any, Any, str, dict[str, Any]], Awaitable[None]]
@@ -30,7 +30,7 @@ JobHandler = Callable[[Any, Any, str, dict[str, Any]], Awaitable[None]]
 
 @dataclass(frozen=True)
 class JobTaskSpec:
-    name: str
+    name: TaskType
     run: JobHandler
     # True when the queue mirrors job state onto session.status (queued ->
     # "queued", running -> "processing") and marks the session failed when the
@@ -53,9 +53,9 @@ async def _run_export_clips(_pipeline: Any, clips: Any, session_id: str, payload
 JOB_TASK_TYPES: dict[str, JobTaskSpec] = {
     spec.name: spec
     for spec in (
-        JobTaskSpec(name="process_session", run=_run_process_session),
-        JobTaskSpec(name="auto_crop", run=_run_auto_crop),
-        JobTaskSpec(name="export_clips", run=_run_export_clips, owns_session_status=False),
+        JobTaskSpec(name=TaskType.PROCESS_SESSION, run=_run_process_session),
+        JobTaskSpec(name=TaskType.AUTO_CROP, run=_run_auto_crop),
+        JobTaskSpec(name=TaskType.EXPORT_CLIPS, run=_run_export_clips, owns_session_status=False),
     )
 }
 

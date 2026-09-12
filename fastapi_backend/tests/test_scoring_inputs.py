@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.process import CommandResult
@@ -83,7 +82,8 @@ def test_content_scorer_is_given_the_normalised_transcript_and_the_case_study(tm
     assert _flag(args, "--transcript") == str(transcript), "the scorer was left to find its own transcript"
     assert _flag(args, "--case-study") == str(case_study)
     assert _flag(args, "--session-id") == "s1"
-    assert result["payload"] == {"criteria": []}
+    assert "payload" not in result
+    assert json.loads(Path(result["absolutePath"]).read_text(encoding="utf-8")) == {"criteria": []}
 
 
 @pytest.mark.parametrize(

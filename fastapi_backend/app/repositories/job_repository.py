@@ -9,7 +9,7 @@ from typing import Any
 from app.core.json_utils import read_json_file
 from app.core.utils import utc_now_iso
 from app.database import Database
-from app.domain.jobs import ACTIVE_JOB_STATUSES
+from app.domain.jobs import ACTIVE_JOB_STATUSES, RECOVERABLE_JOB_STATUSES, JobStatus
 
 
 @dataclass(frozen=True)
@@ -268,7 +268,7 @@ class JobRepository:
             row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if row is None:
                 raise FileNotFoundError(f"Job not found: {job_id}")
-            if str(row["status"]) == "running":
+            if str(row["status"]) == JobStatus.RUNNING:
                 connection.execute(
                     """
                     UPDATE jobs
@@ -315,7 +315,7 @@ class JobRepository:
             status = str(row["status"])
             attempts = int(row["attempts"] or 0)
             max_attempts = int(row["max_attempts"] or 1)
-            if status in {"failed", "running"} and attempts < max_attempts:
+            if status in RECOVERABLE_JOB_STATUSES and attempts < max_attempts:
                 connection.execute(
                     """
                     UPDATE jobs
@@ -334,7 +334,7 @@ class JobRepository:
                     """,
                     (now, now, reason, now, job_id),
                 )
-                if status == "running" and attempts > 0:
+                if status == JobStatus.RUNNING and attempts > 0:
                     connection.execute(
                         """
                         UPDATE job_attempts
@@ -368,7 +368,7 @@ class JobRepository:
             row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if row is None:
                 raise FileNotFoundError(f"Job not found: {job_id}")
-            if str(row["status"]) != "queued":
+            if str(row["status"]) != JobStatus.QUEUED:
                 return JobClaim("not_queued", self._row_to_job(row))
             if int(row["attempts"] or 0) >= int(row["max_attempts"] or 1):
                 connection.execute(
@@ -405,7 +405,7 @@ class JobRepository:
             if (
                 cursor.rowcount != 1
                 or claimed is None
-                or str(claimed["status"]) != "running"
+                or str(claimed["status"]) != JobStatus.RUNNING
                 or str(claimed["locked_by"] or "") != worker_id
             ):
                 return JobClaim("not_queued", self._row_to_job(claimed if claimed is not None else row))
@@ -439,13 +439,13 @@ class JobRepository:
         return await self.database.run(_list)
 
     async def mark_succeeded(self, job_id: str) -> dict[str, Any]:
-        return await self._finish(job_id, "succeeded", None)
+        return await self._finish(job_id, JobStatus.SUCCEEDED, None)
 
     async def mark_failed(self, job_id: str, error: str) -> dict[str, Any]:
-        return await self._finish(job_id, "failed", error or "Job failed.")
+        return await self._finish(job_id, JobStatus.FAILED, error or "Job failed.")
 
     async def mark_cancelled(self, job_id: str, reason: str) -> dict[str, Any]:
-        return await self._finish(job_id, "cancelled", reason or "Job cancelled.")
+        return await self._finish(job_id, JobStatus.CANCELLED, reason or "Job cancelled.")
 
     async def rerun(self, job_id: str, *, reset_attempts: bool = True) -> dict[str, Any]:
         now = utc_now_iso()
@@ -454,7 +454,7 @@ class JobRepository:
             row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if row is None:
                 raise FileNotFoundError(f"Job not found: {job_id}")
-            if str(row["status"]) == "running":
+            if str(row["status"]) == JobStatus.RUNNING:
                 raise ValueError("Running jobs cannot be rerun until they finish or are cancelled.")
             attempts = 0 if reset_attempts else int(row["attempts"] or 0)
             connection.execute(

@@ -11,7 +11,16 @@ from uuid import uuid4
 
 from app.core.exceptions import AppError
 from app.core.logging_utils import log_context
+from app.domain.enums import (
+    ClipExportStatus,
+    ClipKind,
+    PipelineStep,
+    SegmentationMethod,
+    TaskType,
+)
+from app.domain.jobs import ACTIVE_JOB_STATUSES
 from app.domain.notifications import NotificationType
+from app.domain.session_lifecycle import fail_session, record_progress
 from app.domain.sessions import (
     SessionStatus,
     empty_outputs,
@@ -25,26 +34,25 @@ from app.services.event_service import EventService
 from app.services.pipeline_service import PipelineService
 from app.services.session_service import SessionMutator, SessionService
 
-
 logger = logging.getLogger(__name__)
 
 # Step names auto-crop reports under. They are not part of the standard
 # pipeline sequence — a long-workflow session only ever splits a recording —
 # so the frontend gauges them separately (src/lib/processingStage.js keeps the
 # matching list). Keep the two in step.
-PERSON_DETECTION_STEP = "person_detection"
-BELL_DETECTION_STEP = "bell_detection"
+PERSON_DETECTION_STEP = PipelineStep.PERSON_DETECTION
+BELL_DETECTION_STEP = PipelineStep.BELL_DETECTION
 SEGMENTATION_STEPS = frozenset({PERSON_DETECTION_STEP, BELL_DETECTION_STEP})
 SEGMENTATION_STEP_BY_METHOD = {
-    "person": PERSON_DETECTION_STEP,
-    "bells": BELL_DETECTION_STEP,
+    SegmentationMethod.PERSON: PERSON_DETECTION_STEP,
+    SegmentationMethod.BELLS: BELL_DETECTION_STEP,
 }
 
 # Clip-export job states, as recorded on ``session.clipExport.status``.
-EXPORT_QUEUED = "queued"
-EXPORT_RUNNING = "running"
-EXPORT_COMPLETED = "completed"
-EXPORT_FAILED = "failed"
+EXPORT_QUEUED = ClipExportStatus.QUEUED
+EXPORT_RUNNING = ClipExportStatus.RUNNING
+EXPORT_COMPLETED = ClipExportStatus.COMPLETED
+EXPORT_FAILED = ClipExportStatus.FAILED
 LIVE_EXPORT_STATUSES = frozenset({EXPORT_QUEUED, EXPORT_RUNNING})
 
 
@@ -98,7 +106,7 @@ class ClipService:
         to the server default. Unknown values degrade to the default rather
         than failing the job."""
         requested = str(session.get("segmentation") or "").strip().lower()
-        if requested in {"bells", "person"}:
+        if requested in {SegmentationMethod.BELLS, SegmentationMethod.PERSON}:
             return requested
         return self.media.settings.auto_crop_segmentation_default
 
@@ -150,7 +158,7 @@ class ClipService:
                 "code": "autocrop_started",
                 "message": (
                     "detecting people on screen and building clip ranges (RT-DETR)"
-                    if method == "person"
+                    if method == SegmentationMethod.PERSON
                     else "detecting bells and building clip ranges"
                 ),
             },
@@ -171,8 +179,7 @@ class ClipService:
             message = str(error) or type(error).__name__
 
             def fail(current: dict[str, Any]) -> Any:
-                current["status"] = SessionStatus.FAILED
-                current["error"] = message
+                fail_session(current, message)
                 self._clear_segmentation_progress(current)
                 return None
 
@@ -180,7 +187,7 @@ class ClipService:
             await self.events.publish(
                 session_id,
                 "status",
-                {"code": "failed", "message": f"Auto-crop failed: {message}"},
+                {"code": ClipExportStatus.FAILED, "message": f"Auto-crop failed: {message}"},
             )
             # Auto-crop fails outside PipelineService.mark_session_failed, so it
             # must raise its own notification or a failed crop stays silent.
@@ -203,7 +210,7 @@ class ClipService:
         await self._commit(session, finish)
         # Counts are session clips only — intermissions are greyed timeline
         # markers, not student clips.
-        session_count = sum(1 for clip in clips if clip.get("kind") != "intermission")
+        session_count = sum(1 for clip in clips if clip.get("kind") != ClipKind.INTERMISSION)
         intermission_count = len(clips) - session_count
         if self.notifications is not None:
             await self.notifications.emit(
@@ -251,7 +258,7 @@ class ClipService:
         ``_record_segmentation_progress``.
         """
         session_id = str(session.get("id") or "")
-        if method == "person":
+        if method == SegmentationMethod.PERSON:
             options = self._resolve_person_options(session)
             await self.events.publish(
                 session_id,
@@ -337,11 +344,7 @@ class ClipService:
         """
 
         def mutate(current: dict[str, Any]) -> Any:
-            pipeline = current.setdefault("pipeline", {})
-            if pipeline.get("currentStep") != step:
-                return False
-            pipeline["stepProgress"] = percent
-            return None
+            return record_progress(current, step, percent, tracked_step=False)
 
         async with lock:
             await self._commit(session, mutate)
@@ -426,8 +429,8 @@ class ClipService:
         aligned_labels: list[str] = []
         for clip_range in clip_ranges:
             segment_index = int(clip_range.get("segmentIndex", -1))
-            if kinds and 0 <= segment_index < len(kinds) and str(kinds[segment_index]).strip().lower() == "intermission":
-                clip_range["kind"] = "intermission"
+            if kinds and 0 <= segment_index < len(kinds) and str(kinds[segment_index]).strip().lower() == ClipKind.INTERMISSION:
+                clip_range["kind"] = ClipKind.INTERMISSION
             aligned_labels.append(
                 labels[segment_index] if labels and 0 <= segment_index < len(labels) else ""
             )
@@ -449,7 +452,7 @@ class ClipService:
         for index, clip in enumerate(clips):
             clip["exportIndex"] = index
             clip["planId"] = plan_id
-            if clip.get("kind") != "intermission":
+            if clip.get("kind") != ClipKind.INTERMISSION:
                 pending_total += 1
 
         requested_at = self.pipeline.now_iso()
@@ -471,7 +474,7 @@ class ClipService:
 
         await self._commit(session, plan)
 
-        job = await self.jobs.enqueue(session_id, "export_clips", {"clipCount": pending_total, "planId": plan_id})
+        job = await self.jobs.enqueue(session_id, TaskType.EXPORT_CLIPS, {"clipCount": pending_total, "planId": plan_id})
         job_id = job.get("id")
 
         def attach_job(current: dict[str, Any]) -> Any:
@@ -517,7 +520,7 @@ class ClipService:
         plan_id = str((session.get("clipExport") or {}).get("planId") or "")
 
         # Intermissions are timeline markers: no MP4 is cut and none is counted.
-        pending = [clip for clip in clips if str(clip.get("kind") or "session") != "intermission"]
+        pending = [clip for clip in clips if str(clip.get("kind") or ClipKind.SESSION) != ClipKind.INTERMISSION]
         total = len(pending)
         started_at = str((session.get("clipExport") or {}).get("startedAt") or self.pipeline.now_iso())
 
@@ -527,7 +530,7 @@ class ClipService:
                 {
                     "status": EXPORT_RUNNING,
                     "total": total,
-                    "completed": sum(1 for clip in session_clips(current) if not clip.get("isDraft") and clip.get("kind") != "intermission"),
+                    "completed": sum(1 for clip in session_clips(current) if not clip.get("isDraft") and clip.get("kind") != ClipKind.INTERMISSION),
                     "startedAt": started_at,
                     "endedAt": None,
                     "error": None,
@@ -727,7 +730,7 @@ class ClipService:
             job = await self.jobs.repository.read(job_id)
         except Exception:
             return False
-        return str(job.get("status") or "") in {"waiting_for_upload", "queued", "running"}
+        return str(job.get("status") or "") in ACTIVE_JOB_STATUSES
 
     async def recrop_clip(self, session_id: str, clip_id: str, start: float, end: float) -> dict[str, Any]:
         session = await self.sessions.read(session_id)
@@ -790,7 +793,7 @@ class ClipService:
         """
         parent_session = await self.sessions.read(session_id)
         clip = find_clip(parent_session, clip_id)
-        if str(clip.get("kind") or "").lower() == "intermission":
+        if str(clip.get("kind") or "").lower() == ClipKind.INTERMISSION:
             raise AppError(
                 "This segment is an intermission (no confirmed session detected) and cannot be assessed.",
                 status_code=400,
@@ -808,12 +811,10 @@ class ClipService:
             raise AppError("Case study file is missing for this session.", status_code=400)
 
         new_session_id = str(uuid4())
-        entries, used_keys = await self.sessions.ensure_names_for_index(await self.sessions.read_all_entries())
-        _ = entries
         preferred_name = f"{parent_session.get('name') or parent_session.get('id') or 'Session'} - {clip.get('label') or 'Clip'}"
         clip_session = {
             "id": new_session_id,
-            "name": self.sessions.reserve_unique_session_name(used_keys, preferred_name),
+            "name": preferred_name,
             "createdAt": self.pipeline.now_iso(),
             "status": SessionStatus.UPLOADED,
             "pipeline": {
@@ -854,10 +855,10 @@ class ClipService:
         # The one legitimate whole-document write: the row does not exist yet.
         # Born ``queued`` so the child is gated from its first moment.
         clip_session["status"] = SessionStatus.QUEUED
-        await self.sessions.write(clip_session)
+        await self.sessions.create_named(clip_session)
         job = await self.jobs.enqueue(
             new_session_id,
-            "process_session",
+            TaskType.PROCESS_SESSION,
             {"parentSessionId": parent_session["id"], "clipId": clip.get("id")},
         )
         # The local runner may already have claimed the job and written the row;
@@ -896,12 +897,8 @@ class ClipService:
             parent_session = await self.sessions.read(parent_id)
         except FileNotFoundError as error:
             raise AppError("Parent session not found.", status_code=404) from error
-        entries = await self.sessions.read_all_entries()
-        child_sessions = [
-            entry.session
-            for entry in entries
-            if str(entry.session.get("parentSessionId") or "") == str(parent_id)
-        ]
+        entries = await self.sessions.repository.child_summaries(parent_id)
+        child_sessions = [entry.session for entry in entries]
         clips = session_clips(parent_session)
         clips_by_id = {str(clip.get("id")): clip for clip in clips if isinstance(clip, dict) and clip.get("id")}
         summaries: list[dict[str, Any]] = []
@@ -995,7 +992,7 @@ class ClipService:
             "label": str(clip.get("label") or ""),
             "start": clip.get("start"),
             "end": clip.get("end"),
-            "kind": str(clip.get("kind") or "session"),
+            "kind": str(clip.get("kind") or ClipKind.SESSION),
             "personCount": clip.get("personCount"),
             "fileName": clip.get("fileName"),
             "url": clip.get("url"),

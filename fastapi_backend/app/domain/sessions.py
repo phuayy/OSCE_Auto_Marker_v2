@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.exceptions import AppError
+from app.domain.enums import OutputKey
 
 
 class SessionStatus(StrEnum):
@@ -44,17 +45,7 @@ TERMINAL_STATUSES: frozenset[str] = frozenset(
 # Every output slot a session document carries, in the shape a fresh session
 # starts with. Kept here (not on a service) because the upload path and the
 # clip path both create sessions.
-OUTPUT_KEYS: tuple[str, ...] = (
-    "audio",
-    "whisperxJson",
-    "transcript",
-    "subtitle",
-    "subtitleTrack",
-    "audioProfessionalism",
-    "communicationScores",
-    "videoClips",
-    "scores",
-)
+OUTPUT_KEYS: tuple[str, ...] = tuple(OutputKey)
 
 
 def empty_outputs() -> dict[str, Any]:

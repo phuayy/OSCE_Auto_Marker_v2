@@ -127,6 +127,7 @@ def request_defaults_from_env(env: Mapping[str, str] | None = None, **overrides:
             "LLM_REQUEST_TIMEOUT_SECONDS",
             _read_float(source, "NVIDIA_REQUEST_TIMEOUT_SECONDS", 360.0),
         ),
+        total_timeout_seconds=_read_float(source, "LLM_TOTAL_TIMEOUT_SECONDS", 900.0),
         reasoning=ReasoningPolicy(
             enabled=thinking,
             effort="high" if thinking else "none",

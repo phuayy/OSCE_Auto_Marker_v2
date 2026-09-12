@@ -4,6 +4,8 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.domain.enums import ClipKind
+
 
 class RenameSessionRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
@@ -24,14 +26,14 @@ class ManualClipsRequest(BaseModel):
     labels: list[str] = Field(default_factory=list, max_length=200)
     # Per-segment kinds, positional (segment i = between boundary i-1 and i).
     # Optional: omitted/short lists default to "session" segments.
-    kinds: list[str] = Field(default_factory=list, max_length=201)
+    kinds: list[ClipKind] = Field(default_factory=list, max_length=201)
 
     @field_validator("labels")
     @classmethod
     def trim_labels(cls, value: list[str]) -> list[str]:
         return [str(item or "").strip()[:80] for item in value]
 
-    @field_validator("kinds")
+    @field_validator("kinds", mode="before")
     @classmethod
     def normalize_kinds(cls, value: list[str]) -> list[str]:
         normalized = [str(item or "").strip().lower() for item in value]

@@ -12,15 +12,21 @@ from uuid import uuid4
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.logging_utils import log_context
-from app.core.utils import utc_now_iso
-from app.domain.jobs import ACTIVE_JOB_STATUSES
+from app.core.utils import exception_message, parse_iso, utc_now_iso
+from app.domain.jobs import (
+    ACTIVE_JOB_STATUSES,
+    FINISHED_JOB_STATUSES,
+    IN_PROGRESS_JOB_STATUSES,
+    TERMINAL_JOB_STATUSES,
+    JobStatus,
+)
+from app.domain.session_lifecycle import fail_session
 from app.domain.sessions import JOB_DRIVEN_STATUSES
 from app.repositories.job_repository import JobRepository
 from app.services.event_service import EventService
-from app.services.session_service import SessionService
 from app.services.job_tasks import get_task_spec, queue_owns_session_status
+from app.services.session_service import SessionService
 from app.storage import ObjectStorage
-
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +193,7 @@ class JobQueueService:
                 "id": str(uuid4()),
                 "sessionId": session_id,
                 "taskType": task_type,
-                "status": "waiting_for_upload",
+                "status": JobStatus.WAITING_FOR_UPLOAD,
                 "attempts": 0,
                 "maxAttempts": self._default_max_attempts(),
                 "createdAt": utc_now_iso(),
@@ -211,7 +217,7 @@ class JobQueueService:
     ) -> dict[str, Any]:
         async with self._enqueue_lock:
             existing = await self.repository.find_active(session_id, task_type)
-            if existing and str(existing.get("status")) in {"queued", "running"}:
+            if existing and str(existing.get("status")) in IN_PROGRESS_JOB_STATUSES:
                 return existing
 
             job = existing or {
@@ -226,7 +232,7 @@ class JobQueueService:
                 "error": None,
                 "payload": payload or {},
             }
-            job["status"] = "queued"
+            job["status"] = JobStatus.QUEUED
             job["queuedAt"] = utc_now_iso()
             job["startedAt"] = None
             job["endedAt"] = None
@@ -244,8 +250,8 @@ class JobQueueService:
             " — dispatching now" if auto_start else " — awaiting start",
             extra=log_context(session_id, "job_enqueue", job_id=job_id, task_type=task_type),
         )
-        await self.repository.append_event(job_id, "queued", f"{task_type} queued", {"sessionId": session_id})
-        await self.events.publish(session_id, "status", {"code": "queued", "message": f"{task_type} queued"})
+        await self.repository.append_event(job_id, JobStatus.QUEUED, f"{task_type} queued", {"sessionId": session_id})
+        await self.events.publish(session_id, "status", {"code": JobStatus.QUEUED, "message": f"{task_type} queued"})
         if auto_start:
             await self._dispatch(job)
         return job
@@ -263,7 +269,7 @@ class JobQueueService:
         await self.events.publish(
             session_id,
             "status",
-            {"code": "queued", "message": f"{job.get('taskType')} requeued"},
+            {"code": JobStatus.QUEUED, "message": f"{job.get('taskType')} requeued"},
         )
         await self._dispatch(job)
         return job
@@ -279,16 +285,16 @@ class JobQueueService:
     async def start_job(self, job: dict[str, Any]) -> None:
         await self._dispatch(job)
 
-    async def cancel(self, job_id: str, reason: str = "cancelled") -> dict[str, Any]:
+    async def cancel(self, job_id: str, reason: str = JobStatus.CANCELLED) -> dict[str, Any]:
         job = await self.repository.read(job_id)
-        if str(job.get("status")) in {"succeeded", "failed", "cancelled"}:
+        if str(job.get("status")) in TERMINAL_JOB_STATUSES:
             return job
         job = await self.repository.mark_cancelled(job_id, reason)
         task = self._tasks.pop(str(job_id), None)
         if task:
             task.cancel()
-        await self.repository.append_event(job_id, "cancelled", reason, {"sessionId": job.get("sessionId")})
-        await self.events.publish(str(job.get("sessionId")), "status", {"code": "cancelled", "message": reason})
+        await self.repository.append_event(job_id, JobStatus.CANCELLED, reason, {"sessionId": job.get("sessionId")})
+        await self.events.publish(str(job.get("sessionId")), "status", {"code": JobStatus.CANCELLED, "message": reason})
         await self._sync_session_job(job)
         return job
 
@@ -394,14 +400,9 @@ class JobQueueService:
             dispatched_at_str = hatchet_meta.get("dispatchedAt")
             if not dispatched_at_str:
                 continue
-            try:
-                dispatched_at = datetime.fromisoformat(
-                    str(dispatched_at_str).replace("Z", "+00:00")
-                )
-                if dispatched_at < stale_cutoff:
-                    stale.append(job)
-            except (ValueError, TypeError):
-                continue
+            dispatched_at = parse_iso(dispatched_at_str)
+            if dispatched_at is not None and dispatched_at < stale_cutoff:
+                stale.append(job)
 
         undispatched = [j for j in queued_jobs if not (j.get("payload") or {}).get("hatchet")]
         if undispatched:
@@ -455,7 +456,7 @@ class JobQueueService:
     def _schedule_local(self, job: dict[str, Any]) -> None:
         if not self.settings.local_job_auto_start:
             return
-        if str(job.get("status")) != "queued":
+        if str(job.get("status")) != JobStatus.QUEUED:
             return
         job_id = str(job["id"])
         if job_id in self._tasks and not self._tasks[job_id].done():
@@ -510,7 +511,7 @@ class JobQueueService:
                 str(job.get("sessionId")),
                 "status",
                 {
-                    "code": "queued",
+                    "code": JobStatus.QUEUED,
                     "message": "Job is queued but could not be dispatched to Hatchet.",
                 },
             )
@@ -599,7 +600,7 @@ class JobQueueService:
             job_id,
             f"Retrying after failure: {message}",
         )
-        if str(requeued.get("status")) != "queued":
+        if str(requeued.get("status")) != JobStatus.QUEUED:
             # The row moved on (cancelled, or attempts exhausted concurrently);
             # honour that and finish failing the session.
             await self._fail_session(session_id, error, message)
@@ -625,7 +626,7 @@ class JobQueueService:
             session_id,
             "status",
             {
-                "code": "queued",
+                "code": JobStatus.QUEUED,
                 "message": f"{task_type} failed; retry {next_attempt}/{max_attempts} queued.",
             },
         )
@@ -655,7 +656,7 @@ class JobQueueService:
         if not claim.claimed:
             if raise_on_error:
                 status = str(claim.job.get("status") or "")
-                if status in {"succeeded", "cancelled"}:
+                if status in FINISHED_JOB_STATUSES:
                     return JobRunResult()
                 raise RuntimeError(f"Job {job_id} could not be claimed for execution (status={status or 'unknown'}).")
             return JobRunResult()
@@ -669,9 +670,9 @@ class JobQueueService:
                 raise RuntimeError("Job handlers are not bound.")
 
             logger.info("Job running: %s", task_type, extra=job_context)
-            await self.repository.append_event(job_id, "running", f"{task_type} running", {"workerId": self._worker_id})
+            await self.repository.append_event(job_id, JobStatus.RUNNING, f"{task_type} running", {"workerId": self._worker_id})
             await self._sync_session_job(job)
-            await self.events.publish(session_id, "status", {"code": "running", "message": f"{task_type} running"})
+            await self.events.publish(session_id, "status", {"code": JobStatus.RUNNING, "message": f"{task_type} running"})
 
             # Source fixup (a path rewrite on local storage, a checksum-verified
             # download on a bucket) is applied through ``update`` so the write
@@ -693,16 +694,16 @@ class JobQueueService:
 
             finished = await self.repository.mark_succeeded(job_id)
             logger.info("Job succeeded: %s", task_type, extra=job_context)
-            await self.repository.append_event(job_id, "succeeded", f"{task_type} succeeded", {"sessionId": session_id})
+            await self.repository.append_event(job_id, JobStatus.SUCCEEDED, f"{task_type} succeeded", {"sessionId": session_id})
             await self._sync_session_job(finished)
-            await self.events.publish(session_id, "status", {"code": "succeeded", "message": f"{task_type} succeeded"})
+            await self.events.publish(session_id, "status", {"code": JobStatus.SUCCEEDED, "message": f"{task_type} succeeded"})
             return JobRunResult(job=finished)
         except asyncio.CancelledError:
             requeued = await self.repository.requeue_interrupted_job(
                 job_id,
                 "Worker task was cancelled before completion.",
             )
-            if requeued.get("status") == "queued":
+            if requeued.get("status") == JobStatus.QUEUED:
                 await self.repository.append_event(
                     job_id,
                     "interrupted",
@@ -713,14 +714,14 @@ class JobQueueService:
                 await self.events.publish(
                     session_id,
                     "status",
-                    {"code": "queued", "message": f"{task_type} was interrupted and requeued."},
+                    {"code": JobStatus.QUEUED, "message": f"{task_type} was interrupted and requeued."},
                 )
             raise
         except Exception as error:
             message = self._exception_message(error, "Job failed.")
             logger.error("Job failed: %s (%s)", task_type, message, extra=job_context)
             failed = await self.repository.mark_failed(job_id, message)
-            await self.repository.append_event(job_id, "failed", message, {"sessionId": session_id})
+            await self.repository.append_event(job_id, JobStatus.FAILED, message, {"sessionId": session_id})
             await self._sync_session_job(failed)
             # When the local runner will re-run this job, the session must stay
             # non-terminal — marking it failed here would surface a dead session
@@ -739,7 +740,8 @@ class JobQueueService:
         if self.pipeline is not None:
             await self.pipeline.mark_session_failed(session_id, error)
             return
-        await self.events.publish(session_id, "status", {"code": "failed", "message": message})
+        await self.sessions.update(session_id, lambda session: fail_session(session, message))
+        await self.events.publish(session_id, "status", {"code": JobStatus.FAILED, "message": message})
 
     async def _sync_session_job(self, job: dict[str, Any]) -> None:
         """Mirror the job row onto its session — through ``update``, because the
@@ -756,11 +758,11 @@ class JobQueueService:
                 # Overwriting status here would eject a user from a session they
                 # are actively working in.
                 return None
-            if job_status == "running":
+            if job_status == JobStatus.RUNNING:
                 session["status"] = "processing"
                 session["error"] = None
-            elif job_status == "queued" and session.get("status") != "completed":
-                session["status"] = "queued"
+            elif job_status == JobStatus.QUEUED and session.get("status") != "completed":
+                session["status"] = JobStatus.QUEUED
                 session["error"] = None
             return None
 
@@ -777,6 +779,4 @@ class JobQueueService:
                 extra=log_context(session_id, "job_session_sync"),
             )
 
-    @staticmethod
-    def _exception_message(error: Exception, fallback: str) -> str:
-        return str(error) or type(error).__name__ or fallback
+    _exception_message = staticmethod(exception_message)

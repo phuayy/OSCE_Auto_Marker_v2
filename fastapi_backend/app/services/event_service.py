@@ -9,7 +9,6 @@ from typing import Any
 from app.core.config import Settings
 from app.domain.events import SessionEventState
 
-
 logger = logging.getLogger(__name__)
 
 SseEvent = tuple[str, dict[str, Any]]
@@ -28,6 +27,8 @@ class EventService:
         return self._states[session_id]
 
     async def publish(self, session_id: str, event_name: str, payload: dict[str, Any] | None = None) -> None:
+        if not self.settings.session_sse_enabled:
+            return
         state = self.get_state(session_id)
         event_payload = {
             "id": state.event_counter + 1,

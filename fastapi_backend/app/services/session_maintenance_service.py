@@ -8,13 +8,13 @@ from typing import Any
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.logging_utils import log_context
+from app.domain.enums import TaskType
 from app.domain.sessions import IN_FLIGHT_STATUSES, SessionStatus, session_video_path
 from app.repositories.notification_repository import NotificationRepository
 from app.repositories.video_repository import VideoRepository
 from app.services.assessment_service import AssessmentService
 from app.services.job_queue_service import JobQueueService
 from app.services.session_service import SessionService
-
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +123,7 @@ class SessionMaintenanceService:
         session = await self._ready_to_start(session_id)
         return await self._queue_job(
             session_id,
-            "process_session",
+            TaskType.PROCESS_SESSION,
             {
                 "parentSessionId": session.get("parentSessionId"),
                 "clipId": (session.get("clipSource") or {}).get("clipId"),
@@ -136,7 +136,7 @@ class SessionMaintenanceService:
         session = await self._ready_to_start(session_id)
         return await self._queue_job(
             session_id,
-            "auto_crop",
+            TaskType.AUTO_CROP,
             {"workflow": session.get("workflow"), "segmentation": session.get("segmentation")},
             stage="session_auto_crop",
         )
@@ -222,7 +222,7 @@ class SessionMaintenanceService:
         await self.sessions.update(session_id, reset)
         return await self._queue_job(
             session_id,
-            "process_session",
+            TaskType.PROCESS_SESSION,
             {
                 "parentSessionId": session.get("parentSessionId"),
                 "clipId": (session.get("clipSource") or {}).get("clipId"),

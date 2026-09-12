@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import SessionWriteContractError, StaleSessionError
 from app.core.json_utils import read_json_file
+from app.core.utils import parse_iso, session_name_key
 from app.database.models import SessionRecord, utc_now
 from app.database.orm import OrmDatabase
-
 
 logger = logging.getLogger(__name__)
 
@@ -84,12 +86,7 @@ def _record_to_dict(record: SessionRecord) -> dict[str, Any]:
 
 
 def _parse_created_at(session: dict[str, Any]) -> datetime:
-    raw = str(session.get("createdAt") or "").replace("Z", "+00:00")
-    try:
-        dt = datetime.fromisoformat(raw)
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-    except ValueError:
-        return utc_now()
+    return parse_iso(session.get("createdAt")) or utc_now()
 
 
 class SessionRepository:
@@ -104,7 +101,7 @@ class SessionRepository:
                 raise FileNotFoundError(f"Session not found: {session_id}")
             return _record_to_dict(record)
 
-    async def write(self, session: dict[str, Any]) -> None:
+    async def write(self, session: dict[str, Any], *, allocate_name: Callable[[set[str]], str] | None = None) -> None:
         """Persist ``session`` whole, under the write contract.
 
         * A row that does not exist yet is created from any dict — that is how
@@ -124,6 +121,10 @@ class SessionRepository:
         loaded_version = session.get(LOADED_VERSION_KEY)
         payload = {k: v for k, v in session.items() if k not in _NON_PAYLOAD_KEYS}
         async with self.database.transaction() as db_session:
+            if allocate_name is not None:
+                await self._lock_names(db_session)
+                names = await db_session.execute(select(SessionRecord.name))
+                session["name"] = allocate_name({session_name_key(name) for name in names.scalars() if name})
             existing = await db_session.get(SessionRecord, session_id)
             if existing is not None:
                 if loaded_version is None:
@@ -148,12 +149,23 @@ class SessionRepository:
                 )
                 db_session.add(record)
             else:
-                existing.name = session.get("name")
-                existing.status = str(session.get("status") or existing.status)
-                existing.parent_session_id = session.get("parentSessionId")
-                existing.clip_source = session.get("clipSource")
-                existing.payload = payload
-                existing.updated_at = now
+                result = await db_session.execute(
+                    update(SessionRecord)
+                    .where(SessionRecord.id == session_id, SessionRecord.updated_at == existing.updated_at)
+                    .values(
+                        name=session.get("name"),
+                        status=str(session.get("status") or existing.status),
+                        parent_session_id=session.get("parentSessionId"),
+                        clip_source=session.get("clipSource"),
+                        payload=payload,
+                        updated_at=now,
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                if result.rowcount != 1:
+                    raise StaleSessionError(
+                        session_id, loaded_version=str(loaded_version), current_version="concurrent write",
+                    )
 
         # Re-stamp the in-memory dict to the version just persisted, so the
         # read-once-write-many pattern (one caller marking several steps on one
@@ -167,6 +179,82 @@ class SessionRepository:
                 select(SessionRecord).order_by(SessionRecord.created_at.desc())
             )
             return [SessionEntry(session=_record_to_dict(r)) for r in result.scalars().all()]
+
+    async def name_keys(self, *, exclude_id: str | None = None) -> set[str]:
+        statement = select(SessionRecord.name)
+        if exclude_id is not None:
+            statement = statement.where(SessionRecord.id != exclude_id)
+        async with self.database.session() as db_session:
+            result = await db_session.execute(statement)
+            return {session_name_key(name) for name in result.scalars() if name}
+
+    async def _lock_names(self, db_session: AsyncSession) -> None:
+        if self.database.engine.dialect.name == "sqlite":
+            await db_session.execute(text("BEGIN IMMEDIATE"))
+        else:
+            await db_session.execute(text("SELECT pg_advisory_xact_lock(7482673901)"))
+
+    async def rename(self, session_id: str, name: str) -> None:
+        async with self.database.transaction() as db_session:
+            await self._lock_names(db_session)
+            names = await db_session.execute(
+                select(SessionRecord.name).where(SessionRecord.id != session_id)
+            )
+            if session_name_key(name) in {session_name_key(value) for value in names.scalars() if value}:
+                raise FileExistsError("Session name must be unique.")
+            result = await db_session.execute(
+                update(SessionRecord).where(SessionRecord.id == session_id).values(name=name, updated_at=utc_now())
+            )
+            if result.rowcount != 1:
+                raise FileNotFoundError("Session not found.")
+
+    async def read_name_entries(self) -> list[SessionEntry]:
+        async with self.database.session() as db_session:
+            rows = await db_session.execute(select(
+                SessionRecord.id, SessionRecord.name, SessionRecord.created_at,
+                SessionRecord.payload["files", "video", "originalName"].as_string().label("video_name"),
+            ))
+            return [
+                SessionEntry(session={
+                    "id": row.id, "name": row.name, "createdAt": row.created_at.isoformat(),
+                    "files": {"video": {"originalName": row.video_name}},
+                })
+                for row in rows
+            ]
+
+    async def update_name(self, session_id: str, expected: str | None, name: str) -> bool:
+        async with self.database.transaction() as db_session:
+            await self._lock_names(db_session)
+            names = await db_session.execute(select(SessionRecord.name).where(SessionRecord.id != session_id))
+            if session_name_key(name) in {session_name_key(value) for value in names.scalars() if value}:
+                return False
+            result = await db_session.execute(
+                update(SessionRecord)
+                .where(SessionRecord.id == session_id, SessionRecord.name == expected)
+                .values(name=name, updated_at=utc_now())
+            )
+            return result.rowcount == 1
+
+    async def child_summaries(self, parent_session_id: str) -> list[SessionEntry]:
+        payload = SessionRecord.payload
+        async with self.database.session() as db_session:
+            rows = await db_session.execute(
+                select(
+                    SessionRecord.id, SessionRecord.name, SessionRecord.status, SessionRecord.clip_source,
+                    payload["outputs", "scores", "absolutePath"].as_string().label("scores_path"),
+                    payload["outputs", "communicationScores", "absolutePath"].as_string().label("communication_path"),
+                ).where(SessionRecord.parent_session_id == parent_session_id)
+            )
+            return [
+                SessionEntry(session={
+                    "id": row.id, "name": row.name, "status": row.status, "clipSource": row.clip_source,
+                    "outputs": {
+                        "scores": {"absolutePath": row.scores_path},
+                        "communicationScores": {"absolutePath": row.communication_path},
+                    },
+                })
+                for row in rows
+            ]
 
     async def read_index_projection(self) -> list[dict[str, Any]]:
         """Read only the fields the session-list cards render.

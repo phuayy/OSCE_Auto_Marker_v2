@@ -12,19 +12,20 @@ from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.locks import KeyedLocks
 from app.core.tasks import BackgroundTaskRegistry
+from app.core.utils import parse_iso, utc_now_iso
+from app.domain.enums import TaskType, UploadStatus, Workflow
+from app.domain.session_lifecycle import fail_session
 from app.domain.sessions import SessionStatus, empty_outputs
 from app.pipeline.media import MediaPipeline
 from app.repositories.corpus_repository import CorpusRepository
 from app.repositories.upload_repository import UploadRepository
+from app.repositories.video_repository import VideoRepository
 from app.schemas.uploads import CompleteUploadRequest, InitiateUploadRequest
 from app.services.event_service import EventService
 from app.services.job_queue_service import JobQueueService
-from app.repositories.video_repository import VideoRepository
 from app.services.rubric_asset_service import RubricAssetService
 from app.services.session_service import SessionService
-from app.core.utils import utc_now_iso
 from app.storage import ObjectStorage
-
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +78,6 @@ class AsyncUploadService:
         session_id = str(uuid4())
         upload_id = str(uuid4())
         expires_at = self._expires_at()
-        entries, used_keys = await self.sessions.ensure_names_for_index(await self.sessions.read_all_entries())
-        _ = entries
 
         prepared_files = []
         upload_files = []
@@ -109,12 +108,12 @@ class AsyncUploadService:
                     "partSizeBytes": prepared.part_size_bytes,
                     "uploadedBytes": 0,
                     "parts": [],
-                    "status": "initiated",
+                    "status": UploadStatus.INITIATED,
                     "createdAt": utc_now_iso(),
                 }
             )
 
-        task_type = "auto_crop" if payload.workflow == "long" else "process_session"
+        task_type = TaskType.AUTO_CROP if payload.workflow == Workflow.LONG else TaskType.PROCESS_SESSION
         job = await self.jobs.create_waiting_job(
             session_id,
             task_type,
@@ -122,13 +121,13 @@ class AsyncUploadService:
         )
         session = {
             "id": session_id,
-            "name": self.sessions.reserve_unique_session_name(used_keys, payload.sessionName or ""),
+            "name": payload.sessionName or "",
             "createdAt": utc_now_iso(),
             "status": SessionStatus.WAITING_FOR_UPLOAD,
             "workflow": payload.workflow,
             # Long-workflow auto-crop method ("bells" | "person"); None defers
             # to the server default at job execution time.
-            "segmentation": payload.segmentation if payload.workflow == "long" else None,
+            "segmentation": payload.segmentation if payload.workflow == Workflow.LONG else None,
             # Resolved occupancy rule for the person detector (preset name plus
             # the numbers it meant at upload time), or None to use its default.
             "segmentationOptions": payload.resolved_segmentation_options(),
@@ -137,7 +136,7 @@ class AsyncUploadService:
             "corpus": corpus_snapshot,
             "upload": {
                 "id": upload_id,
-                "status": "initiated",
+                "status": UploadStatus.INITIATED,
                 "strategy": self.storage.strategy,
                 "expiresAt": expires_at,
             },
@@ -160,7 +159,7 @@ class AsyncUploadService:
             "sessionId": session_id,
             "workflow": payload.workflow,
             "autoProcess": payload.autoProcess,
-            "status": "initiated",
+            "status": UploadStatus.INITIATED,
             "strategy": self.storage.strategy,
             "provider": self.storage.provider,
             "createdAt": utc_now_iso(),
@@ -169,8 +168,8 @@ class AsyncUploadService:
             "jobId": job["id"],
         }
         await self.repository.write(upload)
-        await self.sessions.write(session)
-        await self.events.publish(session_id, "status", {"code": "uploading", "message": "Upload session created."})
+        await self.sessions.create_named(session)
+        await self.events.publish(session_id, "status", {"code": UploadStatus.UPLOADING, "message": "Upload session created."})
         return {
             "session": self.sessions.public_session(session),
             "uploadId": upload_id,
@@ -212,7 +211,7 @@ class AsyncUploadService:
             str(upload["sessionId"]),
             "status",
             {
-                "code": "uploading",
+                "code": UploadStatus.UPLOADING,
                 "message": f"Uploaded part {part_number}.",
                 "uploadId": upload_id,
                 "fileId": resolved_file_id,
@@ -223,7 +222,7 @@ class AsyncUploadService:
     async def status(self, upload_id: str) -> dict[str, Any]:
         upload = await self.repository.read(upload_id)
         if self._is_expired(upload):
-            upload["status"] = "expired"
+            upload["status"] = UploadStatus.EXPIRED
             await self.repository.write(upload)
         return {"upload": self.public_upload(upload)}
 
@@ -237,7 +236,7 @@ class AsyncUploadService:
         upload = await self.repository.read(upload_id)
 
         # Idempotency: already fully committed
-        if upload.get("status") == "committed":
+        if upload.get("status") == UploadStatus.COMMITTED:
             session = await self.sessions.read(str(upload["sessionId"]))
             job = await self.jobs.repository.read(str(upload["jobId"])) if upload.get("jobId") else None
             return {
@@ -247,7 +246,7 @@ class AsyncUploadService:
             }
 
         # Idempotency: assembly already running in background
-        if upload.get("status") == "assembling":
+        if upload.get("status") == UploadStatus.ASSEMBLING:
             session = await self.sessions.read(str(upload["sessionId"]))
             job = await self.jobs.repository.read(str(upload["jobId"])) if upload.get("jobId") else None
             return {
@@ -280,14 +279,14 @@ class AsyncUploadService:
         # Mark as assembling immediately so duplicate requests are rejected and
         # the client knows the server has started work. The resolved autoProcess
         # is recorded too, so a restart can resume assembly with the same answer.
-        upload["status"] = "assembling"
+        upload["status"] = UploadStatus.ASSEMBLING
         upload["assemblingAt"] = utc_now_iso()
         upload["autoProcess"] = bool(should_process)
         await self.repository.write(upload)
 
         upload_ref = {
             "id": upload["id"],
-            "status": "assembling",
+            "status": UploadStatus.ASSEMBLING,
             "strategy": upload.get("strategy"),
             "assemblingAt": upload["assemblingAt"],
         }
@@ -302,7 +301,7 @@ class AsyncUploadService:
         await self.events.publish(
             str(session["id"]),
             "status",
-            {"code": "assembling", "message": "Assembling uploaded parts into final files..."},
+            {"code": UploadStatus.ASSEMBLING, "message": "Assembling uploaded parts into final files..."},
         )
 
         # Fire-and-forget: heavy I/O (part concatenation, SHA-256, ffprobe) runs in
@@ -368,12 +367,12 @@ class AsyncUploadService:
                 safe_name=str(video_file_record.get("safeName") or ""),
             )
 
-            upload["status"] = "committed"
+            upload["status"] = UploadStatus.COMMITTED
             upload["committedAt"] = utc_now_iso()
 
             upload_ref = {
                 "id": upload["id"],
-                "status": "committed",
+                "status": UploadStatus.COMMITTED,
                 "strategy": upload.get("strategy"),
                 "committedAt": upload["committedAt"],
             }
@@ -390,7 +389,7 @@ class AsyncUploadService:
 
             job = None
             if should_process:
-                task_type = "auto_crop" if upload.get("workflow") == "long" else "process_session"
+                task_type = TaskType.AUTO_CROP if upload.get("workflow") == Workflow.LONG else TaskType.PROCESS_SESSION
                 job = await self.jobs.enqueue(
                     session_id,
                     task_type,
@@ -436,7 +435,7 @@ class AsyncUploadService:
             # only deleted after a successful commit).
             try:
                 failed_upload = await self.repository.read(upload_id)
-                failed_upload["status"] = "failed"
+                failed_upload["status"] = UploadStatus.FAILED
                 failed_upload["error"] = str(error)
                 failed_upload["failedAt"] = utc_now_iso()
                 await self.repository.write(failed_upload)
@@ -448,17 +447,17 @@ class AsyncUploadService:
                     await self.events.publish(
                         session_id,
                         "status",
-                        {"code": "failed", "message": f"Upload assembly failed: {error}"},
+                        {"code": UploadStatus.FAILED, "message": f"Upload assembly failed: {error}"},
                     )
                 except Exception:
                     logger.exception("Failed to persist failed session state for upload %s.", upload_id)
 
     async def abort(self, upload_id: str) -> dict[str, Any]:
         upload = await self.repository.read(upload_id)
-        if upload.get("status") == "committed":
+        if upload.get("status") == UploadStatus.COMMITTED:
             raise AppError("Committed source uploads cannot be aborted.", status_code=409)
         await self.storage.abort_upload(upload)
-        upload["status"] = "aborted"
+        upload["status"] = UploadStatus.ABORTED
         upload["abortedAt"] = utc_now_iso()
         await self.repository.write(upload)
 
@@ -506,7 +505,7 @@ class AsyncUploadService:
             logger.error("Startup upload recovery: could not read upload records — %s", exc)
             return
 
-        stale_uploads = [u for u in all_uploads if u.get("status") == "assembling"]
+        stale_uploads = [u for u in all_uploads if u.get("status") == UploadStatus.ASSEMBLING]
         resumed_sessions: set[str] = set()
 
         for upload in stale_uploads:
@@ -528,7 +527,7 @@ class AsyncUploadService:
                 continue
 
             try:
-                upload["status"] = "failed"
+                upload["status"] = UploadStatus.FAILED
                 upload["failedAt"] = utc_now_iso()
                 upload["error"] = _FAILURE_MESSAGE
                 await self.repository.write(upload)
@@ -559,7 +558,7 @@ class AsyncUploadService:
             return
 
         for entry in all_sessions:
-            if entry.get("status") != "assembling":
+            if entry.get("status") != UploadStatus.ASSEMBLING:
                 continue
             session_id = str(entry.get("id") or "")
             if not session_id or session_id in resumed_sessions:
@@ -601,28 +600,22 @@ class AsyncUploadService:
     @staticmethod
     def _fail_if_assembling(message: str):
         def mutate(session: dict[str, Any]) -> Any:
-            if session.get("status") != SessionStatus.ASSEMBLING:
-                return False
-            session["status"] = SessionStatus.FAILED
-            session["error"] = message
-            return None
+            return fail_session(session, message, expected_status=SessionStatus.ASSEMBLING)
 
         return mutate
 
     @staticmethod
     def _fail_session_mutator(message: str):
         def mutate(session: dict[str, Any]) -> Any:
-            session["status"] = SessionStatus.FAILED
-            session["error"] = message
-            return None
+            return fail_session(session, message)
 
         return mutate
 
     # Pre-commit upload states whose session/job may still be safely failed by
     # the expiry sweep. A session past these (uploaded/queued/processing/…) has
     # already left the upload phase and must never be clobbered by cleanup.
-    _RECOVERABLE_UPLOAD_STATES = frozenset({"initiated", "uploading", "failed"})
-    _RECOVERABLE_SESSION_STATES = frozenset({"waiting_for_upload", "uploading", "assembling"})
+    _RECOVERABLE_UPLOAD_STATES = frozenset({UploadStatus.INITIATED, UploadStatus.UPLOADING, UploadStatus.FAILED})
+    _RECOVERABLE_SESSION_STATES = frozenset({"waiting_for_upload", UploadStatus.UPLOADING, UploadStatus.ASSEMBLING})
 
     async def recover_expired_uploads(self) -> None:
         """Reclaim uploads abandoned mid-transfer once their TTL has elapsed.
@@ -668,7 +661,7 @@ class AsyncUploadService:
 
             # 2. Mark the upload record terminal so the sweep never revisits it.
             try:
-                upload["status"] = "expired"
+                upload["status"] = UploadStatus.EXPIRED
                 upload["expiredAt"] = utc_now_iso()
                 await self.repository.write(upload)
             except Exception as exc:  # noqa: BLE001
@@ -891,15 +884,12 @@ class AsyncUploadService:
         return expires.isoformat().replace("+00:00", "Z")
 
     def _is_expired(self, upload: dict[str, Any]) -> bool:
-        if upload.get("status") in {"committed", "aborted", "expired"}:
+        if upload.get("status") in {UploadStatus.COMMITTED, UploadStatus.ABORTED, UploadStatus.EXPIRED}:
             return False
-        try:
-            expires = datetime.fromisoformat(str(upload.get("expiresAt")).replace("Z", "+00:00"))
-            return datetime.now(timezone.utc) > expires
-        except Exception:
-            return False
+        expires = parse_iso(upload.get("expiresAt"))
+        return expires is not None and datetime.now(timezone.utc) > expires
 
     def _assert_not_expired(self, upload: dict[str, Any]) -> None:
         if self._is_expired(upload):
-            upload["status"] = "expired"
+            upload["status"] = UploadStatus.EXPIRED
             raise AppError("Upload session has expired.", status_code=410)
