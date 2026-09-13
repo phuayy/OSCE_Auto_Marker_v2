@@ -73,6 +73,9 @@ _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "canary_qwen_transcr
 _spec = importlib.util.spec_from_file_location("canary_qwen_transcribe", _SCRIPT)
 canary_script = importlib.util.module_from_spec(_spec)
 assert _spec.loader is not None
+# Registered before it runs, as a real import would be: the script's dataclasses
+# resolve their (postponed) annotations through sys.modules[__module__].
+sys.modules.setdefault(_spec.name, canary_script)
 _spec.loader.exec_module(canary_script)
 
 # The tail of the real traceback, verbatim: this exact text is what the fix has
@@ -225,6 +228,12 @@ def test_the_dtype_flag_defaults_to_auto() -> None:
     assert args.dtype == "auto"
 
 
+def torch_nn() -> Any:
+    import torch.nn
+
+    return torch.nn
+
+
 def install_fake_salm_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     """Put a stub where SALM's module lives, so the dtype patch is observable.
 
@@ -287,20 +296,56 @@ def test_the_defaults_are_restored_when_the_load_fails(monkeypatch: pytest.Monke
     assert salm_module.load_pretrained_hf is original
 
 
-class FakePreprocessor:
+class FakePreprocessor(torch_nn().Module):
     """A mel front-end: computes in float32 and says so, whatever dtype it is in."""
 
-    def __init__(self, name: str, widened: list[str]) -> None:
-        self.name = name
-        self.widened = widened
+    def __init__(self) -> None:
+        super().__init__()
+        import torch
 
-    def float(self) -> None:
-        self.widened.append(self.name)
+        self.register_buffer("window", torch.ones(4, dtype=torch.bfloat16))
 
     def forward(self, _signal: Any) -> tuple[Any, Any]:
         import torch
 
         return torch.zeros(2, 3, dtype=torch.float32), torch.tensor([3, 3])
+
+
+class FakeRelPositionAttention(torch_nn().Module):
+    """NeMo's attention layer, in miniature: one Linear that honours the dtype
+    default and two position biases that do not — ``torch.FloatTensor`` is
+    float32 whatever ``torch.set_default_dtype`` says."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        import torch
+        from torch import nn
+
+        self.linear_pos = nn.Linear(4, 4, bias=False)
+        self.pos_bias_u = nn.Parameter(torch.FloatTensor(2, 2))
+        self.pos_bias_v = nn.Parameter(torch.FloatTensor(2, 2))
+
+
+def build_bfloat16_salm() -> Any:
+    """SALM's shape, built the way the script builds it: under a bfloat16 default."""
+    import torch
+    from torch import nn
+
+    with canary_script.built_in_dtype(torch.bfloat16):
+        model = nn.Module()
+        model.perception = nn.Module()
+        model.perception.preprocessor = FakePreprocessor()
+        model.perception.encoder = nn.Module()
+        model.perception.encoder.layers = nn.ModuleList([FakeRelPositionAttention(), FakeRelPositionAttention()])
+        model.llm = nn.Module()
+        model.llm.q_proj = nn.Linear(4, 4)
+        # PEFT upcasts the LoRA adapters to float32 on purpose; the checkpoint
+        # still holds them in bfloat16.
+        model.llm.lora_A = nn.Linear(4, 2, bias=False, dtype=torch.float32)
+        # transformers computes rotary positions in float32 and keeps the
+        # table that way; a narrowed copy would not recover the precision.
+        model.llm.register_buffer("inv_freq", torch.ones(2, dtype=torch.float32))
+    return model
 
 
 def test_the_mel_frontend_stays_in_float32_and_hands_on_the_load_dtype() -> None:
@@ -311,24 +356,87 @@ def test_the_mel_frontend_stays_in_float32_and_hands_on_the_load_dtype() -> None
     # has loaded. The boundary is cast instead of widened.
     import torch
 
-    widened: list[str] = []
-    preprocessor = FakePreprocessor("perception.preprocessor", widened)
-    modules = [
-        ("", SimpleNamespace()),
-        ("perception.preprocessor", preprocessor),
-        ("perception.encoder", SimpleNamespace()),
-        ("llm.model.layers.0", SimpleNamespace()),
-    ]
-    model = SimpleNamespace(named_modules=lambda: iter(modules))
+    model = build_bfloat16_salm()
 
-    wrapped = canary_script.align_frontend_dtype(model, torch.bfloat16)
+    alignment = canary_script.align_model_dtype(model, torch.bfloat16)
 
-    assert wrapped == ["perception.preprocessor"]
-    assert widened == ["perception.preprocessor"]
-    features, lengths = preprocessor.forward(None)
+    assert alignment.frontends == ("perception.preprocessor",)
+    assert model.perception.preprocessor.window.dtype is torch.float32
+    features, lengths = model.perception.preprocessor(None)
     assert features.dtype is torch.bfloat16
     # Lengths are indices, not activations; casting them would corrupt them.
     assert lengths.dtype is torch.int64
+
+
+def test_parameters_nemo_built_in_float32_are_brought_into_the_load_dtype() -> None:
+    # The production failure: every Conformer attention layer creates its
+    # relative-position biases with torch.FloatTensor, so they stayed float32
+    # under the bfloat16 default and copy_ kept them that way. The first forward
+    # then died with "expected scalar type Float but found BFloat16" where
+    # q + pos_bias_v met linear_pos(pos_emb). The invariant is enforced after
+    # the load, for every parameter, not patched per module.
+    import torch
+
+    model = build_bfloat16_salm()
+    layer = model.perception.encoder.layers[0]
+    assert layer.linear_pos.weight.dtype is torch.bfloat16
+    assert layer.pos_bias_u.dtype is torch.float32, "the fixture must reproduce NeMo's hard-coded float32"
+
+    alignment = canary_script.align_model_dtype(model, torch.bfloat16)
+
+    assert layer.pos_bias_u.dtype is torch.bfloat16
+    assert layer.pos_bias_v.dtype is torch.bfloat16
+    assert model.llm.lora_A.weight.dtype is torch.bfloat16
+    assert alignment.converted == (
+        "perception.encoder.layers.0.pos_bias_u",
+        "perception.encoder.layers.0.pos_bias_v",
+        "perception.encoder.layers.1.pos_bias_u",
+        "perception.encoder.layers.1.pos_bias_v",
+        "llm.lora_A.weight",
+    )
+    # Every parameter outside the front-end now agrees, so no forward can meet
+    # two dtypes in one matmul.
+    stray = [
+        name
+        for name, parameter in model.named_parameters()
+        if not name.startswith("perception.preprocessor.") and parameter.dtype is not torch.bfloat16
+    ]
+    assert stray == []
+
+
+def test_buffers_are_left_in_the_precision_their_owner_chose() -> None:
+    import torch
+
+    model = build_bfloat16_salm()
+
+    canary_script.align_model_dtype(model, torch.bfloat16)
+
+    assert model.llm.inv_freq.dtype is torch.float32
+
+
+def test_the_alignment_report_names_what_it_changed() -> None:
+    import torch
+
+    model = build_bfloat16_salm()
+
+    report = canary_script.align_model_dtype(model, torch.bfloat16).describe()
+
+    assert "front-end kept in float32 (perception.preprocessor)" in report
+    assert "converted 5 parameter(s)" in report
+    assert "perception.encoder.layers.0.pos_bias_u" in report
+    assert "(5 in total)" in report
+
+
+def test_a_model_already_in_the_load_dtype_reports_nothing_to_convert() -> None:
+    import torch
+    from torch import nn
+
+    with canary_script.built_in_dtype(torch.bfloat16):
+        model = nn.Linear(2, 2)
+
+    report = canary_script.align_model_dtype(model, torch.bfloat16).describe()
+
+    assert "nothing to convert" in report
 
 
 def test_weights_are_staged_in_host_memory_even_for_a_cuda_run() -> None:
