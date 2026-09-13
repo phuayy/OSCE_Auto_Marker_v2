@@ -395,11 +395,19 @@ python -c "import sys; sys.path.insert(0, 'fastapi_backend'); from app.queue.hat
 
 The root `pyproject.toml` is the canonical Python dependency file, and `uv.lock`
 is the exact resolution it produced. Both are committed; there is no separate
-backend requirements file to drift out of step. Three sets are declared there:
-the base `dependencies`, the `dev` group (`pytest`, `httpx` — installed by
-default, skip with `uv sync --no-dev`) and the `canary` group (NeMo, opt in with
-`uv sync --group canary`). All three are resolved into the one lock, so the
-optional engine cannot change what the base install gets.
+backend requirements file to drift out of step. Four sets are declared there:
+the base `dependencies`, the `dev` group (`pytest`, `ruff` — installed by
+default, skip with `uv sync --no-dev`), the `canary` group (NeMo, opt in with
+`uv sync --group canary`) and the `debug` group (`openpyxl`, only for the
+hand-run `debug_scripts/`; `uv sync --group debug`). All four are resolved into
+the one lock, so an optional group cannot change what the base install gets.
+
+Remember that `uv sync` is exact: it removes whatever the groups named on that
+command do not cover. If a session fails at transcription with `The NeMo
+toolkit is not installed`, a plain `uv sync` has run on a host that had the
+`canary` group — re-run it with `--group canary`, or pick WhisperX in
+*Settings -> Transcription*. The pipeline itself already falls that run back to
+WhisperX and says so in the step metadata.
 
 - `fastapi`: API framework used by `fastapi_backend/app/main.py`.
 - `uvicorn[standard]`: ASGI server and reload/runtime extras for local serving.

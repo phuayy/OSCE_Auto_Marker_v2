@@ -35,6 +35,12 @@ dependencies = [
     # Already present transitively; pinned directly because app/core/secret_box.py
     # imports it and a transitive dependency is free to drop it.
     "cryptography==50.0.1",
+    # HTTP client behind the Anthropic scoring provider and the webhook
+    # dispatcher. Same reasoning as cryptography: it arrives transitively via
+    # openai today, but both are runtime imports, so it is named here rather
+    # than only in the dev group (where it also serves the API test client) —
+    # a "uv sync --no-dev" deployment must not depend on openai keeping it.
+    "httpx==0.28.1",
 
     # Durable queue support. Local development can use SQLite plus in-process
     # workers; production uses Hatchet backed by PostgreSQL.
@@ -89,8 +95,15 @@ dependencies = [
 # Installed by default by "uv sync". Skip with "uv sync --no-dev".
 dev = [
     "pytest==9.0.3",
-    "httpx==0.28.1",
     "ruff==0.11.13",
+]
+
+# Hand-run experiments under debug_scripts/ (RT-DETR tuning sheets). Nothing in
+# the app or the pipeline imports these; they were installed by hand in the pip
+# era and vanished when uv rebuilt the environment from the manifest. Install
+# with "uv sync --group debug" before running those scripts.
+debug = [
+    "openpyxl==3.1.5",
 ]
 
 # Optional transcription engine: NVIDIA Canary-Qwen 2.5B (NeMo SALM).

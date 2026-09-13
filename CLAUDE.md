@@ -155,7 +155,7 @@ OSCE-AI-FYP/
 │       │       ├── jobs.py              # /api/jobs/**
 │       │       ├── rubrics.py           # /api/rubrics/**
 │       │       ├── media.py             # /media/** static file serving (auth-gated)
-│       │       └── notifications.py     # /api/notifications (list + mark read)
+│       │       └── notifications.py     # /api/notifications (list, mark one read, mark all read)
 │       ├── schemas/             # Pydantic request/response models
 │       └── queue/
 │           ├── hatchet_worker.py    # Hatchet worker lifespan + redispatch loop
@@ -935,6 +935,7 @@ of the same thing; it is gone.)
 # Python environment (uv owns it; pip is not used anywhere)
 uv sync                          # base + dev, exactly as pinned in uv.lock
 uv sync --group canary           # ...plus the optional Canary-Qwen/NeMo engine
+uv sync --group debug            # ...plus what debug_scripts/ need (openpyxl)
 uv sync --no-dev                 # deployment install, no test tooling
 uv lock                          # re-resolve after editing pyproject.toml
 uv add <pkg> / uv remove <pkg>   # edit pyproject.toml and the lock together
@@ -973,12 +974,36 @@ index afterwards" step is gone, and no later group install can swap them for
 CPU wheels. uv creates `.venv` in the project root, so the `SCORER_PYTHON_BIN`
 and `WHISPERX_BIN` auto-detection in `config.py` is unchanged.
 
-Every npm script and `scripts/dev.mjs` invoke `uv run --no-sync`, never a bare
-`uv run`. A bare `uv run` syncs first, and a sync without `--group canary`
-*removes* NeMo — starting the dev server would quietly uninstall the optional
-transcription engine on a host that had it. Syncing stays an explicit step
-(`npm run py:sync` / `py:sync:canary`). `PYTHON_BIN` still overrides the
-interpreter in `dev.mjs` for a hand-managed environment.
+**A `uv sync` is exact, not additive — the one behavioural change from pip
+that bites.** `pip install -r` only ever added; `uv sync` makes `.venv` match
+the lock *for the groups named on that command line* and uninstalls everything
+else. So on a host that installed the optional engine with
+`uv sync --group canary`, the next plain `uv sync` (or `npm run py:sync`)
+removes `nemo_toolkit` and `peft` again, silently, while Settings still names
+Canary-Qwen. That is exactly what produced `Canary-Qwen transcription failed
+with exit code 3. The NeMo toolkit is not installed` on a session that had
+transcribed fine the week before. Every later sync on such a host must repeat
+`--group canary` (`npm run py:sync:canary`). A bare `uv run` is *inexact* — it
+installs what is missing and removes nothing — so it is not the culprit, but
+every npm script and `scripts/dev.mjs` still invoke `uv run --no-sync`: an
+environment step should be explicit, not a side effect of starting the dev
+server. `PYTHON_BIN` still overrides the interpreter in `dev.mjs` for a
+hand-managed environment.
+
+The pipeline no longer loses a session to that mistake. `TranscriptionRouter`
+asks the selected engine's own `availability()` — the probe the settings screen
+reads — *before* running it, and an engine that is not installed here is
+handled like one the host cannot hold in memory: the run goes to the default
+engine (WhisperX) once, loudly, with `fallbackFrom` / `fallbackReason` on the
+step metadata. Both are `HOST_CANNOT_RUN_ENGINE_ERRORS`
+(`TranscriptionResourceError`, `TranscriptionEngineUnavailableError`) — typed,
+non-retryable, so the queue does not spend its attempts spawning an interpreter
+that exits at once. The Canary engine also classifies the script's exit code 3
+itself, for the minute the availability answer is cached.
+
+The `debug` group (`uv sync --group debug`) carries what only the hand-run
+`debug_scripts/` need — `openpyxl` for the RT-DETR tuning sheets. It was a
+manual pip install before and vanished with the rebuild, for the same reason.
 
 **Schema:** Alembic owns it; there is no `create_all` script. `scripts/init_db.py`
 used to offer one, which would have built the tables *without stamping a
