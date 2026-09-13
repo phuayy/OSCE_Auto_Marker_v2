@@ -2211,6 +2211,7 @@ export default function OSCEAiMarkerMockup({
                 items={notifications.items}
                 unreadCount={notifications.unreadCount}
                 onDismiss={notifications.dismiss}
+                onDismissAll={notifications.dismissAll}
               />
             ) : null}
             {onOpenAnalytics ? (
