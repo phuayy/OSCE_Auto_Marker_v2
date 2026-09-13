@@ -148,4 +148,7 @@ explicit = true
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E9", "F63", "F7", "F82"]
+# E9: syntax errors. F: all of pyflakes (unused imports/variables, undefined
+# names, redefinitions). B023: a closure that captures a loop variable late.
+# B904: `raise` inside `except` without `from`, which hides the cause.
+select = ["E9", "F", "B023", "B904"]

@@ -20,10 +20,14 @@ export default [
       'no-unsafe-finally': 'error',
       'no-constant-binary-expression': 'error',
       'react-hooks/rules-of-hooks': 'error',
+      // Dead imports and helpers accumulate silently after a refactor (the
+      // workspace split left an unused icon pair and a commented-out card
+      // behind). `React` stays importable for JSX-only files, and a caught
+      // error that is only logged may be left unnamed.
+      'no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^(_|React$)', caughtErrors: 'none' },
+      ],
     },
-  },
-  {
-    files: ['src/lib/sessionWorkspace.js', 'src/lib/resumableUpload.js'],
-    rules: { 'no-unused-vars': ['error', { argsIgnorePattern: '^_' }] },
   },
 ];

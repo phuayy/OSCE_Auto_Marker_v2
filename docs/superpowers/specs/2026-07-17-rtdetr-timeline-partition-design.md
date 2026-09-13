@@ -120,5 +120,5 @@ skips intermissions, context-menu enablement matrix. Tested by an assert-based
 - `fastapi_backend` pytest: segmenter/partition unit tests (script imported the same
   way `test_rubric_section.py` imports `scripts/`), wiring tests for kinds flow,
   assess rejection.
-- `node src/lib/manualTimeline.test.mjs` for the editor logic.
+- `npm run test:ui` (test/manualTimeline.test.mjs) for the editor logic.
 - `npx vite build` for the frontend.

@@ -48,6 +48,7 @@ OSCE-AI-FYP/
 │   │   ├── demoSessions.js     # Bundled demo fixtures; imported dynamically, never in the entry chunk
 │   │   ├── anchors.js          # DOM ids the dashboard scrolls to and the workspace renders
 │   │   ├── clipAssessments.js  # Clip -> its newest child session, run status, stale-cut flag (pure)
+│   │   ├── coalesce.js         # Single-flight wrapper: a burst of refresh triggers = one run + one catch-up (pure)
 │   │   ├── clipExportOutcome.js # What the editor does when an export/recrop job lands (pure)
 │   │   ├── processingStage.js  # Session card's stage gauge, from the projection's `steps` (pure)
 │   │   ├── navigation.js       # parseRoute / buildRoute (hash-based deep links)
@@ -65,7 +66,8 @@ OSCE-AI-FYP/
 │   │       ├── 0003_change_tracking_triggers.py  # table_versions triggers (+ pg_notify)
 │   │       ├── 0004_provider_credentials.py      # encrypted operator-managed LLM API keys
 │   │       ├── 0005_cache_invalidation_triggers.py  # change tracking on the two cached tables
-│   │       └── 0006_custom_llm_providers.py     # operator-defined scoring providers (+ tracking)
+│   │       ├── 0006_custom_llm_providers.py     # operator-defined scoring providers (+ tracking)
+│   │       └── 0007_jobs_tables_in_orm_metadata.py  # jobs/job_attempts/job_events become ORM models
 │   └── app/
 │       ├── main.py             # FastAPI app, middleware, startup/shutdown
 │       ├── core/
@@ -808,7 +810,13 @@ exactly that.
   (`IN_FLIGHT_HEARTBEAT_MS`) runs *only while a session is in flight*, as a
   floor under that: a long step can go minutes without writing anything
   (auto-crop's person detection), and a refresh that failed during that silence
-  would otherwise have nothing to trigger its retry. The per-session SSE
+  would otherwise have nothing to trigger its retry. Both signals go through
+  one single-flight wrapper (`lib/coalesce.js`): a run writes the session many
+  times a minute and on PostgreSQL each write is its own event, so refetching
+  per event cost a `GET /api/sessions` per write and let a slow, older
+  response land after a newer one. Coalesced, a burst is one request plus one
+  catch-up, and `refreshSessionIndex` drops any response that is not for the
+  most recently issued request. The per-session SSE
   endpoint (`/api/sessions/{id}/events`) is a different stream and the frontend
   does not consume it — see **Per-session SSE** below.
 - The upload overlay shows **only** the upload. It used to also render a
