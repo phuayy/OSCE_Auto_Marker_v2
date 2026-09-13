@@ -54,6 +54,31 @@ class TranscriptionResourceError(AppError):
         super().__init__(message, status_code=507, retryable=False)
 
 
+class TranscriptionEngineUnavailableError(AppError):
+    """The selected transcription engine cannot run in this deployment at all.
+
+    Raised when the engine's own availability probe says no — its optional
+    dependency group is not installed (``uv sync`` without ``--group canary``
+    removes NeMo, because a uv sync is exact rather than additive), its
+    subprocess script is missing, or its binary is not configured. Unlike
+    :class:`TranscriptionResourceError` this has nothing to do with the host's
+    memory: the engine is simply not here, and it will be just as absent on the
+    next attempt, so it is a 503 that is **not retryable**. The message carries
+    the engine's own install instructions, because fixing it means changing the
+    environment or the engine selection, never the recording.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, status_code=503, retryable=False)
+
+
+# The failures the transcription router hands to the default engine: the host
+# cannot run the selected engine — out of memory, or not installed — and would
+# refuse identically on every retry, so a second engine is the only thing that
+# turns the session into a transcript.
+HOST_CANNOT_RUN_ENGINE_ERRORS = (TranscriptionResourceError, TranscriptionEngineUnavailableError)
+
+
 class StaleSessionError(AppError):
     """A session write was based on a version the database has since moved past.
 

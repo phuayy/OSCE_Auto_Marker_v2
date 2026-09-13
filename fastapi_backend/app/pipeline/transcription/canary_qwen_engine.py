@@ -28,7 +28,11 @@ from time import monotonic
 from typing import Any
 
 from app.core.config import Settings
-from app.core.exceptions import EmptyTranscriptError, TranscriptionResourceError
+from app.core.exceptions import (
+    EmptyTranscriptError,
+    TranscriptionEngineUnavailableError,
+    TranscriptionResourceError,
+)
 from app.core.json_utils import extract_json_object
 from app.core.process import CommandRunner
 from app.pipeline.media import MediaPipeline
@@ -93,6 +97,13 @@ FATAL_EXIT_CODES = {
     -11: "SIGSEGV",
 }
 _EXIT_CODE_PATTERN = re.compile(r"failed with exit code (-?\d+)")
+
+# scripts/canary_qwen_transcribe.py exits with this when ``import nemo`` cannot
+# be satisfied. The availability probe normally catches that first, but its
+# answer is cached for AVAILABILITY_CACHE_SECONDS, so a ``uv sync`` that drops
+# the canary group between the probe and the run still reaches here — and must
+# read as "not installed" rather than as a failure worth three retries.
+EXIT_NEMO_MISSING = 3
 
 # How long an availability answer is reused. Long enough that polling the
 # settings screen does not start an interpreter per request, short enough that
@@ -195,6 +206,12 @@ def is_memory_exhaustion(text: str) -> bool:
     return any(signature in lowered for signature in _MEMORY_ERROR_SIGNATURES)
 
 
+def subprocess_exit_code(text: str) -> int | None:
+    """The exit code named in a runner failure, or ``None`` if there is none."""
+    match = _EXIT_CODE_PATTERN.search(str(text or ""))
+    return int(match.group(1)) if match is not None else None
+
+
 def native_crash_reason(text: str) -> str | None:
     """The fatal exit code in a runner failure, named, or ``None``.
 
@@ -204,10 +221,18 @@ def native_crash_reason(text: str) -> str | None:
     ~40-second model load that dies the same way, and finally buries the
     session under three lines of NeMo telemetry that explain nothing.
     """
-    match = _EXIT_CODE_PATTERN.search(str(text or ""))
-    if match is None:
-        return None
-    return FATAL_EXIT_CODES.get(int(match.group(1)))
+    code = subprocess_exit_code(text)
+    return None if code is None else FATAL_EXIT_CODES.get(code)
+
+
+def not_installed_message() -> str:
+    """One operator-facing sentence for a subprocess that found no NeMo."""
+    return (
+        f"{DESCRIPTOR.label} ({ENGINE_ID}) cannot run in this deployment: the NeMo toolkit is not "
+        "installed in the backend environment. It lives in an optional dependency group, and a "
+        "'uv sync' without '--group canary' removes it. Install it with 'uv sync --group canary', "
+        "or select another engine in Settings."
+    )
 
 
 def native_crash_message(model: str, reason: str) -> str:
@@ -430,6 +455,8 @@ class CanaryQwenEngine(TranscriptionEngine):
             # keeps its original exception and its retry.
             if is_memory_exhaustion(str(error)):
                 raise TranscriptionResourceError(memory_failure_message(model, str(error))) from error
+            if subprocess_exit_code(str(error)) == EXIT_NEMO_MISSING:
+                raise TranscriptionEngineUnavailableError(not_installed_message()) from error
             crash_reason = native_crash_reason(str(error))
             if crash_reason is not None:
                 raise TranscriptionResourceError(native_crash_message(model, crash_reason)) from error

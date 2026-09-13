@@ -63,6 +63,10 @@ class ScriptedRunner:
             return CommandResult(stdout="", stderr="")
 
         script = Path(args[0]).name
+        if "--check" in args:
+            # The router asks the engine whether it can run before running it;
+            # this environment has NeMo, as far as the pipeline is concerned.
+            return CommandResult(stdout="nemo-ready", stderr="")
         output_path = Path(args[args.index("--output") + 1])
         if script == "pyannote_diarize.py":
             output_path.write_text(json.dumps({"schema": DIARIZATION_SCHEMA, "turns": TURNS}), encoding="utf-8")

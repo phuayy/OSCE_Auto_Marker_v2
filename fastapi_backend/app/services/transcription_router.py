@@ -13,9 +13,13 @@ Two rules keep a bad selection from costing a run:
 * stored options that no longer validate are dropped rather than failing the
   run — the engine's own defaults are always a valid configuration;
 * an engine that cannot run on this host at all — a checkpoint too large for
-  the machine's memory — hands the run to the default engine once, loudly,
-  rather than failing a session over a hardware limit the recording had
-  nothing to do with.
+  the machine's memory, or an optional dependency group that is not installed
+  here — hands the run to the default engine once, loudly, rather than failing
+  a session over a machine the recording had nothing to do with. The
+  "not installed" case is asked *before* the engine runs, from the same
+  availability probe the settings screen reads, so a stored selection that a
+  ``uv sync`` without ``--group canary`` has since made unrunnable never costs
+  a job its retry budget spawning an interpreter that exits immediately.
 """
 from __future__ import annotations
 
@@ -25,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings
-from app.core.exceptions import TranscriptionResourceError
+from app.core.exceptions import HOST_CANNOT_RUN_ENGINE_ERRORS, AppError, TranscriptionEngineUnavailableError
 from app.core.resources import ResourceLease
 from app.pipeline.transcription import registry
 from app.pipeline.transcription.base import (
@@ -216,14 +220,22 @@ class TranscriptionRouter:
                 "message": f"Transcribing with {engine.descriptor.label} ({engine_id}).",
             },
         )
+        # Asked before the lease is taken: the probe loads no model, and an
+        # engine that is not installed here would otherwise be discovered by
+        # spawning its subprocess, which exits at once with a generic failure
+        # the queue retries. The settings screen shows the same answer.
+        unavailable = await self._unavailable_error(engine)
         # Held for the whole engine run, fallback included: the fallback engine
         # is a second model load on the same card, and releasing between the
         # two would let another job slip in and OOM both.
         async with self.gpu.hold("Transcription", session_id):
-            try:
-                result = await engine.transcribe(request)
-            except TranscriptionResourceError as error:
-                result = await self._transcribe_with_fallback_engine(engine_id, request, error)
+            if unavailable is not None:
+                result = await self._transcribe_with_fallback_engine(engine_id, request, unavailable)
+            else:
+                try:
+                    result = await engine.transcribe(request)
+                except HOST_CANNOT_RUN_ENGINE_ERRORS as error:
+                    result = await self._transcribe_with_fallback_engine(engine_id, request, error)
         if not result.diarized:
             # Loud, because unlabelled dialogue changes what the scorers can
             # conclude — not a silent quality regression.
@@ -240,23 +252,39 @@ class TranscriptionRouter:
             )
         return result
 
+    async def _unavailable_error(self, engine: TranscriptionEngine) -> TranscriptionEngineUnavailableError | None:
+        """The typed, non-retryable failure for an engine this deployment lacks,
+        or ``None`` when the engine reports it can run."""
+        availability = await engine.availability()
+        if availability.available:
+            return None
+        descriptor = engine.descriptor
+        requirements = str(descriptor.requirements or "").strip()
+        return TranscriptionEngineUnavailableError(
+            f"{descriptor.label} ({descriptor.id}) cannot run in this deployment: {availability.reason} "
+            + (f"{requirements} " if requirements else "")
+            + "Install it, or select another engine in Settings."
+        )
+
     async def _transcribe_with_fallback_engine(
         self,
         failed_engine_id: str,
         request: TranscriptionRequest,
-        error: TranscriptionResourceError,
+        error: AppError,
     ) -> TranscriptionResult:
         """Run the default engine when the selected one cannot run on this host.
 
-        A resource failure says nothing about the recording — the machine is too
-        small for that model, and will be just as small on every retry. The
-        deployment default (WhisperX) loads a far smaller model, so trying it
-        turns a dead session into a transcript instead of an error the operator
-        only sees the next morning.
+        Neither failure this handles says anything about the recording: the
+        machine is too small for that model, or the model's toolkit is not
+        installed here, and both will be just as true on every retry. The
+        deployment default (WhisperX) is a far smaller model with no optional
+        dependencies, so trying it turns a dead session into a transcript
+        instead of an error the operator only sees the next morning.
 
-        Deliberately narrow: only this one error class, only the default engine,
-        only when that engine reports itself runnable, and never a second hop.
-        The substitution is announced in the run log and recorded on the step
+        Deliberately narrow: only the error classes in
+        ``HOST_CANNOT_RUN_ENGINE_ERRORS``, only the default engine, only when
+        that engine reports itself runnable, and never a second hop. The
+        substitution is announced in the run log and recorded on the step
         metadata, because a transcript produced by an engine nobody selected
         must never look like the selected engine's work. If nothing can stand
         in, the original failure is raised untouched.
@@ -275,7 +303,7 @@ class TranscriptionRouter:
         availability = await fallback.availability()
         if not availability.available:
             logger.error(
-                "Engine '%s' failed on resources and the fallback '%s' is unavailable: %s",
+                "Engine '%s' cannot run here and the fallback '%s' is unavailable: %s",
                 failed_engine_id,
                 fallback_id,
                 availability.reason,
@@ -283,7 +311,10 @@ class TranscriptionRouter:
             raise error
 
         logger.warning(
-            "Engine '%s' ran out of memory; transcribing with '%s' instead.", failed_engine_id, fallback_id
+            "Engine '%s' cannot run here (%s); transcribing with '%s' instead.",
+            failed_engine_id,
+            error.message,
+            fallback_id,
         )
         await self.events.publish(
             session_id,
