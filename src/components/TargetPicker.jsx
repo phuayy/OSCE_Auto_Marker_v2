@@ -21,9 +21,9 @@ import {
   findModelSpec,
   findProvider,
   formatContextWindow,
-  isCustomModel,
   isProviderReady,
   providerList,
+  shouldShowCustomModelField,
 } from '@/lib/llmProviders';
 
 export default function TargetPicker({
@@ -41,22 +41,35 @@ export default function TargetPicker({
   disabled = false,
 }) {
   const provider = findProvider(description, target?.providerId);
-  const custom = isCustomModel(provider, target?.model);
   const modelSpec = findModelSpec(provider, target?.model);
   const providerControlId = `${id}-provider`;
   const modelControlId = `${id}-model`;
 
-  function selectProvider(providerId) {
-    const next = findProvider(description, providerId);
+  // "Other" starts life with an empty model — the id doesn't exist until the
+  // operator types it — so whether the stored model looks custom can't carry
+  // that choice by itself. This is the one bit of intent the component has to
+  // remember on its own; see `shouldShowCustomModelField`.
+  const [customSelected, setCustomSelected] = React.useState(false);
+  const providerId = target?.providerId || '';
+  React.useEffect(() => {
+    setCustomSelected(false);
+  }, [providerId]);
+
+  const custom = shouldShowCustomModelField(provider, target?.model, customSelected);
+
+  function selectProvider(nextProviderId) {
+    const next = findProvider(description, nextProviderId);
     // Switching provider must reset the model: a model id is provider-scoped,
     // and carrying "gpt-4.1" over to Anthropic would 404 at scoring time.
-    onChange({ providerId, model: next ? next.defaultModelId || '' : '' });
+    onChange({ providerId: nextProviderId, model: next ? next.defaultModelId || '' : '' });
   }
 
   function selectModel(value) {
+    const choosingCustom = value === CUSTOM_MODEL;
     // The "custom" option clears the field so the operator types an id; it is
     // never stored as a model name itself.
-    onChange({ providerId: target?.providerId || '', model: value === CUSTOM_MODEL ? '' : value });
+    setCustomSelected(choosingCustom);
+    onChange({ providerId: target?.providerId || '', model: choosingCustom ? '' : value });
   }
 
   return (

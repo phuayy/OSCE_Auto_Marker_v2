@@ -16,6 +16,7 @@ import {
   resolveModelId,
   resolvePrimaryProviderId,
   routingWarnings,
+  shouldShowCustomModelField,
   validateRouting,
 } from '../src/lib/llmProviders.js';
 
@@ -91,6 +92,23 @@ test('a model id outside the shortlist needs the free-text field', () => {
   assert.equal(isCustomModel(NVIDIA, 'nvidia/nemotron-3-super-120b-a12b'), false);
   assert.equal(isCustomModel(NVIDIA, 'some/new-model-2027'), true);
   assert.equal(isCustomModel(NVIDIA, ''), false);
+});
+
+test('picking "Other" shows the free-text field even before anything is typed', () => {
+  // Regression: isCustomModel(NVIDIA, '') is false by design (a fresh, empty
+  // target isn't "custom", just unset yet) — so the picker cannot derive
+  // "operator just chose Other" from the stored model alone. It has to carry
+  // that bit itself, and shouldShowCustomModelField is where it is combined
+  // with the data-driven answer.
+  assert.equal(shouldShowCustomModelField(NVIDIA, '', true), true);
+  assert.equal(shouldShowCustomModelField(NVIDIA, '', false), false);
+  // A model already outside the shortlist still needs the field regardless
+  // of whether "Other" was the thing that put it there this session.
+  assert.equal(shouldShowCustomModelField(NVIDIA, 'some/new-model-2027', false), true);
+  // A recognised model wins once it is actually chosen from the dropdown —
+  // TargetPicker clears the intent flag itself when that happens, but the
+  // helper is defensive either way for a real, listed id.
+  assert.equal(shouldShowCustomModelField(NVIDIA, 'nvidia/nemotron-3-super-120b-a12b', false), false);
 });
 
 test('validation requires a provider and a model', () => {

@@ -79,6 +79,19 @@ export function findModelSpec(provider, modelId) {
   return (provider?.models || []).find((candidate) => candidate.id === String(modelId || '')) || null;
 }
 
+// Whether the picker should show the free-text model field. `isCustomModel`
+// answers this from the stored model alone, and by design says no for an
+// empty one — a fresh, not-yet-loaded target isn't "custom", it just has
+// nothing yet. But "Other — type a model id…" starts life with an empty
+// model too (the id doesn't exist until the operator types it), so that
+// stored-value question can't carry the operator's intent on its own. The
+// component tracks the one bit `isCustomModel` cannot see — "I just picked
+// Other" — and this is where the two are combined, so the OR lives in one
+// tested place rather than being re-derived at the call site.
+export function shouldShowCustomModelField(provider, storedModel, customSelected) {
+  return Boolean(customSelected) || isCustomModel(provider, storedModel);
+}
+
 // Things worth telling the operator before they save this pairing.
 export function routingWarnings({ description, primary, fallback }) {
   const warnings = [];
