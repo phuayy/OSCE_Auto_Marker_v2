@@ -189,3 +189,79 @@ def test_read_paths_are_delegated(tmp_path) -> None:
         assert await service.list_rows() == []
 
     asyncio.run(scenario())
+
+
+def test_mark_all_read_clears_the_badge_in_one_call(tmp_path) -> None:
+    async def scenario() -> None:
+        service, _repository = _service(tmp_path)
+        for index in range(3):
+            await service.emit(NotificationType.SCORING_COMPLETED, f"n{index}", "body")
+        assert await service.unread_count() == 3
+
+        assert await service.mark_all_read() == 3
+        assert await service.unread_count() == 0
+        assert await service.mark_all_read() == 0
+
+    asyncio.run(scenario())
+
+
+class _FrozenChanges:
+    """A change feed whose token never moves and that announces nothing.
+
+    Stands in for the PostgreSQL listener between a commit and the arrival of
+    its own announcement: the token is answered from memory, so nothing but the
+    writer's own eviction can stop the cached feed being served.
+    """
+
+    async def token(self, _tables):
+        return ("notifications", 1)
+
+    def publish_event(self, *_args, **_kwargs):
+        return None
+
+
+def test_own_writes_evict_the_cached_feed_before_any_announcement(tmp_path) -> None:
+    """Read-your-writes in the writing process. Every write path is covered,
+    because a feed served after a mark-all-read that still shows the badge is
+    exactly what the browser would render on its next poll."""
+
+    async def scenario() -> None:
+        from app.core.versioned_cache import VersionedCache
+
+        database = OrmDatabase(tmp_path / "app.sqlite3")
+        service = NotificationService(
+            NotificationRepository(database), changes=_FrozenChanges(), cache=VersionedCache()
+        )
+
+        first = await service.emit(NotificationType.SCORING_COMPLETED, "one", "body", session_id="s-1")
+        assert (await service.feed())["unreadCount"] == 1
+
+        # emit
+        await service.emit(NotificationType.CLIPS_READY, "two", "body", session_id="s-2")
+        assert (await service.feed())["unreadCount"] == 2
+
+        # mark_read
+        assert await service.mark_read(first["id"]) is True
+        after_one = await service.feed()
+        assert after_one["unreadCount"] == 1
+        assert [row["read"] for row in after_one["notifications"]] == [False, True]
+
+        # mark_all_read
+        assert await service.mark_all_read() == 1
+        after_all = await service.feed()
+        assert after_all["unreadCount"] == 0
+        assert all(row["read"] for row in after_all["notifications"])
+
+        # delete_for_session
+        assert await service.delete_for_session("s-2") == 1
+        assert [row["id"] for row in (await service.feed())["notifications"]] == [first["id"]]
+
+        # A write that changed nothing leaves the entry alone: the feed is a
+        # hit, not a rebuild.
+        misses_before = service.cache.misses
+        assert await service.mark_all_read() == 0
+        assert await service.mark_read("missing") is False
+        await service.feed()
+        assert service.cache.misses == misses_before
+
+    asyncio.run(scenario())

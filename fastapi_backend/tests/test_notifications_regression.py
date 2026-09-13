@@ -72,10 +72,40 @@ def test_mark_read_endpoint_still_decrements_the_badge(tmp_path) -> None:
     assert client.post("/api/notifications/does-not-exist/read", headers=headers).status_code == 404
 
 
+def test_read_all_endpoint_clears_the_badge_in_one_request(tmp_path) -> None:
+    """The bell's "dismiss all": one POST, every unread row read, badge zero.
+    The response reports what it changed so a client can tell a no-op retry
+    from a first call."""
+    client = build_test_client(tmp_path)
+    headers = _authed(client)
+    container = client.app.state.container
+
+    for title in ("Clips ready", "Scoring complete", "Processing failed"):
+        asyncio.run(container.notifications.emit(NotificationType.CLIPS_READY, title, "body"))
+    assert client.get("/api/notifications", headers=headers).json()["unreadCount"] == 3
+
+    response = client.post("/api/notifications/read-all", headers=headers)
+    assert response.status_code == 200
+    assert response.json() == {"unreadCount": 0, "markedRead": 3}
+
+    feed = client.get("/api/notifications", headers=headers).json()
+    assert feed["unreadCount"] == 0
+    assert all(row["read"] is True for row in feed["notifications"])
+
+    # Idempotent, so the browser may resend it after a lost response.
+    again = client.post("/api/notifications/read-all", headers=headers)
+    assert again.status_code == 200
+    assert again.json() == {"unreadCount": 0, "markedRead": 0}
+
+    # The per-row route is untouched by the collection-level one beside it.
+    assert client.post("/api/notifications/does-not-exist/read", headers=headers).status_code == 404
+
+
 def test_notification_endpoints_still_require_auth(tmp_path) -> None:
     client = build_test_client(tmp_path)
     assert client.get("/api/notifications").status_code == 401
     assert client.post("/api/notifications/x/read").status_code == 401
+    assert client.post("/api/notifications/read-all").status_code == 401
 
 
 # --- the repository contract that predates the service ---------------------

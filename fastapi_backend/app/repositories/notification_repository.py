@@ -4,7 +4,7 @@ import logging
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from app.database.models import NotificationRecord, utc_now
 from app.database.orm import OrmDatabase
@@ -100,3 +100,22 @@ class NotificationRepository:
             if record.read_at is None:
                 record.read_at = utc_now()
             return True
+
+    async def mark_all_read(self) -> int:
+        """Mark every unread notification read. Returns how many rows changed.
+
+        One UPDATE rather than a loop over :meth:`mark_read`: on PostgreSQL the
+        statement-level trigger then bumps the change counter once and announces
+        one change, so every listening process evicts its cached feed once and
+        every browser refetches once, instead of once per row. ``WHERE read_at
+        IS NULL`` keeps the timestamp a row was first read at, the same rule
+        :meth:`mark_read` follows for one row, and makes the call idempotent: a
+        retry after a lost response changes nothing and reports 0.
+        """
+        async with self.database.transaction() as db:
+            result = await db.execute(
+                update(NotificationRecord)
+                .where(NotificationRecord.read_at.is_(None))
+                .values(read_at=utc_now())
+            )
+        return int(result.rowcount or 0)

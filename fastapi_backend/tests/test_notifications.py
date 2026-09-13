@@ -31,3 +31,29 @@ def test_notification_lifecycle(tmp_path) -> None:
         assert refreshed[1]["read"] is False
 
     asyncio.run(_run())
+
+
+def test_mark_all_read_touches_only_unread_rows(tmp_path) -> None:
+    async def _run() -> None:
+        repository = NotificationRepository(OrmDatabase(tmp_path / "app.sqlite3"))
+        await repository.notify("A", "a")
+        await repository.notify("B", "b")
+        await repository.notify("C", "c")
+        already_read = (await repository.list_rows())[0]["id"]
+        assert await repository.mark_read(already_read) is True
+
+        # Reports what it changed: the two that were still unread, not all three.
+        assert await repository.mark_all_read() == 2
+        assert await repository.unread_count() == 0
+        assert all(row["read"] is True for row in await repository.list_rows())
+
+        # Idempotent: a retry after a lost response has nothing left to mark.
+        assert await repository.mark_all_read() == 0
+        assert await repository.unread_count() == 0
+
+        # A notification raised afterwards is unread like any other.
+        await repository.notify("D", "d")
+        assert await repository.unread_count() == 1
+        assert (await repository.list_rows())[0]["read"] is False
+
+    asyncio.run(_run())

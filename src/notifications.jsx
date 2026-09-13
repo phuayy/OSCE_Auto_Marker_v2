@@ -162,7 +162,34 @@ export function useNotifications(enabled) {
     }
   }, []);
 
-  return { items, unreadCount, toast, dismiss };
+  const dismissAll = useCallback(async () => {
+    // Optimistic, like `dismiss`: every row reads as dismissed and the badge
+    // clears before the server answers. One request marks the whole set — a
+    // loop over `dismiss` would announce one change per row and have every open
+    // tab refetch the feed that many times.
+    setToast(null);
+    setItems((previous) => previous.map((item) => (item.read ? item : { ...item, read: true })));
+    setUnreadCount(0);
+    try {
+      const body = await apiJson('/api/notifications/read-all', {
+        method: 'POST',
+        // Marking what is already read again changes nothing, so a lost
+        // response is safe to send again.
+        idempotent: true,
+      });
+      // Server truth, not the assumed zero: a notification raised while this
+      // request ran is still unread, and the push that announced it may have
+      // landed before this response did.
+      setUnreadCount(Number(body.unreadCount) || 0);
+    } catch {
+      // A single dismiss that fails leaves one row wrong until the safety
+      // poll; this one leaves the whole badge wrong, so re-read the server
+      // rather than show an empty bell for up to a minute.
+      refresh();
+    }
+  }, [refresh]);
+
+  return { items, unreadCount, toast, dismiss, dismissAll };
 }
 
 function DismissButton({ id, onDismiss }) {
@@ -224,7 +251,7 @@ function NotificationRow({ item, onDismiss }) {
 }
 
 /** Header bell with unread badge; click opens a scrollable dropdown overlay. */
-export function NotificationBell({ items, unreadCount, onDismiss }) {
+export function NotificationBell({ items, unreadCount, onDismiss, onDismissAll }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef(null);
 
@@ -256,8 +283,20 @@ export function NotificationBell({ items, unreadCount, onDismiss }) {
       </button>
       {open ? (
         <div className="absolute right-0 top-10 z-[60] w-80 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl">
-          <div className="border-b border-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-800">
-            Notifications
+          <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2.5">
+            <span className="text-sm font-semibold text-slate-800">Notifications</span>
+            {/* Offered only while there is something to dismiss, the same rule
+                each row follows for its own dismiss link; the optimistic badge
+                update hides it the moment it is clicked. */}
+            {onDismissAll && unreadCount > 0 ? (
+              <button
+                type="button"
+                onClick={() => onDismissAll()}
+                className="text-xs font-medium text-slate-500 underline underline-offset-2 hover:text-slate-800"
+              >
+                dismiss all
+              </button>
+            ) : null}
           </div>
           <div className="max-h-80 overflow-y-auto">
             {items.length === 0 ? (

@@ -83,6 +83,7 @@ class NotificationService:
             # The repository already logged the cause.
             return None
 
+        self._evict_feed()
         await self._publish(type_value, notification)
         self._dispatch_webhooks(type_value, notification)
         return notification
@@ -145,7 +146,9 @@ class NotificationService:
         pair per client.
 
         The entry is evicted by a write to ``notifications``, and its token is
-        that table's change counter, so a hit can never be stale.
+        that table's change counter, so a hit can never be stale. This process's
+        own writes evict it directly as well (:meth:`_evict_feed`), so the
+        response to a mark-read is never built from the feed it just changed.
         """
         if self.cache is None or self.changes is None:
             return await self._build_feed(limit)
@@ -164,6 +167,22 @@ class NotificationService:
             "unreadCount": await self.repository.unread_count(),
         }
 
+    def _evict_feed(self) -> None:
+        """Drop the cached feed after a write made by this process.
+
+        The database announces every committed write and the change feed evicts
+        on that announcement, but with the PostgreSQL listener connected the
+        cache token is answered from memory, so between the commit and the
+        announcement's arrival a read in *this* process would still hit the
+        pre-write entry — and the browser that just marked everything read
+        polls, reconnects and refetches on exactly that kind of boundary. The
+        announcement still reaches every other process; this only closes the
+        read-your-writes window in the one that wrote.
+        """
+        if self.cache is None:
+            return
+        self.cache.invalidate_tables(("notifications",))
+
     async def list_rows(self, limit: int = 200) -> list[dict[str, Any]]:
         return await self.repository.list_rows(limit)
 
@@ -171,10 +190,28 @@ class NotificationService:
         return await self.repository.unread_count()
 
     async def mark_read(self, notification_id: str) -> bool:
-        return await self.repository.mark_read(notification_id)
+        marked = await self.repository.mark_read(notification_id)
+        if marked:
+            self._evict_feed()
+        return marked
+
+    async def mark_all_read(self) -> int:
+        """Mark every unread notification read; returns how many were unread.
+
+        One repository call, one transaction, one change announcement — the
+        "dismiss all" control must not be a loop over :meth:`mark_read`, which
+        would announce and refetch once per row.
+        """
+        marked = await self.repository.mark_all_read()
+        if marked:
+            self._evict_feed()
+        return marked
 
     async def delete_for_session(self, session_id: str) -> int:
-        return await self.repository.delete_for_session(session_id)
+        deleted = await self.repository.delete_for_session(session_id)
+        if deleted:
+            self._evict_feed()
+        return deleted
 
     async def notify(self, title: str, body: str, *, session_id: str | None = None) -> None:
         """Backwards-compatible shim for the pre-typed call shape.

@@ -232,6 +232,29 @@ def test_marking_read_is_reflected_in_the_next_feed_read(tmp_path) -> None:
     asyncio.run(scenario())
 
 
+def test_marking_all_read_is_reflected_in_the_next_feed_read(tmp_path) -> None:
+    async def scenario() -> None:
+        database = await _prepared_database(tmp_path)
+        container = create_container(_settings(tmp_path))
+        container.notifications.repository.database = database
+        container.changes.database = database
+        service = container.notifications
+
+        await service.emit(NotificationType.CLIPS_READY, "Clips ready", "3 clips.")
+        await service.emit(NotificationType.SCORING_COMPLETED, "Scoring complete", "Ready.")
+        assert (await service.feed())["unreadCount"] == 2
+
+        assert await service.mark_all_read() == 2
+        after = await service.feed()
+
+        assert after["unreadCount"] == 0
+        assert all(row["read"] is True for row in after["notifications"])
+
+        await database.shutdown()
+
+    asyncio.run(scenario())
+
+
 def test_feed_falls_back_to_the_database_without_a_cache(tmp_path) -> None:
     """The cache is an optimisation, never a requirement: a service built
     without one must still answer correctly."""

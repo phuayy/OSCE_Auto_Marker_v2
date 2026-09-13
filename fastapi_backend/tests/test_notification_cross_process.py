@@ -188,3 +188,23 @@ def test_marking_read_also_announces_a_change(tmp_path) -> None:
         await database.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_marking_all_read_also_announces_a_change(tmp_path) -> None:
+    """Dismiss-all is one UPDATE; the counter must still move so every other
+    tab's badge (and every other process's cached feed) learns about it."""
+
+    async def scenario() -> None:
+        database = await _prepared_database(tmp_path)
+        repository = NotificationRepository(database)
+        await repository.create("A", "a", event_type="clips.ready")
+        await repository.create("B", "b", event_type="clips.ready")
+
+        before = await _counter(database, "notifications")
+        assert await repository.mark_all_read() == 2
+        after = await _counter(database, "notifications")
+
+        assert after > before
+        await database.shutdown()
+
+    asyncio.run(scenario())
