@@ -6,11 +6,13 @@ import { test } from 'node:test';
 
 import {
   UPLOAD_PHASE,
+  activeUploadTrack,
   applyUploadProgress,
   createUploadTrack,
   describeUploadStage,
   isUploadActive,
   uploadElapsedSeconds,
+  withUploadNote,
   withUploadPhase,
 } from '../src/lib/uploadTracking.js';
 
@@ -106,4 +108,55 @@ test('a plan with no known size still renders a stage instead of NaN', () => {
 test('no track means no stage', () => {
   assert.equal(describeUploadStage(null, T0), null);
   assert.equal(isUploadActive(undefined), false);
+});
+
+// --- the overlay's own gauge ---------------------------------------------
+//
+// The upload overlay used to render a milestone checklist and a live console
+// line fed by the per-session SSE stream the app no longer consumes, plus a
+// runtime clock read off `session.pipeline.runtimeSeconds` (0 for the whole
+// transfer). It now renders the active track, the same source the session card
+// reads — so the two can never disagree, and the clock is real.
+
+test('the active track is the one the overlay gauges', () => {
+  const running = track({ phase: UPLOAD_PHASE.UPLOADING, uploadedBytes: 500 });
+  const finished = { ...track({ sessionId: 's0' }), sessionId: 's0', phase: UPLOAD_PHASE.DONE };
+
+  assert.equal(activeUploadTrack({ s0: finished, s1: running }), running);
+});
+
+test('with nothing in flight there is no active track', () => {
+  assert.equal(activeUploadTrack({}), null);
+  assert.equal(activeUploadTrack(null), null);
+  assert.equal(
+    activeUploadTrack({ s1: withUploadPhase(track(), UPLOAD_PHASE.DONE, { atMs: T0 }) }),
+    null,
+  );
+});
+
+test('the earliest-started transfer wins a tie, so the gauge does not flicker', () => {
+  const older = { ...track({ phase: UPLOAD_PHASE.UPLOADING }), sessionId: 'older', startedAtMs: T0 };
+  const newer = { ...track({ phase: UPLOAD_PHASE.UPLOADING }), sessionId: 'newer', startedAtMs: T0 + 5000 };
+
+  assert.equal(activeUploadTrack({ newer, older }).sessionId, 'older');
+  assert.equal(activeUploadTrack({ older, newer }).sessionId, 'older');
+});
+
+test('a resume note reaches the stage as a detail line', () => {
+  const interrupted = withUploadNote(
+    applyUploadProgress(track(), { uploadedBytes: 250, subject: 'video' }),
+    'Connection interrupted — resuming from the last saved part.',
+  );
+
+  const stage = describeUploadStage(interrupted, T0 + 4000);
+  assert.equal(stage.label, 'Uploading video');
+  assert.match(stage.detail, /resuming from the last saved part/);
+});
+
+test('a note describes a moment, so the next phase change clears it', () => {
+  const noted = withUploadNote(track(), 'resuming');
+  const finalizing = withUploadPhase(noted, UPLOAD_PHASE.FINALIZING, { atMs: T0 + 1000 });
+
+  assert.equal(finalizing.note, '');
+  assert.equal(describeUploadStage(finalizing, T0 + 1000).detail, '');
 });

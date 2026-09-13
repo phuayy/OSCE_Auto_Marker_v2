@@ -66,10 +66,19 @@ export function createUploadTrack({ sessionId, totalBytes = 0, startedAtMs = Dat
     totalBytes: toPositiveInteger(totalBytes),
     // What is being sent right now ("video", "case study"), for the label.
     subject: '',
+    // One short line about something the phase itself cannot say — today only
+    // "resuming from the last saved part" after a dropped connection. Cleared
+    // by the next phase change, because it describes a moment, not a state.
+    note: '',
     startedAtMs,
     endedAtMs: null,
     error: '',
   };
+}
+
+export function withUploadNote(track, note) {
+  if (!track) return track;
+  return { ...track, note: String(note || '') };
 }
 
 export function applyUploadProgress(track, { uploadedBytes, subject } = {}) {
@@ -91,6 +100,7 @@ export function withUploadPhase(track, phase, { error = '', atMs = Date.now() } 
   return {
     ...track,
     phase,
+    note: '',
     // Finishing means every byte landed; say so rather than leaving the bar a
     // chunk short because the last progress callback rounded down.
     uploadedBytes: phase === UPLOAD_PHASE.DONE ? track.totalBytes || track.uploadedBytes : track.uploadedBytes,
@@ -132,6 +142,7 @@ export function describeUploadStage(track, nowMs = Date.now()) {
       fraction: byteFraction,
       stepPercent: Math.round(byteFraction * 100),
       elapsedSeconds,
+      detail: track.note || '',
       failed: false,
     };
   }
@@ -141,8 +152,22 @@ export function describeUploadStage(track, nowMs = Date.now()) {
     fraction: track.phase === UPLOAD_PHASE.FINALIZING ? 1 : Math.max(byteFraction, PREPARING_FRACTION),
     stepPercent: track.phase === UPLOAD_PHASE.FINALIZING ? 100 : null,
     elapsedSeconds,
+    detail: track.note || '',
     failed: track.phase === UPLOAD_PHASE.FAILED,
   };
+}
+
+// The transfer this tab is currently driving, or null.
+//
+// The progress overlay needs a track without being told which session id it
+// belongs to: the id is discovered mid-flight (the server mints it at
+// `initiate`), and a ref holding it would not re-render the overlay when the
+// bytes move. Only one upload runs per tab, so "the active one" is unambiguous;
+// ties are broken by start time so the answer is stable across re-renders.
+export function activeUploadTrack(tracks) {
+  const active = Object.values(tracks || {}).filter(isUploadActive);
+  if (active.length === 0) return null;
+  return active.reduce((earliest, track) => (track.startedAtMs < earliest.startedAtMs ? track : earliest));
 }
 
 const TICK_INTERVAL_MS = 1000;
@@ -202,6 +227,11 @@ export function useUploadTracker() {
     [mutate],
   );
 
+  const note = useCallback(
+    (sessionId, text) => mutate(sessionId, (track) => withUploadNote(track, text)),
+    [mutate],
+  );
+
   // Hand the session back to the server's own status gauge.
   const forget = useCallback((sessionId) => {
     if (!sessionId) return;
@@ -221,5 +251,21 @@ export function useUploadTracker() {
 
   const isActive = useCallback((sessionId) => isUploadActive(tracks[String(sessionId)]), [tracks]);
 
-  return { tracks, nowMs, hasActive, begin, reportProgress, setPhase, fail, forget, describe, isActive };
+  // The overlay's own gauge: whichever transfer this tab is driving right now.
+  const describeActive = useCallback(() => describeUploadStage(activeUploadTrack(tracks), nowMs), [tracks, nowMs]);
+
+  return {
+    tracks,
+    nowMs,
+    hasActive,
+    begin,
+    reportProgress,
+    setPhase,
+    fail,
+    note,
+    forget,
+    describe,
+    describeActive,
+    isActive,
+  };
 }

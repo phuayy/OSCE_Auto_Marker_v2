@@ -45,5 +45,25 @@ export default defineConfig({
     alias: {
       '@': path.resolve(__dirname, 'src')
     }
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        // Vendor code changes on a dependency bump; application code changes
+        // every deploy. Splitting them means a UI fix does not invalidate the
+        // ~300 kB of React/motion/icons a returning browser already holds.
+        // Route chunks are produced by the dynamic imports in the app itself
+        // (see src/lib/lazyRoute.jsx) — this map only covers node_modules.
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined;
+          if (/[\/]node_modules[\/](react|react-dom|scheduler)[\/]/.test(id)) return 'vendor-react';
+          if (id.includes('framer-motion') || id.includes('motion-dom') || id.includes('motion-utils')) {
+            return 'vendor-motion';
+          }
+          if (id.includes('lucide-react')) return 'vendor-icons';
+          return 'vendor';
+        },
+      },
+    },
   }
 });

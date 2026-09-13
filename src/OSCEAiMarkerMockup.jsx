@@ -29,6 +29,7 @@ import {
   LogOut,
   MessageSquare,
   Mic,
+  Play,
   PlayCircle,
   RotateCw,
   Scissors,
@@ -54,6 +55,7 @@ import { panelCsvColumns, panelReport } from '@/lib/panelReport';
 import { describeClipExportOutcome } from '@/lib/clipExportOutcome';
 import { indexClipAssessments } from '@/lib/clipAssessments';
 import { describeRerunAction } from '@/lib/rerunAction';
+import { describeStartAction } from '@/lib/sessionStartAction';
 import {
   FEEDBACK_NOT_PROVIDED,
   contentCriteriaState,
@@ -112,7 +114,7 @@ const LONG_DEMO_CHILD_IDS = [
 const LONG_VIDEO_THRESHOLD_SECONDS = 300;
 
 // How often the open workspace re-reads a session while its clip export runs.
-// Faster than the 8s session-list poll because the user is watching this one
+// Faster than the in-flight heartbeat below because the user is watching this one
 // list fill in; each tick is a single lightweight session read.
 const CLIP_EXPORT_POLL_MS = 3000;
 
@@ -347,6 +349,7 @@ export default function OSCEAiMarkerMockup({
   onOpenRubric = null,
   onOpenAnalytics = null,
   onOpenSettings = null,
+  onPreloadRoute = null,
   onLogout = null,
   notifications = null,
 } = {}) {
@@ -395,6 +398,7 @@ export default function OSCEAiMarkerMockup({
   const [renamingSessionId, setRenamingSessionId] = useState(null);
   const [deletingSessionId, setDeletingSessionId] = useState(null);
   const [rerunningSessionId, setRerunningSessionId] = useState(null);
+  const [startingSessionId, setStartingSessionId] = useState(null);
 
   const [session, setSession] = useState(null);
   const [transcript, setTranscript] = useState({ segments: [] });
@@ -403,7 +407,12 @@ export default function OSCEAiMarkerMockup({
   const [audioProfLoadError, setAudioProfLoadError] = useState('');
 
   const [isUploading, setIsUploading] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
+  // A workspace fetch is in flight. Deliberately NOT "a pipeline is running":
+  // this flag used to be called `isProcessing` and drove a modal titled
+  // "Starting Job" with a milestone checklist, so opening a finished session
+  // popped a fake pipeline dialog. Nothing here runs a pipeline — the run is a
+  // queued job whose progress the session card gauges.
+  const [isLoadingWorkspace, setIsLoadingWorkspace] = useState(false);
   // Per-session upload phase, owned by this tab (see lib/uploadTracking.js).
   // It outlives the progress overlay: dismissing that card hides a view, the
   // transfer keeps running and keeps reporting here, where the session card
@@ -415,17 +424,13 @@ export default function OSCEAiMarkerMockup({
   // Session whose transfer this tab is currently driving, so the failure path
   // can mark the right track without threading the id through every throw.
   const activeUploadSessionIdRef = useRef(null);
-  const [processingStage, setProcessingStage] = useState('pipeline');
   const [isDemoFallback, setIsDemoFallback] = useState(false);
+  // The completed run's wall-clock, read off the session payload for the
+  // workspace's Runtime row. Never a live clock: a run in progress is not
+  // enterable, and an upload's own elapsed time comes from its track.
   const [runtimeSeconds, setRuntimeSeconds] = useState(0);
-  const [processingMessage, setProcessingMessage] = useState('Preparing local pipeline...');
-  const [liveLogLine, setLiveLogLine] = useState('Waiting to start...');
-  const [pipelineMilestones, setPipelineMilestones] = useState({
-    started: false,
-    convertedToMp3: false,
-    transcriptionComplete: false,
-    scored: false,
-  });
+  // What this tab is loading, for the loading card's subtitle.
+  const [workspaceLoadLabel, setWorkspaceLoadLabel] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
@@ -905,7 +910,8 @@ export default function OSCEAiMarkerMockup({
 
   const currentVideoUrl = resolveMediaUrl(session?.files?.video?.url) || localVideoUrl;
   const currentSubtitleUrl = resolveMediaUrl(session?.outputs?.subtitleTrack?.url) || null;
-  const isPipelineActive = isUploading || isProcessing;
+  // Something this tab is driving is in flight: a transfer, or a workspace fetch.
+  const isPipelineActive = isUploading || isLoadingWorkspace;
   const currentModeLabel = String(session?.pipeline?.mode || 'gpu').toUpperCase();
 
   // Clip export runs as a queued job, so the open workspace has to poll for its
@@ -1394,10 +1400,8 @@ export default function OSCEAiMarkerMockup({
     setError('');
     setNotice('');
     setIsDemoFallback(false);
-    setIsProcessing(true);
-    setProcessingStage('pipeline');
-    setProcessingMessage('Loading saved session...');
-    setLiveLogLine('Loading session metadata...');
+    setIsLoadingWorkspace(true);
+    setWorkspaceLoadLabel('Loading saved session…');
     setParentSessionSnapshot(null);
     setClipAssessmentRuns({});
     setSelectedClipAssessmentIds(new Set());
@@ -1438,7 +1442,7 @@ export default function OSCEAiMarkerMockup({
     } catch (error) {
       if (!controller.signal.aborted) setSessionIndexError(error.message || 'Failed to open session.');
     } finally {
-      if (workspaceLoadRef.current === controller) setIsProcessing(false);
+      if (workspaceLoadRef.current === controller) setIsLoadingWorkspace(false);
     }
   }
 
@@ -1470,6 +1474,35 @@ export default function OSCEAiMarkerMockup({
           <Loader2 className="h-3 w-3 animate-spin" />
           {uploading ? 'Uploading…' : 'Processing…'}
         </Button>
+      );
+    }
+
+    // Sources committed, run never queued (an upload completed with
+    // autoProcess off). The only thing to do with such a session is start it,
+    // so the card offers exactly that — the endpoint behind this button had no
+    // caller in the browser at all, which is what made `uploaded` a dead end.
+    const start = describeStartAction(sessionEntry);
+    if (start) {
+      return (
+        <>
+          <Button
+            size="sm"
+            onClick={() => startSession(sessionEntry)}
+            disabled={startingSessionId === sessionEntry.id}
+            className="gap-1"
+            title={start.title}
+          >
+            {startingSessionId === sessionEntry.id ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Play className="h-3 w-3" />
+            )}
+            {start.label}
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => openExistingSession(sessionEntry.id)}>
+            Open
+          </Button>
+        </>
       );
     }
 
@@ -1509,6 +1542,26 @@ export default function OSCEAiMarkerMockup({
         Open
       </Button>
     );
+  }
+
+  // Queue the first run of a session whose files are already on the server.
+  // Deliberately NOT the re-run endpoint: re-run deletes the previous run's
+  // artefacts and assessment rows, and this session has none to delete — while
+  // a resumable artefact left by an interrupted attempt is exactly what
+  // /process is designed to pick up.
+  async function startSession(sessionEntry) {
+    const start = describeStartAction(sessionEntry);
+    if (!start) return;
+    setStartingSessionId(sessionEntry.id);
+    try {
+      await apiJson(start.endpoint, { method: 'POST', fallbackMessage: start.failureMessage });
+      setNotice(start.notice);
+      await refreshSessionIndex({ silent: true });
+    } catch (error) {
+      setSessionIndexError(error.message || start.failureMessage);
+    } finally {
+      setStartingSessionId(null);
+    }
   }
 
   // Queue a fresh run of a failed session. The server picks the job from the
@@ -1555,16 +1608,8 @@ export default function OSCEAiMarkerMockup({
     setNotice('');
     setIsDemoFallback(false);
     setIsUploading(false);
-    setIsProcessing(false);
+    setIsLoadingWorkspace(false);
     setRuntimeSeconds(0);
-    setLiveLogLine('Waiting to start...');
-    setProcessingMessage('Preparing local pipeline...');
-    setPipelineMilestones({
-      started: false,
-      convertedToMp3: false,
-      transcriptionComplete: false,
-      scored: false,
-    });
     refreshSessionIndex();
   }
 
@@ -1674,9 +1719,8 @@ export default function OSCEAiMarkerMockup({
   async function openDemoWorkspace(reason) {
     setError('');
     setIsUploading(false);
-    setIsProcessing(true);
-    setProcessingMessage('Loading bundled demo workspace resources...');
-    setLiveLogLine('Loading demo resources...');
+    setIsLoadingWorkspace(true);
+    setWorkspaceLoadLabel('Loading bundled demo workspace…');
     setActiveSegmentId(null);
 
     try {
@@ -1694,33 +1738,19 @@ export default function OSCEAiMarkerMockup({
       setClipAssessmentRuns({});
       setSelectedClipAssessmentIds(new Set());
       setRuntimeSeconds(Math.round(demoBundle.session?.pipeline?.runtimeSeconds || 0));
-      setPipelineMilestones({
-        started: true,
-        convertedToMp3: true,
-        transcriptionComplete: true,
-        scored: true,
-      });
       setNotice(reason);
-      setLiveLogLine('Bundled demo session loaded successfully.');
     } catch (loadError) {
       setError(`Demo workspace failed to load: ${loadError.message || 'unknown error'}`);
       setNotice('');
     } finally {
       setIsUploading(false);
-      setIsProcessing(false);
+      setIsLoadingWorkspace(false);
     }
   }
 
   async function openManualDemoMode() {
     setError('');
     setRuntimeSeconds(0);
-    setLiveLogLine('Manual demo mode enabled. Model execution skipped.');
-    setPipelineMilestones({
-      started: true,
-      convertedToMp3: true,
-      transcriptionComplete: true,
-      scored: true,
-    });
     await openDemoWorkspace('Manual demo mode enabled. Model execution skipped.');
   }
 
@@ -1896,9 +1926,8 @@ export default function OSCEAiMarkerMockup({
   async function openLongVideoDemoWorkspace() {
     setError('');
     setIsUploading(false);
-    setIsProcessing(true);
-    setProcessingMessage('Loading bundled long-video demo workspace...');
-    setLiveLogLine('Loading long-video demo bundle...');
+    setIsLoadingWorkspace(true);
+    setWorkspaceLoadLabel('Loading bundled long-video demo…');
     setActiveSegmentId(null);
 
     try {
@@ -1920,12 +1949,6 @@ export default function OSCEAiMarkerMockup({
       setCommunicationScores(null);
       setVideoDurationSeconds(Number(bundle.remappedClips?.[bundle.remappedClips.length - 1]?.end || 0));
       setRuntimeSeconds(Math.round(bundle.parentSession?.pipeline?.runtimeSeconds || 0));
-      setPipelineMilestones({
-        started: true,
-        convertedToMp3: true,
-        transcriptionComplete: true,
-        scored: true,
-      });
 
       // Mark every clip as completed so the panel renders "View / Re-run"
       // controls and the cohort charts get the trigger they need.
@@ -1944,13 +1967,12 @@ export default function OSCEAiMarkerMockup({
       setNotice(
         'Long-video demo mode: clips already exported, every student assessed. Export disabled.',
       );
-      setLiveLogLine('Long-video demo bundle loaded successfully.');
     } catch (loadError) {
       setError(`Long-video demo failed to load: ${loadError.message || 'unknown error'}`);
       setNotice('');
     } finally {
       setIsUploading(false);
-      setIsProcessing(false);
+      setIsLoadingWorkspace(false);
     }
   }
 
@@ -1997,7 +2019,7 @@ export default function OSCEAiMarkerMockup({
   // breaks. `GET /uploads/{id}` says exactly which parts arrived, so an outage
   // in the middle of a 2 GB video costs the parts in flight, not the file.
   // A 4xx is the server refusing the request itself and is not retried.
-  async function uploadFileWithResume(uploadId, file, fileUpload, onProgress) {
+  async function uploadFileWithResume(uploadId, file, fileUpload, onProgress, sessionId) {
     try {
       return await uploadFileParts(file, fileUpload, onProgress);
     } catch (error) {
@@ -2005,7 +2027,9 @@ export default function OSCEAiMarkerMockup({
       if (refused || fileUpload.strategy !== 'local_multipart') {
         throw error;
       }
-      setProcessingMessage('Connection interrupted — resuming upload from the last saved part...');
+      // Recorded on the track, not in overlay state: the user may well have
+      // dismissed the overlay, and the note has to reach the session card too.
+      uploadTracker.note(sessionId, 'Connection interrupted — resuming from the last saved part.');
       const status = await apiJson(`/api/uploads/${uploadId}`, {
         fallbackMessage: 'Could not read the upload status to resume.',
       });
@@ -2048,7 +2072,6 @@ export default function OSCEAiMarkerMockup({
       throw new Error('Async upload initiation did not return a session.');
     }
     setSession(initiateBody.session);
-    setProcessingMessage('Uploading source files in resumable parts...');
 
     const filePlans = initiateBody.fileUploads || [];
     const videoPlan = filePlans.find((item) => item.kind === 'video');
@@ -2070,19 +2093,21 @@ export default function OSCEAiMarkerMockup({
     // the second file.
     let bytesFromCompletedFiles = 0;
     const updateUploadProgress = (uploadedBytes, totalBytes, plan) => {
-      const percent = totalBytes > 0 ? Math.round((uploadedBytes / totalBytes) * 100) : 0;
       const label = plan.kind === 'caseStudy' ? 'case study' : 'video';
-      setProcessingMessage(`Uploading ${label} (${percent}%)...`);
-      setLiveLogLine(`Uploaded ${label}: ${percent}%`);
       uploadTracker.reportProgress(sessionId, bytesFromCompletedFiles + uploadedBytes, label);
     };
 
-    await uploadFileWithResume(initiateBody.uploadId, videoFile, videoPlan, updateUploadProgress);
+    await uploadFileWithResume(initiateBody.uploadId, videoFile, videoPlan, updateUploadProgress, sessionId);
     bytesFromCompletedFiles += videoFile.size;
-    await uploadFileWithResume(initiateBody.uploadId, caseStudyFile, caseStudyPlan, updateUploadProgress);
+    await uploadFileWithResume(
+      initiateBody.uploadId,
+      caseStudyFile,
+      caseStudyPlan,
+      updateUploadProgress,
+      sessionId,
+    );
 
     uploadTracker.setPhase(sessionId, UPLOAD_PHASE.FINALIZING);
-    setProcessingMessage('Finalizing upload and verifying media...');
     // `complete` is idempotent on the server (a repeat returns the same
     // assembling/committed record), so a lost response is safe to retry.
     await apiJson(`/api/uploads/${initiateBody.uploadId}/complete`, {
@@ -2103,7 +2128,6 @@ export default function OSCEAiMarkerMockup({
     activeUploadSessionIdRef.current = null;
     setSession(null);
     setIsUploading(false);
-    setIsProcessing(false);
     setSessionNameInput('');
     setNotice('Assessment started. Track its stage on the session card — it unlocks when finished.');
     await refreshSessionIndex();
@@ -2155,22 +2179,12 @@ export default function OSCEAiMarkerMockup({
     setClipSummaries(null);
     setDemoLongVideoSummaries(null);
     setRuntimeSeconds(0);
-    setLiveLogLine('started');
-    setPipelineMilestones({
-      started: true,
-      convertedToMp3: false,
-      transcriptionComplete: false,
-      scored: false,
-    });
-    setProcessingStage(uploadFlow === Workflow.LONG ? 'autocrop' : 'pipeline');
     debugPipeline('[pipeline] started');
     // A new run always opens with the overlay visible, whatever the user did
     // with the previous one.
     setUploadOverlayDismissed(false);
     activeUploadSessionIdRef.current = null;
     setIsUploading(true);
-    setIsProcessing(true);
-    setProcessingMessage('Preparing cloud-ready upload...');
 
     try {
       await runAsyncUploadAssessment();
@@ -2185,7 +2199,6 @@ export default function OSCEAiMarkerMockup({
     } finally {
       activeUploadSessionIdRef.current = null;
       setIsUploading(false);
-      setIsProcessing(false);
     }
   }
 
@@ -2797,19 +2810,15 @@ export default function OSCEAiMarkerMockup({
         ...previous,
         [clip.id]: { status: 'running' },
       }));
-      setLiveLogLine(`Demo re-run for ${clip.label || 'clip'}...`);
-      setProcessingStage('pipeline');
-      setProcessingMessage(`Re-running ${clip.label || 'clip'} (demo)...`);
-      setIsProcessing(true);
+      setIsLoadingWorkspace(true);
+      setWorkspaceLoadLabel(`Re-running ${clip.label || 'clip'} (demo)…`);
       // Brief simulated runtime so the spinner is visible.
       await new Promise((resolve) => setTimeout(resolve, 900));
       setClipAssessmentRuns((previous) => ({
         ...previous,
         [clip.id]: { status: SessionStatus.COMPLETED, sessionId: demoChildId },
       }));
-      setIsProcessing(false);
-      setProcessingMessage('');
-      setLiveLogLine('Demo re-run finished; scores unchanged.');
+      setIsLoadingWorkspace(false);
       setNotice(
         `Demo mode: a real re-run would call the NVIDIA assessor again. Showing the cached score for "${clip.label || ''}".`,
       );
@@ -2817,8 +2826,9 @@ export default function OSCEAiMarkerMockup({
     }
 
     // Non-blocking: queue the child assessment and STAY on the parent clip
-    // list. The clip row shows the live stage (driven by the 8-second session
-    // index poll) and flips to "View" when the child session completes. The
+    // list. The clip row shows the live stage (driven by the change stream,
+    // with IN_FLIGHT_HEARTBEAT_MS as its floor) and flips to "View" when the
+    // child session completes. The
     // child is not enterable while in flight (same rule as the session list).
     setError('');
     setClipAssessmentRuns((previous) => ({
@@ -2987,10 +2997,8 @@ export default function OSCEAiMarkerMockup({
 
     setError('');
     setNotice('');
-    setProcessingStage('pipeline');
-    setProcessingMessage(`Loading ${clip.label || 'clip'}...`);
-    setLiveLogLine('Loading saved clip assessment...');
-    setIsProcessing(true);
+    setIsLoadingWorkspace(true);
+    setWorkspaceLoadLabel(`Loading ${clip.label || 'clip'}…`);
 
     try {
       // Demo path: pull the child session straight out of the long-demo bundle.
@@ -3009,7 +3017,7 @@ export default function OSCEAiMarkerMockup({
     } catch (error) {
       if (!controller.signal.aborted) setError(error.message || 'Failed to load clip assessment.');
     } finally {
-      if (workspaceLoadRef.current === controller) setIsProcessing(false);
+      if (workspaceLoadRef.current === controller) setIsLoadingWorkspace(false);
     }
   }
 
@@ -3386,7 +3394,7 @@ export default function OSCEAiMarkerMockup({
                 size="sm"
                 className="gap-2"
                 onClick={goHome}
-                disabled={isUploading || isProcessing}
+                disabled={isUploading || isLoadingWorkspace}
                 title="Return to upload / saved sessions"
               >
                 <ArrowLeft className="h-4 w-4" />
@@ -3417,19 +3425,40 @@ export default function OSCEAiMarkerMockup({
               />
             ) : null}
             {onOpenAnalytics ? (
-              <Button variant="outline" size="sm" className="gap-2" onClick={onOpenAnalytics}>
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-2"
+                onClick={onOpenAnalytics}
+                onMouseEnter={() => onPreloadRoute?.('analytics')}
+                onFocus={() => onPreloadRoute?.('analytics')}
+              >
                 <BarChart3 className="h-4 w-4" />
                 Analytics
               </Button>
             ) : null}
             {onOpenRubric ? (
-              <Button variant="outline" size="sm" className="gap-2" onClick={onOpenRubric}>
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-2"
+                onClick={onOpenRubric}
+                onMouseEnter={() => onPreloadRoute?.('rubric')}
+                onFocus={() => onPreloadRoute?.('rubric')}
+              >
                 <FileText className="h-4 w-4" />
                 Communication Rubric
               </Button>
             ) : null}
             {onOpenSettings ? (
-              <Button variant="outline" size="sm" className="gap-2" onClick={onOpenSettings}>
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-2"
+                onClick={onOpenSettings}
+                onMouseEnter={() => onPreloadRoute?.('settings')}
+                onFocus={() => onPreloadRoute?.('settings')}
+              >
                 <Settings className="h-4 w-4" />
                 Settings
               </Button>
@@ -3679,7 +3708,7 @@ export default function OSCEAiMarkerMockup({
                     size="lg"
                     className="gap-2 bg-gradient-to-r from-cyan-600 to-blue-700 text-white hover:from-cyan-700 hover:to-blue-800"
                     onClick={requestStartAssessment}
-                    disabled={!videoFile || !caseStudyFile || isUploading || isProcessing}
+                    disabled={!videoFile || !caseStudyFile || isUploading || isLoadingWorkspace}
                   >
                     <Wand2 className="h-4 w-4" />
                     {uploadFlow === Workflow.LONG ? 'Start Long Video Assessment' : 'Start Assessment'}
@@ -3689,7 +3718,7 @@ export default function OSCEAiMarkerMockup({
                     variant="outline"
                     className="gap-2"
                     onClick={openManualDemoMode}
-                    disabled={isUploading || isProcessing}
+                    disabled={isUploading || isLoadingWorkspace}
                   >
                     <PlayCircle className="h-4 w-4" />
                     Open Standard Demo
@@ -3699,7 +3728,7 @@ export default function OSCEAiMarkerMockup({
                     variant="outline"
                     className="gap-2 border-violet-300 text-violet-700 hover:bg-violet-50"
                     onClick={openLongVideoDemoWorkspace}
-                    disabled={isUploading || isProcessing}
+                    disabled={isUploading || isLoadingWorkspace}
                   >
                     <Scissors className="h-4 w-4" />
                     Open Long-Video Demo
@@ -3967,7 +3996,7 @@ export default function OSCEAiMarkerMockup({
                     Session: <span title={session?.id || ''}>{session?.name || session?.id || 'Pending'}</span>
                   </div>
                   <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-emerald-700">
-                    Status: {session?.status || (isProcessing ? SessionStatus.PROCESSING : SessionStatus.UPLOADED)}
+                    Status: {session?.status || SessionStatus.UPLOADED}
                   </div>
                 </div>
                 {isClipAssessmentView ? (
@@ -4606,7 +4635,7 @@ export default function OSCEAiMarkerMockup({
                           size="sm"
                           onClick={runSelectedClipAssessments}
                           disabled={
-                            isProcessing || isQueueingSelectedClips || selectedRunnableClipIds.length === 0
+                            isLoadingWorkspace || isQueueingSelectedClips || selectedRunnableClipIds.length === 0
                           }
                           title={
                             selectedRunnableClipIds.length === 0
@@ -4727,7 +4756,7 @@ export default function OSCEAiMarkerMockup({
                                     size="sm"
                                     variant="ghost"
                                     onClick={() => deleteClipAssessment(clip, progressSessionId)}
-                                    disabled={isProcessing || deletingSessionId === progressSessionId}
+                                    disabled={isLoadingWorkspace || deletingSessionId === progressSessionId}
                                     title="Delete this clip's assessment and scores"
                                     className="text-rose-600 hover:bg-rose-50 hover:text-rose-700"
                                   >
@@ -4744,7 +4773,7 @@ export default function OSCEAiMarkerMockup({
                                     size="sm"
                                     variant="ghost"
                                     onClick={() => rerunClipAssessment(clip, progressSessionId)}
-                                    disabled={isProcessing}
+                                    disabled={isLoadingWorkspace}
                                     title="Re-run assessment for this clip (keeps the same record)"
                                     className="text-slate-700 hover:bg-slate-100"
                                   >
@@ -4760,7 +4789,7 @@ export default function OSCEAiMarkerMockup({
                                         size="sm"
                                         variant="outline"
                                         onClick={() => openClipAssessmentView(clip, runState)}
-                                        disabled={isProcessing}
+                                        disabled={isLoadingWorkspace}
                                       >
                                         View
                                       </Button>
@@ -4804,7 +4833,7 @@ export default function OSCEAiMarkerMockup({
                                   <Button
                                     size="sm"
                                     onClick={() => runClipAssessment(clip)}
-                                    disabled={isProcessing}
+                                    disabled={isLoadingWorkspace}
                                   >
                                     Run assessment
                                   </Button>
@@ -5116,9 +5145,20 @@ export default function OSCEAiMarkerMockup({
       </AnimatePresence>
 
       <AnimatePresence>
-        {/* Dismissing this overlay hides it and nothing else — the transfer
-            keeps running and keeps reporting to the session card. */}
-        {(isUploading || isProcessing) && !uploadOverlayDismissed && (
+        {/* The upload overlay. It shows the one thing this tab genuinely knows
+            about that the server does not: how far the bytes have got. It used
+            to also render a "started -> mp3 -> transcript -> scored" milestone
+            checklist and a live console line, both fed by the per-session SSE
+            stream the app stopped consuming — so the rows never ticked and the
+            console line never moved. Worse, the same flag was set while *any*
+            workspace loaded, so opening a finished session popped a modal
+            titled "Starting Job" listing a pipeline that was not running.
+
+            Everything here now comes from the upload track
+            (`lib/uploadTracking.js`), which is also what the session card
+            reads. One source, so the overlay and the card can never disagree,
+            and dismissing this hides a view without stopping a transfer. */}
+        {isUploading && !uploadOverlayDismissed && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -5131,74 +5171,96 @@ export default function OSCEAiMarkerMockup({
               exit={{ scale: 0.96, y: 14 }}
               className="w-full max-w-md"
             >
-              <Card className="border-slate-200 bg-white shadow-xl">
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-lg">
-                    <Loader2 className="h-5 w-5 animate-spin text-cyan-700" />
-                    {isUploading ? 'Uploading Files' : 'Starting Job'}
-                  </CardTitle>
-                  <CardDescription>{processingMessage}</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  <div className="rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-center">
-                    <div className="flex items-center justify-center gap-2 text-xs font-semibold uppercase tracking-wide text-cyan-700">
-                      <Clock3 className="h-3.5 w-3.5" /> Runtime
-                    </div>
-                    <div className="mt-1 text-3xl font-bold text-cyan-900">{formatRuntime(runtimeSeconds)}</div>
-                  </div>
-
-                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                      Live Console Line
-                    </div>
-                    <div className="mt-1 truncate font-mono text-xs text-slate-700">{liveLogLine}</div>
-                  </div>
-
-                  {processingStage === 'pipeline' ? (
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
-                      <div className="mb-2 font-semibold uppercase tracking-wide text-slate-500">Milestones</div>
-                      <div className="mb-2 text-[11px] text-slate-500">
-                        started -&gt; converted to mp3 -&gt; transcript generated -&gt; scored
+              {(() => {
+                // Null in the moment between the transfer being committed and
+                // `isUploading` clearing; the label below covers it.
+                const stage = uploadTracker.describeActive();
+                return (
+                  <Card className="border-slate-200 bg-white shadow-xl">
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2 text-lg">
+                        <Loader2 className="h-5 w-5 animate-spin text-cyan-700" />
+                        Uploading Files
+                      </CardTitle>
+                      <CardDescription>
+                        {stage ? formatProcessingStageLabel(stage) : 'Handing the upload to the server…'}
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      <div className="rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-center">
+                        <div className="flex items-center justify-center gap-2 text-xs font-semibold uppercase tracking-wide text-cyan-700">
+                          <Clock3 className="h-3.5 w-3.5" /> Elapsed
+                        </div>
+                        {/* Derived from the track's own timestamps, so it keeps
+                            time across a dismiss and a re-open. */}
+                        <div className="mt-1 text-3xl font-bold text-cyan-900">
+                          {formatRuntime(stage?.elapsedSeconds || 0)}
+                        </div>
                       </div>
-                      <MilestoneRow label="started" done={pipelineMilestones.started} />
-                      <MilestoneRow label="converted to mp3" done={pipelineMilestones.convertedToMp3} />
-                      <MilestoneRow label="transcript generated" done={pipelineMilestones.transcriptionComplete} />
-                      <MilestoneRow label="scored" done={pipelineMilestones.scored} />
-                    </div>
-                  ) : (
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
-                      <div className="mb-2 font-semibold uppercase tracking-wide text-slate-500">Auto-crop</div>
-                      <div className="text-[11px] text-slate-500">
-                        Detecting bell frequencies and estimating student clip boundaries.
-                      </div>
-                    </div>
-                  )}
 
-                  {/* Hides the card only. Previously this also cleared the
-                      in-flight flags, which stopped the runtime clock and left
-                      the session card with a bare "waiting_for_upload" — while
-                      the transfer it appeared to cancel carried on regardless.
-                      The run now keeps its clock and its percentage on the
-                      Saved Sessions card. */}
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="w-full text-slate-400 hover:text-slate-600"
-                    onClick={() => {
-                      setUploadOverlayDismissed(true);
-                      setNotice(
-                        isUploading
-                          ? 'Upload still running. Track its time and progress on the session card below.'
-                          : 'Still running. Track its stage on the session card below.',
-                      );
-                    }}
-                    title="Hide this card — the upload keeps running"
-                  >
-                    Dismiss
-                  </Button>
-                </CardContent>
-              </Card>
+                      <div>
+                        <div className="flex items-center justify-between text-[11px] text-slate-600">
+                          <span>{stage?.label || 'Finalizing upload'}</span>
+                          <span className="tabular-nums">{Math.round((stage?.fraction || 0) * 100)}%</span>
+                        </div>
+                        <Progress value={(stage?.fraction || 0) * 100} className="mt-1 h-1.5" />
+                        {stage?.detail ? (
+                          <div className="mt-1 text-[11px] text-amber-700">{stage.detail}</div>
+                        ) : null}
+                      </div>
+
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-500">
+                        Scoring starts on the server once the files land. The session card below
+                        gauges every step and unlocks when the run finishes.
+                      </div>
+
+                      {/* Hides the card only. Previously this also cleared the
+                          in-flight flags, which stopped the runtime clock and left
+                          the session card with a bare "waiting_for_upload" — while
+                          the transfer it appeared to cancel carried on regardless.
+                          The run now keeps its clock and its percentage on the
+                          Saved Sessions card. */}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="w-full text-slate-400 hover:text-slate-600"
+                        onClick={() => {
+                          setUploadOverlayDismissed(true);
+                          setNotice(
+                            'Upload still running. Track its time and progress on the session card below.',
+                          );
+                        }}
+                        title="Hide this card — the upload keeps running"
+                      >
+                        Dismiss
+                      </Button>
+                    </CardContent>
+                  </Card>
+                );
+              })()}
             </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {/* Fetching a saved session's artefacts. A separate, smaller card from
+            the upload overlay because it is a different event: nothing is being
+            produced, a few JSON documents are being read. Not dismissible —
+            it clears itself within a second either way. */}
+        {isLoadingWorkspace && !isUploading && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 px-4"
+          >
+            <Card className="w-full max-w-xs border-slate-200 bg-white shadow-xl">
+              <CardContent className="flex items-center gap-3 py-5 text-sm text-slate-700">
+                <Loader2 className="h-4 w-4 animate-spin text-cyan-700" />
+                {workspaceLoadLabel || 'Loading session…'}
+              </CardContent>
+            </Card>
           </motion.div>
         )}
       </AnimatePresence>
@@ -5519,17 +5581,6 @@ function Metric({ label, value }) {
     <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
       <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
       <div className="text-2xl font-bold text-slate-900">{value}</div>
-    </div>
-  );
-}
-
-function MilestoneRow({ label, done }) {
-  return (
-    <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2">
-      <span>{label}</span>
-      <span className={`text-[11px] font-semibold uppercase ${done ? 'text-emerald-700' : 'text-slate-500'}`}>
-        {done ? 'done' : 'pending'}
-      </span>
     </div>
   );
 }

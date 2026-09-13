@@ -2,12 +2,24 @@ import React, { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { getStoredAuth, installFetchAuthShim, logout } from '@/auth';
 import { useHashRoute } from '@/lib/useHashRoute';
+import { LazyBoundary, RouteFallback, lazyComponent, preloadComponent } from '@/lib/lazyRoute';
 import LoginScreen from '@/LoginScreen.jsx';
-import CommunicationRubricPanel from '@/CommunicationRubricPanel.jsx';
-import AnalyticsPage from '@/AnalyticsPage.jsx';
-import SettingsPage from '@/SettingsPage.jsx';
 import OSCEAiMarkerMockup from '@/OSCEAiMarkerMockup.jsx';
 import { NotificationToast, useNotifications } from '@/notifications.jsx';
+
+// The dashboard is what a logged-in user lands on, so it stays in the entry
+// chunk. The other three routes are whole pages reached by a deliberate click:
+// each is its own chunk, fetched on hover (see the mockup's nav handlers) and
+// at the latest when the route changes.
+const CommunicationRubricPanel = lazyComponent(() => import('@/CommunicationRubricPanel.jsx'));
+const AnalyticsPage = lazyComponent(() => import('@/AnalyticsPage.jsx'));
+const SettingsPage = lazyComponent(() => import('@/SettingsPage.jsx'));
+
+const ROUTE_CHUNKS = {
+  rubric: CommunicationRubricPanel,
+  analytics: AnalyticsPage,
+  settings: SettingsPage,
+};
 
 installFetchAuthShim();
 
@@ -35,6 +47,13 @@ export default function AppShell() {
     setAuthState(getStoredAuth() || result);
   }
 
+  // Called from the dashboard's nav on hover/focus: by the time the click
+  // lands the route's chunk is usually already parsed, so the split is
+  // invisible to the user.
+  function preloadRoute(view) {
+    preloadComponent(ROUTE_CHUNKS[view]);
+  }
+
   function handleLogout() {
     logout();
     setAuthState(null);
@@ -56,7 +75,9 @@ export default function AppShell() {
           exit={{ opacity: 0 }}
           transition={{ duration: 0.25 }}
         >
-          <CommunicationRubricPanel onBack={() => navigate({ view: 'dashboard' })} />
+          <LazyBoundary fallback={<RouteFallback label="Loading rubric…" />}>
+            <CommunicationRubricPanel onBack={() => navigate({ view: 'dashboard' })} />
+          </LazyBoundary>
         </motion.div>
       ) : route.view === 'analytics' ? (
         <motion.div
@@ -66,7 +87,9 @@ export default function AppShell() {
           exit={{ opacity: 0 }}
           transition={{ duration: 0.25 }}
         >
-          <AnalyticsPage onBack={() => navigate({ view: 'dashboard' })} />
+          <LazyBoundary fallback={<RouteFallback label="Loading analytics…" />}>
+            <AnalyticsPage onBack={() => navigate({ view: 'dashboard' })} />
+          </LazyBoundary>
         </motion.div>
       ) : route.view === 'settings' ? (
         <motion.div
@@ -76,7 +99,9 @@ export default function AppShell() {
           exit={{ opacity: 0 }}
           transition={{ duration: 0.25 }}
         >
-          <SettingsPage onBack={() => navigate({ view: 'dashboard' })} />
+          <LazyBoundary fallback={<RouteFallback label="Loading settings…" />}>
+            <SettingsPage onBack={() => navigate({ view: 'dashboard' })} />
+          </LazyBoundary>
         </motion.div>
       ) : (
         <motion.div
@@ -93,6 +118,7 @@ export default function AppShell() {
             onOpenRubric={() => navigate({ view: 'rubric' })}
             onOpenAnalytics={() => navigate({ view: 'analytics' })}
             onOpenSettings={() => navigate({ view: 'settings' })}
+            onPreloadRoute={preloadRoute}
             onLogout={handleLogout}
             notifications={notifications}
           />
