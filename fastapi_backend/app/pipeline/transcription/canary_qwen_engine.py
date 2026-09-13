@@ -170,6 +170,19 @@ DESCRIPTOR = EngineDescriptor(
             help="auto uses CUDA when it is available and falls back to CPU.",
         ),
         ParameterSpec(
+            name="dtype",
+            label="Parameter precision",
+            type=ParameterType.ENUM,
+            default="auto",
+            options=("auto", "bfloat16", "float16", "float32"),
+            help=(
+                "Precision the model is built in. auto is bfloat16, the precision the checkpoint is "
+                "published in; float32 doubles the host memory the load needs and is only an escape "
+                "hatch for a NeMo release that misbehaves in reduced precision."
+            ),
+            advanced=True,
+        ),
+        ParameterSpec(
             name="diarize",
             label="Label speakers",
             type=ParameterType.BOOLEAN,
@@ -429,6 +442,8 @@ class CanaryQwenEngine(TranscriptionEngine):
             str(options.get("batchSize")),
             "--device",
             str(options.get("device") or "auto"),
+            "--dtype",
+            str(options.get("dtype") or "auto"),
             "--language",
             request.language or "en",
             "--prompt",

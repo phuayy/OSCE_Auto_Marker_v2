@@ -24,6 +24,7 @@ import faulthandler
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -456,24 +457,73 @@ def streamed_checkpoint_load():
         PyTorchModelHubMixin._load_as_safetensor = original
 
 
-def align_frontend_dtype(model: Any, dtype: Any) -> list[str]:
-    """Keep the mel front-end in float32, hand its features on as ``dtype``.
+# The one module that is not built in the load dtype: it runs an STFT over the
+# raw float32 waveform and hands float32 features to the encoder. Every module
+# whose name ends in this, and everything beneath it, is kept in float32.
+FRONTEND_MODULE_NAME = "preprocessor"
 
-    The preprocessor is the one module that cannot follow the rest into
-    bfloat16: it runs an STFT over the raw float32 waveform and returns float32
-    features no matter what dtype its own buffers are in. The encoder's first
-    convolution then rejects them — ``Input type (float) and bias type (struct
-    c10::BFloat16) should be the same`` — after the whole model has loaded,
-    which is the worst possible moment to find out.
 
-    So the boundary is made explicit rather than widened: the front-end stays
-    float32, where it is correct and costs a filterbank's worth of memory, and
-    its output is cast once on the way into the encoder. Lengths and other
-    integer outputs are passed through untouched.
+@dataclass(frozen=True)
+class DtypeAlignment:
+    """What :func:`align_model_dtype` changed, for the log line the run prints."""
 
-    Returns the modules that were wrapped.
+    dtype: Any
+    frontends: tuple[str, ...]
+    converted: tuple[str, ...]
+
+    def describe(self, sample: int = 3) -> str:
+        shown = ", ".join(self.converted[:sample])
+        if len(self.converted) > sample:
+            shown += f", ... ({len(self.converted)} in total)"
+        converted = f"converted {len(self.converted)} parameter(s) built in float32 ({shown})" if shown else "nothing to convert"
+        frontends = ", ".join(self.frontends) or "none"
+        return f"Aligned the model to {self.dtype}: front-end kept in float32 ({frontends}); {converted}."
+
+
+def _is_frontend(name: str) -> bool:
+    return name.rsplit(".", 1)[-1] == FRONTEND_MODULE_NAME
+
+
+def _under_frontend(name: str, frontends: tuple[str, ...]) -> bool:
+    return any(name == frontend or name.startswith(f"{frontend}.") for frontend in frontends)
+
+
+def align_model_dtype(model: Any, dtype: Any) -> DtypeAlignment:
+    """Make every floating parameter agree on ``dtype`` — except the mel front-end.
+
+    Building the model under a ``dtype`` default only converts what honours
+    that default, and NeMo does not everywhere: each Conformer attention layer
+    creates its relative-position biases with ``torch.FloatTensor(h, d_k)``,
+    which is float32 whatever the default says, and PEFT upcasts the LoRA
+    adapters to float32 on purpose. ``copy_`` then keeps the destination's
+    dtype, so the checkpoint's bfloat16 values are widened into those float32
+    parameters and the mismatch survives the load intact. It surfaced only in
+    the first forward — ``expected scalar type Float but found BFloat16`` where
+    ``q + pos_bias_v`` (promoted to float32) met ``linear_pos(pos_emb)``
+    (bfloat16) — after the whole checkpoint had been streamed in.
+
+    So the load is followed by one invariant rather than a patch per module:
+    every floating-point *parameter* outside the front-end is in ``dtype``.
+    That costs nothing in precision — the checkpoint holds nothing wider than
+    bfloat16 — and the converted names are returned so the next hard-coded
+    float32 a NeMo upgrade introduces shows up in the run's log rather than as
+    a traceback under ``generate``.
+
+    Buffers are left as their owners made them: the Qwen rotary ``inv_freq`` is
+    float32 by design (transformers computes positions in float32 and would
+    not recover the precision from a narrowed copy), and NeMo's positional
+    table is already created in the encoder's dtype.
+
+    The front-end is the exception in the other direction. It cannot follow the
+    rest into bfloat16 — an STFT over the raw float32 waveform returns float32
+    features no matter what dtype its own buffers are in — so it stays float32
+    and its output is cast once on the way into the encoder. Lengths and other
+    integer outputs pass through untouched. Without that cast the encoder's
+    first convolution rejects the features (``Input type (float) and bias type
+    (struct c10::BFloat16) should be the same``).
     """
-    wrapped: list[str] = []
+    frontends: list[str] = []
+    converted: list[str] = []
 
     def cast(value: Any) -> Any:
         if hasattr(value, "is_floating_point") and value.is_floating_point():
@@ -481,7 +531,7 @@ def align_frontend_dtype(model: Any, dtype: Any) -> list[str]:
         return value
 
     for name, module in model.named_modules():
-        if name.rsplit(".", 1)[-1] != "preprocessor":
+        if not _is_frontend(name):
             continue
         module.float()
         original_forward = module.forward
@@ -493,8 +543,18 @@ def align_frontend_dtype(model: Any, dtype: Any) -> list[str]:
             return cast(outputs)
 
         module.forward = forward
-        wrapped.append(name)
-    return wrapped
+        frontends.append(name)
+
+    for name, module in model.named_modules():
+        if _under_frontend(name, tuple(frontends)):
+            continue
+        for parameter_name, parameter in module.named_parameters(recurse=False):
+            if not parameter.is_floating_point() or parameter.dtype == dtype:
+                continue
+            parameter.data = parameter.data.to(dtype)
+            converted.append(f"{name}.{parameter_name}" if name else parameter_name)
+
+    return DtypeAlignment(dtype=dtype, frontends=tuple(frontends), converted=tuple(converted))
 
 
 def load_salm(salm_class: Any, model_id: str, device: str, dtype: Any = None) -> tuple[Any, str]:
@@ -602,7 +662,7 @@ def run(args: argparse.Namespace) -> int:
         flush=True,
     )
     model, device = load_salm(SALM, args.model, device, dtype=dtype)
-    align_frontend_dtype(model, dtype)
+    print(align_model_dtype(model, dtype).describe(), flush=True)
     if hasattr(model, "to"):
         model = model.to(device)
     if hasattr(model, "eval"):

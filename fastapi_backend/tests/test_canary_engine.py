@@ -152,12 +152,13 @@ def test_the_engine_declares_what_it_cannot_do(tmp_path: Path) -> None:
 def test_script_arguments_carry_the_resolved_options(tmp_path: Path) -> None:
     engine, runner, _ = build(tmp_path)
 
-    transcribe(engine, tmp_path, options={"chunkSeconds": 25.0, "batchSize": 2, "device": "cpu"})
+    transcribe(engine, tmp_path, options={"chunkSeconds": 25.0, "batchSize": 2, "device": "cpu", "dtype": "float32"})
 
     args = runner.script_args("canary_qwen_transcribe.py")
     assert args[args.index("--chunk-seconds") + 1] == "25.0"
     assert args[args.index("--batch-size") + 1] == "2"
     assert args[args.index("--device") + 1] == "cpu"
+    assert args[args.index("--dtype") + 1] == "float32"
     assert args[args.index("--model") + 1] == "nvidia/canary-qwen-2.5b"
 
 
