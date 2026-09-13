@@ -26,15 +26,27 @@ Final-year project (FYP) that automatically marks OSCE (Objective Structured Cli
 ```
 OSCE-AI-FYP/
 ├── src/                        # React frontend (Vite)
-│   ├── OSCEAiMarkerMockup.jsx  # ~4500-line monolithic component (main app)
+│   ├── OSCEAiMarkerMockup.jsx  # The dashboard: upload form, session index, session state (entry chunk)
 │   ├── AppShell.jsx            # Root shell, hash-routing driver
 │   ├── MarkingModeSettings.jsx # Settings card: single-model vs panel marking
 │   ├── PanelMarkingSummary.jsx # Score tab: how a panel marked (summary + per-criterion votes)
+│   ├── workspace/              # The opened-session view — its own chunk, loaded by the click that opens a session
+│   │   ├── SessionWorkspace.jsx        # Chunk root: results model, player/download handlers, the whole subtree
+│   │   ├── ManualTimelineEditor.jsx    # Manual crop timeline (separators, labels, Export clips)
+│   │   ├── CommunicationScoresTab.jsx  # Communication rubric tab
+│   │   ├── StudentClipSplitterCard.jsx # Auto-split clip list + per-clip trim
+│   │   └── primitives.jsx              # StatusRow / Metric / FeedbackBlock / ContentSheetEmptyState / IndicatorList
 │   ├── components/
 │   │   └── TargetPicker.jsx    # One provider+model choice; shared by every settings card that asks for one
 │   ├── lib/
 │   │   ├── llmProviders.js     # Routing + marking-mode form logic (pure)
 │   │   ├── panelReport.js      # Reads a sheet's `panel` block for the results view (pure)
+│   │   ├── resultsModel.js     # Score sheets -> what the tabs and the CSV both read (pure)
+│   │   ├── scoreSheet.js       # What to show when a sheet is absent or partial (pure)
+│   │   ├── format.js           # formatRuntime / prettySpeaker / evidence-timestamp parsing (pure)
+│   │   ├── download.js         # downloadBlob + the CSV encoder behind the score sheet (pure)
+│   │   ├── demoSessions.js     # Bundled demo fixtures; imported dynamically, never in the entry chunk
+│   │   ├── anchors.js          # DOM ids the dashboard scrolls to and the workspace renders
 │   │   ├── clipAssessments.js  # Clip -> its newest child session, run status, stale-cut flag (pure)
 │   │   ├── clipExportOutcome.js # What the editor does when an export/recrop job lands (pure)
 │   │   ├── processingStage.js  # Session card's stage gauge, from the projection's `steps` (pure)
@@ -697,7 +709,12 @@ own publish calls, which `publish` no-ops anyway.
 
 ## Frontend Architecture
 
-Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~4500 lines) rendered by [AppShell.jsx](src/AppShell.jsx).
+Two components, split along what a first paint needs.
+[OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) is the dashboard — upload
+form, session index, and the session state everything else reads — rendered by
+[AppShell.jsx](src/AppShell.jsx).
+[workspace/SessionWorkspace.jsx](src/workspace/SessionWorkspace.jsx) is the
+opened-session view, and loads as its own chunk.
 
 **Hash routing** — no react-router:
 - Routes: `#/` (dashboard), `#/session/<id>` (workspace), `#/rubric`.
@@ -724,10 +741,48 @@ Vendor code is split from application code in
 icon set are their own chunks, so shipping a UI fix does not invalidate the
 ~280 kB of dependencies a returning browser already holds.
 
-The dashboard monolith ([OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx)) is
-still one chunk. Splitting the session workspace (clip editor, results tabs) out
-of it is the next step and needs the render subtrees lifted into their own
-modules first.
+**The session workspace is the fourth lazy route, and it is the one that pays.**
+The same criterion applies to it as to the other three, only more strongly: a
+session *in flight is not enterable at all*, so reaching the workspace is always
+a deliberate second click on a terminal session. Everything only it can show —
+the player, the crop timeline, the four result tabs, the clip-assessment list,
+`LongVideoSummaryCharts`, `PanelMarkingSummary` — now lives under
+[src/workspace/](src/workspace/) and loads with it. The bundled demo fixtures
+([lib/demoSessions.js](src/lib/demoSessions.js)) went the same way behind
+`await import(...)`, because a demo button is a click too. Entry chunk: 186 kB
+-> 105 kB (53.6 -> 32.1 kB gzipped); the dashboard file, 5,872 -> 3,160 lines.
+
+Three things make the seam honest rather than cosmetic:
+
+- **The dashboard still owns the session state.** The upload flow, the
+  change-stream refresh and the clip handlers all write the same document;
+  splitting *that* is a different and riskier change. What moved is everything
+  only the view uses — the results model, the player and download handlers, and
+  the three effects that are meaningless with no player mounted (they no longer
+  run while the dashboard is open at all). State and setters are passed in, so
+  every other flow is untouched. `manualTimeline` and `clipSplitterSharedProps`
+  travel as bundles, the pattern the file already used.
+- **Preload on intent, twice over.** `beginWorkspaceLoad()` warms the chunk at
+  the same moment it starts fetching the session, so the two arrive together;
+  `OpenSessionButton` warms it on hover and focus as well. The split is
+  invisible unless the fetch beats the chunk, and `PanelFallback` covers that.
+- **The derivations became a pure module.** `aiCriteria`, the communication
+  criteria and both scoring summaries were `useMemo` bodies inside the
+  component: untestable, and in the entry chunk. They are
+  [lib/resultsModel.js](src/lib/resultsModel.js) now, and `test/resultsModel.test.mjs`
+  pins down the rules an examiner depends on — a critical No fails, fewer than
+  half Yes fails, an unrecognised communication label scores zero rather than
+  silently the maximum. The tabs and `downloadScoreSheet` read the same values,
+  so the CSV cannot disagree with the tab it came from.
+
+`test/bundleSplit.test.mjs` is what keeps it split. It walks the *static* import
+graph from `src/main.jsx` and fails if any lazy-only module is reachable,
+because the regression is silent: one `import { X } from '@/workspace/...'` for
+a single constant pulls the whole module back into the entry chunk and nothing
+breaks — the bundle just grows again. That is also why
+[lib/anchors.js](src/lib/anchors.js) exists: the dashboard scrolls to a DOM id
+the workspace renders, and importing it from the workspace would have done
+exactly that.
 
 **Non-blocking processing UX (no progress overlay, no SSE consumption):**
 
