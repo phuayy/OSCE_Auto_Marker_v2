@@ -37,7 +37,7 @@ class AssessmentService:
     async def _load_payload(self, output: Any) -> dict[str, Any] | None:
         if not isinstance(output, dict):
             return None
-        return await read_artifact_payload(output, prefer_legacy=True)
+        return await read_artifact_payload(output)
 
     def _result_payload(self, result_type: str, output: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         summary = payload.get("scoring_summary") if isinstance(payload.get("scoring_summary"), dict) else {}
