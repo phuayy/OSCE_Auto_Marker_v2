@@ -3125,10 +3125,10 @@ function OpenSessionButton({ onOpen }) {
 
 function UploadCard({ icon, title, subtitle, fileName, onPick }) {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-      <div className="mb-3 flex items-center gap-3">
+    <div className="flex h-full flex-col rounded-2xl border border-slate-200 bg-slate-50 p-4">
+      <div className="mb-3 flex items-start gap-3">
         <div className="rounded-xl bg-gradient-to-br from-cyan-600 to-blue-700 p-2.5 text-white">{icon}</div>
-        <div>
+        <div className="min-h-[2.5rem]">
           <div className="text-sm font-semibold text-slate-900">{title}</div>
           <div className="text-xs text-slate-500">{subtitle}</div>
         </div>
@@ -3137,7 +3137,7 @@ function UploadCard({ icon, title, subtitle, fileName, onPick }) {
       <button
         type="button"
         onClick={onPick}
-        className="flex h-28 w-full flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-white text-slate-600 transition hover:border-cyan-500 hover:bg-cyan-50"
+        className="flex min-h-28 w-full flex-1 flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-white text-slate-600 transition hover:border-cyan-500 hover:bg-cyan-50"
       >
         <UploadCloud className="h-6 w-6" />
         <span className="text-sm font-medium">Click to upload</span>
