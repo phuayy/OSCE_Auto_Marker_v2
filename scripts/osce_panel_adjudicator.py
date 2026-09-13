@@ -46,7 +46,6 @@ from content_marking import (
     compute_scoring_summary,
     enforce_expected_resolutions_array,
     marker_letter,
-    read_file_as_context_text,
     to_repo_relative,
     validate_adjudication_output,
     validate_feedback_output,
