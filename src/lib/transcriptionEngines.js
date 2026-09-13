@@ -6,9 +6,6 @@
 // send lives here, separately from the component, so it is unit-testable
 // (see test/transcriptionEngines.test.mjs).
 
-// Value the API uses for "whichever engine this deployment configured".
-export const DEPLOYMENT_DEFAULT_ENGINE = '';
-
 // Resolve which engine the form should show as selected: the operator's stored
 // choice, else the deployment default, else the first engine we know about.
 export function resolveSelectedEngineId(description) {

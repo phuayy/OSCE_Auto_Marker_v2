@@ -1,8 +1,9 @@
 // Pure logic for the Clip Assessments batch-run selection: which clips can be
 // checked, the select-all toggle state, and how a selected clip is dispatched
 // (fresh run vs re-run of its existing child session). No React, no DOM —
-// testable with plain node (`node src/lib/clipSelection.test.mjs`).
+// testable with plain node (see test/clipSelection.test.mjs).
 
+import { RUN_STATUS } from './clipAssessments.js';
 import { INTERMISSION_KIND } from './manualTimeline.js';
 
 /**
@@ -14,7 +15,7 @@ export function selectableClipIds(clips, runStates) {
   return (Array.isArray(clips) ? clips : [])
     .filter(
       (clip) =>
-        clip?.id && clip.kind !== INTERMISSION_KIND && runStates?.[clip.id]?.status !== 'running'
+        clip?.id && clip.kind !== INTERMISSION_KIND && runStates?.[clip.id]?.status !== RUN_STATUS.RUNNING
     )
     .map((clip) => clip.id);
 }
@@ -43,9 +44,9 @@ export function toggleSelection(selectedIds, clipId) {
  * polled session index).
  */
 export function planClipDispatch(runState, indexEntry) {
-  const status = runState?.status || indexEntry?.status || 'idle';
+  const status = runState?.status || indexEntry?.status || RUN_STATUS.IDLE;
   const childSessionId = runState?.sessionId || indexEntry?.sessionId || null;
-  if (childSessionId && (status === 'completed' || status === 'failed')) {
+  if (childSessionId && (status === RUN_STATUS.COMPLETED || status === RUN_STATUS.FAILED)) {
     return { mode: 'rerun', childSessionId, status };
   }
   return { mode: 'run', childSessionId: null, status };

@@ -73,7 +73,6 @@ export default function SessionWorkspace({
   localVideoUrl,
   isDemoFallback,
   runtimeSeconds,
-  error,
   notice,
   isLoadingWorkspace,
   isClipAssessmentView,

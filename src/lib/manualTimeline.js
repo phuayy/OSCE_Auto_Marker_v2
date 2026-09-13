@@ -1,7 +1,7 @@
 // Pure logic for the manual-crop timeline editor: hit-testing, separator
 // insert/delete, segment kinds (session vs intermission) and the right-click
 // context-menu enablement matrix. No React, no DOM — testable with plain node
-// (`node src/lib/manualTimeline.test.mjs`).
+// (see test/manualTimeline.test.mjs).
 //
 // Data model: N separators (`boundaries`, seconds, sorted) partition the video
 // into N+1 segments. `labels[i]` and `kinds[i]` describe segment i (between
@@ -24,10 +24,6 @@ const AUTO_LABEL_PATTERN = /^(Student \d+|Intermission)$/;
 function toFiniteNumber(value, fallback = 0) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : fallback;
-}
-
-export function clampTime(seconds, duration) {
-  return Math.min(Math.max(0, toFiniteNumber(seconds)), Math.max(0, toFiniteNumber(duration)));
 }
 
 /** Convert a pointer x-offset inside the timeline element to a video time. */

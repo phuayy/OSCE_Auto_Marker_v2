@@ -9,6 +9,7 @@ import { uploadFileToResumableSession } from '@/lib/resumableUpload';
 import { DEFAULT_PART_CONCURRENCY, recordedPartNumbers, uploadParts } from '@/lib/partUpload';
 import { CONNECTION_STATUS, useConnectionStatus } from '@/lib/connectionStatus';
 import { CLIP_ASSESSMENTS_ANCHOR_ID } from '@/lib/anchors';
+import { coalesceAsync } from '@/lib/coalesce';
 import { clampNumber, formatRuntime } from '@/lib/format';
 import { LazyBoundary, PanelFallback, lazyComponent, preloadComponent } from '@/lib/lazyRoute';
 import { ConnectionBadge, ConnectionNotice } from '@/components/ConnectionStatus';
@@ -29,8 +30,6 @@ import {
   FileText,
   Loader2,
   LogOut,
-  MessageSquare,
-  Mic,
   Play,
   PlayCircle,
   RotateCw,
@@ -236,6 +235,8 @@ export default function OSCEAiMarkerMockup({
   const videoInputRef = useRef(null);
   const caseStudyInputRef = useRef(null);
   const clipExportWasWatchedRef = useRef(false);
+  // Issue number of the newest GET /api/sessions; see refreshSessionIndex.
+  const sessionIndexRequestSeqRef = useRef(0);
   const videoPlayerRef = useRef(null);
   const videoPlayerSectionRef = useRef(null);
   const timelineContainerRef = useRef(null);
@@ -677,8 +678,24 @@ export default function OSCEAiMarkerMockup({
   //
   // A `ready` event means the stream just (re)connected, so anything could have
   // happened while it was down — refetch unconditionally in that case.
+  //
+  // Both this and the heartbeat below go through one single-flight wrapper:
+  // a run writes the session many times a minute (progress readings, step
+  // transitions, the job mirror — two branches at once under
+  // PARALLEL_SCORING), and on PostgreSQL every one of those is its own event.
+  // Refetching per event cost a GET per write and let a slow, older response
+  // land after a newer one. Coalesced, a burst is one request plus one
+  // catch-up, and responses never overlap. The ref keeps the wrapper stable
+  // across renders without freezing the first render's closure.
+  const refreshSessionIndexRef = useRef(refreshSessionIndex);
+  refreshSessionIndexRef.current = refreshSessionIndex;
+  const refreshSessionIndexInBackground = useMemo(
+    () => coalesceAsync(() => refreshSessionIndexRef.current({ silent: true })),
+    [],
+  );
+
   useChangeStream(() => {
-    refreshSessionIndex({ silent: true });
+    refreshSessionIndexInBackground();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, ['sessions', 'jobs']);
 
@@ -707,7 +724,7 @@ export default function OSCEAiMarkerMockup({
       if (cancelled || isHidden()) {
         return;
       }
-      refreshSessionIndex({ silent: true });
+      refreshSessionIndexInBackground();
     }
 
     const intervalId = window.setInterval(tick, IN_FLIGHT_HEARTBEAT_MS);
@@ -797,10 +814,18 @@ export default function OSCEAiMarkerMockup({
     if (!silent) {
       setSessionIndexLoading(true);
     }
+    // Background refreshes are single-flight, but a user-triggered one can
+    // still overlap them. Whichever request was *issued* last is the truth;
+    // a response for an earlier request is dropped rather than allowed to
+    // roll the cards back to a stage the run has already left.
+    const requestSeq = (sessionIndexRequestSeqRef.current += 1);
     try {
       const body = await apiJson('/api/sessions', {
         fallbackMessage: 'Failed to load sessions.',
       });
+      if (requestSeq !== sessionIndexRequestSeqRef.current) {
+        return null;
+      }
 
       const sessions = Array.isArray(body.sessions) ? body.sessions : [];
       setSessionIndex(sessions);
@@ -2701,30 +2726,6 @@ export default function OSCEAiMarkerMockup({
                 </CardContent>
               </Card>
 
-              {/* <Card className="border-slate-200 bg-white shadow-sm">
-                <CardHeader>
-                  <CardTitle>Pipeline Overview</CardTitle>
-                  <CardDescription>Current local processing steps</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3 text-sm text-slate-700">
-                  <FeatureRow
-                    icon={<UploadCloud className="h-4 w-4" />}
-                    text="Upload video and case-study PDF to storage/input"
-                  />
-                  <FeatureRow icon={<Mic className="h-4 w-4" />} text="Extract MP3 into storage/output/audio" />
-                  <FeatureRow icon={<Brain className="h-4 w-4" />} text="Run WhisperX locally (GPU/CPU configurable)" />
-                  <FeatureRow icon={<MessageSquare className="h-4 w-4" />} text="Save normalized transcript JSON" />
-                  <FeatureRow
-                    icon={<FileSpreadsheet className="h-4 w-4" />}
-                    text="Score transcript using rubric at end of case-study PDF"
-                  />
-                  <FeatureRow
-                    icon={<PlayCircle className="h-4 w-4" />}
-                    text="Review video + transcript in synced workspace"
-                  />
-                </CardContent>
-              </Card> */}
-
               {notifications ? (
                 <NotificationFeed
                   items={notifications.items}
@@ -2752,7 +2753,6 @@ export default function OSCEAiMarkerMockup({
               localVideoUrl={localVideoUrl}
               isDemoFallback={isDemoFallback}
               runtimeSeconds={runtimeSeconds}
-              error={error}
               notice={notice}
               isLoadingWorkspace={isLoadingWorkspace}
               isClipAssessmentView={isClipAssessmentView}
@@ -3146,15 +3146,6 @@ function UploadCard({ icon, title, subtitle, fileName, onPick }) {
       <div className="mt-3 truncate text-xs font-medium text-slate-700">
         {fileName || 'No file selected'}
       </div>
-    </div>
-  );
-}
-
-function FeatureRow({ icon, text }) {
-  return (
-    <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-      <span className="text-cyan-700">{icon}</span>
-      <span>{text}</span>
     </div>
   );
 }
