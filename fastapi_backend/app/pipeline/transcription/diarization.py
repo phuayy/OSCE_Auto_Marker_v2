@@ -134,11 +134,7 @@ class PyannoteDiarizer:
             args,
             "Speaker diarization (pyannote)",
             env=self.python_env(),
-            on_output=lambda stream, text: self.events.publish(
-                session_id,
-                "log",
-                {"source": f"diarization-{stream}", "message": text},
-            ),
+            on_output=self.events.log_sink(session_id, "diarization"),
         )
         if not output_path.exists():
             raise RuntimeError("Diarization produced no output file.")

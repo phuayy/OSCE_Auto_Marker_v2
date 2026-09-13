@@ -146,11 +146,7 @@ class TranscriptPreprocessor:
             args,
             "LLM transcript preprocess",
             env=await self.preprocess_env(),
-            on_output=lambda stream, text: self.events.publish(
-                str(session["id"]),
-                "log",
-                {"source": f"llm-preprocess-{stream}", "message": text},
-            ),
+            on_output=self.events.log_sink(str(session["id"]), "llm-preprocess"),
         )
         if not output_path.exists():
             raise RuntimeError("Transcript preprocessor did not produce an output file.")

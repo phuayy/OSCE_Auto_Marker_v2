@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,6 +21,40 @@ class EventService:
         self._states: dict[str, SessionEventState] = {}
         self._client_counter = 0
 
+    @property
+    def enabled(self) -> bool:
+        """Whether anything published here can reach a client.
+
+        Per-session SSE is off by default (``SESSION_SSE_ENABLED``): the browser
+        drives live state from the change feed instead. Producers ask this
+        *before* building a per-line callback, because the cost of the dead path
+        is not the no-op ``publish`` at the end of it — it is one
+        ``run_coroutine_threadsafe`` hop per line of subprocess output, from the
+        reader thread into the event loop, for a WhisperX run that emits
+        thousands of them.
+        """
+        return bool(self.settings.session_sse_enabled)
+
+    def log_sink(self, session_id: str, source: str) -> Callable[[str, str], Awaitable[None]] | None:
+        """A ``CommandRunner.on_output`` callback that forwards each line as a
+        ``log`` event — or ``None`` when nothing would receive it.
+
+        ``None`` is the point: ``CommandRunner`` skips the whole cross-thread
+        hand-off when there is no callback, so a disabled stream costs nothing
+        per line instead of costing a scheduled coroutine per line.
+
+        Only for handlers that *just* log. A handler that also parses progress
+        (WhisperX, the person detector) must stay installed whatever SSE is
+        doing, and guards its own publish call.
+        """
+        if not self.enabled:
+            return None
+
+        async def forward(stream: str, text: str) -> None:
+            await self.publish(session_id, "log", {"source": f"{source}-{stream}", "message": text})
+
+        return forward
+
     def get_state(self, session_id: str) -> SessionEventState:
         if session_id not in self._states:
             self._evict_idle_states_if_needed()
@@ -27,7 +62,7 @@ class EventService:
         return self._states[session_id]
 
     async def publish(self, session_id: str, event_name: str, payload: dict[str, Any] | None = None) -> None:
-        if not self.settings.session_sse_enabled:
+        if not self.enabled:
             return
         state = self.get_state(session_id)
         event_payload = {

@@ -912,7 +912,10 @@ class MediaPipeline:
                     },
                 )
 
-        task = asyncio.create_task(heartbeat())
+        # The heartbeat exists so a client watching the event stream sees that a
+        # silent 90-second model load is not a stall. With no stream to watch it
+        # is a timer publishing into a no-op, so it is not started at all.
+        task = asyncio.create_task(heartbeat()) if self.events.enabled else None
         try:
             await self.runner.run(
                 self.settings.whisperx_bin,
@@ -924,9 +927,10 @@ class MediaPipeline:
                 on_output=self._build_whisperx_output_handler(str(session["id"]), on_progress),
             )
         finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
         completed_outputs = await self.find_existing_whisperx_outputs(session, audio_info)
         if not completed_outputs:

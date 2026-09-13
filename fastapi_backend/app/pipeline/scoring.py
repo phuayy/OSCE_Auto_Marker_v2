@@ -288,11 +288,7 @@ class ScoringPipeline:
             args,
             "Audio professionalism extraction",
             env=await self.scoring_env({"FFMPEG_BIN": self.settings.ffmpeg_bin}),
-            on_output=lambda stream, text: self.events.publish(
-                str(session["id"]),
-                "log",
-                {"source": f"audio-prof-{stream}", "message": text},
-            ),
+            on_output=self.events.log_sink(str(session["id"]), "audio-prof"),
         )
         if not output_path.exists():
             raise RuntimeError("Audio professionalism extractor did not produce an output file.")
@@ -342,11 +338,7 @@ class ScoringPipeline:
             args,
             "Communication scoring",
             env=await self.scoring_env(),
-            on_output=lambda stream, text: self.events.publish(
-                str(session["id"]),
-                "log",
-                {"source": f"communication-scorer-{stream}", "message": text},
-            ),
+            on_output=self.events.log_sink(str(session["id"]), "communication-scorer"),
         )
         if not output_path.exists():
             raise RuntimeError("Communication scorer did not produce an output file.")
