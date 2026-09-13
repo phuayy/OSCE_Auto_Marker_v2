@@ -118,7 +118,14 @@ SESSION_NAME_MAX_LENGTH = 80
 
 
 class UploadMetadataMixin(BaseModel):
-    """Shared, validated upload metadata (async initiate + legacy multipart)."""
+    """Validated upload metadata for the chunked upload's ``initiate`` call.
+
+    A mixin rather than plain fields on the request because these invariants —
+    a trimmed, bounded name; a known workflow; a segmentation method that only
+    means anything to a long upload — belong to the *session being created*,
+    not to one transport. It stays a mixin so a second ingest path cannot
+    reintroduce its own copy of them.
+    """
 
     workflow: UploadWorkflow = Workflow.STANDARD
     # Optional user-chosen session name; blank/None falls back to an
@@ -194,41 +201,6 @@ class UploadMetadataMixin(BaseModel):
         if self.segmentationOptions is None:
             return None
         return self.segmentationOptions.resolved()
-
-
-class LegacyUploadForm(UploadMetadataMixin):
-    """Validated form fields of the legacy single-shot POST /upload.
-
-    The legacy route is a compatibility fallback for older clients, so an
-    unknown segmentation value degrades to None (server default) instead of
-    rejecting the whole multi-gigabyte upload.
-    """
-
-    @field_validator("segmentation", mode="before")
-    @classmethod
-    def drop_unknown_segmentation(cls, value: Any) -> str | None:
-        if value in {None, ""}:
-            return None
-        cleaned = str(value).strip().lower()
-        if cleaned == "human":
-            cleaned = SegmentationMethod.PERSON
-        return cleaned if cleaned in {SegmentationMethod.BELLS, SegmentationMethod.PERSON} else None
-
-    @field_validator("segmentationOptions", mode="before")
-    @classmethod
-    def drop_unusable_segmentation_options(cls, value: Any) -> Any:
-        """Same leniency as the segmentation method itself: unparseable or
-        unknown options fall back to the detector default rather than costing
-        the client its whole upload."""
-        if value is None or value == "":
-            return None
-        try:
-            parsed = coerce_segmentation_options(value)
-            if parsed is None:
-                return None
-            return PersonSegmentationOptions.model_validate(parsed)
-        except (ValueError, TypeError):
-            return None
 
 
 class InitiateUploadRequest(UploadMetadataMixin):

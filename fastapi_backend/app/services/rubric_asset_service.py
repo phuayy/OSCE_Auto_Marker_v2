@@ -11,18 +11,6 @@ class RubricAssetService:
     def __init__(self, repository: RubricAssetRepository) -> None:
         self.repository = repository
 
-    async def register_case_study_meta(self, meta: dict[str, Any]) -> dict[str, Any]:
-        path = Path(str(meta.get("absolutePath") or ""))
-        registration = await self.repository.register_file(
-            path=path,
-            rubric_type="case_study",
-            original_name=str(meta.get("originalName") or meta.get("fileName") or path.name),
-            mime_type=meta.get("mimeType"),
-            public_url=meta.get("url"),
-        )
-        await self._remove_duplicate_upload(registration, path)
-        return self._merge_case_study_meta(meta, registration)
-
     async def register_case_study_storage_ref(
         self,
         *,
@@ -76,21 +64,3 @@ class RubricAssetService:
         if canonical_path == uploaded_path:
             return
         await asyncio.to_thread(lambda: uploaded_path.unlink(missing_ok=True))
-
-    @staticmethod
-    def _merge_case_study_meta(meta: dict[str, Any], registration: RubricAssetRegistration) -> dict[str, Any]:
-        asset = registration.asset
-        merged = dict(meta)
-        merged.update(
-            {
-                "rubricAssetId": asset["id"],
-                "rubricDeduplicated": registration.is_duplicate,
-                "contentSha256": asset["contentSha256"],
-                "absolutePath": asset["absolutePath"],
-                "fileName": asset["fileName"],
-                "sizeBytes": asset["sizeBytes"],
-            }
-        )
-        if asset.get("publicUrl"):
-            merged["url"] = asset["publicUrl"]
-        return merged

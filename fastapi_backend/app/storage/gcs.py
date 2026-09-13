@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import UploadFile
 
 from app.core.config import Settings
 from app.core.exceptions import AppError
@@ -40,7 +39,6 @@ from app.core.utils import atomic_replace, sanitize_file_name
 from app.domain.enums import UploadStatus
 from app.storage.base import (
     PreparedUploadFile,
-    SourceFileKind,
     build_object_key,
     build_storage_ref,
     find_upload_file,
@@ -185,83 +183,6 @@ class GcsObjectStorageService:
             part_size_bytes=self.settings.upload_part_size_bytes,
             upload_url=str(session_uri),
         )
-
-    async def save_uploaded_source(
-        self,
-        upload: UploadFile,
-        *,
-        session_id: str,
-        kind: SourceFileKind,
-        max_bytes: int,
-    ) -> dict[str, Any]:
-        """Single-shot upload path: stream the request body into the bucket."""
-        safe_name = sanitize_file_name(upload.filename or "file")
-        key = build_object_key(
-            object_prefix=self.settings.object_prefix,
-            session_id=session_id,
-            kind=kind,
-            safe_name=safe_name,
-        )
-        content_type = upload.content_type or "application/octet-stream"
-        # Buffer to the local cache first: the bytes have to be hashed and
-        # size-checked before anything is published, and a rejected oversize
-        # upload must never leave a partial object in the bucket.
-        staged_path = self.settings.gcs_cache_root / ".staging" / f"{uuid4().hex}-{safe_name}"
-
-        def _stage() -> tuple[str, int]:
-            staged_path.parent.mkdir(parents=True, exist_ok=True)
-            upload.file.seek(0)
-            hasher = hashlib.sha256()
-            copied = 0
-            try:
-                with staged_path.open("wb") as buffer:
-                    while True:
-                        chunk = upload.file.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        copied += len(chunk)
-                        if copied > max_bytes:
-                            raise AppError(
-                                f"Uploaded file exceeds the {max_bytes // (1024 * 1024)} MB limit.",
-                                status_code=413,
-                            )
-                        hasher.update(chunk)
-                        buffer.write(chunk)
-                return hasher.hexdigest(), copied
-            except Exception:
-                staged_path.unlink(missing_ok=True)
-                raise
-
-        digest, size_bytes = await asyncio.to_thread(_stage)
-        blob = await self._blob(key)
-        try:
-            await asyncio.to_thread(blob.upload_from_filename, str(staged_path), content_type=content_type)
-        except Exception:
-            await asyncio.to_thread(staged_path.unlink, True)
-            raise
-        # Promote the staged copy into the object cache so the worker that just
-        # received the file does not download what it already holds.
-        cached_path = self._cache_path(key)
-        await asyncio.to_thread(cached_path.parent.mkdir, parents=True, exist_ok=True)
-        await asyncio.to_thread(atomic_replace, staged_path, cached_path)
-
-        storage_ref = self._storage_ref(
-            key=key,
-            size_bytes=size_bytes,
-            mime_type=content_type,
-            digest=digest,
-            local_path=str(cached_path),
-            generation=self._blob_generation(blob),
-        )
-        return {
-            "originalName": upload.filename or safe_name,
-            "fileName": safe_name,
-            "absolutePath": str(cached_path),
-            "url": self.public_url_for_key(key),
-            "sizeBytes": size_bytes,
-            "mimeType": content_type,
-            "storageRef": storage_ref,
-        }
 
     async def put_part(
         self, upload: dict[str, Any], file_id: str, part_number: int, body: bytes

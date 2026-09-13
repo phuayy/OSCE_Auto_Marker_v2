@@ -24,7 +24,6 @@ from app.api.routes import (
     rubrics,
     sessions,
     settings as settings_routes,
-    uploads,
     webhooks,
 )
 from app.core.asyncio_compat import configure_windows_selector_event_loop_policy
@@ -137,7 +136,6 @@ app.include_router(health.router, prefix="/api")
 app.include_router(events_routes.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(rubrics.router, prefix="/api")
-app.include_router(uploads.router, prefix="/api")
 app.include_router(async_uploads.router, prefix="/api")
 app.include_router(jobs.router, prefix="/api")
 app.include_router(sessions.router, prefix="/api")

@@ -23,12 +23,6 @@ class ArtifactService:
     def new_session_id(self) -> str:
         return str(uuid4())
 
-    def validate_video_upload(self, upload: UploadFile | None) -> None:
-        if upload is None:
-            raise ValueError("A video file is required.")
-        if not str(upload.content_type or "").startswith("video/"):
-            raise ValueError("The video field must contain a video file.")
-
     def validate_pdf_upload(self, upload: UploadFile | None, *, field_name: str, message: str | None = None) -> None:
         if upload is None:
             raise ValueError(message or f'{field_name} PDF file is required.')

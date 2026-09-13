@@ -11,7 +11,6 @@ from app.core.rate_limit import FixedWindowRateLimiter
 from app.core.resources import ResourceLease
 from app.core.tasks import BackgroundTaskRegistry
 from app.core.versioned_cache import VersionedCache
-from app.database import Database
 from app.database.change_tracking import install_change_tracking
 from app.database.migration_runner import run_database_migrations
 from app.database.migrations import apply_additive_migrations
@@ -76,7 +75,6 @@ class ContainerRole(StrEnum):
 @dataclass
 class AppContainer:
     settings: Settings
-    database: Database
     orm_database: OrmDatabase
     runner: CommandRunner
     artifacts: ArtifactService
@@ -157,7 +155,6 @@ class AppContainer:
         # One process migrates; a worker booting alongside must not race it.
         if api and self.settings.db_auto_migrate:
             await run_database_migrations(self.settings.resolved_database_source)
-        await self.database.initialize()
         await self.orm_database.initialize()
         # create_all adds missing tables but never alters an existing one, so
         # columns introduced after a database was created need this pass.
@@ -202,13 +199,10 @@ class AppContainer:
         await self.notifications.drain()
         await self.changes.stop()
         await self.orm_database.shutdown()
-        # Releases the raw-SQL layer's PostgreSQL pool; a no-op on SQLite.
-        self.database.close()
 
 
 def create_container(settings: Settings | None = None) -> AppContainer:
     active_settings = settings or Settings.load()
-    database = Database(active_settings.resolved_database_source)
     orm_database = OrmDatabase(active_settings.resolved_database_source)
     runner = CommandRunner(
         active_settings.root_dir,
@@ -236,7 +230,7 @@ def create_container(settings: Settings | None = None) -> AppContainer:
     storage = create_storage_service(active_settings)
     jobs = JobQueueService(
         active_settings,
-        JobRepository(database, active_settings.paths.jobs_dir),
+        JobRepository(orm_database, active_settings.paths.jobs_dir),
         events,
         sessions,
         storage,
@@ -346,7 +340,6 @@ def create_container(settings: Settings | None = None) -> AppContainer:
     )
     return AppContainer(
         settings=active_settings,
-        database=database,
         orm_database=orm_database,
         runner=runner,
         artifacts=artifacts,

@@ -23,13 +23,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from fastapi import UploadFile
 
 from app.core.exceptions import AppError
 from app.core.utils import utc_now_iso
 from app.domain.enums import UploadStatus
 
 
+# The two source files a session is built from. Every object key is scoped by
+# one of them, so the type belongs on the key builder and on the plan the
+# browser is handed — not only in this module's __all__.
 SourceFileKind = Literal["video", "caseStudy"]
 
 
@@ -43,7 +45,7 @@ class PreparedUploadFile:
     """
 
     file_id: str
-    kind: str
+    kind: SourceFileKind
     key: str
     safe_name: str
     original_name: str
@@ -97,16 +99,6 @@ class ObjectStorage(Protocol):
     ) -> PreparedUploadFile:
         """Mint the server-side key and the transport plan for one file."""
 
-    async def save_uploaded_source(
-        self,
-        upload: UploadFile,
-        *,
-        session_id: str,
-        kind: SourceFileKind,
-        max_bytes: int,
-    ) -> dict[str, Any]:
-        """Store a single-shot multipart upload (the legacy /api/upload route)."""
-
     async def put_part(
         self, upload: dict[str, Any], file_id: str, part_number: int, body: bytes
     ) -> dict[str, Any]:
@@ -132,7 +124,7 @@ class ObjectStorage(Protocol):
         """Point the session's source files at local paths a worker can open."""
 
 
-def build_object_key(*, object_prefix: str, session_id: str, kind: str, safe_name: str) -> str:
+def build_object_key(*, object_prefix: str, session_id: str, kind: SourceFileKind, safe_name: str) -> str:
     prefix = f"{object_prefix}/" if object_prefix else ""
     return f"{prefix}sessions/{session_id}/source/{kind}/{safe_name}"
 

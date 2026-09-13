@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import UploadFile
 
 from app.core.config import Settings
 from app.core.exceptions import AppError
@@ -23,7 +22,6 @@ from app.core.utils import atomic_replace, sanitize_file_name, utc_now_iso
 from app.domain.enums import UploadStatus
 from app.storage.base import (
     PreparedUploadFile,
-    SourceFileKind,
     build_object_key,
     build_storage_ref,
     find_upload_file,
@@ -95,63 +93,6 @@ class LocalObjectStorageService:
             part_size_bytes=self.settings.upload_part_size_bytes,
             part_url_template=f"/api/uploads/{upload_id}/parts/{{partNumber}}?fileId={file_id}",
         )
-
-    async def save_uploaded_source(
-        self,
-        upload: UploadFile,
-        *,
-        session_id: str,
-        kind: SourceFileKind,
-        max_bytes: int,
-    ) -> dict[str, Any]:
-        safe_name = sanitize_file_name(upload.filename or "file")
-        key = self._object_key(session_id=session_id, kind=kind, safe_name=safe_name)
-        final_path = self.settings.object_storage_root / key
-        final_path.parent.mkdir(parents=True, exist_ok=True)
-
-        def _copy() -> tuple[str, int]:
-            upload.file.seek(0)
-            hasher = hashlib.sha256()
-            copied = 0
-            tmp_path = final_path.with_name(f".tmp-{uuid4().hex[:8]}")
-            try:
-                with tmp_path.open("wb") as buffer:
-                    while True:
-                        chunk = upload.file.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        copied += len(chunk)
-                        if copied > max_bytes:
-                            raise AppError(
-                                f"Uploaded file exceeds the {max_bytes // (1024 * 1024)} MB limit.",
-                                status_code=413,
-                            )
-                        hasher.update(chunk)
-                        buffer.write(chunk)
-                atomic_replace(tmp_path, final_path)
-                return hasher.hexdigest(), copied
-            except Exception:
-                tmp_path.unlink(missing_ok=True)
-                final_path.unlink(missing_ok=True)
-                raise
-
-        digest, size_bytes = await asyncio.to_thread(_copy)
-        storage_ref = self._storage_ref(
-            key=key,
-            path=final_path,
-            size_bytes=size_bytes,
-            mime_type=upload.content_type or "",
-            digest=digest,
-        )
-        return {
-            "originalName": upload.filename or safe_name,
-            "fileName": safe_name,
-            "absolutePath": str(final_path),
-            "url": self.public_url_for_key(key),
-            "sizeBytes": size_bytes,
-            "mimeType": upload.content_type or "",
-            "storageRef": storage_ref,
-        }
 
     async def put_part(self, upload: dict[str, Any], file_id: str, part_number: int, body: bytes) -> dict[str, Any]:
         if part_number < 1:
