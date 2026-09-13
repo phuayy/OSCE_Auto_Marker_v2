@@ -1,5 +1,5 @@
 // Assert-based checks for the manual timeline editor logic.
-// Run: node src/lib/manualTimeline.test.mjs
+// Run with: npm run test:ui  (node --test, no test framework dependency)
 import assert from 'node:assert/strict';
 
 import {
@@ -13,7 +13,7 @@ import {
   sessionOrdinals,
   timeAtOffset,
   toggleSegmentKind,
-} from './manualTimeline.js';
+} from '../src/lib/manualTimeline.js';
 
 // --- timeAtOffset / segmentIndexAtTime -------------------------------------
 assert.equal(timeAtOffset(500, 1000, 600), 300); // middle of a 10-minute video

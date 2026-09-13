@@ -1,5 +1,5 @@
 // Assert-based checks for the Clip Assessments batch-selection logic.
-// Run: node src/lib/clipSelection.test.mjs
+// Run with: npm run test:ui  (node --test, no test framework dependency)
 import assert from 'node:assert/strict';
 
 import {
@@ -7,8 +7,8 @@ import {
   planClipDispatch,
   selectableClipIds,
   toggleSelection,
-} from './clipSelection.js';
-import { INTERMISSION_KIND } from './manualTimeline.js';
+} from '../src/lib/clipSelection.js';
+import { INTERMISSION_KIND } from '../src/lib/manualTimeline.js';
 
 const clips = [
   { id: 'c1', kind: 'session' },
