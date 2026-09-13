@@ -45,7 +45,6 @@ from content_marking import (
     build_follow_up_messages,
     compute_scoring_summary,
     enforce_expected_resolutions_array,
-    extract_rubric_criteria_from_case_study_rubric,
     marker_letter,
     read_file_as_context_text,
     to_repo_relative,
@@ -53,6 +52,7 @@ from content_marking import (
     validate_feedback_output,
     validate_output,
 )
+from case_study_rubric import load_case_study_rubric
 from env_loader import load_env_file
 from llm_bootstrap import (
     MIN_PANEL_MARKERS,
@@ -67,10 +67,6 @@ from llm_bootstrap import (
 from llm_bootstrap import (
     create_completion as complete_scoring,
 )
-from rubric_section import (
-    diagnose_missing_rubric_section,
-    split_case_study_context_and_rubric,
-)
 from scorer_checkpoint import (
     CheckpointMessage,
     checkpoint_file_signature,
@@ -79,7 +75,7 @@ from scorer_checkpoint import (
     read_checkpoint,
     write_checkpoint,
 )
-from scorer_inputs import InputError, required_file, run_main, session_id_from
+from scorer_inputs import InputError, optional_directory, required_file, run_main, session_id_from
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 load_env_file(ROOT_DIR)
@@ -114,6 +110,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=[str(policy) for policy in TieBreak],
         help="What settles a disputed criterion when the adjudicator cannot.",
     )
+    parser.add_argument(
+        "--rubric-cache",
+        help=(
+            "Directory holding extracted case-study rubrics, shared with the markers. Optional: "
+            "without it the rubric is parsed from the PDF in-process."
+        ),
+    )
     parser.add_argument("--output", required=True, help="Final sheet path (storage/output/scores/<id>.json).")
     parser.add_argument(
         "--adjudication-output",
@@ -136,19 +139,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 # --- inputs ------------------------------------------------------------------
 
 
-def load_rubric_criteria(case_study_path: Path) -> list[dict[str, Any]]:
-    """The same extraction the markers ran, so the sheets align to it."""
-    case_study_full_text = read_file_as_context_text(case_study_path)
-    _context, rubric_section_text = split_case_study_context_and_rubric(case_study_full_text)
-    if not rubric_section_text:
-        raise ValueError(diagnose_missing_rubric_section(case_study_full_text))
-    rubric_criteria = extract_rubric_criteria_from_case_study_rubric(rubric_section_text)
-    if len(rubric_criteria) < 2:
-        raise ValueError(
-            "Could not extract enough rubric criteria from case-study PDF rubric section. "
-            f"Found {len(rubric_criteria)} criteria."
-        )
-    return rubric_criteria
+def load_rubric_criteria(case_study_path: Path, cache_dir: Path | None = None) -> list[dict[str, Any]]:
+    """The same extraction the markers ran, so the sheets align to it.
+
+    Literally the same: both go through ``case_study_rubric``, so when the
+    markers have already parsed this PDF the adjudicator adopts their result
+    rather than repeating the parse — and the two can never diverge.
+    """
+    return load_case_study_rubric(case_study_path, cache_dir=cache_dir).criteria
 
 
 def load_transcript(transcript_path: Path) -> dict[str, Any]:
@@ -494,7 +492,7 @@ def run_panel(args: argparse.Namespace, router: LLMRouter | None) -> int:
     routing_summary = describe_routing(router) if router is not None else "(no adjudicator)"
     print(f"[osce_panel_adjudicator] adjudicator routing: {routing_summary}", file=sys.stderr)
 
-    rubric_criteria = load_rubric_criteria(case_study_path)
+    rubric_criteria = load_rubric_criteria(case_study_path, optional_directory(args.rubric_cache))
     transcript = load_transcript(transcript_path)
     loaded = [load_marker_sheet(path, rubric_criteria) for path in marker_paths]
     sheets = [sheet for sheet, _payload in loaded]

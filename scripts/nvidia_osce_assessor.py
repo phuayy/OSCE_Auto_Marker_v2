@@ -24,11 +24,11 @@ from content_marking import (
     build_system_prompt,
     build_user_prompt,
     compute_scoring_summary,
-    extract_rubric_criteria_from_case_study_rubric,
     read_file_as_context_text,
     to_repo_relative,
     validate_output,
 )
+from case_study_rubric import load_case_study_rubric
 from env_loader import load_env_file
 from llm_bootstrap import (
     build_router_from_env,
@@ -43,10 +43,6 @@ from llm_bootstrap import (
 from llm_bootstrap import (
     enforce_expected_criteria_array as enforce_expected_criteria_array_or_raise_retry,
 )
-from rubric_section import (
-    diagnose_missing_rubric_section,
-    split_case_study_context_and_rubric,
-)
 from scorer_checkpoint import (
     CheckpointMessage,
     checkpoint_file_signature,
@@ -55,7 +51,7 @@ from scorer_checkpoint import (
     read_checkpoint,
     write_checkpoint,
 )
-from scorer_inputs import required_file, run_main, session_id_from
+from scorer_inputs import optional_directory, required_file, run_main, session_id_from
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 load_env_file(ROOT_DIR)
@@ -105,6 +101,13 @@ def parse_args() -> argparse.Namespace:
         help="This session's case-study PDF (the rubric is embedded in it). Required.",
     )
     parser.add_argument(
+        "--rubric-cache",
+        help=(
+            "Directory holding extracted case-study rubrics, shared by every marker and the "
+            "adjudicator. Optional: without it the rubric is parsed from the PDF in-process."
+        ),
+    )
+    parser.add_argument(
         "--output",
         help="Output JSON path (defaults to storage/output/scores/<session-id>.json)",
     )
@@ -144,18 +147,19 @@ def main() -> int:
 
     transcript_text = clip_text(read_file_as_context_text(transcript_path), MAX_TRANSCRIPT_CHARS, "transcript")
 
-    case_study_full_text = read_file_as_context_text(case_study_path)
-    case_study_context_text, rubric_section_text = split_case_study_context_and_rubric(case_study_full_text)
-
-    if not rubric_section_text:
-        raise ValueError(diagnose_missing_rubric_section(case_study_full_text))
-
-    rubric_criteria = extract_rubric_criteria_from_case_study_rubric(rubric_section_text)
-    if len(rubric_criteria) < 2:
-        raise ValueError(
-            "Could not extract enough rubric criteria from case-study PDF rubric section. "
-            f"Found {len(rubric_criteria)} criteria."
-        )
+    # Parsing the rubric out of the PDF is a pure function of its bytes, so a
+    # panel's markers share one extraction instead of each running their own.
+    case_study_rubric = load_case_study_rubric(
+        case_study_path, cache_dir=optional_directory(args.rubric_cache)
+    )
+    print(
+        f"[nvidia_osce_assessor] case-study rubric: {len(case_study_rubric.criteria)} criteria "
+        f"({case_study_rubric.source})",
+        file=sys.stderr,
+    )
+    case_study_context_text = case_study_rubric.context_text
+    rubric_section_text = case_study_rubric.rubric_section_text
+    rubric_criteria = case_study_rubric.criteria
 
     checkpoint_context = {
         "session_id": session_id,
@@ -177,7 +181,7 @@ def main() -> int:
     )
 
     case_study_context_text = clip_text(
-        case_study_context_text or case_study_full_text,
+        case_study_context_text,
         MAX_CASE_STUDY_CONTEXT_CHARS,
         "case_study_context",
     )

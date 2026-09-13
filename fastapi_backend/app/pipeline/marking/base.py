@@ -160,6 +160,13 @@ class ContentMarkerRunner:
             str(transcript_path),
             "--case-study",
             str(case_study_path),
+            # Parsing the rubric out of the PDF is a pure function of its bytes.
+            # Naming the shared cache lets a panel's markers — and every clip
+            # child of one recording — do it once between them instead of once
+            # each. The script falls back to parsing in-process if the directory
+            # is unusable, so this can only ever save work, never cost a run.
+            "--rubric-cache",
+            str(self.settings.paths.output_case_study_rubrics_dir),
             "--output",
             str(output_path),
         ]

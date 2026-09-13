@@ -123,6 +123,11 @@ class PanelAdjudicatorRunner:
             str(transcript_path),
             "--case-study",
             str(case_study_path),
+            # Same cache the markers filled: the adjudicator must align to the
+            # exact criteria list they marked against, and adopting their
+            # extraction is both cheaper and stronger than repeating it.
+            "--rubric-cache",
+            str(self.settings.paths.output_case_study_rubrics_dir),
             "--output",
             str(output_path),
             "--adjudication-output",

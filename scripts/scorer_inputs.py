@@ -47,6 +47,25 @@ def optional_file(value: str | None, *, flag: str, label: str) -> Path | None:
     return required_file(value, flag=flag, label=label)
 
 
+def optional_directory(value: str | None, *, create: bool = False) -> Path | None:
+    """``None`` when the flag was omitted; the directory when it was given.
+
+    Unlike :func:`optional_file` this does not fail when the directory is
+    missing. The only caller is the rubric cache, which is an optimisation: a
+    cache directory that does not exist yet (or cannot be created) means the
+    work is done in-process, never that the run stops.
+    """
+    if not value or not str(value).strip():
+        return None
+    path = Path(str(value)).expanduser().resolve()
+    if create:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+    return path
+
+
 def session_id_from(args: argparse.Namespace, fallback_path: Path) -> str:
     """``--session-id`` when given, else the stem of the primary input file.
 
@@ -78,6 +97,7 @@ def run_main(main, *, script_name: str) -> None:
 __all__ = [
     "EXIT_USAGE",
     "InputError",
+    "optional_directory",
     "optional_file",
     "required_file",
     "run_main",

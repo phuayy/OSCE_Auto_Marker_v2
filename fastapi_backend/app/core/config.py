@@ -130,6 +130,17 @@ class StoragePaths:
         return self.output_scores_dir / SCORES_PANEL_SUBDIRECTORY
 
     @property
+    def output_case_study_rubrics_dir(self) -> Path:
+        """Rubrics extracted from case-study PDFs, keyed by a digest of the PDF's
+        bytes (see ``scripts/case_study_rubric.py``).
+
+        Not per session: the point is that the markers of one panel, and every
+        clip child of one long recording, share a single extraction. Entries are
+        content-addressed and small, so nothing here goes stale and nothing has
+        to be swept — deleting the directory only costs the next run one parse."""
+        return self.storage_root / "output" / "case_study_rubrics"
+
+    @property
     def output_llm_preprocess_dir(self) -> Path:
         return self.storage_root / "output" / "llm_preprocess"
 
@@ -201,6 +212,7 @@ class StoragePaths:
             self.output_whisperx_dir,
             self.output_transcripts_dir,
             self.output_scores_dir,
+            self.output_case_study_rubrics_dir,
             self.output_llm_preprocess_dir,
             self.output_communication_scores_dir,
             self.output_clips_dir,
