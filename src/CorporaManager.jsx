@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Loader2, Mic, Sparkles, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { apiJson } from '@/lib/apiFetch';
 
 // Transcription corpora CRUD (list + inline editor), extracted from the
 // dashboard modal so the exact same UI serves both the Settings page and the
@@ -17,11 +18,7 @@ export default function CorporaManager({ onClose = null, onCreated = null, onCha
 
   async function refresh({ notify = true } = {}) {
     try {
-      const response = await fetch('/api/corpora');
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to load corpora.');
-      }
+      const body = await apiJson('/api/corpora', { fallbackMessage: 'Failed to load corpora.' });
       const list = Array.isArray(body.corpora) ? body.corpora : [];
       setCorpora(list);
       if (notify && typeof onChanged === 'function') {
@@ -60,15 +57,11 @@ export default function CorporaManager({ onClose = null, onCreated = null, onCha
     setSaving(true);
     setError('');
     try {
-      const response = await fetch(editor.id ? `/api/corpora/${editor.id}` : '/api/corpora', {
+      const body = await apiJson(editor.id ? `/api/corpora/${editor.id}` : '/api/corpora', {
         method: editor.id ? 'PUT' : 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, terms }),
+        json: { name, terms },
+        fallbackMessage: 'Failed to save corpus.',
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to save corpus.');
-      }
       if (body.corpus?.id && !editor.id && typeof onCreated === 'function') {
         onCreated(body.corpus);
       }
@@ -87,11 +80,10 @@ export default function CorporaManager({ onClose = null, onCreated = null, onCha
     }
     setError('');
     try {
-      const response = await fetch(`/api/corpora/${corpus.id}`, { method: 'DELETE' });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to delete corpus.');
-      }
+      await apiJson(`/api/corpora/${corpus.id}`, {
+        method: 'DELETE',
+        fallbackMessage: 'Failed to delete corpus.',
+      });
       await refresh();
     } catch (deleteError) {
       setError(deleteError.message || 'Failed to delete corpus.');

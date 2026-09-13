@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { AlertCircle, CheckCircle2, Copy, Loader2, Send, Trash2, Webhook } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { apiJson } from '@/lib/apiFetch';
 
 // Outbound webhook subscriptions: register an external HTTPS endpoint and the
 // backend POSTs a signed JSON payload to it whenever a notification is raised.
@@ -113,11 +114,7 @@ export default function WebhooksManager() {
   async function refresh() {
     setError('');
     try {
-      const response = await fetch('/api/webhooks');
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to load webhooks.');
-      }
+      const body = await apiJson('/api/webhooks', { fallbackMessage: 'Failed to load webhooks.' });
       setWebhooks(Array.isArray(body.webhooks) ? body.webhooks : []);
       setEventTypes(Array.isArray(body.eventTypes) ? body.eventTypes : []);
     } catch (loadError) {
@@ -177,22 +174,18 @@ export default function WebhooksManager() {
     setSaving(true);
     setError('');
     try {
-      const response = await fetch(editor.id ? `/api/webhooks/${editor.id}` : '/api/webhooks', {
+      const body = await apiJson(editor.id ? `/api/webhooks/${editor.id}` : '/api/webhooks', {
         method: editor.id ? 'PUT' : 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        json: {
           url,
           description: editor.description.trim(),
           // Every box ticked is semantically the wildcard, and storing it that
           // way means a future event type is included automatically.
           eventTypes: editor.eventTypes.length === eventTypes.length ? ['*'] : editor.eventTypes,
           active: editor.active,
-        }),
+        },
+        fallbackMessage: 'Failed to save webhook.',
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to save webhook.');
-      }
       if (body.webhook?.secret) {
         setRevealedSecret(body.webhook.secret);
       }
@@ -211,11 +204,10 @@ export default function WebhooksManager() {
     }
     setError('');
     try {
-      const response = await fetch(`/api/webhooks/${webhook.id}`, { method: 'DELETE' });
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({}));
-        throw new Error(body.error || 'Failed to delete webhook.');
-      }
+      await apiJson(`/api/webhooks/${webhook.id}`, {
+        method: 'DELETE',
+        fallbackMessage: 'Failed to delete webhook.',
+      });
       await refresh();
     } catch (deleteError) {
       setError(deleteError.message || 'Failed to delete webhook.');
@@ -232,11 +224,10 @@ export default function WebhooksManager() {
     }
     setError('');
     try {
-      const response = await fetch(`/api/webhooks/${webhook.id}/rotate-secret`, { method: 'POST' });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to rotate secret.');
-      }
+      const body = await apiJson(`/api/webhooks/${webhook.id}/rotate-secret`, {
+        method: 'POST',
+        fallbackMessage: 'Failed to rotate secret.',
+      });
       setRevealedSecret(body.webhook?.secret || null);
       await refresh();
     } catch (rotateError) {
@@ -249,11 +240,10 @@ export default function WebhooksManager() {
     setTestResult(null);
     setError('');
     try {
-      const response = await fetch(`/api/webhooks/${webhook.id}/test`, { method: 'POST' });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Test delivery failed.');
-      }
+      const body = await apiJson(`/api/webhooks/${webhook.id}/test`, {
+        method: 'POST',
+        fallbackMessage: 'Test delivery failed.',
+      });
       setTestResult({ id: webhook.id, delivered: Boolean(body.delivered) });
       await refresh();
       // The attempt is logged either way, so show what the endpoint did.
@@ -267,9 +257,7 @@ export default function WebhooksManager() {
 
   async function loadDeliveries(webhookId) {
     try {
-      const response = await fetch(`/api/webhooks/${webhookId}/deliveries?limit=10`);
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) return;
+      const body = await apiJson(`/api/webhooks/${webhookId}/deliveries?limit=10`);
       setDeliveries((current) => ({ ...current, [webhookId]: body.deliveries || [] }));
     } catch {
       // Non-fatal: the log is a debugging aid, not required for operation.

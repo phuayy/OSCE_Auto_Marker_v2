@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { apiJson } from '@/lib/apiFetch';
 import {
   canStoreKeys,
   credentialOf,
@@ -50,9 +51,9 @@ export default function ProviderKeysSettings({ version = 0, onProvidersChanged }
   async function loadProviders() {
     setLoadError('');
     try {
-      const response = await fetch('/api/settings/llm-providers');
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.error || 'Failed to load scoring providers.');
+      const body = await apiJson('/api/settings/llm-providers', {
+        fallbackMessage: 'Failed to load scoring providers.',
+      });
       setDescription(body);
     } catch (error) {
       setLoadError(error.message || 'Failed to load scoring providers.');
@@ -91,15 +92,11 @@ export default function ProviderKeysSettings({ version = 0, onProvidersChanged }
     setErrors((current) => ({ ...current, [providerId]: '' }));
     setProviderBusy(providerId, 'saving');
     try {
-      const response = await fetch(keyEndpoint(providerId), {
+      const body = await apiJson(keyEndpoint(providerId), {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: draft.trim() }),
+        json: { apiKey: draft.trim() },
+        fallbackMessage: 'Failed to save the API key.',
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.detail?.[0]?.msg || body.detail || body.error || 'Failed to save the API key.');
-      }
       // Cleared the moment it is stored: a key left sitting in component state
       // survives navigation and ends up in a React devtools dump.
       setDrafts((current) => ({ ...current, [providerId]: '' }));
@@ -117,11 +114,10 @@ export default function ProviderKeysSettings({ version = 0, onProvidersChanged }
     setProviderBusy(providerId, 'clearing');
     setErrors((current) => ({ ...current, [providerId]: '' }));
     try {
-      const response = await fetch(keyEndpoint(providerId), { method: 'DELETE' });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.detail || body.error || 'Failed to remove the API key.');
-      }
+      const body = await apiJson(keyEndpoint(providerId), {
+        method: 'DELETE',
+        fallbackMessage: 'Failed to remove the API key.',
+      });
       setResults((current) => ({ ...current, [providerId]: null }));
       adoptDescription(body);
     } catch (error) {
@@ -136,22 +132,18 @@ export default function ProviderKeysSettings({ version = 0, onProvidersChanged }
     setProviderBusy(providerId, 'testing');
     setResults((current) => ({ ...current, [providerId]: null }));
     try {
-      const response = await fetch('/api/settings/llm-providers/test', {
+      const body = await apiJson('/api/settings/llm-providers/test', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        json: {
           providerId,
           model: testModelFor(description, providerId),
           // A key typed but not yet saved is probed as-is, so a mistyped
           // credential is caught before it replaces a working one. The server
           // holds it for the one call and never writes it.
           apiKey: draft,
-        }),
+        },
+        fallbackMessage: 'The connection test could not be run.',
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.detail?.[0]?.msg || body.error || 'The connection test could not be run.');
-      }
       setResults((current) => ({ ...current, [providerId]: { ...body, probe: Boolean(draft) } }));
       // A saved-key test updates the row's verdict server-side; re-read so the
       // "verified just now" line survives a reload.

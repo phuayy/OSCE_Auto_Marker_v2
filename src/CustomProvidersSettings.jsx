@@ -31,6 +31,7 @@ import {
   routingUsage,
   validateDraft,
 } from '@/lib/customProviders';
+import { apiJson } from '@/lib/apiFetch';
 
 // Scoring providers an operator defines, rather than the six this build ships.
 //
@@ -59,9 +60,9 @@ export default function CustomProvidersSettings({ version = 0, onProvidersChange
   async function loadProviders() {
     setLoadError('');
     try {
-      const response = await fetch('/api/settings/llm-providers');
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.error || 'Failed to load scoring providers.');
+      const body = await apiJson('/api/settings/llm-providers', {
+        fallbackMessage: 'Failed to load scoring providers.',
+      });
       setDescription(body);
     } catch (error) {
       setLoadError(error.message || 'Failed to load scoring providers.');
@@ -124,17 +125,11 @@ export default function CustomProvidersSettings({ version = 0, onProvidersChange
     setBusy('saving');
     setFormError('');
     try {
-      const response = await fetch(isNew ? createEndpoint() : providerEndpoint(editingId), {
+      const body = await apiJson(isNew ? createEndpoint() : providerEndpoint(editingId), {
         method: isNew ? 'POST' : 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildProviderPayload(draft)),
+        json: buildProviderPayload(draft),
+        fallbackMessage: 'Failed to save the provider.',
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(
-          body.detail?.[0]?.msg || body.detail || body.error || 'Failed to save the provider.',
-        );
-      }
       adoptDescription(body);
       closeForm();
     } catch (error) {
@@ -148,9 +143,10 @@ export default function CustomProvidersSettings({ version = 0, onProvidersChange
     setBusy(`deleting:${providerId}`);
     setLoadError('');
     try {
-      const response = await fetch(providerEndpoint(providerId), { method: 'DELETE' });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.detail || body.error || 'Failed to remove the provider.');
+      const body = await apiJson(providerEndpoint(providerId), {
+        method: 'DELETE',
+        fallbackMessage: 'Failed to remove the provider.',
+      });
       adoptDescription(body);
       setConfirmingDelete('');
       if (editingId === providerId) closeForm();

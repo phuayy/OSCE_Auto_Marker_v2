@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { Bell } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useChangeStream } from '@/changeStream';
+import { ApiError, apiJson } from '@/lib/apiFetch';
 
 // New notifications arrive pushed over the change stream, so this timer is only
 // a reconciliation net — it catches anything missed while the stream was down
@@ -44,12 +45,9 @@ export function useNotifications(enabled) {
   // unreachable — the poll loop backs off on false.
   const refresh = useCallback(async () => {
     try {
-      const response = await fetch('/api/notifications');
-      if (!response.ok) {
-        // 502 is the vite proxy's "backend unavailable" answer.
-        return response.status !== 502;
-      }
-      const body = await response.json();
+      const body = await apiJson('/api/notifications', {
+        fallbackMessage: 'Failed to load notifications.',
+      });
       const list = Array.isArray(body.notifications) ? body.notifications : [];
       setItems(list);
       setUnreadCount(Number(body.unreadCount) || 0);
@@ -61,8 +59,13 @@ export function useNotifications(enabled) {
       for (const item of list) knownIdsRef.current.add(item.id);
       if (fresh.length > 0) setToast(fresh[0]); // list is newest-first
       return true;
-    } catch {
-      return false; // Backend down/booting — back off and retry.
+    } catch (error) {
+      // "Reachable" here means the request got an answer, not that the answer
+      // was good — only an unreachable backend should back the poll off.
+      // `apiFetch` is the one place that tells those apart (a gateway 502 is a
+      // network failure, a 500 from the API is not), which is why this call no
+      // longer inspects a raw status itself.
+      return !(error instanceof ApiError && error.isUnreachable);
     }
   }, []);
 
@@ -147,11 +150,13 @@ export function useNotifications(enabled) {
     setItems((previous) => previous.map((item) => (item.id === id ? { ...item, read: true } : item)));
     setUnreadCount((count) => Math.max(0, count - 1));
     try {
-      const response = await fetch(`/api/notifications/${id}/read`, { method: 'POST' });
-      if (response.ok) {
-        const body = await response.json();
-        setUnreadCount(Number(body.unreadCount) || 0);
-      }
+      const body = await apiJson(`/api/notifications/${id}/read`, {
+        method: 'POST',
+        // Marking the same row read twice is the same row read; a lost
+        // response is safe to send again.
+        idempotent: true,
+      });
+      setUnreadCount(Number(body.unreadCount) || 0);
     } catch {
       // Row stays optimistically read; the next poll restores server truth.
     }

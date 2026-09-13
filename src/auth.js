@@ -2,6 +2,13 @@
 // browser close) instead of localStorage so a stolen device is less risky.
 // The token itself is a server-signed HMAC blob; the client treats it as
 // opaque and never inspects/decodes it.
+//
+// Every call here goes through `apiJson` like the rest of the app: one place
+// classifies a failure, absorbs a transient one and reports reachability. This
+// module used to carry a second, parallel mechanism — `authFetch`, which
+// attached the token and handled a 401 exactly as `installFetchAuthShim` does
+// — with no caller at all.
+import { apiJson } from '@/lib/apiFetch';
 
 const TOKEN_STORAGE_KEY = 'osce-ai-marker:auth-token';
 const EXPIRY_STORAGE_KEY = 'osce-ai-marker:auth-expires-at';
@@ -94,11 +101,14 @@ export async function fetchStreamTicket() {
   }
   streamTicketInFlight = (async () => {
     try {
-      const response = await fetch('/api/auth/stream-ticket', { headers: authHeaders() });
-      if (!response.ok) {
-        return null;
-      }
-      const body = await response.json().catch(() => ({}));
+      // No Authorization header here: `installFetchAuthShim` attaches the
+      // bearer token to every /api/* request, and a second place that knows how
+      // to authenticate is a second place that can get it wrong.
+      //
+      // `reportConnection: false`: a missing ticket degrades to the bearer
+      // token, so a failure here says nothing about whether the app is usable
+      // and must not flip the whole UI to "offline".
+      const body = await apiJson('/api/auth/stream-ticket', { reportConnection: false });
       if (body?.ticket) {
         cachedStreamTicket = { ticket: body.ticket, expiresAt: Number(body.expiresAt) || 0 };
         return cachedStreamTicket;
@@ -165,15 +175,14 @@ export function resolveMediaUrl(url) {
   return withStreamTicket(url);
 }
 
-export function authHeaders() {
-  const stored = getStoredAuth();
-  if (!stored?.token) {
-    return {};
-  }
-  return { Authorization: `Bearer ${stored.token}` };
-}
-
-export function appendTokenToUrl(url) {
+/**
+ * Last-resort credential for a URL that must carry one in its query string and
+ * has no ticket yet. Module-private, and reached only through
+ * `withStreamTicket`: a long-lived bearer token in a URL is the leak the
+ * stream-ticket mechanism exists to end, so the one place that can still do it
+ * is the one place that has already failed to find a ticket.
+ */
+function appendTokenToUrl(url) {
   const stored = getStoredAuth();
   if (!stored?.token) {
     return url;
@@ -189,33 +198,6 @@ export function appendTokenToUrl(url) {
     const separator = url.includes('?') ? '&' : '?';
     return `${url}${separator}token=${encodeURIComponent(stored.token)}`;
   }
-}
-
-/**
- * Wraps window.fetch so every authenticated /api/* request automatically
- * attaches the Bearer token. Static /media/* and demo-resource requests pass
- * through untouched.
- */
-export async function authFetch(input, init = {}) {
-  const url = typeof input === 'string' ? input : input?.url || '';
-  const isApiCall = url.startsWith('/api/');
-
-  const nextInit = { ...init };
-  if (isApiCall) {
-    nextInit.headers = {
-      ...(init.headers || {}),
-      ...authHeaders(),
-    };
-  }
-
-  const response = await fetch(input, nextInit);
-  if (isApiCall && response.status === 401) {
-    clearStoredAuth();
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('osce:auth:expired'));
-    }
-  }
-  return response;
 }
 
 export function installFetchAuthShim() {
@@ -249,18 +231,15 @@ export function installFetchAuthShim() {
 }
 
 export async function loginRequest(username, password) {
-  const response = await fetch('/api/auth/login', {
+  // Never retried: `apiJson` retries only safe methods and explicit opt-ins,
+  // and repeating a rejected login would burn the endpoint's rate-limit budget
+  // to re-earn the same refusal. The thrown `ApiError` carries `.status`, which
+  // is what the login screen reads.
+  const body = await apiJson('/api/auth/login', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
+    json: { username, password },
+    fallbackMessage: 'Login failed.',
   });
-
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(body?.error || 'Login failed.');
-    error.status = response.status;
-    throw error;
-  }
 
   setStoredAuth(body);
   // Warm a stream ticket so media/SSE URLs avoid the long-lived token.
@@ -277,7 +256,7 @@ export async function loginRequest(username, password) {
 export function logout() {
   // Best-effort server-side revocation so the token cannot be reused.
   try {
-    fetch('/api/auth/logout', { method: 'POST', headers: authHeaders() }).catch(() => {});
+    apiJson('/api/auth/logout', { method: 'POST', reportConnection: false }).catch(() => {});
   } catch (_error) {
     /* ignore */
   }

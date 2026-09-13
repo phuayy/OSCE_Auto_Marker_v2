@@ -15,6 +15,7 @@ import {
   routingWarnings,
   validateRouting,
 } from '@/lib/llmProviders';
+import { apiJson } from '@/lib/apiFetch';
 
 // Scoring-model picker for the settings page.
 //
@@ -39,9 +40,9 @@ export default function LlmRoutingSettings({ version = 0, onProvidersChanged, on
   async function loadProviders() {
     setLoadError('');
     try {
-      const response = await fetch('/api/settings/llm-providers');
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.error || 'Failed to load scoring providers.');
+      const body = await apiJson('/api/settings/llm-providers', {
+        fallbackMessage: 'Failed to load scoring providers.',
+      });
 
       setDescription(body);
       const primaryProviderId = resolvePrimaryProviderId(body);
@@ -81,15 +82,11 @@ export default function LlmRoutingSettings({ version = 0, onProvidersChanged, on
       // A patch of this card's two keys. The GET-then-PUT that used to sit
       // here re-sent every other card's values as this tab last saw them.
       const payload = buildSettingsPayload({ primary, fallback });
-      const response = await fetch('/api/settings', {
+      const body = await apiJson('/api/settings', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        json: payload,
+        fallbackMessage: 'Failed to save the scoring model.',
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.detail?.[0]?.msg || body.error || 'Failed to save the scoring model.');
-      }
       setSavedAt(Date.now());
       // Re-read so the "what will actually run" line reflects the server's own
       // filtering rather than what this form believes it just saved.

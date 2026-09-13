@@ -16,6 +16,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { apiJson } from '@/lib/apiFetch';
 
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -57,11 +58,9 @@ export default function CommunicationRubricPanel({ onBack }) {
     setIsLoading(true);
     setError('');
     try {
-      const response = await fetch('/api/communication-rubric');
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body?.error || 'Failed to load rubric.');
-      }
+      const body = await apiJson('/api/communication-rubric', {
+        fallbackMessage: 'Failed to load rubric.',
+      });
       setRubric(body.rubric || null);
       setPdfMeta(body.pdf || null);
     } catch (loadError) {
@@ -84,14 +83,13 @@ export default function CommunicationRubricPanel({ onBack }) {
       const formData = new FormData();
       formData.append('rubric', file);
 
-      const response = await fetch('/api/communication-rubric', {
+      // No Content-Type: the browser has to set the multipart boundary, which
+      // is why this passes `body` rather than `json`.
+      const body = await apiJson('/api/communication-rubric', {
         method: 'POST',
         body: formData,
+        fallbackMessage: 'Rubric upload failed.',
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body?.error || 'Rubric upload failed.');
-      }
 
       setRubric(body.rubric);
       setPdfMeta(body.pdf || null);
@@ -111,11 +109,10 @@ export default function CommunicationRubricPanel({ onBack }) {
     setError('');
     setNotice('');
     try {
-      const response = await fetch('/api/communication-rubric/reset', { method: 'POST' });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body?.error || 'Reset failed.');
-      }
+      const body = await apiJson('/api/communication-rubric/reset', {
+        method: 'POST',
+        fallbackMessage: 'Reset failed.',
+      });
       setRubric(body.rubric);
       setPdfMeta(body.pdf || null);
       setNotice('Restored default communication rubric.');

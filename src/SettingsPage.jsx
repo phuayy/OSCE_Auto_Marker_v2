@@ -9,6 +9,7 @@ import MarkingModeSettings from '@/MarkingModeSettings.jsx';
 import ProviderKeysSettings from '@/ProviderKeysSettings.jsx';
 import TranscriptionEngineSettings from '@/TranscriptionEngineSettings.jsx';
 import WebhooksManager from '@/WebhooksManager.jsx';
+import { apiJson } from '@/lib/apiFetch';
 
 // Global application settings page (#/settings). Settings live in the backend
 // DB, so a toggle here applies immediately to every subsequent run — including
@@ -27,11 +28,7 @@ export default function SettingsPage({ onBack }) {
   async function loadSettings() {
     setLoadError('');
     try {
-      const response = await fetch('/api/settings');
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to load settings.');
-      }
+      const body = await apiJson('/api/settings', { fallbackMessage: 'Failed to load settings.' });
       setSettings(body.settings || {});
     } catch (error) {
       setLoadError(error.message || 'Failed to load settings.');
@@ -62,15 +59,11 @@ export default function SettingsPage({ onBack }) {
       // that copy back put those keys to their mount-time values — a marking
       // mode saved as "panel" reverted to "single" the moment this toggle was
       // flipped. A patch carries only the key that changed.
-      const response = await fetch('/api/settings', {
+      const body = await apiJson('/api/settings', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ [key]: value }),
+        json: { [key]: value },
+        fallbackMessage: 'Failed to save settings.',
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.error || 'Failed to save settings.');
-      }
       setSettings(body.settings || next);
     } catch (error) {
       // Optimistic toggle reverts so the UI never lies about the stored value.

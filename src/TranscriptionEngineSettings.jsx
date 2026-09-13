@@ -11,6 +11,7 @@ import {
   splitParameters,
   validateEngineOptions,
 } from '@/lib/transcriptionEngines';
+import { apiJson } from '@/lib/apiFetch';
 
 // Transcription engine picker for the settings page.
 //
@@ -31,14 +32,12 @@ export default function TranscriptionEngineSettings({ onSettingsChanged }) {
   async function loadEngines() {
     setLoadError('');
     try {
-      const [enginesResponse, settingsResponse] = await Promise.all([
-        fetch('/api/settings/transcription-engines'),
-        fetch('/api/settings'),
+      const [enginesBody, settingsBody] = await Promise.all([
+        apiJson('/api/settings/transcription-engines', {
+          fallbackMessage: 'Failed to load transcription engines.',
+        }),
+        apiJson('/api/settings', { fallbackMessage: 'Failed to load settings.' }),
       ]);
-      const enginesBody = await enginesResponse.json().catch(() => ({}));
-      const settingsBody = await settingsResponse.json().catch(() => ({}));
-      if (!enginesResponse.ok) throw new Error(enginesBody.error || 'Failed to load transcription engines.');
-      if (!settingsResponse.ok) throw new Error(settingsBody.error || 'Failed to load settings.');
 
       setDescription(enginesBody);
       setSelectedEngineId(resolveSelectedEngineId(enginesBody));
@@ -79,15 +78,11 @@ export default function TranscriptionEngineSettings({ onSettingsChanged }) {
     setSaveError('');
     try {
       const payload = buildTranscriptionPatch(description, selectedEngineId, optionsByEngine);
-      const response = await fetch('/api/settings', {
+      const body = await apiJson('/api/settings', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        json: payload,
+        fallbackMessage: 'Failed to save the transcription engine.',
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.detail?.[0]?.msg || body.error || 'Failed to save the transcription engine.');
-      }
       setOptionsByEngine(body.settings?.transcriptionEngineOptions || {});
       setSavedAt(Date.now());
       if (onSettingsChanged) onSettingsChanged(body.settings);

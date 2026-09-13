@@ -16,6 +16,7 @@ import {
   resolvePanelState,
   validatePanel,
 } from '@/lib/llmProviders';
+import { apiJson } from '@/lib/apiFetch';
 
 // How content is marked: by one model (the scoring model above) or by a panel.
 //
@@ -40,9 +41,9 @@ export default function MarkingModeSettings({ version = 0, onProvidersChanged, o
   async function loadProviders() {
     setLoadError('');
     try {
-      const response = await fetch('/api/settings/llm-providers');
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.error || 'Failed to load scoring providers.');
+      const body = await apiJson('/api/settings/llm-providers', {
+        fallbackMessage: 'Failed to load scoring providers.',
+      });
       setDescription(body);
       const state = resolvePanelState(body);
       setMode(state.mode);
@@ -78,15 +79,11 @@ export default function MarkingModeSettings({ version = 0, onProvidersChanged, o
       // A patch of this card's two keys. The GET-then-PUT that used to sit
       // here re-sent every other card's values as this tab last saw them.
       const payload = buildMarkingPayload({ mode, markers, adjudicator, tieBreak });
-      const response = await fetch('/api/settings', {
+      const body = await apiJson('/api/settings', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        json: payload,
+        fallbackMessage: 'Failed to save the marking mode.',
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body.detail?.[0]?.msg || body.detail || body.error || 'Failed to save the marking mode.');
-      }
       setSavedAt(Date.now());
       await loadProviders();
       if (onProvidersChanged) onProvidersChanged();

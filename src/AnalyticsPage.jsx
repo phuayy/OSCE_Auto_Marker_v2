@@ -17,6 +17,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { apiJson } from '@/lib/apiFetch';
 
 // Series colors — validated with the dataviz palette checker (CVD ΔE and
 // contrast on white). A/B compare the two filter sets in the histograms;
@@ -552,11 +553,9 @@ export default function AnalyticsPage({ onBack }) {
     setIsLoading(true);
     setError('');
     try {
-      const response = await fetch('/api/analytics/assessments');
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body?.error || 'Failed to load analytics data.');
-      }
+      const body = await apiJson('/api/analytics/assessments', {
+        fallbackMessage: 'Failed to load analytics data.',
+      });
       // Atomic swap: incomplete/in-flight fetches never render partial data.
       setRows(Array.isArray(body.results) ? body.results : []);
     } catch (loadError) {

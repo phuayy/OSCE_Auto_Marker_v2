@@ -15,6 +15,7 @@ import React from 'react';
 import { CheckCircle2, Loader2, PlugZap, XCircle } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { apiJson } from '@/lib/apiFetch';
 import {
   CUSTOM_MODEL,
   findModelSpec,
@@ -191,16 +192,11 @@ export default function TargetPicker({
 // failed probe is a result to show, not an error to recover from.
 export async function testTarget(target) {
   try {
-    const response = await fetch('/api/settings/llm-providers/test', {
+    return await apiJson('/api/settings/llm-providers/test', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ providerId: target.providerId, model: target.model || '' }),
+      json: { providerId: target.providerId, model: target.model || '' },
+      fallbackMessage: 'The connection test could not be run.',
     });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(body.detail?.[0]?.msg || body.error || 'The connection test could not be run.');
-    }
-    return body;
   } catch (error) {
     return { ok: false, error: error.message || 'The connection test could not be run.' };
   }
