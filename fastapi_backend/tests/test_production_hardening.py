@@ -9,7 +9,6 @@ than a module.
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 import time
 from pathlib import Path
 
@@ -19,7 +18,8 @@ from app.api.routes.auth import _client_ip
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.process import CommandRunner
-from app.database.connection import Database
+from app.database.orm import OrmDatabase
+from sqlalchemy import text as sa_text
 from app.services.storage_service import LocalObjectStorageService
 
 
@@ -178,37 +178,34 @@ def test_a_non_positive_configured_timeout_disables_the_watchdog(tmp_path) -> No
 # --- database connections --------------------------------------------------
 
 
-def test_sqlite_connections_are_closed_after_each_operation(tmp_path) -> None:
-    """sqlite3's context manager commits but does not close; relying on it leaked
-    a handle per operation until the collector happened to run."""
+def test_one_database_layer_serves_the_whole_application() -> None:
+    """The jobs queue used to run on a second, raw-SQL connection layer with its
+    own pool and its own ``CREATE TABLE`` statements. Two pools against one file
+    and two sources of truth for one schema is what this pins shut: every table
+    is a model, and ``app.database`` exposes a single way to reach the database.
+    """
+    import app.database as database_package
+    from app.database.models import Base
+
+    assert database_package.__all__ == ["OrmDatabase"]
+    for table in ("jobs", "job_attempts", "job_events"):
+        assert table in Base.metadata.tables, f"{table} is described outside the ORM metadata again"
+
+
+def test_the_orm_engine_is_disposed_on_shutdown(tmp_path) -> None:
+    """Shutdown has to return the connections, not leave them to the collector."""
 
     async def scenario() -> None:
-        database = Database(tmp_path / "jobs.sqlite3")
-        opened: list[sqlite3.Connection] = []
-        original_connect = database._connect
-
-        def tracking_connect() -> sqlite3.Connection:
-            connection = original_connect()
-            opened.append(connection)
-            return connection
-
-        database._connect = tracking_connect  # type: ignore[method-assign]
-        for _ in range(5):
-            await database.run(lambda connection: connection.execute("SELECT 1").fetchone())
-
-        assert len(opened) >= 5
-        for connection in opened:
-            # A closed connection raises on use; an open one would not.
-            with pytest.raises(sqlite3.ProgrammingError):
-                connection.execute("SELECT 1")
+        database = OrmDatabase(tmp_path / "app.sqlite3")
+        await database.initialize()
+        async with database.session() as db:
+            await db.execute(sa_text("SELECT 1"))
+        await database.shutdown()
+        # A disposed engine drops its pooled connections; checked out size is the
+        # observable part of that.
+        assert database.engine.pool.checkedin() == 0
 
     asyncio.run(scenario())
-
-
-def test_closing_a_sqlite_database_is_a_safe_noop(tmp_path) -> None:
-    """`close` exists for the PostgreSQL pool; on SQLite there is nothing to
-    release and shutdown must not raise."""
-    Database(tmp_path / "jobs.sqlite3").close()
 
 
 # --- rate-limit keying behind a proxy --------------------------------------

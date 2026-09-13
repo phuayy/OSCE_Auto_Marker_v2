@@ -24,6 +24,7 @@ from app.pipeline.transcription.base import (
     TranscriptionResult,
 )
 from app.services.transcription_router import TranscriptionRouter
+from tests.fixtures.events import RecordingEvents as _Events
 
 
 def test_bounded_lease_serialises_holders_and_reports_waits() -> None:
@@ -90,11 +91,6 @@ def test_media_pipeline_has_a_lease_even_when_constructed_without_one(tmp_path: 
     settings = Settings(root_dir=tmp_path, backend_root=tmp_path, ffmpeg_bin="f", ffprobe_bin="f", scorer_python_bin="p")
     media = MediaPipeline(settings, runner=None, events=None, auth=None, gpu=shared)  # type: ignore[arg-type]
     assert media.gpu is shared
-
-
-class _Events:
-    async def publish(self, *_args: Any, **_kwargs: Any) -> None:
-        return None
 
 
 class _LeaseWatchingEngine(TranscriptionEngine):

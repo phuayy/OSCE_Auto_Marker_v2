@@ -293,10 +293,52 @@ class JobQueueService:
         task = self._tasks.pop(str(job_id), None)
         if task:
             task.cancel()
+        await self._cancel_hatchet_run(job)
         await self.repository.append_event(job_id, JobStatus.CANCELLED, reason, {"sessionId": job.get("sessionId")})
         await self.events.publish(str(job.get("sessionId")), "status", {"code": JobStatus.CANCELLED, "message": reason})
         await self._sync_session_job(job)
         return job
+
+    async def _cancel_hatchet_run(self, job: dict[str, Any]) -> None:
+        """Best-effort engine-side abort of a job's dispatched Hatchet run.
+
+        Marking the row ``cancelled`` (or deleting it in ``purge_session``)
+        only stops the *local* bookkeeping — it never told the Hatchet engine
+        the step run it dispatched should stop. Left alone, that run keeps
+        executing or retrying with no DB row to report back to: a retry
+        eventually calls ``prepare_hatchet_retry_attempt`` for a job id that no
+        longer exists. This is a best-effort abort — a transport error here is
+        logged and recorded, never raised, because the row is already
+        cancelled and the caller (often a session purge) must proceed either
+        way; the other half of this race is that ``process_job`` treats a
+        missing job row as "already gone" rather than crashing.
+        """
+        if self.settings.job_queue_backend != "hatchet":
+            return
+        payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+        hatchet_meta = payload.get("hatchet") if isinstance(payload.get("hatchet"), dict) else {}
+        run_id = hatchet_meta.get("runId") or payload.get("hatchetRunId")
+        if not run_id:
+            return
+        job_id = str(job.get("id"))
+        try:
+            from app.queue.hatchet_tasks import hatchet
+
+            await hatchet.runs.aio_cancel(str(run_id))
+            logger.info("Cancelled Hatchet run %s for job %s.", run_id, job_id)
+        except Exception as error:
+            logger.warning(
+                "Failed to cancel Hatchet run %s for job %s: %s. The engine-side run may keep executing.",
+                run_id,
+                job_id,
+                error,
+            )
+            await self.repository.append_event(
+                job_id,
+                "hatchet_cancel_failed",
+                f"Could not cancel Hatchet run {run_id}: {error}",
+                {"sessionId": job.get("sessionId"), "hatchetRunId": run_id},
+            )
 
     async def purge_session(self, session_id: str) -> int:
         """Cancel any in-flight job for a session and delete all of its job
@@ -349,13 +391,32 @@ class JobQueueService:
         async with self._semaphore:
             return await self._execute_job(job_id, raise_on_error=raise_on_error)
 
-    async def prepare_hatchet_retry_attempt(self, job_id: str, retry_count: int) -> None:
+    async def prepare_hatchet_retry_attempt(self, job_id: str, retry_count: int) -> bool:
+        """Ready a job row for its next Hatchet-driven attempt.
+
+        Returns ``False`` when the row is gone — the session was deleted, or
+        ``purge_session``/``rerun`` cleared it — out from under a run Hatchet
+        already had in flight. A cancel attempts to abort that run engine-side
+        (see ``_cancel_hatchet_run``), but the abort is best-effort and a
+        scheduled retry can still land after the row is deleted. That used to
+        surface as an unhandled ``FileNotFoundError`` crashing the Hatchet
+        task; the caller (``process_job``) now reads ``False`` as "nothing left
+        to do" and stops without running the job or raising.
+        """
         if retry_count <= 0:
-            return
-        job = await self.repository.prepare_retry_attempt(
-            job_id,
-            f"Preparing Hatchet retry attempt {retry_count}.",
-        )
+            return True
+        try:
+            job = await self.repository.prepare_retry_attempt(
+                job_id,
+                f"Preparing Hatchet retry attempt {retry_count}.",
+            )
+        except FileNotFoundError:
+            logger.info(
+                "Job %s no longer exists; skipping Hatchet retry attempt %d.",
+                job_id,
+                retry_count,
+            )
+            return False
         await self.repository.append_event(
             job_id,
             "retry_prepared",
@@ -363,6 +424,7 @@ class JobQueueService:
             {"sessionId": job.get("sessionId"), "retryCount": retry_count},
         )
         await self._sync_session_job(job)
+        return True
 
     async def redispatch_stale_hatchet_jobs(self) -> None:
         """Dispatch queued jobs that Hatchet never received, and re-dispatch ones
@@ -633,7 +695,15 @@ class JobQueueService:
         return True
 
     async def _execute_job(self, job_id: str, *, raise_on_error: bool = False) -> JobRunResult:
-        claim = await self.repository.claim_queued(job_id, self._worker_id)
+        try:
+            claim = await self.repository.claim_queued(job_id, self._worker_id)
+        except FileNotFoundError:
+            # Row was purged (session deleted, or rerun cleared it) between
+            # dispatch and claim. Nothing left to run, and nothing to raise —
+            # a purge already cancels the Hatchet-side run on a best-effort
+            # basis, but a scheduled retry can still slip in after the delete.
+            logger.info("Job %s no longer exists; nothing to execute.", job_id)
+            return JobRunResult()
         if claim.exhausted:
             # The row just went terminal without ever running. The session it
             # belongs to is still waiting on it and nothing else will ever touch

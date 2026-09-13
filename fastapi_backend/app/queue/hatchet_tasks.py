@@ -122,6 +122,21 @@ async def shutdown_worker_container() -> None:
             await container.shutdown()
 
 
+async def _run_process_job(job_id: str, retry_count: int, container: "AppContainer") -> dict[str, str]:
+    """The task body, kept independent of the ``@hatchet.task`` decorator so it
+    can be exercised directly in tests without a configured Hatchet client."""
+    still_exists = await container.jobs.prepare_hatchet_retry_attempt(job_id, retry_count)
+    if not still_exists:
+        # The job row was purged (session deleted, or rerun cleared it) while
+        # this run was dispatched or scheduled to retry. A cancel tries to
+        # abort the Hatchet run engine-side, but that abort is best-effort, so
+        # this retry can still land after the row is gone. There is nothing
+        # left to execute and nothing to raise.
+        return {"jobId": job_id, "status": "skipped_missing"}
+    await container.jobs.run_job(job_id, raise_on_error=True)
+    return {"jobId": job_id, "status": "completed"}
+
+
 @hatchet.task(
     name="osce-process-job",
     input_validator=ProcessJobInput,
@@ -134,9 +149,7 @@ async def process_job(input: ProcessJobInput, ctx: Any) -> dict[str, str]:
         raise RuntimeError("Hatchet task was cancelled before job execution started.")
 
     container = await get_worker_container()
-    await container.jobs.prepare_hatchet_retry_attempt(input.job_id, _retry_count(ctx))
-    await container.jobs.run_job(input.job_id, raise_on_error=True)
-    return {"jobId": input.job_id, "status": "completed"}
+    return await _run_process_job(input.job_id, _retry_count(ctx), container)
 
 
 async def enqueue_process_job(job_id: str) -> Any:
