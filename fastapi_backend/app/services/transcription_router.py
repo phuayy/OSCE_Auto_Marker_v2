@@ -144,7 +144,7 @@ class TranscriptionRouter:
         """Every engine, its schema, its defaults here, and whether it can run."""
         selected_id, stored_options = await self.selection()
         engines: list[dict[str, Any]] = []
-        for engine_id, engine in self.engines.items():
+        for engine in self.engines.values():
             availability = await engine.availability()
             payload = engine.descriptor.to_public()
             payload["availability"] = availability.to_public()

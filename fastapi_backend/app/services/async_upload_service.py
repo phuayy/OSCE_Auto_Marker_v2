@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -670,10 +669,8 @@ class AsyncUploadService:
 
             # 3. Fail the session, but only while it is still in the upload phase.
             if session_id:
-                recoverable = self._RECOVERABLE_SESSION_STATES
-
                 def expire(current: dict[str, Any]) -> Any:
-                    if str(current.get("status")) not in recoverable:
+                    if str(current.get("status")) not in self._RECOVERABLE_SESSION_STATES:
                         return False
                     current["status"] = SessionStatus.FAILED
                     current["error"] = "Upload expired before completion. Please start a new assessment to re-upload."

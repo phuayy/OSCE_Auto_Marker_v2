@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 
 from app.api.dependencies import get_container
 from app.api.errors import http_error
-from app.core.exceptions import AppError
 from app.services.container import AppContainer
 
 

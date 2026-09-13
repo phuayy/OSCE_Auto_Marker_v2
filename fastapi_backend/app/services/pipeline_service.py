@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -267,7 +266,6 @@ class PipelineService:
         )
 
     async def _process_cached_transcript(self, session: dict[str, Any]) -> dict[str, Any]:
-        session_id = str(session["id"])
         if await self.media.ensure_session_subtitle_track(session):
             await self._commit(session, _assign_output(OutputKey.SUBTITLE_TRACK, session["outputs"][OutputKey.SUBTITLE_TRACK]))
         transcript_path = Path(str(session["outputs"][OutputKey.TRANSCRIPT]["absolutePath"]))

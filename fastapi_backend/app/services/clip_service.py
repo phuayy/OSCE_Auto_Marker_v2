@@ -636,12 +636,17 @@ class ClipService:
                 # or retried run resumes from. Only the cut clip's file fields
                 # and the counter are touched — a label the user changed while
                 # ffmpeg ran stays theirs.
-                def checkpoint(current: dict[str, Any], _clip_id: str = clip_id, _position: int = position) -> Any:
+                def checkpoint(
+                    current: dict[str, Any],
+                    _clip_id: str = clip_id,
+                    _position: int = position,
+                    _materialized: dict[str, Any] = materialized,
+                ) -> Any:
                     for stored in session_clips(current):
                         if str(stored.get("id")) == _clip_id:
                             for key in ("fileName", "url", "absolutePath", "sizeBytes", "isDraft", "planId"):
-                                if key in materialized:
-                                    stored[key] = materialized[key]
+                                if key in _materialized:
+                                    stored[key] = _materialized[key]
                             # The replaced cut is only forgotten once the new one
                             # is durable, so an interrupted recrop still knows
                             # which file it is superseding on the next attempt.

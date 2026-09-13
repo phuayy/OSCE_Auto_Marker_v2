@@ -153,4 +153,7 @@ async def process_job(input: ProcessJobInput, ctx: Any) -> dict[str, str]:
 
 
 async def enqueue_process_job(job_id: str) -> Any:
-    return await process_job.aio_run_no_wait(input=ProcessJobInput(job_id=job_id))
+    # ``wait_for_result=False`` returns the run reference the dispatcher records
+    # (``_hatchet_run_id``); ``aio_run_no_wait`` is the deprecated spelling of
+    # the same call, and the offline stub above only implements ``aio_run``.
+    return await process_job.aio_run(input=ProcessJobInput(job_id=job_id), wait_for_result=False)
