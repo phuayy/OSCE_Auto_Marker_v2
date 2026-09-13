@@ -283,11 +283,16 @@ class ScoringPipeline:
             "log",
             {"source": "audio-prof", "message": f"{self.settings.scorer_python_bin} {' '.join(args)}"},
         )
+        # librosa/openSMILE only: this extractor never calls a model, so it gets
+        # the bare interpreter environment plus ffmpeg — not ``scoring_env``,
+        # which would resolve the routing and hand it every provider's API key
+        # for nothing (see "Subprocess blast radius" in CLAUDE.md).
+        env = self.settings.subprocess_env({"FFMPEG_BIN": self.settings.ffmpeg_bin})
         await self.runner.run(
             self.settings.scorer_python_bin,
             args,
             "Audio professionalism extraction",
-            env=await self.scoring_env({"FFMPEG_BIN": self.settings.ffmpeg_bin}),
+            env=env,
             on_output=self.events.log_sink(str(session["id"]), "audio-prof"),
         )
         if not output_path.exists():

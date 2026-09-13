@@ -134,3 +134,46 @@ def test_scorer_scripts_refuse_to_guess_inputs() -> None:
         assert "newest_file" not in source, f"{name} still scans a directory for its inputs"
         assert "session_id_from_latest_metadata" not in source, f"{name} still guesses the session"
         assert "from scorer_inputs import" in source, f"{name} does not use the shared input contract"
+
+
+def test_audio_professionalism_extractor_is_started_without_llm_credentials(tmp_path: Path) -> None:
+    """The extractor is librosa/openSMILE only: it never calls a model, so it
+    must not be handed the routing blob or any provider key the other scorers
+    need. Forwarding them widened the blast radius of a subprocess that has
+    no use for them."""
+    audio = tmp_path / "s1.mp3"
+    audio.write_bytes(b"ID3")
+    transcript = tmp_path / "s1.json"
+    transcript.write_text(json.dumps({"segments": [{"text": "hi"}]}), encoding="utf-8")
+
+    class _LlmSettings:
+        async def subprocess_env(self) -> dict[str, str]:
+            return {"OSCE_LLM_ROUTING": "{}", "NVIDIA_API_KEY": "nvapi-secret", "OPENAI_API_KEY": "sk-secret"}
+
+    class EnvRecordingRunner(RecordingRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.envs: list[dict[str, str]] = []
+
+        async def run(self, command: str, args: list[str], label: str, **kwargs: Any) -> CommandResult:
+            self.envs.append(dict(kwargs.get("env") or {}))
+            Path(_flag(args, "--output")).write_text(
+                json.dumps({"schema": "audio-professionalism-v1", "metrics": {}}), encoding="utf-8"
+            )
+            return await super().run(command, args, label, **kwargs)
+
+    runner = EnvRecordingRunner()
+    pipeline = _pipeline(tmp_path, runner)
+    pipeline.llm_settings = _LlmSettings()
+    pipeline.settings.paths.output_audio_professionalism_dir.mkdir(parents=True, exist_ok=True)
+    session = {
+        "id": "s1",
+        "outputs": {"audio": {"absolutePath": str(audio)}, "transcript": {"absolutePath": str(transcript)}},
+    }
+
+    asyncio.run(pipeline.run_audio_professionalism(session))
+
+    env = runner.envs[0]
+    assert env["FFMPEG_BIN"] == "f"
+    for secret in ("OSCE_LLM_ROUTING", "NVIDIA_API_KEY", "OPENAI_API_KEY"):
+        assert secret not in env, f"{secret} reached a subprocess that never calls a model"
