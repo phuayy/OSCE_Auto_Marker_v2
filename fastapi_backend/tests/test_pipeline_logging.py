@@ -7,6 +7,7 @@ import logging
 from app.core.logging_utils import log_context
 from app.services.pipeline_service import PipelineService
 from tests.fixtures.session_store import SessionUpdateMixin
+from tests.fixtures.events import RecordingEvents as _FakeEvents
 
 
 class _FakeSessions(SessionUpdateMixin):
@@ -20,14 +21,6 @@ class _FakeSessions(SessionUpdateMixin):
     async def write(self, session: dict) -> None:
         self.writes += 1
         self.session = session
-
-
-class _FakeEvents:
-    def __init__(self) -> None:
-        self.published: list[tuple[str, str, dict | None]] = []
-
-    async def publish(self, session_id: str, name: str, payload: dict | None = None) -> None:
-        self.published.append((session_id, name, payload))
 
 
 def test_log_context_has_correlation_keys() -> None:

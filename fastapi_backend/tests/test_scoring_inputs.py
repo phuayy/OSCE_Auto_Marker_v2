@@ -20,6 +20,7 @@ from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.process import CommandResult
 from app.pipeline.scoring import ScoringPipeline
+from tests.fixtures.events import RecordingEvents as _Events
 
 
 class RecordingRunner:
@@ -32,11 +33,6 @@ class RecordingRunner:
         if self.output_writer is not None:
             self.output_writer(args)
         return CommandResult(stdout="{}", stderr="")
-
-
-class _Events:
-    async def publish(self, *_args: Any, **_kwargs: Any) -> None:
-        return None
 
 
 class _Auth:
@@ -84,6 +80,11 @@ def test_content_scorer_is_given_the_normalised_transcript_and_the_case_study(tm
     assert _flag(args, "--session-id") == "s1"
     assert "payload" not in result
     assert json.loads(Path(result["absolutePath"]).read_text(encoding="utf-8")) == {"criteria": []}
+    # The rubric lives inside the case-study PDF, and parsing it out is a pure
+    # function of that file's bytes. Naming the shared cache is what lets a
+    # panel's markers — and every clip child of one recording — parse it once
+    # between them instead of once each.
+    assert _flag(args, "--rubric-cache") == str(pipeline.settings.paths.output_case_study_rubrics_dir)
 
 
 @pytest.mark.parametrize(

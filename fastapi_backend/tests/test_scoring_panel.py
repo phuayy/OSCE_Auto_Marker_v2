@@ -554,7 +554,7 @@ def test_pipeline_service_uses_the_prepared_run_and_records_its_metadata(tmp_pat
     scoring = RecordingMarking(panel_plan(), refresh=True)
     service = PipelineService(sessions=sessions, events=FakeEvents(), media=FakeMedia(settings), scoring=scoring)
 
-    result = asyncio.run(service._run_fresh_scoring_branches(session))
+    result = asyncio.run(service._run_cached_scoring_branches(session))
 
     assert result["scores"] == {"schema": "content-scoring-v1"}
     assert scoring.runs == 1
@@ -578,7 +578,7 @@ def test_pipeline_service_skips_the_run_when_the_prepared_predicate_accepts_the_
     scoring = RecordingMarking(panel_plan(), refresh=False)
     service = PipelineService(sessions=sessions, events=FakeEvents(), media=FakeMedia(settings), scoring=scoring)
 
-    result = asyncio.run(service._run_fresh_scoring_branches(session))
+    result = asyncio.run(service._run_cached_scoring_branches(session))
 
     assert scoring.runs == 0
     assert result["scores"]["marking_mode"] == "panel"

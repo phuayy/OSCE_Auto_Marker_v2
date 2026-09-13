@@ -27,6 +27,7 @@ from app.pipeline.transcription.base import TranscriptionRequest
 from app.pipeline.transcription.diarization import DIARIZATION_SCHEMA, PyannoteDiarizer
 
 from tests.test_transcription_diarization import stub_script_root
+from tests.fixtures.events import RecordingEvents as FakeEvents
 
 CANARY_SEGMENTS = [
     {"start": 0.0, "end": 30.0, "text": "Good morning, I am the medical student."},
@@ -37,14 +38,6 @@ TURNS = [
     {"start": 27.0, "end": 60.0, "speaker": "SPEAKER_01"},
 ]
 CANARY_STDOUT = ["Loading nvidia/canary-qwen-2.5b...", "Progress: 50.00%...", "Progress: 100.00%..."]
-
-
-class FakeEvents:
-    def __init__(self) -> None:
-        self.items: list[tuple[str, str, dict[str, Any]]] = []
-
-    async def publish(self, session_id: str, event: str, payload: dict[str, Any]) -> None:
-        self.items.append((session_id, event, payload))
 
 
 class FakeRunner:

@@ -24,6 +24,7 @@ from app.pipeline.transcription.diarization import (
     overlap_seconds,
     write_turns_file,
 )
+from tests.fixtures.events import RecordingEvents as FakeEvents
 
 TURNS = [
     {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
@@ -115,14 +116,6 @@ class FakeRunner:
         if self.turns is not None:
             write_turns_file(Path(args[args.index("--output") + 1]), self.turns)
         return CommandResult(stdout="", stderr="")
-
-
-class FakeEvents:
-    def __init__(self) -> None:
-        self.items: list[tuple[str, str, dict[str, Any]]] = []
-
-    async def publish(self, session_id: str, event: str, payload: dict[str, Any]) -> None:
-        self.items.append((session_id, event, payload))
 
 
 def stub_script_root(tmp_path: Path) -> Path:

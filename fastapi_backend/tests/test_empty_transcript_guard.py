@@ -28,17 +28,10 @@ from app.pipeline.media import MediaPipeline
 from app.services.pipeline_service import PipelineService
 
 from tests.test_pipeline_service import FakeEvents, FakeMedia, FakeSessions, build_session, build_settings
+from tests.fixtures.events import RecordingEvents as CapturingEvents
 
 
 SPOKEN_SEGMENT = {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00", "text": "Good morning."}
-
-
-class CapturingEvents:
-    def __init__(self) -> None:
-        self.items: list[tuple[str, str, dict[str, Any]]] = []
-
-    async def publish(self, session_id: str, event_name: str, payload: dict[str, Any]) -> None:
-        self.items.append((session_id, event_name, payload))
 
 
 class WhisperxRunner:

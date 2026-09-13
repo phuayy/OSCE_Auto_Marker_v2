@@ -41,7 +41,7 @@ async def _container(tmp_path: Path, session: dict[str, Any]):
     container = create_container(_settings(tmp_path))
     await container.artifacts.ensure_storage_layout()
     await container.storage.ensure_layout()
-    await container.database.initialize()
+    await container.orm_database.initialize()
     await container.orm_database.initialize()
     await container.jobs.repository.initialize()
     await container.sessions.write(session)

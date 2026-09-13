@@ -20,7 +20,6 @@ from app.api.routes import (
     notifications,
     sessions,
     settings as settings_routes,
-    uploads,
     webhooks,
 )
 from app.core.config import Settings
@@ -84,7 +83,6 @@ def build_test_client(tmp_path: Path) -> TestClient:
     )
     app.include_router(health.router, prefix="/api")
     app.include_router(auth.router, prefix="/api")
-    app.include_router(uploads.router, prefix="/api")
     app.include_router(async_uploads.router, prefix="/api")
     app.include_router(jobs.router, prefix="/api")
     app.include_router(sessions.router, prefix="/api")
@@ -452,52 +450,118 @@ def test_failed_assembly_marks_upload_failed_and_allows_retry(tmp_path) -> None:
     assert asyncio.run(container.sessions.read(session_id))["status"] == "uploaded"
 
 
-def test_legacy_upload_persists_workflow_segmentation_and_name(tmp_path) -> None:
+def test_single_shot_upload_route_is_gone(tmp_path) -> None:
+    """``POST /api/upload`` was a second, separately-validated ingest path that
+    no client used and that produced sessions the UI could not start. It is
+    removed; this pins that it stays removed, because reintroducing it means
+    reintroducing two places where an upload's invariants are enforced."""
     client = build_test_client(tmp_path)
     token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
     response = client.post(
         "/api/upload",
         headers={"Authorization": f"Bearer {token}"},
-        data={"workflow": "long", "segmentation": "human", "sessionName": "  Cohort A  "},
         files={
             "video": ("station.mp4", b"video-bytes", "video/mp4"),
             "caseStudy": ("case.pdf", b"%PDF-1.4 case", "application/pdf"),
         },
     )
-    assert response.status_code == 200, response.text
-    session = response.json()["session"]
+    assert response.status_code == 404, response.text
+
+
+def _chunked_upload(
+    client: TestClient,
+    headers: dict[str, str],
+    *,
+    video_name: str = "station.mp4",
+    case_study_name: str = "case.pdf",
+    **metadata: object,
+) -> dict:
+    """Run one whole chunked upload (initiate -> parts -> complete -> assemble)
+    and return the committed raw session."""
+
+    async def fake_video_duration(_path: Path) -> float:
+        return 1.0
+
+    container = client.app.state.container
+    container.media.get_video_duration_seconds = fake_video_duration
+
+    video_bytes = b"video-bytes"
+    case_study_bytes = b"%PDF-1.4 case"
+    initiate = client.post(
+        "/api/uploads/initiate",
+        headers=headers,
+        json={
+            "autoProcess": False,
+            "files": [
+                {
+                    "kind": "video",
+                    "originalName": video_name,
+                    "mimeType": "video/mp4",
+                    "sizeBytes": len(video_bytes),
+                },
+                {
+                    "kind": "caseStudy",
+                    "originalName": case_study_name,
+                    "mimeType": "application/pdf",
+                    "sizeBytes": len(case_study_bytes),
+                },
+            ],
+            **metadata,
+        },
+    )
+    assert initiate.status_code == 201, initiate.text
+    body = initiate.json()
+    for kind, payload in (("video", video_bytes), ("caseStudy", case_study_bytes)):
+        file_upload = next(item for item in body["fileUploads"] if item["kind"] == kind)
+        part = client.put(
+            f"/api/uploads/{body['uploadId']}/parts/1?fileId={file_upload['fileId']}",
+            headers=headers,
+            content=payload,
+        )
+        assert part.status_code == 200, part.text
+    complete = client.post(f"/api/uploads/{body['uploadId']}/complete", headers=headers, json={})
+    assert complete.status_code == 202, complete.text
+    asyncio.run(container.async_uploads._assemble_and_dispatch(body["uploadId"], False))
+    return asyncio.run(container.sessions.read(body["session"]["id"]))
+
+
+def test_chunked_upload_persists_workflow_segmentation_and_name(tmp_path) -> None:
+    """The invariants the removed legacy route enforced separately — a trimmed
+    name, a known workflow, the "human" segmentation synonym — are enforced once
+    now, by the shared ``UploadMetadataMixin`` on the only ingest path."""
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    session = _chunked_upload(
+        client,
+        {"Authorization": f"Bearer {token}"},
+        workflow="long",
+        segmentation="human",
+        sessionName="  Cohort A  ",
+    )
     assert session["workflow"] == "long"
     assert session["segmentation"] == "person"  # "human" synonym normalized
     assert session["name"] == "Cohort A"
 
-    raw_session = asyncio.run(client.app.state.container.sessions.read(session["id"]))
-    assert raw_session["workflow"] == "long"
-    assert raw_session["segmentation"] == "person"
 
-
-def test_direct_upload_uses_object_storage_refs(tmp_path) -> None:
+def test_upload_uses_object_storage_refs(tmp_path) -> None:
     client = build_test_client(tmp_path)
     token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
-    response = client.post(
-        "/api/upload",
-        headers={"Authorization": f"Bearer {token}"},
-        files={
-            "video": ("station video.mp4", b"video-bytes", "video/mp4"),
-            "caseStudy": ("case.pdf", b"%PDF-1.4 case", "application/pdf"),
-        },
+    raw_session = _chunked_upload(
+        client,
+        {"Authorization": f"Bearer {token}"},
+        video_name="station video.mp4",
     )
 
-    assert response.status_code == 200, response.text
-    session = response.json()["session"]
-    video = session["files"]["video"]
-    case_study = session["files"]["caseStudy"]
+    public = client.app.state.container.sessions.public_session(raw_session)
+    video = public["files"]["video"]
+    case_study = public["files"]["caseStudy"]
     assert video["url"].startswith("/media/source/sessions/")
     assert video["storageRef"]["provider"] == "local"
     assert video["storageRef"]["key"].endswith("/source/video/station-video.mp4")
+    # Server paths never leave the process through a public projection.
     assert "localPath" not in video["storageRef"]
     assert case_study["storageRef"]["key"].endswith("/source/caseStudy/case.pdf")
 
-    raw_session = asyncio.run(client.app.state.container.sessions.read(session["id"]))
     raw_video = raw_session["files"]["video"]
     assert raw_video["storageRef"]["localPath"].startswith(str(tmp_path / "storage" / "objects"))
     assert Path(raw_video["absolutePath"]).exists()

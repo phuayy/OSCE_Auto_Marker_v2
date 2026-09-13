@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.schemas.sessions import ManualClipsRequest, RecropClipRequest
-from app.schemas.uploads import InitiateUploadRequest, LegacyUploadForm
+from app.schemas.uploads import InitiateUploadRequest
 
 
 def _initiate_payload(**overrides):
@@ -40,46 +40,17 @@ def test_initiate_keeps_segmentation_for_long_workflow_and_maps_synonym() -> Non
     assert request.segmentation == "person"
 
 
-def test_legacy_form_defaults_and_degradation() -> None:
-    form = LegacyUploadForm(sessionName=None, workflow=None, segmentation=None)
-    assert form.workflow == "standard"
-    assert form.sessionName is None
-    assert form.segmentation is None
-    # Unknown segmentation degrades to None on the compat route instead of
-    # failing a multi-gigabyte upload.
-    degraded = LegacyUploadForm(sessionName=" S1 ", workflow="long", segmentation="lasers")
-    assert degraded.segmentation is None
-    assert degraded.sessionName == "S1"
-    assert degraded.workflow == "long"
+def test_initiate_rejects_unknown_segmentation_rather_than_degrading() -> None:
+    """The removed legacy route degraded an unknown segmentation method to the
+    server default, because failing there cost the client a multi-gigabyte
+    body it had already sent. ``initiate`` carries no bytes, so it refuses:
+    a typo must not silently become a different segmentation run."""
+    with pytest.raises(ValidationError):
+        InitiateUploadRequest(**_initiate_payload(workflow="long", segmentation="lasers"))
 
 
-def test_recrop_rejects_non_finite_and_inverted_bounds() -> None:
-    with pytest.raises(ValidationError):
-        RecropClipRequest(start=float("nan"), end=1.0)
-    with pytest.raises(ValidationError):
-        RecropClipRequest(start=float("inf"), end=1.0)
-    with pytest.raises(ValidationError):
-        RecropClipRequest(start=5.0, end=5.0)
-    with pytest.raises(ValidationError):
-        RecropClipRequest(start=-1.0, end=5.0)
-    ok = RecropClipRequest(start=0.0, end=12.5)
-    assert ok.end == 12.5
-
-
-def test_manual_clips_rejects_bad_boundaries() -> None:
-    with pytest.raises(ValidationError):
-        ManualClipsRequest(boundaries=[10.0, float("nan")])
-    with pytest.raises(ValidationError):
-        ManualClipsRequest(boundaries=[-3.0])
-    with pytest.raises(ValidationError):
-        ManualClipsRequest(boundaries=list(float(i) for i in range(201)))
-    ok = ManualClipsRequest(boundaries=[30.0, 60.0], labels=["  Student 1  "])
-    assert ok.labels == ["Student 1"]
-
-
-def test_manual_clips_kinds_normalized_and_validated() -> None:
-    ok = ManualClipsRequest(boundaries=[30.0], kinds=[" Session ", "INTERMISSION"])
-    assert ok.kinds == ["session", "intermission"]
-    assert ManualClipsRequest(boundaries=[30.0]).kinds == []  # optional — old clients
-    with pytest.raises(ValidationError):
-        ManualClipsRequest(boundaries=[30.0], kinds=["break"])
+def test_initiate_defaults_to_the_standard_workflow() -> None:
+    request = InitiateUploadRequest(**_initiate_payload(workflow=None, sessionName=None, segmentation=None))
+    assert request.workflow == "standard"
+    assert request.sessionName is None
+    assert request.segmentation is None

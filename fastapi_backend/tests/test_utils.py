@@ -19,14 +19,7 @@ from app.pipeline.scoring import ScoringPipeline
 from app.services.job_queue_service import JobQueueService
 from app.services.storage_service import LocalObjectStorageService
 from tests.fixtures.session_store import SessionUpdateMixin
-
-
-class CapturingEvents:
-    def __init__(self) -> None:
-        self.items: list[tuple[str, str, dict[str, Any]]] = []
-
-    async def publish(self, session_id: str, event_name: str, payload: dict[str, Any]) -> None:
-        self.items.append((session_id, event_name, payload))
+from tests.fixtures.events import RecordingEvents as CapturingEvents
 
 
 class InMemorySessions(SessionUpdateMixin):

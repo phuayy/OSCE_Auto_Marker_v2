@@ -10,13 +10,7 @@ from typing import Any
 from app.core.config import Settings
 from app.core.process import CommandResult
 from app.pipeline.media import MediaPipeline
-
-class CapturingEvents:
-    def __init__(self) -> None:
-        self.items: list[tuple[str, str, dict[str, Any]]] = []
-
-    async def publish(self, session_id: str, event_name: str, payload: dict[str, Any]) -> None:
-        self.items.append((session_id, event_name, payload))
+from tests.fixtures.events import RecordingEvents as CapturingEvents
 
 
 # A minimal but *usable* WhisperX artifact. It must carry real segment text:
@@ -202,3 +196,38 @@ def test_whisperx_env_carries_the_resolved_ffmpeg_directory(tmp_path: Path) -> N
     # The inherited PATH is preserved, not replaced: the child still needs the
     # interpreter and CUDA libraries it was going to find there.
     assert path_entries[1:] == os.environ.get("PATH", "").split(os.pathsep)
+
+
+def test_the_log_heartbeat_only_runs_when_something_can_hear_it(tmp_path: Path) -> None:
+    """The heartbeat exists so a client watching the event stream can tell a
+    silent 90-second model load from a stall. With ``SESSION_SSE_ENABLED``
+    false — the default — nobody is watching, so the timer is not started and
+    its once-a-second publish loop never runs.
+
+    Each run gets its own directory: a second run in the same one finds the
+    first run's WhisperX artifact and reuses it, so the CLI (and the heartbeat
+    around it) never happens.
+    """
+    started: list[str] = []
+    real_create_task = asyncio.create_task
+
+    def counting(coro, **kwargs):
+        if getattr(coro, "__name__", "") == "heartbeat":
+            started.append("heartbeat")
+        return real_create_task(coro, **kwargs)
+
+    def transcribe_with(enabled: bool, directory: Path) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        media, _ = make_media(directory)
+        media.events = CapturingEvents(enabled=enabled)
+        asyncio.create_task = counting
+        try:
+            run_transcription(media, directory)
+        finally:
+            asyncio.create_task = real_create_task
+
+    transcribe_with(False, tmp_path / "stream-off")
+    assert started == []
+
+    transcribe_with(True, tmp_path / "stream-on")
+    assert started == ["heartbeat"]

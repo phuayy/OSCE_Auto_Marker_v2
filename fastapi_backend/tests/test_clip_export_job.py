@@ -20,14 +20,7 @@ from app.pipeline.media import MediaPipeline
 from app.services.clip_service import ClipService
 from app.services.job_tasks import get_task_spec, queue_owns_session_status
 from tests.fixtures.session_store import SessionUpdateMixin
-
-
-class FakeEvents:
-    def __init__(self) -> None:
-        self.items: list[tuple[str, str, dict[str, Any]]] = []
-
-    async def publish(self, session_id: str, event_type: str, payload: dict[str, Any]) -> None:
-        self.items.append((session_id, event_type, payload))
+from tests.fixtures.events import RecordingEvents as FakeEvents
 
 
 class FakeSessions(SessionUpdateMixin):

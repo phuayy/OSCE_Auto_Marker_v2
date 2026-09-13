@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings
-from app.database import Database
+from app.database.orm import OrmDatabase
 from app.database.orm import OrmDatabase
 from app.repositories.job_repository import JobRepository
 from app.repositories.session_repository import SessionRepository
@@ -209,7 +209,7 @@ def _queue(tmp_path, pipeline) -> tuple[JobQueueService, SessionService]:
         scorer_python_bin="python",
     )
     sessions = SessionService(settings, SessionRepository(OrmDatabase(tmp_path / "s.sqlite3")))
-    repository = JobRepository(Database(tmp_path / "jobs.sqlite3"))
+    repository = JobRepository(OrmDatabase(tmp_path / "jobs.sqlite3"))
 
     class Storage:
         async def prepare_session_sources(self, session: dict[str, Any]) -> dict[str, Any]:

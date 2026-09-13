@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import runpy
 import sys
 from pathlib import Path
@@ -30,7 +31,7 @@ def _settings(tmp_path: Path) -> Settings:
 async def _init(container) -> None:
     await container.artifacts.ensure_storage_layout()
     await container.storage.ensure_layout()
-    await container.database.initialize()
+    await container.orm_database.initialize()
     await container.orm_database.initialize()
 
 
@@ -50,8 +51,11 @@ def test_delete_session_cascades_children_and_wipes_data(tmp_path) -> None:
         parent_video = tmp_path / "parent-video.mp4"
         case_study = tmp_path / "shared-rubric.pdf"
         child_score = tmp_path / "child1-scores.json"
-        for path in (parent_video, case_study, child_score):
+        for path in (parent_video, case_study):
             path.write_text("x", encoding="utf-8")
+        # A score artifact has to hold the sheet: `read_artifact_payload` takes
+        # the file over any copy embedded on the session.
+        child_score.write_text(json.dumps(_score_payload()), encoding="utf-8")
 
         parent_id = "parent-1"
         await container.sessions.write(
@@ -144,7 +148,7 @@ def test_rerun_session_keeps_id_and_reenqueues(tmp_path) -> None:
         video = tmp_path / "clip.mp4"
         score = tmp_path / "scores.json"
         video.write_text("x", encoding="utf-8")
-        score.write_text("x", encoding="utf-8")
+        score.write_text(json.dumps(_score_payload()), encoding="utf-8")
 
         session_id = "child-rerun"
         session = {
@@ -310,8 +314,9 @@ def test_rerun_of_a_long_session_clears_a_stray_pipeline_run_left_on_it(tmp_path
         clip_file = tmp_path / "clip-1.mp4"
         score_file = tmp_path / "scores.json"
         transcript_file = tmp_path / "transcript.json"
-        for path in (video, clip_file, score_file, transcript_file):
+        for path in (video, clip_file, transcript_file):
             path.write_text("x", encoding="utf-8")
+        score_file.write_text(json.dumps(_score_payload()), encoding="utf-8")
 
         session_id = "long-3"
         session = {
@@ -360,7 +365,7 @@ def test_rerun_of_a_standard_session_still_runs_the_pipeline_and_clears_outputs(
         video = tmp_path / "standard-video.mp4"
         score = tmp_path / "scores.json"
         video.write_text("x", encoding="utf-8")
-        score.write_text("x", encoding="utf-8")
+        score.write_text(json.dumps(_score_payload()), encoding="utf-8")
 
         session_id = "standard-1"
         session = {

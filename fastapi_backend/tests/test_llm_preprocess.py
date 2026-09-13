@@ -12,6 +12,7 @@ from app.core.json_utils import read_json_file
 from app.pipeline.llm_preprocess import diff_replacements, merge_corrected_segments
 from app.services.pipeline_service import PipelineService
 from tests.fixtures.session_store import SessionUpdateMixin
+from tests.fixtures.events import RecordingEvents as _FakeEvents
 
 
 def build_transcript() -> dict[str, Any]:
@@ -79,14 +80,6 @@ class _FakeSessions(SessionUpdateMixin):
     async def write(self, session: dict[str, Any]) -> None:
         self.writes += 1
         self.session = copy.deepcopy(session)
-
-
-class _FakeEvents:
-    def __init__(self) -> None:
-        self.published: list[tuple[str, str, dict | None]] = []
-
-    async def publish(self, session_id: str, name: str, payload: dict | None = None) -> None:
-        self.published.append((session_id, name, payload))
 
 
 class _FakeAppSettings:
