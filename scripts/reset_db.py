@@ -134,7 +134,10 @@ async def run(*, clear_all: bool) -> None:
         clear_directory(paths.output_clips_dir, "clips")
 
     print()
-    print("Done. Run scripts/init_db.py (or npm run dev:api) to re-create the schema.")
+    # Alembic owns the schema. The API applies migrations at startup unless
+    # DB_AUTO_MIGRATE=false, in which case migrate as a deliberate step.
+    print("Done. Start the API (npm run dev:api), or migrate explicitly:")
+    print("  cd fastapi_backend && uv run alembic upgrade head")
 
 
 def main() -> None:

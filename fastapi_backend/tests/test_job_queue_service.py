@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from app.core.config import Settings
-from app.database import Database
+from app.database.orm import OrmDatabase
 from app.repositories.job_repository import JobRepository
 from app.services.event_service import EventService
 from app.services.job_queue_service import JobQueueService, compute_retry_backoff_seconds
@@ -11,7 +11,7 @@ from app.services.job_queue_service import JobQueueService, compute_retry_backof
 
 def _make_service(tmp_path) -> JobQueueService:
     settings = Settings(ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe", scorer_python_bin="python")
-    repository = JobRepository(Database(tmp_path / "osce_marker.sqlite3"))
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
     events = EventService(settings)
     # sessions/storage are unused by the enqueue path under test.
     return JobQueueService(settings, repository, events, sessions=None, storage=None)

@@ -146,11 +146,7 @@ class PanelAdjudicatorRunner:
             args,
             "Panel adjudication",
             env=self.marker.python_env(llm_env),
-            on_output=lambda stream, text: self.events.publish(
-                session_id,
-                "log",
-                {"source": f"{log_source}-{stream}", "message": text},
-            ),
+            on_output=self.events.log_sink(session_id, log_source),
         )
         if not output_path.exists():
             raise RuntimeError("The panel adjudicator did not produce a final sheet.")

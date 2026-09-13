@@ -10,11 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.database.models import Base
 
 
-# Matches the raw-sqlite jobs layer (app/database/connection.py), which sets
-# ``PRAGMA busy_timeout = 30000``. Without an explicit timeout the ORM engine
-# would fall back to sqlite3's 5 s default and surface transient
-# "database is locked" errors when the separate jobs connection holds the write
-# lock under concurrent local-mode writes.
+# Without an explicit timeout the engine falls back to sqlite3's 5 s default,
+# and a writer that has to wait longer than that surfaces a transient
+# "database is locked" instead of waiting its turn. SQLite serialises writers,
+# and this process has several — the pipeline, the queue, an export job and a
+# user renaming things in the browser — so waiting is the normal case, not a
+# sign of trouble. (This used to also have to cover a second connection layer
+# for the jobs queue, which set the same PRAGMA of its own; that layer is gone.)
 _SQLITE_BUSY_TIMEOUT_SECONDS = 30
 
 

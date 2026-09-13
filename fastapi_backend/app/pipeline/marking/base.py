@@ -173,11 +173,7 @@ class ContentMarkerRunner:
             args,
             label,
             env=self.python_env(llm_env),
-            on_output=lambda stream, text: self.events.publish(
-                session_id,
-                "log",
-                {"source": f"{log_source}-{stream}", "message": text},
-            ),
+            on_output=self.events.log_sink(session_id, log_source),
         )
         if output_path.exists():
             payload = await asyncio.to_thread(lambda: extract_json_object(output_path.read_text(encoding="utf-8")))

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 
-from app.database import Database
+from app.database.orm import OrmDatabase
 from app.repositories.job_repository import JobRepository
 
 
 def test_job_repository_recovers_running_jobs(tmp_path) -> None:
-    repository = JobRepository(Database(tmp_path / "osce_marker.sqlite3"))
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
     job = {
         "id": "job-1",
         "sessionId": "session-1",
@@ -34,7 +34,7 @@ def test_job_repository_recovers_running_jobs(tmp_path) -> None:
 
 
 def test_job_repository_claims_queued_job_once(tmp_path) -> None:
-    repository = JobRepository(Database(tmp_path / "osce_marker.sqlite3"))
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
     job = {
         "id": "job-1",
         "sessionId": "session-1",
@@ -62,7 +62,7 @@ def test_job_repository_claims_queued_job_once(tmp_path) -> None:
 
 
 def test_job_repository_prepares_failed_job_for_hatchet_retry(tmp_path) -> None:
-    repository = JobRepository(Database(tmp_path / "osce_marker.sqlite3"))
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
     job = {
         "id": "job-1",
         "sessionId": "session-1",
@@ -89,7 +89,7 @@ def test_job_repository_prepares_failed_job_for_hatchet_retry(tmp_path) -> None:
 
 
 def test_job_repository_does_not_requeue_cancelled_interrupted_job(tmp_path) -> None:
-    repository = JobRepository(Database(tmp_path / "osce_marker.sqlite3"))
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
     job = {
         "id": "job-1",
         "sessionId": "session-1",

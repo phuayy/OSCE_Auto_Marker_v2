@@ -389,3 +389,88 @@ class TableVersionRecord(Base):
     table_name: Mapped[str] = mapped_column(String(64), primary_key=True)
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class JobRecord(Base):
+    """One queued/running/finished unit of background work.
+
+    The jobs tables used to live outside this metadata, described by raw
+    ``CREATE TABLE`` strings in ``app/database/schema.py`` and reached through a
+    second connection pool. Two schema sources for one database meant Alembic
+    had to be told to ignore half of it, ``alembic check`` could not see a drift
+    in that half, and every deployment opened two pools against the same file.
+    They are ordinary models now; the raw layer is gone.
+
+    Timestamps here are ISO-8601 UTC **text**, not ``DateTime`` like the rest of
+    this module. That is deliberate and not a style slip: these values are the
+    job document the API hands to the browser and writes onto ``session.job``,
+    they are compared and ordered as strings, and the rows already on disk hold
+    text. Modelling them as text keeps this a pure refactor with no data
+    migration; ``app/core/utils.utc_now_iso`` is the single producer.
+    """
+
+    __tablename__ = "jobs"
+    __table_args__ = (
+        Index("idx_jobs_status_created_at", "status", "created_at"),
+        Index("idx_jobs_session_task_status", "session_id", "task_type", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_type: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    # The task payload as a JSON *string*, matching the column already on disk.
+    # JobRepository owns the encode/decode so the stored bytes are stable
+    # (sorted keys, compact separators) whatever the backend.
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    queued_at: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[str | None] = mapped_column(Text)
+    ended_at: Mapped[str | None] = mapped_column(Text)
+    requeued_at: Mapped[str | None] = mapped_column(Text)
+    locked_by: Mapped[str | None] = mapped_column(Text)
+    locked_at: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class JobAttemptRecord(Base):
+    """One execution of a job: which worker took it, when, and how it ended.
+
+    Rows are never updated except to close the open attempt, so the history of a
+    retried job stays readable after the fact.
+    """
+
+    __tablename__ = "job_attempts"
+    __table_args__ = (Index("idx_job_attempts_job_id", "job_id", "attempt_number"),)
+
+    # BIGSERIAL on PostgreSQL, INTEGER (rowid alias) on SQLite — the variant is
+    # what the raw DDL spelled by hand for each backend.
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
+    job_id: Mapped[str] = mapped_column(Text, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    worker_id: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[str] = mapped_column(Text, nullable=False)
+    ended_at: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+
+
+class JobEventRecord(Base):
+    """An append-only log line for a job, kept for diagnosis after the fact."""
+
+    __tablename__ = "job_events"
+    __table_args__ = (Index("idx_job_events_job_id", "job_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
+    job_id: Mapped[str] = mapped_column(Text, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    message: Mapped[str | None] = mapped_column(Text)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)

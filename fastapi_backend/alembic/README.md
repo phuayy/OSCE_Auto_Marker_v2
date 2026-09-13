@@ -1,9 +1,16 @@
 # Database migrations
 
-Alembic owns the schema for both database layers: the SQLAlchemy ORM tables
-(`sessions`, `assessments`, `rubric_assets`, `notifications`, …) and the raw-SQL
-jobs tables (`jobs`, `job_attempts`, `job_events`, `app_metadata`). It also
-installs the change-tracking triggers that maintain `table_versions`.
+Alembic owns the schema, and `app/database/models.py` is the only description of
+it — sessions, assessments, rubric assets, notifications and the job queue
+(`jobs`, `job_attempts`, `job_events`) alike. It also installs the
+change-tracking triggers that maintain `table_versions`.
+
+Until revision `0007` the queue's tables were the exception: raw `CREATE TABLE`
+strings in `app/database/schema.py`, run at startup over a second connection
+pool. Autogenerate was told to ignore them, so `alembic check` could not see
+drift in that half — and there was some (see `0007`). The list of tables still
+outside the metadata is now two entries long and lives in
+`app/database/schema_ownership.py`.
 
 All commands run from `fastapi_backend/`, which is where `alembic.ini` lives and
 where `app` is importable.
@@ -32,11 +39,12 @@ alembic -x db_url=postgresql+psycopg://user:pass@host/db upgrade head
 
 | Revision | What it does |
 |---|---|
-| `0001_initial_schema` | Baseline: every ORM table plus the raw-SQL jobs tables. Mirrors the schema the old `create_all` startup path produced, minus `notifications.event_type`. |
+| `0001_initial_schema` | Baseline: every ORM table plus the jobs tables, which at the time were owned by the raw-SQL layer. Mirrors the schema the old `create_all` startup path produced, minus `notifications.event_type`. |
 | `0002_notification_event_type` | Adds `notifications.event_type` and backfills legacy rows to `scoring.completed`. Mirrors the `ADDITIVE_MIGRATIONS` entry in `app/database/migrations.py`. |
 | `0003_change_tracking_triggers` | Installs the per-table triggers that bump `table_versions.version` (and `pg_notify` on PostgreSQL). Mirrors `install_change_tracking()`. |
 | `0004_provider_credentials` | Adds `provider_credentials`: the operator-managed LLM API keys, stored as AES-256-GCM ciphertext bound to their provider id. Never in `app_settings`, which is returned verbatim by `GET /api/settings`. |
 | `0005_cache_invalidation_triggers` | Attaches change tracking to `provider_credentials` and `app_settings`. Both are resolved before every scoring run in every process and written a few times a year, so both are cached; these triggers are what evict those caches when a key is rotated or a model is switched. |
+| `0007_jobs_tables_in_orm_metadata` | Folds `jobs`, `job_attempts` and `job_events` into the ORM metadata and makes their primary keys `NOT NULL` — SQLite implies that only for an `INTEGER PRIMARY KEY`, so `jobs.id` (TEXT) could hold a null under the hand-written DDL. A no-op on PostgreSQL. |
 | `0006_custom_llm_providers` | Adds `llm_providers`: scoring providers an operator defines at runtime (endpoint, auth placement, versions, extra headers/query/body) instead of ones the build ships. No API key column - the credential goes to `provider_credentials` like every other provider's. Change tracking is attached in the same revision, because the catalogue is cached in every process. |
 
 Revision files are self-contained snapshots — they never import
@@ -78,10 +86,9 @@ cd fastapi_backend
 alembic revision --autogenerate -m "add whatever"
 ```
 
-Autogenerate compares `Base.metadata` against the live database and ignores the
-raw-SQL jobs tables (they are not in the metadata, so `env.py` filters them out
-rather than proposing to drop them). **Read the generated file before committing
-it** — autogenerate does not detect renames, server-side default changes, or
+Autogenerate compares `Base.metadata` against the live database, ignoring only
+the tables named in `app/database/schema_ownership.py`. **Read the generated file
+before committing it** — autogenerate does not detect renames, server-side default changes, or
 anything expressed outside the metadata, and on SQLite it needs the batch mode
 `env.py` already enables.
 

@@ -13,6 +13,13 @@ from app.services.rubric_asset_service import RubricAssetService
 
 
 def test_rubric_asset_service_reuses_existing_matching_file(tmp_path) -> None:
+    """Two uploads of the same PDF resolve to one stored asset.
+
+    Exercised through ``register_case_study_storage_ref`` — the only case-study
+    registration path there is, now that the single-shot ``POST /api/upload``
+    route and its ``register_case_study_meta`` twin are gone.
+    """
+
     async def _run() -> None:
         database = OrmDatabase(tmp_path / "app.sqlite3")
         service = RubricAssetService(RubricAssetRepository(database))
@@ -21,28 +28,30 @@ def test_rubric_asset_service_reuses_existing_matching_file(tmp_path) -> None:
         first_path.write_bytes(b"%PDF-1.4 same rubric")
         second_path.write_bytes(b"%PDF-1.4 same rubric")
 
-        first = await service.register_case_study_meta(
-            {
-                "absolutePath": str(first_path),
-                "originalName": "PHR1012 rubric.pdf",
-                "fileName": first_path.name,
-                "sizeBytes": first_path.stat().st_size,
-                "mimeType": "application/pdf",
-            }
-        )
-        second = await service.register_case_study_meta(
-            {
-                "absolutePath": str(second_path),
-                "originalName": "PHR1012 rubric.pdf",
-                "fileName": second_path.name,
-                "sizeBytes": second_path.stat().st_size,
-                "mimeType": "application/pdf",
-            }
-        )
+        async def register(path):
+            return await service.register_case_study_storage_ref(
+                storage_ref={
+                    "provider": "local",
+                    "key": f"sessions/x/source/caseStudy/{path.name}",
+                    "localPath": str(path),
+                    "sizeBytes": path.stat().st_size,
+                    "mimeType": "application/pdf",
+                },
+                original_name="PHR1012 rubric.pdf",
+                safe_name=path.name,
+                public_url=f"/media/source/{path.name}",
+            )
 
-        assert second["rubricAssetId"] == first["rubricAssetId"]
-        assert second["absolutePath"] == str(first_path)
-        assert second["rubricDeduplicated"] is True
+        _, first_asset, first_duplicate = await register(first_path)
+        second_ref, second_asset, second_duplicate = await register(second_path)
+
+        assert first_duplicate is False
+        assert second_duplicate is True
+        assert second_asset["id"] == first_asset["id"]
+        assert second_asset["absolutePath"] == str(first_path)
+        # The canonical ref points at the surviving copy, not the one just
+        # deleted, or a later run would materialise a path with no file.
+        assert second_ref["localPath"] == str(first_path)
         assert first_path.exists()
         assert not second_path.exists()
         await database.shutdown()

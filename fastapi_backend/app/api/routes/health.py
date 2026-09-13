@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Response
+from sqlalchemy import text
 
 from app.api.dependencies import get_container
 from app.schemas.common import HealthResponse
@@ -67,7 +68,8 @@ async def readiness(response: Response, container: AppContainer = Depends(get_co
 
 async def _check_database(container: AppContainer) -> bool:
     try:
-        await container.database.run(lambda connection: connection.execute("SELECT 1").fetchone())
+        async with container.orm_database.session() as db:
+            await db.execute(text("SELECT 1"))
         return True
     except Exception:
         return False

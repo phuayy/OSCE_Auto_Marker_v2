@@ -7,12 +7,13 @@ Two things make this file longer than the generated default:
    a default SQLite file under ``storage/``; duplicating that logic in an ini
    file is how a migration ends up applied to the wrong database.
 
-2. The schema is owned by *two* layers. ``app.database.models`` (SQLAlchemy
-   metadata) owns sessions/assessments/rubrics/notifications; the raw-SQL jobs
-   layer (``app.database.schema``) owns ``jobs``, ``job_attempts``,
-   ``job_events`` and ``app_metadata``. Both are created by the migrations, but
-   only the first is in ``target_metadata`` — so autogenerate is told to ignore
-   the second rather than proposing to drop it on every run.
+2. Two tables in the database belong to nobody. ``app.database.models`` owns
+   every table the application uses -- the jobs queue included, since the
+   raw-SQL layer that used to own it was folded into the ORM. What is left is
+   ``alembic_version`` (Alembic's own bookkeeping) and ``app_metadata``, a
+   schema-version row the removed layer wrote on PostgreSQL. Neither is in
+   ``target_metadata``, so autogenerate is told to ignore them rather than
+   proposing to drop them on every run.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.core.config import Settings  # noqa: E402
 from app.database.models import Base  # noqa: E402
+from app.database.schema_ownership import UNMANAGED_TABLES as SCHEMA_UNMANAGED_TABLES  # noqa: E402
 
 
 config = context.config
@@ -52,12 +54,10 @@ if config.config_file_name is not None and config.attributes.get("configure_logg
 target_metadata = Base.metadata
 
 
-# Tables created by the raw-SQL jobs layer, plus Alembic's own bookkeeping.
-# They exist in the database but not in ``target_metadata``, so autogenerate
-# would otherwise emit a drop for each one.
-UNMANAGED_TABLES = frozenset(
-    {"jobs", "job_attempts", "job_events", "app_metadata", "alembic_version"}
-)
+# Tables that exist in deployed databases but not in ``target_metadata``. See
+# app/database/schema_ownership.py for what is on the list and why; it lives
+# there so this file and the tests that pin the property read one value.
+UNMANAGED_TABLES = SCHEMA_UNMANAGED_TABLES
 
 
 def _sync_url() -> str:

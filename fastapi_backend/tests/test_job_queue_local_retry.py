@@ -17,7 +17,10 @@ import pytest
 
 from app.core.config import Settings
 from app.core.exceptions import AppError, EmptyTranscriptError
-from app.database import Database
+from sqlalchemy import select
+
+from app.database.models import JobEventRecord
+from app.database.orm import OrmDatabase
 from app.repositories.job_repository import JobRepository
 from app.services.event_service import EventService
 from app.services.job_queue_service import JobQueueService, JobRunResult, is_retryable_failure
@@ -83,7 +86,7 @@ def make_service(
         scorer_python_bin="python",
         **setting_overrides,
     )
-    repository = JobRepository(Database(tmp_path / "osce_marker.sqlite3"))
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
     service = JobQueueService(settings, repository, EventService(settings), FakeSessions(), FakeStorage())
     service.bind_handlers(pipeline=pipeline, clips=object())
     return service
@@ -110,14 +113,13 @@ async def job_event_types(service: JobQueueService, job_id: str) -> list[str]:
     rows rather than growing the repository an API nothing else needs.
     """
 
-    def _read(connection) -> list[str]:
-        rows = connection.execute(
-            "SELECT event_type FROM job_events WHERE job_id = ? ORDER BY id ASC",
-            (job_id,),
-        ).fetchall()
-        return [str(row["event_type"]) for row in rows]
-
-    return await service.repository.database.run(_read)
+    async with service.repository.database.session() as db:
+        rows = await db.scalars(
+            select(JobEventRecord.event_type)
+            .where(JobEventRecord.job_id == job_id)
+            .order_by(JobEventRecord.id.asc())
+        )
+        return [str(event_type) for event_type in rows]
 
 
 # --- retryability rule ------------------------------------------------------

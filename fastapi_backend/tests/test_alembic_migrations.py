@@ -17,9 +17,11 @@ from app.database.orm import OrmDatabase
 pytest.importorskip("alembic", reason="Alembic is an optional install for the schema tooling.")
 
 
-# Tables Alembic must produce. The ORM half comes from the metadata; the jobs
-# half is owned by the raw-SQL layer and created by revision 0001 as well, so a
-# database built purely by "alembic upgrade head" is complete.
+# The queue's tables, named here because they are the ones that used to live
+# outside the ORM metadata — described by hand in a raw-SQL module with a
+# connection pool of their own. They are models now, so "alembic upgrade head"
+# and Base.metadata describe one and the same schema, and `alembic check` can
+# see drift in this half like any other.
 JOBS_TABLES = {"jobs", "job_attempts", "job_events"}
 
 
@@ -194,3 +196,20 @@ def test_sqlite_async_driver_is_stripped_for_the_migration_connection() -> None:
         to_sync_url("postgresql+psycopg://user:pass@host/db")
         == "postgresql+psycopg://user:pass@host/db"
     )
+
+
+def test_the_jobs_tables_are_managed_by_alembic() -> None:
+    """The env's ignore list is what made the second schema source invisible to
+    autogenerate. With the raw layer gone, only Alembic's own bookkeeping and a
+    dead ``app_metadata`` row may stay outside the metadata."""
+    from app.database.schema_ownership import UNMANAGED_TABLES
+
+    assert UNMANAGED_TABLES.isdisjoint(JOBS_TABLES)
+    assert UNMANAGED_TABLES == frozenset({"app_metadata", "alembic_version"})
+
+
+def test_every_application_table_is_in_the_orm_metadata() -> None:
+    from app.database.models import Base
+
+    for table in JOBS_TABLES:
+        assert table in Base.metadata.tables

@@ -12,7 +12,6 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from app.core.asyncio_compat import configure_windows_selector_event_loop_policy  # noqa: E402
 from app.core.config import settings  # noqa: E402
-from app.database import Database  # noqa: E402
 from app.database.orm import OrmDatabase  # noqa: E402
 
 
@@ -34,17 +33,16 @@ def redact_database_url(url: str) -> str:
 
 async def main() -> None:
     source = settings.resolved_database_source
-    database = Database(source)
     orm_database = OrmDatabase(source)
+    backend = "postgres" if orm_database.url.startswith("postgresql") else "sqlite"
 
     try:
-        await database.initialize()
         await orm_database.initialize()
     finally:
         await orm_database.shutdown()
 
-    source_label = str(source) if database.backend == "sqlite" else redact_database_url(str(source))
-    print(f"Database backend: {database.backend}")
+    source_label = str(source) if backend == "sqlite" else redact_database_url(str(source))
+    print(f"Database backend: {backend}")
     print(f"Database source: {source_label}")
     print("Database initialization: ok")
 
