@@ -1001,6 +1001,35 @@ non-retryable, so the queue does not spend its attempts spawning an interpreter
 that exits at once. The Canary engine also classifies the script's exit code 3
 itself, for the minute the availability answer is cached.
 
+**How the Canary checkpoint is loaded, and the one invariant that follows it.**
+`scripts/canary_qwen_transcribe.py` builds SALM in the checkpoint's own
+bfloat16 (`built_in_dtype`, displacing both torch's default and
+`load_pretrained_hf`'s float32 signature default) and streams the safetensors
+file straight into the parameters that already exist (`streamed_checkpoint_load`)
+instead of materialising a second full copy — together the difference between
+~9.7 GB and ~4.6 GB of peak host commit, which is what decides whether a
+Windows machine with an ordinary pagefile loads it or dies with an access
+violation. Neither step is complete on its own: NeMo hard-codes float32 in
+places that ignore the dtype default (`torch.FloatTensor(h, d_k)` for every
+Conformer attention layer's relative-position biases; PEFT upcasts the LoRA
+adapters deliberately), and `copy_` keeps the destination's dtype, so those
+parameters came out of the load float32 with bfloat16 values in them. The
+mismatch only surfaced in the first forward — `expected scalar type Float but
+found BFloat16`, ten seconds after a five-minute load — and it cost three
+identical retries and the session, because a dtype bug is indistinguishable from
+a transient failure to the queue. So the load is followed by
+`align_model_dtype`, which enforces one rule rather than a patch per module:
+every floating-point **parameter** outside the mel front-end is in the load
+dtype (the front-end stays float32 — an STFT over the waveform returns float32
+regardless — and casts once at its boundary; buffers are left as their owners
+made them, because transformers keeps the rotary `inv_freq` float32 on
+purpose). The names it converted are printed in the run's log, so the next
+hard-coded float32 a NeMo upgrade introduces shows up as a line there, not as a
+traceback under `generate`. The precision is exposed as the engine's advanced
+`dtype` parameter in Settings — `auto` is bfloat16; `float32` doubles the host
+memory and exists only as an escape hatch for a NeMo release that misbehaves in
+reduced precision.
+
 The `debug` group (`uv sync --group debug`) carries what only the hand-run
 `debug_scripts/` need — `openpyxl` for the RT-DETR tuning sheets. It was a
 manual pip install before and vanished with the rebuild, for the same reason.
