@@ -36,6 +36,25 @@ export default defineConfig({
     host: '127.0.0.1',
     // Fail loudly instead of silently sliding to 5174 when 5173 is taken.
     strictPort: true,
+    watch: {
+      // Vite's watcher ignores only .git, node_modules and the build output,
+      // so on this repo chokidar walked the Python virtualenv (~59k files in
+      // ~9.3k directories once torch and NeMo are installed) and the runtime
+      // artefact store before the dev server was usable: measured 256 s and
+      // ~780 MB of watcher state, against 2 s with these out. None of them
+      // holds anything Vite serves. Same scoping run_api.py applies to its own
+      // reloader (RELOAD_DIRS). Appended to Vite's defaults, not replacing them.
+      // public/ is deliberately not listed: the watcher is what keeps the
+      // served public-file set current when a file is added there.
+      ignored: [
+        '**/.venv/**',
+        '**/storage/**',
+        '**/__pycache__/**',
+        '**/.codegraph/**',
+        '**/.ruff_cache/**',
+        '**/fastapi_backend/**',
+      ],
+    },
     proxy: {
       '/api': makeProxyOptions(apiTarget),
       '/media': makeProxyOptions(apiTarget),
