@@ -12,7 +12,7 @@ Final-year project (FYP) that automatically marks OSCE (Objective Structured Cli
 |---|---|
 | Frontend | React 18 + Vite, Tailwind CSS, shadcn/ui, plain JS (no TypeScript) |
 | Backend | FastAPI (Python 3.11+), uvicorn, SQLAlchemy async |
-| Databases | **Dual**: raw aiosqlite (`Database`) for jobs; SQLAlchemy ORM (`OrmDatabase`) for sessions/assessments/rubric assets/videos — same SQLite or PostgreSQL file |
+| Databases | One SQLAlchemy async engine (`OrmDatabase`) for everything — sessions, assessments, rubric assets, videos **and** the job queue. `app/database/models.py` is the only schema description; Alembic migrates it. SQLite or PostgreSQL |
 | AI scoring | Pluggable LLM providers behind a router (NVIDIA, OpenAI, Anthropic, DeepSeek, Gemini, OpenRouter) for content + communication; librosa for audio professionalism — all run as **subprocesses** via `scripts/`. Primary and fallback model chosen in Settings, stored in `app_settings`, read live per run |
 | Transcription | Pluggable engines behind a router: **WhisperX** (default, diarises) or **NVIDIA Canary-Qwen 2.5B** (optional, NeMo; text-only + separate pyannote pass). Chosen in Settings, stored in `app_settings`, read live per run |
 | Job queue | **local** asyncio (default) or **Hatchet** (optional distributed queue) |
@@ -39,15 +39,16 @@ OSCE-AI-FYP/
 │   │   ├── clipExportOutcome.js # What the editor does when an export/recrop job lands (pure)
 │   │   ├── processingStage.js  # Session card's stage gauge, from the projection's `steps` (pure)
 │   │   ├── navigation.js       # parseRoute / buildRoute (hash-based deep links)
+│   │   ├── lazyRoute.jsx       # Code-splitting plumbing: lazy + preload + chunk error boundary
 │   │   └── useHashRoute.js     # React hook for URL <-> state sync
 │   └── auth.js                 # fetchStreamTicket, resolveMediaUrl helpers
 ├── fastapi_backend/
 │   ├── alembic.ini             # Alembic config; URL comes from Settings, not this file
 │   ├── alembic/
-│   │   ├── env.py              # Resolves the DB URL from Settings; filters raw-SQL jobs tables
+│   │   ├── env.py              # Resolves the DB URL from Settings; ignores only schema_ownership.UNMANAGED_TABLES
 │   │   ├── README.md           # Migration workflow, revision table, startup behaviour
 │   │   └── versions/
-│   │       ├── 0001_initial_schema.py            # Baseline: ORM tables + raw-SQL jobs tables
+│   │       ├── 0001_initial_schema.py            # Baseline: ORM tables + the (then raw-SQL) jobs tables
 │   │       ├── 0002_notification_event_type.py   # notifications.event_type + backfill
 │   │       ├── 0003_change_tracking_triggers.py  # table_versions triggers (+ pg_notify)
 │   │       ├── 0004_provider_credentials.py      # encrypted operator-managed LLM API keys
@@ -65,9 +66,9 @@ OSCE-AI-FYP/
 │       │   ├── token_revocation.py
 │       │   └── logging_utils.py # log_context() structured logging helper
 │       ├── database/
-│       │   ├── connection.py   # Database — raw aiosqlite (jobs layer)
-│       │   ├── orm.py          # OrmDatabase — SQLAlchemy async engine
+│       │   ├── orm.py          # OrmDatabase — the one SQLAlchemy async engine
 │       │   ├── models.py       # SQLAlchemy models (see DB Models section)
+│       │   ├── schema_ownership.py  # The only tables Alembic autogenerate ignores
 │       │   └── migration_runner.py  # Runs "alembic upgrade head" at startup
 │       ├── repositories/
 │       │   ├── session_repository.py    # SessionRecord CRUD + legacy JSON migration
@@ -134,8 +135,7 @@ OSCE-AI-FYP/
 │       │   ├── dependencies.py          # get_container, authorize_request
 │       │   └── routes/
 │       │       ├── sessions.py          # /api/sessions/** (list, get, events SSE, process, clips)
-│       │       ├── async_uploads.py     # /api/uploads/** (initiate, part, complete, abort)
-│       │       ├── uploads.py           # /api/upload (legacy single-shot multipart)
+│       │       ├── async_uploads.py     # /api/uploads/** (initiate, part, complete, abort) — the ONLY ingest path
 │       │       ├── auth.py              # /api/auth/login|me|logout|stream-ticket
 │       │       ├── health.py            # /api/health (liveness) + /api/health/ready (readiness)
 │       │       ├── jobs.py              # /api/jobs/**
@@ -156,12 +156,15 @@ OSCE-AI-FYP/
 │   ├── nvidia_osce_communication.py           # Communication scoring subprocess
 │   ├── audio_professionalism_extractor.py     # Audio professionalism subprocess
 │   ├── scorer_inputs.py                       # Shared input contract: required flags, exit 2, no guessing
-│   ├── bell_detector.py             # Bell-sound clip segmentation
+│   ├── detect_bell_segments.py      # Bell-sound clip segmentation
+│   ├── detect_human_segments.py     # RT-DETR person-occupancy segmentation
 │   ├── rubric_section.py            # PDF rubric section extractor
-│   └── rubric_parser.py             # Communication rubric PDF -> JSON
+│   ├── case_study_rubric.py         # Extract a case study's rubric once; content-addressed cache
+│   └── parse_communication_rubric.py  # Communication rubric PDF -> JSON
 ├── storage/                         # Runtime artefact store (gitignored)
 │   ├── input/                       # Uploaded videos, case studies
 │   └── output/                      # audio/, whisperx/, transcripts/, scores/, clips/, ...
+│       ├── case_study_rubrics/      # one extracted rubric per distinct case-study PDF
 │       └── scores/panel/<id>/       # a panel run's per-marker sheets + adjudication.json
 └── .env                             # Local secrets/config (not committed)
 ```
@@ -174,8 +177,7 @@ OSCE-AI-FYP/
 
 ```
 AppContainer
- ├── database          Database (raw aiosqlite — jobs)
- ├── orm_database      OrmDatabase (SQLAlchemy — sessions/assessments/rubrics/videos)
+ ├── orm_database      OrmDatabase (SQLAlchemy async — every table, jobs included)
  ├── runner            CommandRunner
  ├── auth              AuthService
  ├── events            EventService (in-process SSE)
@@ -322,7 +324,7 @@ and the name on `session.segmentationOptions`. The job passes the numbers to the
 subprocess as explicit flags, so a retuned table can never silently re-cut a
 session that was queued under the old one.
 
-1. Segmentation (`auto_crop` job): bell detector (`scripts/bell_detector.py`) or
+1. Segmentation (`auto_crop` job): bell detector (`scripts/detect_bell_segments.py`) or
    person detector (RT-DETR) proposes ranges. `build_clip_drafts_from_ranges`
    records them; no ffmpeg runs. Session status -> `cropped`.
 2. The user adjusts boundaries in the timeline editor and hits **Export clips**:
@@ -405,6 +407,17 @@ timeline from the server and throw away separators the user is dragging.
 ---
 
 ## Upload Flow (Chunked)
+
+**This is the only way sources enter the system.** A second route —
+`POST /api/upload`, a single-shot multipart form — used to exist beside it with
+its own validation schema (`LegacyUploadForm`), its own session-creation code
+and its own `ObjectStorage.save_uploaded_source` implementation in each backend.
+No client called it, and the session it created sat at `uploaded` with nothing
+in the browser able to start it. It is removed; `UploadMetadataMixin` is now the
+single place an upload's invariants are enforced, and
+`tests/test_routes.py::test_single_shot_upload_route_is_gone` keeps it that way.
+A session that still legitimately reaches `uploaded` (completed with
+`autoProcess: false`) is started from its card — see **Frontend Architecture**.
 
 `STORAGE_BACKEND` decides where the bytes go. The API contract is identical
 either way; `initiate` tells the client which transport to use via `strategy`.
@@ -494,7 +507,33 @@ Defined in [models.py](fastapi_backend/app/database/models.py):
 | `llm_providers` | `CustomProviderRecord` | Scoring providers an operator defined at runtime — endpoint, auth placement, versions, extra headers/query/body. No key column: the credential lives in `provider_credentials` like every other provider's |
 | `app_settings` | `AppSettingRecord` | Global key/value settings — model routing, marking mode + panel, transcription engine, preprocess toggle — written by `PUT /api/settings` (replace) or `PATCH /api/settings` (merge only the keys sent; what the settings cards use, so no card can revert another's save) |
 
-Jobs table (`jobs`, `job_events`) managed by raw SQL via `JobRepository` / `Database`.
+The queue's tables (`jobs`, `job_attempts`, `job_events`) are models like the
+rest, reached through `JobRepository` on the same engine. They used to be a
+second layer — hand-written `CREATE TABLE` strings in `app/database/schema.py`
+over a separate connection pool — which meant one database with two pools and
+two schema descriptions, Alembic told to ignore half of it, and `alembic check`
+blind to drift there. There *was* drift: SQLite implies `NOT NULL` only for an
+`INTEGER PRIMARY KEY`, so `jobs.id` (TEXT) could hold a null. Revision `0007`
+folded them in and fixed it. What survived the move unchanged, because the queue
+depends on it:
+
+* **A claim is a conditional update, not a read-then-write.** Whoever's
+  `UPDATE … WHERE status = 'queued'` matches the row owns the job; a second
+  worker's matches nothing. That is what makes `claim_queued` atomic on both
+  backends without a lock table or `SELECT … FOR UPDATE`.
+* **Job timestamps are ISO-8601 UTC text**, not `DateTime` like every other
+  model. They are the job document the browser reads and `session.job` stores,
+  they sort as strings, and the rows on disk already hold text.
+
+**Reading an artefact: the file on disk is the document.** Every producer writes
+its JSON to disk and records only metadata (`fileName`, `absolutePath`,
+`sizeBytes`, `url`) on the session, so `read_artifact_payload` reads the file
+and falls back to an embedded `payload` key only when there is no file. It used
+to take a `prefer_legacy` flag, and the single caller that passed it was
+`AssessmentService` — the writer of the rows analytics and the results view are
+built from. That one reader preferred an inline copy over the file, so a session
+carrying a stale embedded payload persisted the stale marks while the workspace
+rendered the current sheet, with nothing saying they disagreed.
 
 ### Session write contract
 
@@ -543,8 +582,8 @@ never re-spelled at a call site. That rule is enforced rather than trusted:
 (except `app/domain/`, which defines the vocabulary) and fails on a bare status
 string used as a `status` value, a `status` comparison or a `status in {...}`
 membership test. It is what caught the job queue writing `"processing"` onto a
-session, the legacy upload route's `"uploaded"`, and the upload-file records in
-`app/storage/` that predate `UploadStatus`.
+session, the since-removed single-shot upload route's `"uploaded"`, and the
+upload-file records in `app/storage/` that predate `UploadStatus`.
 
 ---
 
@@ -621,6 +660,32 @@ worker's `slots`.
 
 ---
 
+## Per-session SSE
+
+`EventService` fans a run's own events — log lines, step progress, milestones —
+out to clients connected to `GET /api/sessions/{id}/events`. It is **off by
+default** (`SESSION_SSE_ENABLED=false`): the browser drives live state from the
+change feed instead, and the per-session stream can only carry what the process
+holding the connection published, so a Hatchet worker's output never reaches it.
+
+Off must therefore cost nothing, and that is not the same as `publish`
+returning early. `CommandRunner` drains a subprocess's stdout and stderr on
+their own threads, so every line handed to an `on_output` callback pays an
+`asyncio.run_coroutine_threadsafe` hop into the event loop — thousands of them
+per WhisperX or scorer run — just to reach that early return. Producers ask
+`EventService.log_sink(session_id, source)` for the callback and it answers
+`None` when the stream is disabled, which `CommandRunner` reads as "no
+callback" and skips the hand-off entirely. The WhisperX log heartbeat is not
+started for the same reason.
+
+`log_sink` is only for handlers that *just* log. A handler that also parses
+progress — `MediaPipeline._build_whisperx_output_handler`, the Canary engine's,
+the person detector's `stream_progress` — stays installed whatever SSE is
+doing, because `on_progress` drives the session card's gauge; those guard their
+own publish calls, which `publish` no-ops anyway.
+
+---
+
 ## Authentication
 
 - Single admin user; credentials in `.env` (`AUTH_USERNAME`, `AUTH_PASSWORD_HASH`).
@@ -637,6 +702,32 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 **Hash routing** — no react-router:
 - Routes: `#/` (dashboard), `#/session/<id>` (workspace), `#/rubric`.
 - `useHashRoute` hook syncs React state <-> URL. Back/forward and deep-links work.
+
+**Code splitting.** The login screen and the dashboard are what a first paint
+has to contain; Settings, Analytics and the Communication Rubric are whole pages
+reached by a deliberate click, so `AppShell` loads each as its own chunk through
+[lib/lazyRoute.jsx](src/lib/lazyRoute.jsx). Three things that module adds over a
+bare `React.lazy`, because a deployed app needs all three:
+
+- **Preloading.** The loader is memoised and exposed as `.preload()`; the
+  dashboard's nav buttons call it on hover and focus (`onPreloadRoute`), so the
+  chunk is normally parsed before the click lands and the split is invisible.
+- **One fallback.** `RouteFallback` / `PanelFallback` keep a loading route
+  looking like the app instead of like a blank page.
+- **A chunk error boundary.** A lazy import *rejects* when a browser holding an
+  old `index.html` asks for a chunk this deploy no longer has. Without a
+  boundary that unmounts the tree and the user sees white. `LazyBoundary`
+  pairs the Suspense with it and offers the reload that actually fixes it.
+
+Vendor code is split from application code in
+[vite.config.js](vite.config.js) (`manualChunks`): React, framer-motion and the
+icon set are their own chunks, so shipping a UI fix does not invalidate the
+~280 kB of dependencies a returning browser already holds.
+
+The dashboard monolith ([OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx)) is
+still one chunk. Splitting the session workspace (clip editor, results tabs) out
+of it is the next step and needs the render subtrees lifted into their own
+modules first.
 
 **Non-blocking processing UX (no progress overlay, no SSE consumption):**
 
@@ -655,9 +746,24 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
   which is what stops the card ever pairing one step's name with another step's
   percentage. A row with no `steps` (a session recorded before this) falls back
   to the scalar path unchanged.
-- An 8-second session-index poll drives all live state (cards AND per-clip run
-  rows inside a long-session workspace). The backend SSE endpoint still exists
-  but the frontend no longer consumes it.
+- Live state is **pushed, not polled**. The backend announces a write on the
+  change feed (`/api/events`, `useChangeStream`) and the app refetches the
+  session index, which drives both the cards and the per-clip run rows inside a
+  long-session workspace. A 12-second heartbeat
+  (`IN_FLIGHT_HEARTBEAT_MS`) runs *only while a session is in flight*, as a
+  floor under that: a long step can go minutes without writing anything
+  (auto-crop's person detection), and a refresh that failed during that silence
+  would otherwise have nothing to trigger its retry. The per-session SSE
+  endpoint (`/api/sessions/{id}/events`) is a different stream and the frontend
+  does not consume it — see **Per-session SSE** below.
+- The upload overlay shows **only** the upload. It used to also render a
+  milestone checklist (started → mp3 → transcript → scored) and a live console
+  line fed by the per-session SSE stream this app does not consume, so neither
+  ever moved; and the flag that opened it was also set while any workspace
+  loaded, so opening a finished session popped a modal titled "Starting Job".
+  That flag is now `isLoadingWorkspace` and opens a small "Loading session…"
+  card instead; the overlay is gated on the transfer alone and reads
+  `uploadTracker.describeActive()`.
 - The upload overlay's **Dismiss** hides the card and nothing else. The transfer
   is never cancelled by it, so the phase cannot live in the overlay's state:
   `lib/uploadTracking.js` keeps a session-keyed track (`preparing` →
@@ -678,11 +784,29 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 - `runClipAssessment(clip)` — `POST /assess` (202, always queued), stays on the clip list;
   the clip row shows the child session's stage and unlocks when completed.
 - `renderSessionAction(entry)` — session-list row button: disabled
-  "Processing…" while in flight, "Open" when terminal.
+  "Processing…" while in flight, a start button for an `uploaded` session
+  (`lib/sessionStartAction.js` — "Start assessment" or "Split into clips",
+  matching the server's own `_task_type_for` split), "Re-run" + "Open" for a
+  failed one, "Open" when terminal.
 - `describeProcessingStage(entry)` — maps list-projection fields to the card's
   human-readable stage + completion fraction.
 
 `isLongWorkflow` derived from `session.workflow === 'long' || videoClips.length > 0` — NOT from the ephemeral upload-form tab.
+
+**One API client.** Every request goes through `apiFetch` / `apiJson`
+([lib/apiFetch.js](src/lib/apiFetch.js)), which classifies the failure (no
+response vs. a refusal), retries the safe ones with jittered backoff, reports
+reachability to `connectionStatus`, and reads an error message from `error`,
+`detail` *or* a FastAPI validation list. Half the app used to call `fetch`
+directly with its own `body.error ||` fallback — so those screens had no retry,
+never reported reachability, and showed a generic message for every FastAPI
+refusal, which answers with `detail`. `test/apiClientCoverage.test.mjs` is a
+structural test that fails if a bare `fetch(` comes back.
+
+Credentials are attached in exactly one place: `installFetchAuthShim` patches
+`window.fetch` for `/api/*` and clears the session on a 401, so `apiFetch` and
+anything else inherit it. (`authFetch` was a second, caller-less implementation
+of the same thing; it is gone.)
 
 ---
 
@@ -736,6 +860,8 @@ Single-file component [OSCEAiMarkerMockup.jsx](src/OSCEAiMarkerMockup.jsx) (~450
 | `LLM_TEMPERATURE` / `LLM_TOP_P` / `LLM_MAX_TOKENS` / `LLM_REQUEST_TIMEOUT_SECONDS` | `0.2` / `0.9` / `24576` / `360` | Sampling, shared by all providers. The `NVIDIA_*` spellings still work |
 | `WHISPERX_HF_TOKEN` | — | HuggingFace token for pyannote diarisation |
 | `PROTECT_MEDIA_ENDPOINTS` | `true` | Auth-gate `/media/*` |
+| `SESSION_SSE_ENABLED` | `false` | Per-session event stream (`GET /api/sessions/{id}/events`). Off: the browser drives live state from the change feed, and the per-session stream only carries what the *API process* published — a Hatchet worker's output never reaches it. When off, producers install no per-line log callback at all (`EventService.log_sink` returns `None`) and the WhisperX heartbeat is not started |
+| `SSE_CLIENT_QUEUE_MAXSIZE` / `SSE_MAX_TRACKED_SESSIONS` / `SESSION_EVENT_HISTORY_LIMIT` | `1000` / `1000` / `500` | Bounds for that stream when it is on |
 | `LOG_LEVEL` | `INFO` | App logger level |
 
 ---
@@ -761,7 +887,8 @@ npm run dev:api
 uv run python scripts/run_api.py --reload
 
 # Tests
-cd fastapi_backend && uv run pytest
+cd fastapi_backend && uv run pytest    # or: npm run test:api
+npm run test:ui                        # node --test over test/*.test.mjs
 
 # Migrations (the app also applies these at startup unless DB_AUTO_MIGRATE=false)
 cd fastapi_backend && uv run alembic upgrade head
@@ -790,6 +917,23 @@ transcription engine on a host that had it. Syncing stays an explicit step
 (`npm run py:sync` / `py:sync:canary`). `PYTHON_BIN` still overrides the
 interpreter in `dev.mjs` for a hand-managed environment.
 
+**Schema:** Alembic owns it; there is no `create_all` script. `scripts/init_db.py`
+used to offer one, which would have built the tables *without stamping a
+revision* — the next `alembic upgrade head` then finds an unstamped database and
+either fails or replays migrations over live tables. `npm run db:reset` clears
+the data and tells you to migrate; the API migrates at startup unless
+`DB_AUTO_MIGRATE=false`.
+
+**Tests:** `test/` is the browser suite (`*.test.mjs`, run by `node --test`) and
+`fastapi_backend/tests/` the Python one. Anything that makes a live, billable
+call is neither — those live in `debug_scripts/` and are run by hand
+(`debug_scripts/check_nvidia_api.py`). Shared Python doubles live in
+`fastapi_backend/tests/fixtures/`: `events.py` (`RecordingEvents` — one double
+for `EventService`, replacing thirteen bespoke copies that each knew only
+`publish`) and `scoring_doubles.py` (`ContentMarkingSeam`, which gives a
+`run_content_scoring`-shaped double the prepared-run seam the pipeline actually
+calls).
+
 **Windows:** `run_api.py` always sets `loop="none"` so uvicorn keeps the `WindowsSelectorEventLoopPolicy` that async psycopg needs. `--reload` is driven by `watchfiles.run_process`, not uvicorn's own reloader: uvicorn restarts its worker with `os.kill(pid, CTRL_C_EVENT)`, and Windows delivers a console control event to *every* process on the console — under `npm run dev` that killed node, vite and npm too, which looked like the server shutting itself down on save. Never run two API instances on same port.
 
 ---
@@ -800,8 +944,8 @@ All three scorers are independent Python subprocesses. Read from disk, write JSO
 
 | Script | Input | Output |
 |---|---|---|
-| `nvidia_osce_assessor.py` | `--transcript` normalised JSON + `--case-study` PDF | `scores/<id>.json` (single) or `scores/panel/<id>/<markerKey>.json` (one panel marker) |
-| `osce_panel_adjudicator.py` | `--marker` sheet ×N + `--transcript` + `--case-study` (+ `--tie-break`, `--without-adjudicator`, `--warning`) | `scores/<id>.json` + `scores/panel/<id>/adjudication.json` |
+| `nvidia_osce_assessor.py` | `--transcript` normalised JSON + `--case-study` PDF (+ `--rubric-cache` dir) | `scores/<id>.json` (single) or `scores/panel/<id>/<markerKey>.json` (one panel marker) |
+| `osce_panel_adjudicator.py` | `--marker` sheet ×N + `--transcript` + `--case-study` (+ `--rubric-cache`, `--tie-break`, `--without-adjudicator`, `--warning`) | `scores/<id>.json` + `scores/panel/<id>/adjudication.json` |
 | `audio_professionalism_extractor.py` | `--audio` MP3 + `--transcript` normalised JSON | `audio_professionalism/<id>.json` |
 | `nvidia_osce_communication.py` | `--transcript` normalised JSON + parsed rubric JSON + optional `--audio-professionalism` JSON | `communication_scores/<id>.json` |
 
@@ -821,6 +965,33 @@ optional input that is named but missing is still an error, exit code 2 on
 usage errors, which the job queue does not retry.
 
 Content scorer has checkpoint/repair: saves after each LLM call, up to 2 repair passes on bad JSON output, resumes from checkpoint on crash.
+
+**The rubric is extracted from the case-study PDF once, not once per marker.**
+Pulling the clinical context, the rubric section and the criteria out of a PDF
+is a pure function of that file's bytes, so `scripts/case_study_rubric.py`
+caches the result under `storage/output/case_study_rubrics/`, keyed by a SHA-256
+of the file plus an `EXTRACTOR_VERSION` covering the parsing itself. Nothing can
+go stale: different bytes are a different key. A panel of N markers used to pay
+N+1 identical pypdf passes (the adjudicator repeats the extraction so its
+criteria align with the markers'), and every clip child of a long recording
+repeated them again against the *same* case study — the cache collapses all of
+that to one.
+
+The markers of a panel start simultaneously, so a cold cache would be missed by
+all of them at once; one process takes an `O_CREAT | O_EXCL` lock and the others
+adopt its result. Every failure path — no `--rubric-cache`, an unwritable
+directory, a corrupt entry, a lock holder that died — falls back to extracting
+in-process, so the cache can make a run faster and never makes one fail. The
+adjudicator reads the same entry the markers wrote, which is also why it cannot
+disagree with them about the criteria list.
+
+`PipelineService` reaches the content scorer through
+`ScoringPipeline.prepare_content_marking` — required, not probed. It used to be
+fetched with `getattr` and fall back to a plain `run_content_scoring`, a
+production branch that existed solely so test doubles could skip the seam, which
+meant those doubles exercised a path the real pipeline never takes. The plan is
+resolved only once the step is known to be enabled: resolving it reads settings
+and the credential store, and a disabled step has no run to describe.
 
 ---
 

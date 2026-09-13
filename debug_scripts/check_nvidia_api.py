@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+"""Live connectivity check for the NVIDIA scoring endpoint.
+
+Not a unit test — it makes a real, billable API call — which is why it lives
+here beside the other hand-run diagnostics rather than in ``test/`` (which
+``npm run test:ui`` globs for ``*.test.mjs`` and never ran this) or in
+``fastapi_backend/tests/`` (which pytest would have run against the network).
+
+    uv run --no-sync python debug_scripts/check_nvidia_api.py
+"""
 from __future__ import annotations
 
 import os

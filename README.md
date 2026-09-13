@@ -27,7 +27,7 @@ The end product: an examiner uploads a video, walks away, and comes back to a pe
 | --- | --- |
 | Frontend | React 18 + Vite, Tailwind CSS, shadcn/ui patterns, plain JS (hash routing, no react-router) |
 | Backend | FastAPI (Python 3.12), uvicorn, SQLAlchemy async |
-| Databases | Dual: raw `aiosqlite` for the jobs queue; SQLAlchemy ORM for sessions/assessments/rubrics/videos. SQLite by default, PostgreSQL optional |
+| Databases | SQLAlchemy async ORM throughout — sessions, assessments, rubrics, videos and the job queue on one engine, with Alembic as the single schema source. SQLite by default, PostgreSQL optional |
 | Transcription | WhisperX CLI (large-v3, CUDA float16 or CPU int8) — subprocess |
 | Vision segmentation | RT-DETRv2-R18 (`PekingU/rtdetr_v2_r18vd`) via HuggingFace `transformers` — subprocess, ~1.5 GB VRAM fp16 |
 | Audio segmentation | librosa bell + silence detection — subprocess |
@@ -103,7 +103,7 @@ OSCE-AI-FYP/
 │   │   ├── pipeline/media.py     # ffmpeg, WhisperX, bell + person segmentation wrappers
 │   │   ├── pipeline/scoring.py   # The three scorer subprocess wrappers
 │   │   ├── queue/                # Hatchet worker + task definitions
-│   │   ├── repositories/         # DB access (sessions ORM, jobs raw SQL, uploads JSON)
+│   │   ├── repositories/         # DB access (ORM; uploads are JSON files on disk)
 │   │   └── api/routes/           # sessions, uploads, async_uploads, auth, jobs, health, rubrics
 │   └── tests/                    # pytest suite (98 tests)
 ├── scripts/
