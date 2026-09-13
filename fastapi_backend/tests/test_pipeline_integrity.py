@@ -15,7 +15,6 @@ from typing import Any
 
 from app.core.config import Settings
 from app.database.orm import OrmDatabase
-from app.database.orm import OrmDatabase
 from app.repositories.job_repository import JobRepository
 from app.repositories.session_repository import SessionRepository
 from app.repositories.upload_repository import UploadRepository

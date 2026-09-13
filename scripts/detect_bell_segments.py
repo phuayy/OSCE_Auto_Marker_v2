@@ -154,45 +154,6 @@ def _pick_local_peaks(score, min_distance_frames, threshold):
     return np.asarray(selected, dtype=int)
 
 
-def _fill_large_gaps(peak_idx, score, min_distance_frames, fill_threshold):
-    import numpy as np
-
-    if len(peak_idx) < 2:
-        return peak_idx
-
-    arr = np.asarray(score, dtype=float)
-    peak_idx = list(int(i) for i in peak_idx)
-    frame_gaps = [peak_idx[i + 1] - peak_idx[i] for i in range(len(peak_idx) - 1)]
-    if not frame_gaps:
-        return peak_idx
-
-    typical_gap = float(np.median(frame_gaps))
-    if typical_gap <= 0:
-        return peak_idx
-
-    updated = peak_idx[:]
-    cursor = 0
-    while cursor < len(updated) - 1:
-        left = updated[cursor]
-        right = updated[cursor + 1]
-        gap = right - left
-        if gap > 1.75 * typical_gap:
-            scan_start = left + min_distance_frames
-            scan_end = right - min_distance_frames
-            if scan_end > scan_start:
-                window = arr[scan_start:scan_end]
-                if window.size > 0:
-                    local_idx = int(np.argmax(window))
-                    candidate = scan_start + local_idx
-                    if arr[candidate] >= fill_threshold:
-                        updated.insert(cursor + 1, int(candidate))
-                        cursor += 1
-                        continue
-        cursor += 1
-
-    return updated
-
-
 def _iter_audio_chunks(audio_path: Path, chunk_seconds: float, target_sr: int) -> tuple[list, float, int]:
     import numpy as np
     import soundfile as sf

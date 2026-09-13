@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from app.schemas.sessions import ManualClipsRequest, RecropClipRequest
 from app.schemas.uploads import InitiateUploadRequest
 
 

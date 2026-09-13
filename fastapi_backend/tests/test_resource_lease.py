@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
 
 from app.core.config import Settings
 from app.core.resources import ResourceLease
