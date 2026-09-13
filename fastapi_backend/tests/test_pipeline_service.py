@@ -11,15 +11,9 @@ from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.pipeline.media import MediaPipeline
 from app.services.pipeline_service import PipelineService
+from tests.fixtures.scoring_doubles import ContentMarkingSeam
 from tests.fixtures.session_store import SessionUpdateMixin
-
-
-class FakeEvents:
-    def __init__(self) -> None:
-        self.items: list[tuple[str, str, dict[str, Any]]] = []
-
-    async def publish(self, session_id: str, event_type: str, payload: dict[str, Any]) -> None:
-        self.items.append((session_id, event_type, payload))
+from tests.fixtures.events import RecordingEvents as FakeEvents
 
 
 class FakeSessions(SessionUpdateMixin):
@@ -88,7 +82,7 @@ def test_parallel_scoring_overlaps_content_with_audio_branch(tmp_path) -> None:
     session = build_session(tmp_path)
     sessions = FakeSessions(session)
 
-    class FakeScoring:
+    class FakeScoring(ContentMarkingSeam):
         def __init__(self) -> None:
             self.audio_started = asyncio.Event()
             self.content_started = asyncio.Event()
@@ -118,7 +112,7 @@ def test_parallel_scoring_overlaps_content_with_audio_branch(tmp_path) -> None:
         scoring=FakeScoring(),
     )
 
-    result = asyncio.run(service._run_fresh_scoring_branches(session))
+    result = asyncio.run(service._run_cached_scoring_branches(session))
 
     assert result["audioProfessionalism"]["schema"] == "audio-professionalism-v1"
     assert result["communicationScores"]["schema"] == "communication-scoring-v2"
@@ -131,7 +125,7 @@ def test_parallel_scoring_persists_successful_branch_before_raising(tmp_path) ->
     session = build_session(tmp_path)
     sessions = FakeSessions(session)
 
-    class PartiallyFailingScoring:
+    class PartiallyFailingScoring(ContentMarkingSeam):
         async def run_audio_professionalism(self, _session: dict[str, Any]) -> dict[str, Any]:
             return {"absolutePath": "audio-prof.json", "payload": {"schema": "audio-professionalism-v1"}}
 
@@ -153,7 +147,7 @@ def test_parallel_scoring_persists_successful_branch_before_raising(tmp_path) ->
     )
 
     with pytest.raises(RuntimeError, match="communication provider failed"):
-        asyncio.run(service._run_fresh_scoring_branches(session))
+        asyncio.run(service._run_cached_scoring_branches(session))
 
     persisted_outputs = sessions.writes[-1]["outputs"]
     assert persisted_outputs["audioProfessionalism"]["absolutePath"] == "audio-prof.json"
@@ -215,7 +209,7 @@ def test_cached_parallel_scoring_overlaps_content_with_audio_branch(tmp_path) ->
     session = build_session(tmp_path)
     sessions = FakeSessions(session)
 
-    class FakeScoring:
+    class FakeScoring(ContentMarkingSeam):
         def __init__(self) -> None:
             self.audio_started = asyncio.Event()
             self.content_started = asyncio.Event()
@@ -269,7 +263,7 @@ def test_cached_parallel_scoring_persists_successful_branch_before_raising(tmp_p
     session = build_session(tmp_path)
     sessions = FakeSessions(session)
 
-    class PartiallyFailingScoring:
+    class PartiallyFailingScoring(ContentMarkingSeam):
         @staticmethod
         def should_refresh_audio_professionalism_payload(_payload: Any) -> bool:
             return True
@@ -348,7 +342,7 @@ def test_cached_scoring_discovers_existing_content_output_without_session_metada
     score_path = settings.paths.output_scores_dir / "session-1.json"
     score_path.write_text('{"ok": true}\n', encoding="utf-8")
 
-    class NoRunScoring:
+    class NoRunScoring(ContentMarkingSeam):
         @staticmethod
         def should_refresh_score_payload(_payload: Any) -> bool:
             return False

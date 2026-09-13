@@ -70,6 +70,12 @@ def _merge_outputs(patch: dict[str, Any]) -> SessionMutator:
     return mutate
 
 
+async def _scoring_disabled() -> dict[str, Any]:  # pragma: no cover - never called
+    """Placeholder run for a disabled step; ``_refresh_or_load_output`` returns
+    before it could be awaited."""
+    raise AssertionError("content scoring is disabled")
+
+
 class PipelineService:
     def __init__(
         self,
@@ -546,7 +552,7 @@ class PipelineService:
 
         await self._run_llm_preprocess(session, normalized_transcript, whisperx_outputs, transcript_path)
 
-        scoring_outputs = await self._run_fresh_scoring_branches(session)
+        scoring_outputs = await self._run_cached_scoring_branches(session)
         audio_prof_payload = scoring_outputs.get(OutputKey.AUDIO_PROFESSIONALISM)
         communication_payload = scoring_outputs.get(OutputKey.COMMUNICATION_SCORES)
         scoring_payload = scoring_outputs.get(OutputKey.SCORES)
@@ -980,25 +986,28 @@ class PipelineService:
     ) -> dict[str, Any]:
         """Content scoring, under the marking mode the operator selected.
 
-        A scoring pipeline that can ``prepare_content_marking`` resolves the
-        plan once, up front, so the cache check and the run agree about the
-        mode — a single-model sheet on disk is refreshed when a panel was
-        selected, and a panel's live progress reaches the session card. The
-        test doubles that only implement ``run_content_scoring`` take the
-        historical path unchanged.
+        The plan is resolved once, up front, so the cache check and the run
+        agree about the mode — a single-model sheet on disk is refreshed when a
+        panel was selected, and a panel's live progress reaches the session
+        card. ``prepare_content_marking`` is required, not probed: the
+        ``getattr`` fallback that used to stand in for it existed only so test
+        doubles could skip implementing the seam, and a double that skips the
+        seam is not exercising the path the pipeline actually takes
+        (``tests/fixtures/scoring_doubles.py`` gives them the seam instead).
         """
         spec = OUTPUT_SPECS[OutputKey.SCORES]
-        prepare = getattr(self.scoring, "prepare_content_marking", None)
-        if not callable(prepare):
+        if not self.media.settings.enable_scoring:
+            # Resolving a marking plan reads settings and the credential store.
+            # A disabled step runs nothing, so it asks nothing: the plan is only
+            # prepared once we know there is a run for it to describe.
             return await self._refresh_or_load_output(
                 session, spec,
-                enabled=self.media.settings.enable_scoring,
-                run=lambda: self.scoring.run_content_scoring(session),
-                predicate=self._predicate_or_default(self.scoring, "should_refresh_score_payload"),
+                enabled=False,
+                run=_scoring_disabled,
+                predicate=lambda _payload: False,
                 lock=lock,
             )
-
-        marking = await prepare(session)
+        marking = await self.scoring.prepare_content_marking(session)
         # Progress writes share the branch lock when there is one; sequential
         # scoring has no concurrent writer, so a private lock only serialises
         # the subprocess reader threads against each other.
@@ -1093,9 +1102,6 @@ class PipelineService:
             await self._persist_session_output(session, spec.key, output, lock=lock)
         return {"output": output, "payload": payload}
 
-    async def _run_fresh_scoring_branches(self, session: dict[str, Any]) -> dict[str, Any]:
-        return await self._run_cached_scoring_branches(session)
-
     @staticmethod
     def _output_absolute_path(output: Any) -> str | None:
         if not isinstance(output, dict):
@@ -1116,14 +1122,6 @@ class PipelineService:
                 extra=log_context("", "payload_refresh_check", path=str(absolute_path)),
             )
             return True
-
-    async def _read_text_if_exists(self, absolute_path: str | None) -> str | None:
-        if not absolute_path:
-            return None
-        path = Path(str(absolute_path))
-        if not path.exists():
-            return None
-        return await self._read_text(path)
 
     @staticmethod
     async def _read_text(path: Path) -> str:

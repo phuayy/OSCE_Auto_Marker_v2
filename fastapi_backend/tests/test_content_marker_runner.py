@@ -20,6 +20,7 @@ from app.core.process import CommandResult
 from app.pipeline.marking.base import MarkingPlan
 from app.pipeline.marking.fingerprint import SHEET_INPUTS_KEY
 from app.pipeline.scoring import ScoringPipeline
+from tests.fixtures.events import RecordingEvents as _Events
 
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 
@@ -36,11 +37,6 @@ class EnvRecordingRunner:
             output.write_text(json.dumps({"criteria": [{"label": "x"}]}), encoding="utf-8")
             return CommandResult(stdout="", stderr="")
         return CommandResult(stdout=json.dumps({"criteria": [{"label": "from-stdout"}]}), stderr="")
-
-
-class _Events:
-    async def publish(self, *_args: Any, **_kwargs: Any) -> None:
-        return None
 
 
 class _Auth:
@@ -151,17 +147,26 @@ def test_the_assessor_marks_with_the_shared_prompt_and_validator(monkeypatch) ->
     """The extraction of content_marking.py left the assessor using those very
     objects — not private copies that could drift from a panel marker's."""
     monkeypatch.syspath_prepend(str(SCRIPTS))
-    for name in ("content_marking", "scorer_checkpoint", "nvidia_osce_assessor"):
+    for name in ("content_marking", "scorer_checkpoint", "case_study_rubric", "nvidia_osce_assessor"):
         sys.modules.pop(name, None)
     assessor = runpy.run_path(str(SCRIPTS / "nvidia_osce_assessor.py"))
     shared = runpy.run_path(str(SCRIPTS / "content_marking.py"))
 
     for name in (
         "build_system_prompt", "build_user_prompt", "validate_output",
-        "compute_scoring_summary", "extract_rubric_criteria_from_case_study_rubric",
-        "build_follow_up_messages",
+        "compute_scoring_summary", "build_follow_up_messages",
     ):
         assert assessor[name].__module__ == "content_marking", f"{name} is defined locally in the assessor again"
         assert name in shared
     assert assessor["PROMPT_VERSION"] == shared["PROMPT_VERSION"]
     assert "prompt_version" in (SCRIPTS / "nvidia_osce_assessor.py").read_text(encoding="utf-8")
+
+    # The rubric extraction reaches the assessor through case_study_rubric, which
+    # shares it with the adjudicator and caches it. Same no-local-copy rule, one
+    # module further out: the extractor itself must still be content_marking's.
+    assert assessor["load_case_study_rubric"].__module__ == "case_study_rubric"
+    cache_module = runpy.run_path(str(SCRIPTS / "case_study_rubric.py"))
+    assert (
+        cache_module["extract_rubric_criteria_from_case_study_rubric"].__module__ == "content_marking"
+    )
+    assert "extract_rubric_criteria_from_case_study_rubric" in shared

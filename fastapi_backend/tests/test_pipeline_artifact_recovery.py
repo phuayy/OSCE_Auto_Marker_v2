@@ -13,6 +13,7 @@ from app.services.assessment_service import AssessmentService
 from app.services.pipeline_service import PipelineService
 from app.services.session_service import SessionService
 
+from tests.fixtures.scoring_doubles import ContentMarkingSeam
 from tests.test_pipeline_service import (
     TRANSCRIPT_JSON,
     FakeEvents,
@@ -32,7 +33,7 @@ PAYLOAD = {
 }
 
 
-class FileScoring:
+class FileScoring(ContentMarkingSeam):
     should_refresh_score_payload = staticmethod(ScoringPipeline.should_refresh_score_payload)
 
     def __init__(self, path):
