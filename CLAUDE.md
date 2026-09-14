@@ -37,7 +37,9 @@ OSCE-AI-FYP/
 │   │   ├── StudentClipSplitterCard.jsx # Auto-split clip list + per-clip trim
 │   │   └── primitives.jsx              # StatusRow / Metric / FeedbackBlock / ContentSheetEmptyState / IndicatorList
 │   ├── components/
-│   │   └── TargetPicker.jsx    # One provider+model choice; shared by every settings card that asks for one
+│   │   ├── TargetPicker.jsx    # One provider+model choice; shared by every settings card that asks for one
+│   │   ├── skeletons.jsx       # First-load placeholders: route/page frames, settings card bodies, the workspace outline (entry chunk)
+│   │   └── ui/skeleton.jsx     # The one bone every skeleton is built from
 │   ├── lib/
 │   │   ├── llmProviders.js     # Routing + marking-mode form logic (pure)
 │   │   ├── panelReport.js      # Reads a sheet's `panel` block for the results view (pure)
@@ -731,8 +733,13 @@ bare `React.lazy`, because a deployed app needs all three:
 - **Preloading.** The loader is memoised and exposed as `.preload()`; the
   dashboard's nav buttons call it on hover and focus (`onPreloadRoute`), so the
   chunk is normally parsed before the click lands and the split is invisible.
-- **One fallback.** `RouteFallback` / `PanelFallback` keep a loading route
-  looking like the app instead of like a blank page.
+- **A fallback in the page's own shape.** Each split point passes a skeleton
+  from [components/skeletons.jsx](src/components/skeletons.jsx) — the page's
+  header for real, its content as placeholders in the outline the data will
+  take — and the page renders the *same* skeleton until its first response, so
+  chunk-load and data-load read as one wait rather than a spinner followed by
+  a second "Loading…". `RouteFallback` survives only as `LazyBoundary`'s last
+  resort. See **Skeletons** below.
 - **A chunk error boundary.** A lazy import *rejects* when a browser holding an
   old `index.html` asks for a chunk this deploy no longer has. Without a
   boundary that unmounts the tree and the user sees white. `LazyBoundary`
@@ -767,7 +774,9 @@ Three things make the seam honest rather than cosmetic:
 - **Preload on intent, twice over.** `beginWorkspaceLoad()` warms the chunk at
   the same moment it starts fetching the session, so the two arrive together;
   `OpenSessionButton` warms it on hover and focus as well. The split is
-  invisible unless the fetch beats the chunk, and `PanelFallback` covers that.
+  invisible unless the fetch beats the chunk, and when it does the Suspense
+  fallback is the same `WorkspaceSkeleton` the fetch was already showing, so
+  the placeholder simply stays.
 - **The derivations became a pure module.** `aiCriteria`, the communication
   criteria and both scoring summaries were `useMemo` bodies inside the
   component: untestable, and in the entry chunk. They are
@@ -824,9 +833,9 @@ exactly that.
   line fed by the per-session SSE stream this app does not consume, so neither
   ever moved; and the flag that opened it was also set while any workspace
   loaded, so opening a finished session popped a modal titled "Starting Job".
-  That flag is now `isLoadingWorkspace` and opens a small "Loading session…"
-  card instead; the overlay is gated on the transfer alone and reads
-  `uploadTracker.describeActive()`.
+  That flag is now `isLoadingWorkspace`, and a workspace fetch has no overlay
+  at all — see **Skeletons** below; the overlay is gated on the transfer alone
+  and reads `uploadTracker.describeActive()`.
 - The upload overlay's **Dismiss** hides the card and nothing else. The transfer
   is never cancelled by it, so the phase cannot live in the overlay's state:
   `lib/uploadTracking.js` keeps a session-keyed track (`preparing` →
@@ -839,6 +848,47 @@ exactly that.
   survives being dismissed. Both files are gauged as one transfer (combined
   bytes), and a session uploading in this tab is un-enterable like any other
   in-flight one.
+
+**Skeletons.** A first load shows the shape of what is coming, not a spinner.
+[components/skeletons.jsx](src/components/skeletons.jsx) holds every
+placeholder, built from the one bone in `components/ui/skeleton.jsx`; the
+rules it is built on, and what `test/skeletons.test.mjs` pins:
+
+- **One placeholder per wait.** A route's Suspense fallback
+  (`SettingsSkeleton`, `AnalyticsSkeleton`, `RubricSkeleton`, passed by
+  `AppShell`) renders the page's real header over the same body skeletons the
+  page shows until its first response — `SettingsSkeleton` composes the eight
+  settings cards' bodies in the order `SettingsPage` renders them — so the
+  chunk mounting on top of the fallback changes text, not layout. Titles
+  inside the route skeletons are bone because the text lives in the chunk;
+  the header is static, so it is real, and its Back button works mid-load.
+- **Opening a session replaces the screen, not dims it.** `workspaceLoad`
+  (`{ label, layout }`, null when no navigation is pending) renders a
+  `WorkspaceSkeleton` in the main slot while `loadSessionWorkspace` runs; the
+  dashboard stands down for it, and `showWorkspace` still flips only once the
+  payload is in, so the URL sync effects see the sequence they always did.
+  The `layout` (`standard` | `long` | `clip`) comes from
+  `workspaceLayoutFor(entry)` in `lib/sessionWorkspace.js` — the list
+  projection's `workflow` / `hasVideoClips` / `parentSessionId` — so the
+  outline does not change when the payload lands; a deep link on a cold start
+  gets `standard`. `isLoadingWorkspace` is kept apart from it on purpose: the
+  demo re-run sets the busy flag but stays on the clip list, and must not swap
+  the view for a placeholder. The `LazyBoundary` fallback for the workspace
+  chunk is the same skeleton in the loaded session's layout.
+- **First load only.** Gate on `data === null` (or `isLoading && !data`),
+  never on `isLoading` alone: a refresh keeps what is on screen and dims it
+  (the Analytics pattern); the dashboard's coalesced background refreshes must
+  never flash bone. A state that starts empty needs a "has loaded" flag before
+  it may show an empty state — `CorporaManager.hasLoaded`, the rubric panel's
+  `isLoading` starting `true` — because "No corpora yet" before the first
+  response is a false answer, not a wait.
+- **Announced once, hidden in detail.** Every body skeleton sits inside a
+  `LoadingRegion` (`role="status"`, `aria-busy`, an sr-only label); the bones
+  themselves are `aria-hidden` and `motion-reduce:animate-none`.
+- **Entry-chunk safe.** `skeletons.jsx` ships in the first paint, so it may
+  import nothing from `src/workspace/` or the lazy pages;
+  `test/bundleSplit.test.mjs` asserts it is reachable from the entry and would
+  fail the moment it dragged a lazy module in with it.
 
 **Key state flows:**
 

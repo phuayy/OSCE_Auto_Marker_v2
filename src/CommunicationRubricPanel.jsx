@@ -16,6 +16,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { LoadingRegion, RubricCriteriaSkeleton, RubricSourceSkeleton } from '@/components/skeletons.jsx';
 import { apiJson } from '@/lib/apiFetch';
 
 function formatBytes(bytes) {
@@ -42,7 +43,10 @@ function formatDate(value) {
 export default function CommunicationRubricPanel({ onBack }) {
   const [rubric, setRubric] = useState(null);
   const [pdfMeta, setPdfMeta] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
+  // True from the first render: the mount effect always fetches, and a first
+  // paint that said "No rubric loaded" before that fetch had even started was
+  // a false empty state, not a wait.
+  const [isLoading, setIsLoading] = useState(true);
   const [isUploading, setIsUploading] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
   const [error, setError] = useState('');
@@ -158,6 +162,10 @@ export default function CommunicationRubricPanel({ onBack }) {
       )
   );
 
+  // Skeletons are for a first load only. A reload with a rubric on screen
+  // keeps it (the button spins) rather than replacing it with bone.
+  const isFirstLoad = isLoading && !rubric;
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100">
       <header className="border-b border-slate-200 bg-white/80 backdrop-blur">
@@ -218,18 +226,28 @@ export default function CommunicationRubricPanel({ onBack }) {
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                     Source file
                   </div>
-                  <div className="mt-1 truncate text-sm font-medium text-slate-800" title={pdfMeta?.fileName}>
-                    {pdfMeta?.fileName || 'No PDF available'}
-                  </div>
-                  <div className="mt-1 text-[11px] text-slate-500">
-                    {pdfMeta?.sizeBytes ? formatBytes(pdfMeta.sizeBytes) : '—'} ·{' '}
-                    {pdfMeta?.updatedAt ? `Updated ${formatDate(pdfMeta.updatedAt)}` : 'No timestamp'}
-                  </div>
-                  {pdfMeta?.isCustomUpload === false ? (
-                    <div className="mt-2 text-[11px] text-slate-500">
-                      Default rubric bundled with the project.
-                    </div>
-                  ) : null}
+                  {isFirstLoad ? (
+                    /* "No PDF available" is an answer; before the first
+                       response there is none yet. */
+                    <LoadingRegion label="Loading rubric source">
+                      <RubricSourceSkeleton />
+                    </LoadingRegion>
+                  ) : (
+                    <>
+                      <div className="mt-1 truncate text-sm font-medium text-slate-800" title={pdfMeta?.fileName}>
+                        {pdfMeta?.fileName || 'No PDF available'}
+                      </div>
+                      <div className="mt-1 text-[11px] text-slate-500">
+                        {pdfMeta?.sizeBytes ? formatBytes(pdfMeta.sizeBytes) : '—'} ·{' '}
+                        {pdfMeta?.updatedAt ? `Updated ${formatDate(pdfMeta.updatedAt)}` : 'No timestamp'}
+                      </div>
+                      {pdfMeta?.isCustomUpload === false ? (
+                        <div className="mt-2 text-[11px] text-slate-500">
+                          Default rubric bundled with the project.
+                        </div>
+                      ) : null}
+                    </>
+                  )}
                 </div>
 
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
@@ -354,11 +372,12 @@ export default function CommunicationRubricPanel({ onBack }) {
               </div>
             </CardHeader>
             <CardContent className="space-y-5 pt-5">
-              {isLoading && !rubric ? (
-                <div className="flex items-center gap-2 rounded-xl border border-dashed border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Loading rubric…
-                </div>
+              {isFirstLoad ? (
+                /* The same rows AppShell's RubricSkeleton drew while this chunk
+                   loaded, so the hand-off from chunk to page is invisible. */
+                <LoadingRegion label="Loading rubric criteria">
+                  <RubricCriteriaSkeleton />
+                </LoadingRegion>
               ) : !rubric?.criteria?.length ? (
                 <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">
                   No rubric loaded. Upload a PDF above to populate the criteria.

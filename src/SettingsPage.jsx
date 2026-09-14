@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowLeft, Loader2, Settings as SettingsIcon, Wand2 } from 'lucide-react';
+import { ArrowLeft, Settings as SettingsIcon, Wand2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { LoadingRegion, ToggleRowSkeleton } from '@/components/skeletons.jsx';
 import CorporaManager from '@/CorporaManager.jsx';
 import CustomProvidersSettings from '@/CustomProvidersSettings.jsx';
 import LlmRoutingSettings from '@/LlmRoutingSettings.jsx';
@@ -145,9 +146,9 @@ export default function SettingsPage({ onBack }) {
           </CardHeader>
           <CardContent>
             {settings === null && !loadError ? (
-              <div className="flex items-center gap-2 text-sm text-slate-500">
-                <Loader2 className="h-4 w-4 animate-spin" /> Loading…
-              </div>
+              <LoadingRegion label="Loading transcription preprocess setting">
+                <ToggleRowSkeleton />
+              </LoadingRegion>
             ) : (
               <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
                 <div>

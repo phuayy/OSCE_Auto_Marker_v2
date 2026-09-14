@@ -10,8 +10,12 @@ import { Button } from '@/components/ui/button';
 //      it is usually already there when they click, so the split costs nothing
 //      perceptible. lazyComponent() memoises the import promise and exposes it
 //      as `.preload()`.
-//   2. A shared fallback, so a loading route looks like the rest of the app
-//      rather than like a blank page.
+//   2. A fallback, so a loading route is never a blank page. Every split
+//      point in the app passes its own — a skeleton in the shape of the page
+//      it stands in for (components/skeletons.jsx), which is also what that
+//      page shows until its first response, so chunk-load and data-load read
+//      as one wait. RouteFallback below is the last resort for a boundary
+//      that passes nothing.
 //   3. An error boundary. A lazy import rejects when the browser holds an old
 //      index.html and asks for a chunk this deploy no longer has — without a
 //      boundary that unmounts the whole tree and the user sees a white screen.
@@ -47,20 +51,11 @@ export function preloadComponent(Component) {
 
 export function RouteFallback({ label = 'Loading…' }) {
   return (
-    <div className="flex min-h-[60vh] items-center justify-center px-6 py-16 text-slate-500">
+    <div role="status" className="flex min-h-[60vh] items-center justify-center px-6 py-16 text-slate-500">
       <div className="flex items-center gap-3 text-sm">
-        <Loader2 className="h-5 w-5 animate-spin" />
+        <Loader2 className="h-5 w-5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
         {label}
       </div>
-    </div>
-  );
-}
-
-export function PanelFallback({ label = 'Loading…' }) {
-  return (
-    <div className="flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-500">
-      <Loader2 className="h-4 w-4 animate-spin" />
-      {label}
     </div>
   );
 }

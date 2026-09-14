@@ -2,7 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { getStoredAuth, installFetchAuthShim, logout } from '@/auth';
 import { useHashRoute } from '@/lib/useHashRoute';
-import { LazyBoundary, RouteFallback, lazyComponent, preloadComponent } from '@/lib/lazyRoute';
+import { LazyBoundary, lazyComponent, preloadComponent } from '@/lib/lazyRoute';
+import { AnalyticsSkeleton, RubricSkeleton, SettingsSkeleton } from '@/components/skeletons.jsx';
 import LoginScreen from '@/LoginScreen.jsx';
 import OSCEAiMarkerMockup from '@/OSCEAiMarkerMockup.jsx';
 import { NotificationToast, useNotifications } from '@/notifications.jsx';
@@ -11,6 +12,11 @@ import { NotificationToast, useNotifications } from '@/notifications.jsx';
 // chunk. The other three routes are whole pages reached by a deliberate click:
 // each is its own chunk, fetched on hover (see the mockup's nav handlers) and
 // at the latest when the route changes.
+//
+// While a chunk loads, the route shows the same skeleton the page itself shows
+// until its first response — the page's header for real, its content as
+// placeholders in the shape the data will take — so a cold visit is one
+// continuous wait rather than a spinner followed by a second "Loading…".
 const CommunicationRubricPanel = lazyComponent(() => import('@/CommunicationRubricPanel.jsx'));
 const AnalyticsPage = lazyComponent(() => import('@/AnalyticsPage.jsx'));
 const SettingsPage = lazyComponent(() => import('@/SettingsPage.jsx'));
@@ -75,7 +81,7 @@ export default function AppShell() {
           exit={{ opacity: 0 }}
           transition={{ duration: 0.25 }}
         >
-          <LazyBoundary fallback={<RouteFallback label="Loading rubric…" />}>
+          <LazyBoundary fallback={<RubricSkeleton onBack={() => navigate({ view: 'dashboard' })} />}>
             <CommunicationRubricPanel onBack={() => navigate({ view: 'dashboard' })} />
           </LazyBoundary>
         </motion.div>
@@ -87,7 +93,7 @@ export default function AppShell() {
           exit={{ opacity: 0 }}
           transition={{ duration: 0.25 }}
         >
-          <LazyBoundary fallback={<RouteFallback label="Loading analytics…" />}>
+          <LazyBoundary fallback={<AnalyticsSkeleton onBack={() => navigate({ view: 'dashboard' })} />}>
             <AnalyticsPage onBack={() => navigate({ view: 'dashboard' })} />
           </LazyBoundary>
         </motion.div>
@@ -99,7 +105,7 @@ export default function AppShell() {
           exit={{ opacity: 0 }}
           transition={{ duration: 0.25 }}
         >
-          <LazyBoundary fallback={<RouteFallback label="Loading settings…" />}>
+          <LazyBoundary fallback={<SettingsSkeleton onBack={() => navigate({ view: 'dashboard' })} />}>
             <SettingsPage onBack={() => navigate({ view: 'dashboard' })} />
           </LazyBoundary>
         </motion.div>

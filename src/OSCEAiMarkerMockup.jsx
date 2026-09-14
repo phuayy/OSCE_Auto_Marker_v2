@@ -4,14 +4,15 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { ensureStreamTicket } from '@/auth';
 import { useChangeStream } from '@/changeStream';
 import { ApiError, ERROR_KIND, apiJson } from '@/lib/apiFetch';
-import { loadSessionWorkspace } from '@/lib/sessionWorkspace';
+import { WORKSPACE_LAYOUT, loadSessionWorkspace, workspaceLayoutFor } from '@/lib/sessionWorkspace';
 import { uploadFileToResumableSession } from '@/lib/resumableUpload';
 import { DEFAULT_PART_CONCURRENCY, recordedPartNumbers, uploadParts } from '@/lib/partUpload';
 import { CONNECTION_STATUS, useConnectionStatus } from '@/lib/connectionStatus';
 import { CLIP_ASSESSMENTS_ANCHOR_ID } from '@/lib/anchors';
 import { coalesceAsync } from '@/lib/coalesce';
 import { clampNumber, formatRuntime } from '@/lib/format';
-import { LazyBoundary, PanelFallback, lazyComponent, preloadComponent } from '@/lib/lazyRoute';
+import { LazyBoundary, lazyComponent, preloadComponent } from '@/lib/lazyRoute';
+import { WorkspaceSkeleton } from '@/components/skeletons.jsx';
 import { ConnectionBadge, ConnectionNotice } from '@/components/ConnectionStatus';
 import {
   IN_FLIGHT_STATUSES,
@@ -191,8 +192,16 @@ export default function OSCEAiMarkerMockup({
   // workspace's Runtime row. Never a live clock: a run in progress is not
   // enterable, and an upload's own elapsed time comes from its track.
   const [runtimeSeconds, setRuntimeSeconds] = useState(0);
-  // What this tab is loading, for the loading card's subtitle.
-  const [workspaceLoadLabel, setWorkspaceLoadLabel] = useState('');
+  // The workspace this tab is navigating *to*, while its payload is fetched:
+  // `{ label, layout }`, or null when no navigation is pending. Non-null
+  // replaces the current screen with a WorkspaceSkeleton in that layout — the
+  // outline the view will have once the payload lands, chosen from what the
+  // session list already knows (`workspaceLayoutFor`). Distinct from
+  // `isLoadingWorkspace` on purpose: that flag also covers a fetch that stays
+  // on the current screen (the demo re-run), which must not swap the view
+  // for a placeholder. Deep links and the route restore effect set this too,
+  // through openExistingSession.
+  const [workspaceLoad, setWorkspaceLoad] = useState(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
@@ -906,7 +915,14 @@ export default function OSCEAiMarkerMockup({
     setNotice('');
     setIsDemoFallback(false);
     setIsLoadingWorkspace(true);
-    setWorkspaceLoadLabel('Loading saved session…');
+    // The skeleton takes the outline of the session about to open. The list
+    // projection knows the workflow and whether clips exist (and, for a child
+    // reached by deep link, its parent); a session the list has not loaded
+    // yet — a deep link on a cold start — gets the standard layout.
+    setWorkspaceLoad({
+      label: 'Loading saved session',
+      layout: workspaceLayoutFor(sessionIndex.find((entry) => String(entry.id) === String(sessionId))),
+    });
     setParentSessionSnapshot(null);
     setClipAssessmentRuns({});
     setSelectedClipAssessmentIds(new Set());
@@ -923,6 +939,9 @@ export default function OSCEAiMarkerMockup({
       const loaded = payload.session;
       if (IN_FLIGHT_STATUSES.has(String(loaded?.status))) {
         setShowWorkspace(false);
+        // Hand the screen back to the list now, with the notice, rather than
+        // holding the placeholder for the index refresh below.
+        setWorkspaceLoad(null);
         setNotice(
           'This session is still processing. Track its stage on the session card — it unlocks when finished.',
         );
@@ -947,7 +966,12 @@ export default function OSCEAiMarkerMockup({
     } catch (error) {
       if (!controller.signal.aborted) setSessionIndexError(error.message || 'Failed to open session.');
     } finally {
-      if (workspaceLoadRef.current === controller) setIsLoadingWorkspace(false);
+      // Only the newest load may clear these: an older one settling late
+      // must not take the placeholder away from the load that replaced it.
+      if (workspaceLoadRef.current === controller) {
+        setIsLoadingWorkspace(false);
+        setWorkspaceLoad(null);
+      }
     }
   }
 
@@ -1086,6 +1110,7 @@ export default function OSCEAiMarkerMockup({
   function goHome() {
     workspaceLoadRef.current?.abort();
     setShowWorkspace(false);
+    setWorkspaceLoad(null);
     setSession(null);
     setTranscript({ segments: [] });
     setScoreReport(null);
@@ -1185,7 +1210,7 @@ export default function OSCEAiMarkerMockup({
     setError('');
     setIsUploading(false);
     setIsLoadingWorkspace(true);
-    setWorkspaceLoadLabel('Loading bundled demo workspace…');
+    setWorkspaceLoad({ label: 'Loading bundled demo workspace', layout: WORKSPACE_LAYOUT.STANDARD });
     setActiveSegmentId(null);
 
     try {
@@ -1211,6 +1236,7 @@ export default function OSCEAiMarkerMockup({
     } finally {
       setIsUploading(false);
       setIsLoadingWorkspace(false);
+      setWorkspaceLoad(null);
     }
   }
 
@@ -1231,7 +1257,7 @@ export default function OSCEAiMarkerMockup({
     setError('');
     setIsUploading(false);
     setIsLoadingWorkspace(true);
-    setWorkspaceLoadLabel('Loading bundled long-video demo…');
+    setWorkspaceLoad({ label: 'Loading bundled long-video demo', layout: WORKSPACE_LAYOUT.LONG });
     setActiveSegmentId(null);
 
     try {
@@ -1279,6 +1305,7 @@ export default function OSCEAiMarkerMockup({
     } finally {
       setIsUploading(false);
       setIsLoadingWorkspace(false);
+      setWorkspaceLoad(null);
     }
   }
 
@@ -1865,9 +1892,11 @@ export default function OSCEAiMarkerMockup({
         ...previous,
         [clip.id]: { status: 'running' },
       }));
+      // Not a navigation — the user stays on the clip list, so this sets the
+      // busy flag (batch controls disable) but no `workspaceLoad`: the row's
+      // own running state is the feedback, as it is for a real re-run.
       setIsLoadingWorkspace(true);
-      setWorkspaceLoadLabel(`Re-running ${clip.label || 'clip'} (demo)…`);
-      // Brief simulated runtime so the spinner is visible.
+      // Brief simulated runtime so the row's running state is visible.
       await new Promise((resolve) => setTimeout(resolve, 900));
       setClipAssessmentRuns((previous) => ({
         ...previous,
@@ -2053,7 +2082,10 @@ export default function OSCEAiMarkerMockup({
     setError('');
     setNotice('');
     setIsLoadingWorkspace(true);
-    setWorkspaceLoadLabel(`Loading ${clip.label || 'clip'}…`);
+    // A child session opens in the single-student layout with a "Back to clip
+    // list" control, so the placeholder is drawn that way; the parent view
+    // stands down until the child's payload arrives.
+    setWorkspaceLoad({ label: `Loading ${clip.label || 'clip'}`, layout: WORKSPACE_LAYOUT.CLIP });
 
     try {
       // Demo path: pull the child session straight out of the long-demo bundle.
@@ -2072,12 +2104,19 @@ export default function OSCEAiMarkerMockup({
     } catch (error) {
       if (!controller.signal.aborted) setError(error.message || 'Failed to load clip assessment.');
     } finally {
-      if (workspaceLoadRef.current === controller) setIsLoadingWorkspace(false);
+      if (workspaceLoadRef.current === controller) {
+        setIsLoadingWorkspace(false);
+        setWorkspaceLoad(null);
+      }
     }
   }
 
   function restoreParentSession() {
     workspaceLoadRef.current?.abort();
+    // The aborted load's own cleanup lands when its request rejects; take the
+    // placeholder down now so the parent is visible the moment it is restored.
+    setWorkspaceLoad(null);
+    setIsLoadingWorkspace(false);
     // Fast path: restore the parent from the in-memory snapshot captured when
     // the user drilled into a clip (no refetch, preserves prior UI state).
     if (parentSessionSnapshot?.session) {
@@ -2177,7 +2216,10 @@ export default function OSCEAiMarkerMockup({
       <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-6 py-4">
           <div className="flex items-center gap-3">
-            {showWorkspace ? (
+            {/* Shown while a workspace is loading too, so the header has its
+                final shape under the placeholder and does not shift when the
+                view lands. Disabled until then, as before. */}
+            {showWorkspace || workspaceLoad ? (
               <Button
                 variant="outline"
                 size="sm"
@@ -2270,7 +2312,14 @@ export default function OSCEAiMarkerMockup({
       </header>
 
       <main className="mx-auto max-w-7xl px-6 py-10">
-        {!showWorkspace && (
+        {/* Three states share this slot: the dashboard, the placeholder for a
+            workspace being fetched, and the workspace. The placeholder is a
+            screen of its own — the dashboard stands down while it shows —
+            because that is what the click asked for: the next screen, in
+            outline, until its data arrives. `showWorkspace` itself only flips
+            once the payload is in, so the URL sync effects above see the
+            same sequence they always did. */}
+        {!showWorkspace && !workspaceLoad && (
           <section className="grid grid-cols-1 gap-6 lg:grid-cols-3">
             <Card className="lg:col-span-2 border-slate-200 bg-white shadow-sm">
               <CardHeader>
@@ -2738,8 +2787,15 @@ export default function OSCEAiMarkerMockup({
           </section>
         )}
 
-        {showWorkspace && (
-          <LazyBoundary fallback={<PanelFallback label="Loading session workspace…" />}>
+        {workspaceLoad ? (
+          <WorkspaceSkeleton layout={workspaceLoad.layout} label={workspaceLoad.label} />
+        ) : null}
+
+        {/* The chunk fallback is the same skeleton, in the layout the loaded
+            session actually has: if the chunk arrives after the payload — a
+            slow network beats the preload — the placeholder simply stays. */}
+        {showWorkspace && !workspaceLoad && (
+          <LazyBoundary fallback={<WorkspaceSkeleton layout={workspaceLayoutFor(session)} />}>
             <SessionWorkspace
               session={session}
               videoFile={videoFile}
@@ -3086,27 +3142,10 @@ export default function OSCEAiMarkerMockup({
         )}
       </AnimatePresence>
 
-      <AnimatePresence>
-        {/* Fetching a saved session's artefacts. A separate, smaller card from
-            the upload overlay because it is a different event: nothing is being
-            produced, a few JSON documents are being read. Not dismissible —
-            it clears itself within a second either way. */}
-        {isLoadingWorkspace && !isUploading && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 px-4"
-          >
-            <Card className="w-full max-w-xs border-slate-200 bg-white shadow-xl">
-              <CardContent className="flex items-center gap-3 py-5 text-sm text-slate-700">
-                <Loader2 className="h-4 w-4 animate-spin text-cyan-700" />
-                {workspaceLoadLabel || 'Loading session…'}
-              </CardContent>
-            </Card>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* Fetching a saved session's artefacts has no overlay. It used to dim
+          the page behind a "Loading session…" card; the wait is now the
+          WorkspaceSkeleton in the main slot, drawn in the outline of the view
+          about to open, so nothing pops up and nothing is dimmed. */}
     </div>
   );
 }

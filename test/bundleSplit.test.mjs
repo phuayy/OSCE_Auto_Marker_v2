@@ -76,6 +76,14 @@ test('the entry chunk holds the dashboard and nothing that needs a second click'
     reachable.has('src/OSCEAiMarkerMockup.jsx'),
     'the dashboard should be statically reachable from the entry',
   );
+  // The skeletons are what the entry chunk paints while a lazy chunk loads,
+  // so they must be in it too — and, being in it, they are covered by the
+  // check below: a skeleton that imported a lazy-only module for a shared
+  // constant would drag that module into the first paint.
+  assert.ok(
+    reachable.has('src/components/skeletons.jsx'),
+    'the route and workspace skeletons should be statically reachable from the entry',
+  );
 
   for (const [path, trigger] of LAZY_ONLY) {
     assert.ok(

@@ -3,6 +3,7 @@ import { AlertTriangle, Brain, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import TargetPicker, { testTarget } from '@/components/TargetPicker.jsx';
+import { LoadingRegion, ScoringModelSkeleton } from '@/components/skeletons.jsx';
 import {
   NO_FALLBACK,
   buildSettingsPayload,
@@ -132,9 +133,9 @@ export default function LlmRoutingSettings({ version = 0, onProvidersChanged, on
             </Button>
           </div>
         ) : description === null ? (
-          <div className="flex items-center gap-2 text-sm text-slate-500">
-            <Loader2 className="h-4 w-4 animate-spin" /> Loading…
-          </div>
+          <LoadingRegion label="Loading scoring providers">
+            <ScoringModelSkeleton />
+          </LoadingRegion>
         ) : (
           <div className="flex flex-col gap-4">
             <TargetPicker

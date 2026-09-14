@@ -17,6 +17,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { AnalyticsSkeletonBody, LoadingRegion } from '@/components/skeletons.jsx';
 import { apiJson } from '@/lib/apiFetch';
 import {
   DATE_PRESETS,
@@ -107,10 +108,6 @@ function LegendKey({ color, label }) {
       {label}
     </span>
   );
-}
-
-function SkeletonBlock({ className = '' }) {
-  return <div className={`animate-pulse rounded-xl bg-slate-200/80 ${className}`} aria-hidden />;
 }
 
 function ChartTooltip({ tooltip }) {
@@ -632,18 +629,12 @@ export default function AnalyticsPage({ onBack }) {
         ) : null}
 
         {isFirstLoad ? (
-          /* First load: skeleton placeholders — nothing partial is ever shown. */
-          <div className="flex flex-col gap-6" aria-busy="true" aria-label="Loading analytics">
-            <SkeletonBlock className="h-24" />
-            <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-              {[0, 1, 2, 3].map((i) => <SkeletonBlock key={i} className="h-24" />)}
-            </div>
-            <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-              <SkeletonBlock className="h-72" />
-              <SkeletonBlock className="h-72" />
-            </div>
-            <SkeletonBlock className="h-56" />
-          </div>
+          /* First load: the same placeholders the route showed while this
+             chunk loaded (AppShell's fallback is AnalyticsSkeleton), so the
+             two waits read as one. Nothing partial is ever shown. */
+          <LoadingRegion label="Loading analytics">
+            <AnalyticsSkeletonBody />
+          </LoadingRegion>
         ) : rows !== null ? (
           <motion.div
             className={`flex flex-col gap-6 transition-opacity ${isRefreshing ? 'pointer-events-none opacity-50' : ''}`}

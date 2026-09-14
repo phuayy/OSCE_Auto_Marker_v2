@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { AlertCircle, CheckCircle2, Copy, Loader2, Send, Trash2, Webhook } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { LoadingRegion, WebhookRowsSkeleton } from '@/components/skeletons.jsx';
 import { apiJson } from '@/lib/apiFetch';
 
 // Outbound webhook subscriptions: register an external HTTPS endpoint and the
@@ -377,9 +378,9 @@ export default function WebhooksManager() {
         )}
 
         {loading ? (
-          <div className="flex items-center gap-2 text-sm text-slate-500">
-            <Loader2 className="h-4 w-4 animate-spin" /> Loading…
-          </div>
+          <LoadingRegion label="Loading webhooks">
+            <WebhookRowsSkeleton />
+          </LoadingRegion>
         ) : webhooks.length === 0 ? (
           <div className="rounded-xl border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-500">
             No webhooks yet. Add one to forward task events to another system.

@@ -3,6 +3,7 @@ import { AlertTriangle, Loader2, Scale, Users } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import TargetPicker, { testTarget } from '@/components/TargetPicker.jsx';
+import { LoadingRegion, MarkingModeSkeleton } from '@/components/skeletons.jsx';
 import {
   MIN_PANEL_MARKERS,
   MarkingMode,
@@ -128,9 +129,9 @@ export default function MarkingModeSettings({ version = 0, onProvidersChanged, o
             </Button>
           </div>
         ) : description === null ? (
-          <div className="flex items-center gap-2 text-sm text-slate-500">
-            <Loader2 className="h-4 w-4 animate-spin" /> Loading…
-          </div>
+          <LoadingRegion label="Loading marking mode">
+            <MarkingModeSkeleton />
+          </LoadingRegion>
         ) : (
           <div className="flex flex-col gap-4">
             <div role="radiogroup" aria-label="Marking mode" className="grid gap-2 sm:grid-cols-2">

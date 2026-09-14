@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Loader2, Mic, Sparkles, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { ListRowsSkeleton, LoadingRegion } from '@/components/skeletons.jsx';
 import { apiJson } from '@/lib/apiFetch';
 
 // Transcription corpora CRUD (list + inline editor), extracted from the
@@ -11,6 +12,10 @@ import { apiJson } from '@/lib/apiFetch';
 // stay in sync.
 export default function CorporaManager({ onClose = null, onCreated = null, onChanged = null }) {
   const [corpora, setCorpora] = useState([]);
+  // False until the first list response, success or failure. `corpora` starts
+  // empty, so without this the card said "No corpora yet" for the whole first
+  // fetch — a false empty state, not a wait.
+  const [hasLoaded, setHasLoaded] = useState(false);
   // null = list view; {id: null} = creating; {id} = editing that corpus.
   const [editor, setEditor] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -26,6 +31,8 @@ export default function CorporaManager({ onClose = null, onCreated = null, onCha
       }
     } catch (loadError) {
       setError(loadError.message || 'Failed to load corpora.');
+    } finally {
+      setHasLoaded(true);
     }
   }
 
@@ -159,7 +166,12 @@ export default function CorporaManager({ onClose = null, onCreated = null, onCha
         ) : (
           <>
             <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
-              {corpora.length === 0 && (
+              {!hasLoaded ? (
+                <LoadingRegion label="Loading corpora">
+                  <ListRowsSkeleton rows={2} />
+                </LoadingRegion>
+              ) : null}
+              {hasLoaded && corpora.length === 0 && (
                 <div className="rounded-xl border border-dashed border-slate-300 p-4 text-center text-sm text-slate-500">
                   No corpora yet. Create one for this case study.
                 </div>

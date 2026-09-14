@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { CustomProvidersSkeleton, LoadingRegion } from '@/components/skeletons.jsx';
 import {
   API_FORMAT_OPTIONS,
   AUTH_SCHEME,
@@ -646,9 +647,9 @@ export default function CustomProvidersSettings({ version = 0, onProvidersChange
             </Button>
           </div>
         ) : description === null ? (
-          <div className="flex items-center gap-2 text-sm text-slate-500">
-            <Loader2 className="h-4 w-4 animate-spin" /> Loading…
-          </div>
+          <LoadingRegion label="Loading custom providers">
+            <CustomProvidersSkeleton />
+          </LoadingRegion>
         ) : (
           <div className="flex flex-col gap-4">
             {providers.length ? (

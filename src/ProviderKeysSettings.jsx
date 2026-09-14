@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { LoadingRegion, ProviderKeysSkeleton } from '@/components/skeletons.jsx';
 import { apiJson } from '@/lib/apiFetch';
 import {
   canStoreKeys,
@@ -337,9 +338,9 @@ export default function ProviderKeysSettings({ version = 0, onProvidersChanged }
             </Button>
           </div>
         ) : description === null ? (
-          <div className="flex items-center gap-2 text-sm text-slate-500">
-            <Loader2 className="h-4 w-4 animate-spin" /> Loading…
-          </div>
+          <LoadingRegion label="Loading provider keys">
+            <ProviderKeysSkeleton />
+          </LoadingRegion>
         ) : (
           <div className="flex flex-col gap-4">
             {!storageAvailable ? (

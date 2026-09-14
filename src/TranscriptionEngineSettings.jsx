@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Check, Loader2, Mic, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { EngineSettingsSkeleton, LoadingRegion } from '@/components/skeletons.jsx';
 import {
   buildTranscriptionPatch,
   effectiveValue,
@@ -191,9 +192,9 @@ export default function TranscriptionEngineSettings({ onSettingsChanged }) {
             </Button>
           </div>
         ) : description === null ? (
-          <div className="flex items-center gap-2 text-sm text-slate-500">
-            <Loader2 className="h-4 w-4 animate-spin" /> Loading…
-          </div>
+          <LoadingRegion label="Loading transcription engines">
+            <EngineSettingsSkeleton />
+          </LoadingRegion>
         ) : (
           <div className="flex flex-col gap-4">
             <div className="grid gap-2 sm:grid-cols-2">

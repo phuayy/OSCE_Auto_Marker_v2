@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ApiError, ERROR_KIND } from '../src/lib/apiFetch.js';
-import { loadSessionWorkspace } from '../src/lib/sessionWorkspace.js';
+import { WORKSPACE_LAYOUT, loadSessionWorkspace, workspaceLayoutFor } from '../src/lib/sessionWorkspace.js';
 
 const session = {
   id: 's1', status: 'completed',
@@ -66,4 +66,36 @@ test('workspace rejects wrong session identity and propagates cancellation', asy
   await assert.rejects(loadSessionWorkspace('s1', {
     request: async () => { throw new ApiError('Cancelled', { kind: ERROR_KIND.ABORT }); },
   }), { kind: ERROR_KIND.ABORT });
+});
+
+// The placeholder drawn while a session's payload is fetched must have the
+// outline of the view that replaces it, and it is decided from what the list
+// projection already carries — the same rule the dashboard applies to the
+// loaded session (`workflow === 'long' || videoClips.length > 0`).
+test('the workspace layout is read off a session-list entry before the payload arrives', () => {
+  assert.equal(workspaceLayoutFor({ id: 's1', workflow: 'standard', hasVideoClips: false }), WORKSPACE_LAYOUT.STANDARD);
+  assert.equal(workspaceLayoutFor({ id: 's1', workflow: 'long', hasVideoClips: false }), WORKSPACE_LAYOUT.LONG);
+  // A standard upload that was split anyway shows the clip workflow, exactly
+  // as the loaded view does.
+  assert.equal(workspaceLayoutFor({ id: 's1', workflow: 'standard', hasVideoClips: true }), WORKSPACE_LAYOUT.LONG);
+  // A clip's child is the standard layout plus "Back to clip list", whatever
+  // its own workflow field says.
+  assert.equal(
+    workspaceLayoutFor({ id: 'c1', parentSessionId: 's1', workflow: 'long', hasVideoClips: false }),
+    WORKSPACE_LAYOUT.CLIP,
+  );
+});
+
+test('the workspace layout reads a full session document the same way', () => {
+  assert.equal(workspaceLayoutFor({ id: 's1', workflow: 'standard', outputs: { videoClips: [] } }), WORKSPACE_LAYOUT.STANDARD);
+  assert.equal(workspaceLayoutFor({ id: 's1', workflow: 'standard', outputs: { videoClips: [{ id: 'k1' }] } }), WORKSPACE_LAYOUT.LONG);
+  assert.equal(workspaceLayoutFor({ id: 's1', workflow: 'long', outputs: {} }), WORKSPACE_LAYOUT.LONG);
+  assert.equal(workspaceLayoutFor({ id: 'c1', parentSessionId: 's1', outputs: { videoClips: [] } }), WORKSPACE_LAYOUT.CLIP);
+});
+
+test('an unknown session gets the standard layout rather than a crash', () => {
+  // A deep link on a cold start: the list has not loaded, so nothing is known.
+  for (const unknown of [undefined, null, 'nope', 42, {}]) {
+    assert.equal(workspaceLayoutFor(unknown), WORKSPACE_LAYOUT.STANDARD);
+  }
 });
