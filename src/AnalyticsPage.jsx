@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
-  ArrowLeft,
   BarChart3,
   CalendarDays,
   ChevronDown,
@@ -18,6 +17,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { AnalyticsSkeletonBody, LoadingRegion } from '@/components/skeletons.jsx';
+import { PageHeader } from '@/components/PageHeader.jsx';
 import { apiJson } from '@/lib/apiFetch';
 import {
   DATE_PRESETS,
@@ -144,8 +144,18 @@ function SessionMultiSelect({ catalog, filter, onChange }) {
     function onDocDown(event) {
       if (rootRef.current && !rootRef.current.contains(event.target)) setOpen(false);
     }
+    function onKeyDown(event) {
+      if (event.key === 'Escape') {
+        setOpen(false);
+        rootRef.current?.querySelector('button')?.focus();
+      }
+    }
     document.addEventListener('mousedown', onDocDown);
-    return () => document.removeEventListener('mousedown', onDocDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
   }, [open]);
 
   const summary = describeSessionSelection(filter, catalog);
@@ -156,18 +166,23 @@ function SessionMultiSelect({ catalog, filter, onChange }) {
         type="button"
         onClick={() => setOpen((v) => !v)}
         className="flex h-9 w-44 items-center justify-between rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700 hover:bg-slate-50"
-        aria-haspopup="listbox"
+        aria-haspopup="true"
         aria-expanded={open}
+        aria-label={`Sessions: ${summary}`}
         title={summary}
       >
         <span className="truncate">{summary}</span>
-        <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
+        <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" aria-hidden="true" />
       </button>
       {open ? (
-        <div className="absolute z-30 mt-1 max-h-64 w-72 overflow-auto rounded-lg border border-slate-200 bg-white p-1 shadow-xl" role="listbox">
+        <div
+          className="absolute z-30 mt-1 max-h-64 w-72 overflow-auto rounded-lg border border-slate-200 bg-white p-1 shadow-xl"
+          role="group"
+          aria-label="Choose sessions"
+        >
           <button
             type="button"
-            className="w-full rounded-md px-2 py-1.5 text-left text-xs font-medium text-blue-700 hover:bg-slate-50"
+            className="w-full rounded-md px-2 py-1.5 text-left text-xs font-medium text-cyan-700 hover:bg-slate-50"
             onClick={() => onChange(patchFilter(filter, { sessionIds: [] }, catalog))}
           >
             Clear selection (all sessions)
@@ -176,17 +191,17 @@ function SessionMultiSelect({ catalog, filter, onChange }) {
             <label key={session.id} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-slate-50">
               <input
                 type="checkbox"
-                className="h-3.5 w-3.5 accent-blue-600"
+                className="h-3.5 w-3.5 accent-cyan-600"
                 checked={selectedIds.includes(session.id)}
                 onChange={() => onChange(toggleSession(filter, session.id, catalog))}
               />
               <span className="truncate text-slate-700">{session.name}</span>
-              <span className="ml-auto shrink-0 text-[10px] text-slate-400">
+              <span className="ml-auto shrink-0 text-[11px] text-slate-500">
                 {session.studentIds.length} student{session.studentIds.length === 1 ? '' : 's'} · {formatDate(session.createdAt)}
               </span>
             </label>
           ))}
-          {sessions.length === 0 ? <div className="px-2 py-2 text-xs text-slate-400">No sessions yet.</div> : null}
+          {sessions.length === 0 ? <div className="px-2 py-2 text-xs text-slate-500">No sessions yet.</div> : null}
         </div>
       ) : null}
     </div>
@@ -226,7 +241,7 @@ function FilterRow({ label, color, filter, onChange, catalog, onRemove }) {
             onChange={(e) => patch({ dateFrom: e.target.value })}
             aria-label={`${label} from date`}
           />
-          <span className="text-xs text-slate-400">to</span>
+          <span className="text-xs text-slate-500">to</span>
           <input
             type="date"
             className="h-9 rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700"
@@ -281,7 +296,7 @@ function StatTile({ icon: Icon, label, primary, secondary, hint, compare }) {
             <span className="text-sm font-semibold text-slate-700">{secondary}</span>
           </div>
         ) : null}
-        {hint ? <div className="text-[11px] text-slate-400">{hint}</div> : null}
+        {hint ? <div className="text-[11px] text-slate-500">{hint}</div> : null}
       </CardContent>
     </Card>
   );
@@ -329,7 +344,7 @@ function DistributionChart({ title, description, seriesA, seriesB, compare }) {
       </CardHeader>
       <CardContent>
         {isEmpty ? (
-          <div className="flex h-52 items-center justify-center text-sm text-slate-400">
+          <div className="flex h-52 items-center justify-center text-sm text-slate-500">
             No completed assessments match this filter.
           </div>
         ) : (
@@ -353,7 +368,7 @@ function DistributionChart({ title, description, seriesA, seriesB, compare }) {
                       (series, seriesIndex) => (
                         <div key={seriesIndex} className="flex w-full max-w-6 flex-col items-center justify-end self-end">
                           {series.count > 0 ? (
-                            <span className="mb-0.5 text-[10px] font-medium leading-none text-slate-500">{series.count}</span>
+                            <span className="mb-0.5 text-[11px] font-medium leading-none text-slate-500">{series.count}</span>
                           ) : null}
                           <div
                             className="w-full rounded-t"
@@ -369,12 +384,12 @@ function DistributionChart({ title, description, seriesA, seriesB, compare }) {
                 );
               })}
             </div>
-            <div className="mt-1 flex gap-1.5 text-[10px] text-slate-400">
+            <div className="mt-1 flex gap-1.5 text-[11px] text-slate-500">
               {seriesA.map((_, index) => (
                 <div key={index} className="flex-1 text-center">{index * 10}{index === BUCKET_COUNT - 1 ? '–100' : ''}</div>
               ))}
             </div>
-            <div className="mt-1 text-center text-[10px] uppercase tracking-wide text-slate-400">Score (%)</div>
+            <div className="mt-1 text-center text-[11px] uppercase tracking-wide text-slate-500">Score (%)</div>
           </div>
         )}
       </CardContent>
@@ -419,7 +434,7 @@ function StudentBreakdownChart({ rows }) {
       </CardHeader>
       <CardContent>
         {students.length === 0 ? (
-          <div className="flex h-24 items-center justify-center text-sm text-slate-400">
+          <div className="flex h-24 items-center justify-center text-sm text-slate-500">
             No scored students match this filter.
           </div>
         ) : (
@@ -492,11 +507,11 @@ function ResultsTable({ rows }) {
                 <td className="px-3 py-2 text-right tabular-nums text-slate-700">{formatPct(pct, 0)}</td>
                 <td className="px-3 py-2">
                   {row.passFail ? (
-                    <Badge className={isPass ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}>
+                    <Badge variant={isPass ? 'success' : 'danger'}>
                       {row.passFail}
                     </Badge>
                   ) : (
-                    <span className="text-slate-400">—</span>
+                    <span className="text-slate-500">—</span>
                   )}
                 </td>
                 <td className="whitespace-nowrap px-3 py-2 text-slate-500">{formatDate(row.createdAt)}</td>
@@ -505,7 +520,7 @@ function ResultsTable({ rows }) {
           })}
           {sorted.length === 0 ? (
             <tr>
-              <td colSpan={7} className="px-3 py-6 text-center text-sm text-slate-400">No rows match this filter.</td>
+              <td colSpan={7} className="px-3 py-6 text-center text-sm text-slate-500">No rows match this filter.</td>
             </tr>
           ) : null}
         </tbody>
@@ -598,29 +613,24 @@ export default function AnalyticsPage({ onBack }) {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-6 py-4">
-          <div className="flex items-center gap-3">
-            <Button variant="outline" size="sm" className="gap-2" onClick={onBack} title="Back to dashboard">
-              <ArrowLeft className="h-4 w-4" />
-              Back
-            </Button>
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-700 text-white shadow-sm">
-              <BarChart3 className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="text-lg font-bold">Score Analytics</div>
-              <div className="text-xs text-slate-500">Assessment results stored in the database</div>
-            </div>
-          </div>
-          <Button variant="outline" size="sm" className="gap-2" onClick={loadData} disabled={isLoading}>
-            {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
-            Refresh
-          </Button>
-        </div>
-      </header>
+      <PageHeader
+        icon={<BarChart3 className="h-5 w-5" />}
+        title="Score Analytics"
+        subtitle="Assessment results stored in the database"
+        onBack={onBack}
+        backTitle="Back to dashboard"
+      >
+        <Button variant="outline" size="sm" className="gap-2" onClick={loadData} disabled={isLoading}>
+          {isLoading ? (
+            <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+          ) : (
+            <RefreshCcw className="h-4 w-4" aria-hidden="true" />
+          )}
+          Refresh
+        </Button>
+      </PageHeader>
 
-      <main className="mx-auto flex max-w-7xl flex-col gap-6 px-6 py-8">
+      <main id="main" className="mx-auto flex max-w-7xl flex-col gap-6 px-6 py-8">
         {error ? (
           <div className="flex items-center justify-between rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
             <span>{error}</span>
@@ -747,7 +757,7 @@ export default function AnalyticsPage({ onBack }) {
               ) : null}
             </Card>
 
-            <div className="flex items-center gap-2 text-xs text-slate-400">
+            <div className="flex items-center gap-2 text-xs text-slate-500">
               <CalendarDays className="h-3.5 w-3.5" />
               Data reloads only when you press Refresh — newly completed assessments appear after a refresh.
             </div>

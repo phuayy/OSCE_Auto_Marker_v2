@@ -1,9 +1,10 @@
 import React from 'react';
-import { ArrowLeft, BarChart3, RefreshCcw, Settings as SettingsIcon } from 'lucide-react';
+import { BarChart3, FileText, RefreshCcw, Settings as SettingsIcon } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
+import { PageHeader } from '@/components/PageHeader.jsx';
 import { WORKSPACE_LAYOUT } from '@/lib/sessionWorkspace';
 
 // Placeholders shaped like the content that replaces them.
@@ -28,9 +29,9 @@ import { WORKSPACE_LAYOUT } from '@/lib/sessionWorkspace';
 //     catches it if that changes. The cost is that page titles in the *route*
 //     skeletons are bone rather than text — the text lives in the chunk.
 //
-// The page-frame headers below copy the real pages' header markup class for
-// class. That is deliberate duplication: a frame that moved between skeleton
-// and page would defeat the point. test/skeletons.test.mjs pins the titles.
+// The page-frame headers below are the real pages' header — the same
+// PageHeader component with the same title and subtitle — so nothing moves
+// when the chunk mounts. test/skeletons.test.mjs pins the titles.
 
 /**
  * Announces a wait once, for everything inside it. The bones themselves are
@@ -290,23 +291,13 @@ export function WebhookRowsSkeleton({ rows = 2 }) {
 export function SettingsSkeleton({ onBack }) {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-6 py-4">
-          <div className="flex items-center gap-3">
-            <Button variant="outline" size="sm" className="gap-2" onClick={onBack} title="Back to dashboard">
-              <ArrowLeft className="h-4 w-4" />
-              Back
-            </Button>
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-slate-600 to-slate-800 text-white shadow-sm">
-              <SettingsIcon className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="text-lg font-bold">Settings</div>
-              <div className="text-xs text-slate-500">Global options applied to every assessment run</div>
-            </div>
-          </div>
-        </div>
-      </header>
+      <PageHeader
+        icon={<SettingsIcon className="h-5 w-5" />}
+        title="Settings"
+        subtitle="Global options applied to every assessment run"
+        onBack={onBack}
+        backTitle="Back to dashboard"
+      />
 
       <LoadingRegion label="Loading settings" className="mx-auto flex max-w-3xl flex-col gap-6 px-6 py-8">
         <SettingsCardSkeleton>
@@ -372,27 +363,18 @@ export function AnalyticsSkeletonBody() {
 export function AnalyticsSkeleton({ onBack }) {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-6 py-4">
-          <div className="flex items-center gap-3">
-            <Button variant="outline" size="sm" className="gap-2" onClick={onBack} title="Back to dashboard">
-              <ArrowLeft className="h-4 w-4" />
-              Back
-            </Button>
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-700 text-white shadow-sm">
-              <BarChart3 className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="text-lg font-bold">Score Analytics</div>
-              <div className="text-xs text-slate-500">Assessment results stored in the database</div>
-            </div>
-          </div>
-          <Button variant="outline" size="sm" className="gap-2" disabled>
-            <RefreshCcw className="h-4 w-4" />
-            Refresh
-          </Button>
-        </div>
-      </header>
+      <PageHeader
+        icon={<BarChart3 className="h-5 w-5" />}
+        title="Score Analytics"
+        subtitle="Assessment results stored in the database"
+        onBack={onBack}
+        backTitle="Back to dashboard"
+      >
+        <Button variant="outline" size="sm" className="gap-2" disabled>
+          <RefreshCcw className="h-4 w-4" aria-hidden="true" />
+          Refresh
+        </Button>
+      </PageHeader>
       <LoadingRegion label="Loading analytics" className="mx-auto flex max-w-7xl flex-col gap-6 px-6 py-8">
         <AnalyticsSkeletonBody />
       </LoadingRegion>
@@ -444,27 +426,20 @@ export function RubricCriteriaSkeleton({ groups = 2, rows = 3 }) {
 /** The Rubric route while its chunk loads: the real header, then both cards. */
 export function RubricSkeleton({ onBack }) {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100">
-      <header className="border-b border-slate-200 bg-white/80 backdrop-blur">
-        <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
-          <div className="flex items-center gap-3">
-            <Button variant="ghost" size="sm" className="gap-2" onClick={onBack}>
-              <ArrowLeft className="h-4 w-4" />
-              Back
-            </Button>
-            <div className="h-6 w-px bg-slate-200" />
-            <div>
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Settings</div>
-              <h1 className="text-lg font-bold text-slate-900">Communication Rubric</h1>
-            </div>
-          </div>
-          <Badge className="bg-purple-100 text-purple-700">Editable</Badge>
-        </div>
-      </header>
+    <div className="min-h-screen bg-slate-50 text-slate-900">
+      <PageHeader
+        icon={<FileText className="h-5 w-5" />}
+        title="Communication Rubric"
+        subtitle="The rubric every communication score is marked against"
+        onBack={onBack}
+        backTitle="Back to dashboard"
+      >
+        <Badge variant="accent">Editable</Badge>
+      </PageHeader>
 
       <LoadingRegion label="Loading rubric" className="mx-auto max-w-5xl space-y-6 px-6 py-8">
         <Card className="overflow-hidden border-slate-200 bg-white shadow-sm">
-          <CardHeader className="border-b border-slate-100 bg-gradient-to-r from-purple-50 via-white to-cyan-50">
+          <CardHeader className="border-b border-slate-100 bg-slate-50/60">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">

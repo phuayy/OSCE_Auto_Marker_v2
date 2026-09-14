@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  ArrowLeft,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -17,6 +16,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { LoadingRegion, RubricCriteriaSkeleton, RubricSourceSkeleton } from '@/components/skeletons.jsx';
+import { PageHeader } from '@/components/PageHeader.jsx';
 import { apiJson } from '@/lib/apiFetch';
 
 function formatBytes(bytes) {
@@ -167,38 +167,29 @@ export default function CommunicationRubricPanel({ onBack }) {
   const isFirstLoad = isLoading && !rubric;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100">
-      <header className="border-b border-slate-200 bg-white/80 backdrop-blur">
-        <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
-          <div className="flex items-center gap-3">
-            <Button variant="ghost" size="sm" className="gap-2" onClick={onBack}>
-              <ArrowLeft className="h-4 w-4" />
-              Back
-            </Button>
-            <div className="h-6 w-px bg-slate-200" />
-            <div>
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                Settings
-              </div>
-              <h1 className="text-lg font-bold text-slate-900">Communication Rubric</h1>
-            </div>
-          </div>
-          <Badge className="bg-purple-100 text-purple-700">Editable</Badge>
-        </div>
-      </header>
+    <div className="min-h-screen bg-slate-50 text-slate-900">
+      <PageHeader
+        icon={<FileText className="h-5 w-5" />}
+        title="Communication Rubric"
+        subtitle="The rubric every communication score is marked against"
+        onBack={onBack}
+        backTitle="Back to dashboard"
+      >
+        <Badge variant="accent">Editable</Badge>
+      </PageHeader>
 
-      <main className="mx-auto max-w-5xl space-y-6 px-6 py-8">
+      <main id="main" className="mx-auto max-w-5xl space-y-6 px-6 py-8">
         <motion.div
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4 }}
         >
           <Card className="overflow-hidden border-slate-200 bg-white shadow-sm">
-            <CardHeader className="border-b border-slate-100 bg-gradient-to-r from-purple-50 via-white to-cyan-50">
+            <CardHeader className="border-b border-slate-100 bg-slate-50/60">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="space-y-1">
                   <CardTitle className="flex items-center gap-2 text-lg">
-                    <FileText className="h-5 w-5 text-purple-600" />
+                    <FileText className="h-5 w-5 text-cyan-700" aria-hidden="true" />
                     {rubric?.title || 'Communication Rubric'}
                   </CardTitle>
                   <CardDescription>
@@ -208,7 +199,7 @@ export default function CommunicationRubricPanel({ onBack }) {
                 </div>
                 <div className="flex flex-col items-end gap-2 text-right">
                   {rubric ? (
-                    <Badge className="bg-emerald-100 text-emerald-700">
+                    <Badge variant="success">
                       {rubric.criteria_count || rubric.criteria?.length || 0} criteria · Max {rubric.max_score}
                     </Badge>
                   ) : null}
@@ -424,7 +415,7 @@ export default function CommunicationRubricPanel({ onBack }) {
           className="rounded-xl border border-slate-200 bg-white/70 p-4 text-xs text-slate-600"
         >
           <div className="flex items-start gap-2">
-            <Sparkles className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-purple-500" />
+            <Sparkles className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-cyan-600" aria-hidden="true" />
             <p>
               The parser only re-runs when you upload a new rubric PDF or click reset, so day-to-day
               scoring stays fast. Indicators that cannot be observed from audio/video alone (e.g. eye
@@ -455,20 +446,21 @@ function CriteriaGroup({ title, criteria, expanded, onToggle }) {
           return (
             <li
               key={criterion.id}
-              className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition hover:border-purple-200 hover:shadow"
+              className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition hover:border-cyan-200 hover:shadow"
             >
               <button
                 type="button"
                 onClick={() => onToggle(criterion.id)}
-                className="flex w-full items-start gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
+                aria-expanded={isOpen}
+                className="flex w-full items-start gap-3 px-4 py-3 text-left transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-500"
               >
-                <span className="mt-0.5 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-purple-500 to-cyan-500 text-xs font-bold text-white shadow">
+                <span className="mt-0.5 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-cyan-600 to-blue-700 text-xs font-bold text-white shadow-sm">
                   {criterion.id}
                 </span>
                 <span className="flex-1 text-sm font-medium text-slate-800">
                   {criterion.label}
                 </span>
-                <span className="mt-1 text-slate-400">
+                <span className="mt-1 text-slate-500" aria-hidden="true">
                   {isOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                 </span>
               </button>
@@ -488,7 +480,7 @@ function CriteriaGroup({ title, criteria, expanded, onToggle }) {
                       <ul className="mt-2 space-y-1.5 text-sm text-slate-700">
                         {criterion.indicators.map((indicator, indicatorIndex) => (
                           <li key={`${criterion.id}-${indicatorIndex}`} className="flex gap-2">
-                            <span className="mt-1.5 inline-block h-1.5 w-1.5 flex-shrink-0 rounded-full bg-purple-400" />
+                            <span className="mt-1.5 inline-block h-1.5 w-1.5 flex-shrink-0 rounded-full bg-cyan-500" aria-hidden="true" />
                             <span>{indicator}</span>
                           </li>
                         ))}
