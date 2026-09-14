@@ -38,13 +38,17 @@ OSCE-AI-FYP/
 │   │   └── primitives.jsx              # StatusRow / Metric / FeedbackBlock / ContentSheetEmptyState / IndicatorList
 │   ├── components/
 │   │   ├── TargetPicker.jsx    # One provider+model choice; shared by every settings card that asks for one
+│   │   ├── PageHeader.jsx      # The sticky page bar every route shares (h1, Back, actions) + SkipToContent
+│   │   ├── SessionStatusBadge.jsx # A session's status as a word in its tone (reads lib/sessionStatus.js)
 │   │   ├── skeletons.jsx       # First-load placeholders: route/page frames, settings card bodies, the workspace outline (entry chunk)
+│   │   ├── ui/dialog.jsx       # Modal: dialog semantics, Escape, focus trap + restore, backdrop
 │   │   └── ui/skeleton.jsx     # The one bone every skeleton is built from
 │   ├── lib/
 │   │   ├── llmProviders.js     # Routing + marking-mode form logic (pure)
 │   │   ├── panelReport.js      # Reads a sheet's `panel` block for the results view (pure)
 │   │   ├── resultsModel.js     # Score sheets -> what the tabs and the CSV both read (pure)
 │   │   ├── scoreSheet.js       # What to show when a sheet is absent or partial (pure)
+│   │   ├── sessionStatus.js    # Machine status -> label + badge tone + busy (pure)
 │   │   ├── format.js           # formatRuntime / prettySpeaker / evidence-timestamp parsing (pure)
 │   │   ├── download.js         # downloadBlob + the CSV encoder behind the score sheet (pure)
 │   │   ├── demoSessions.js     # Bundled demo fixtures; imported dynamically, never in the entry chunk
@@ -917,6 +921,44 @@ rules it is built on, and what `test/skeletons.test.mjs` pins:
   human-readable stage + completion fraction.
 
 `isLongWorkflow` derived from `session.workflow === 'long' || videoClips.length > 0` — NOT from the ephemeral upload-form tab.
+
+**Design system.** One palette, one vocabulary, decided in `components/ui/` and
+read everywhere else. The app is slate on white with the primary as a
+cyan-600→blue-700 gradient; violet is reserved for the long-recording
+workflow; emerald / amber / rose are outcomes. The login screen is the one
+deliberately loud surface (dark, purple→cyan) and paints its own button
+(`variant="plain"`). What each primitive decides:
+
+- `Button` — `default` *is* the primary gradient, so a screen's main action
+  never spells out its colours at the call site; `destructive` is outlined
+  rose for anything that loses data; `type="button"` by default so a stray
+  button inside a form cannot submit it.
+- `Badge` — tones by meaning (`neutral | info | accent | success | warning |
+  danger`), never by hue at the call site. A session's status goes through
+  `SessionStatusBadge` → `lib/sessionStatus.js`, the one table that names a
+  machine status (`waiting_for_upload` → "Waiting for upload") and gives it a
+  tone; `test/sessionStatus.test.mjs` requires every `SessionStatus` to be
+  named there.
+- `Tabs` — the WAI-ARIA tabs pattern: `tablist` / `tab` / `tabpanel`,
+  `aria-selected`, roving focus with the arrow keys. Only for switching
+  between views of one thing; a choice that changes what happens next (upload
+  mode, auto-split method, occupancy rule) is a radio-card `radiogroup`, one
+  pattern for every "choose one" in the upload form.
+- `Modal` (`components/ui/dialog.jsx`) — `role="dialog"`, `aria-modal`,
+  Escape, focus moved to `initialFocus` on open and handed back on close, Tab
+  kept inside. Every dashboard overlay (confirm-start, corpora, upload) is
+  one; nothing hand-rolls a backdrop.
+- `PageHeader` — the sticky bar every page shares: the app mark, the page's
+  `<h1>`, an optional Back button and a slot for that page's actions. The
+  route skeletons render the same component with the same title, which is
+  what keeps a chunk mounting from moving anything. `SkipToContent` targets
+  each page's `<main id="main">`. `CardTitle` is an `<h2>`, so the heading
+  outline is page → card.
+- Floor for text is `text-slate-500` (4.6:1 on white) at 11 px; `slate-400`
+  is for decorative icons and separators only. `MotionConfig
+  reducedMotion="user"` in `AppShell` makes every framer-motion transition
+  honour the OS setting; CSS animations carry their own `motion-reduce` /
+  `prefers-reduced-motion` guards.
 
 **One API client.** Every request goes through `apiFetch` / `apiJson`
 ([lib/apiFetch.js](src/lib/apiFetch.js)), which classifies the failure (no
