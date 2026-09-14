@@ -1,6 +1,6 @@
 import { ClipExportScope, ClipExportStatus, SegmentationMethod, SessionStatus, Workflow } from '@/lib/enums';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence } from 'framer-motion';
 import { ensureStreamTicket } from '@/auth';
 import { useChangeStream } from '@/changeStream';
 import { ApiError, ERROR_KIND, apiJson } from '@/lib/apiFetch';
@@ -21,7 +21,6 @@ import {
 } from '@/lib/processingStage';
 import { UPLOAD_PHASE, useUploadTracker } from '@/lib/uploadTracking';
 import {
-  ArrowLeft,
   BarChart3,
   BellRing,
   Brain,
@@ -29,6 +28,7 @@ import {
   Clock3,
   FileSpreadsheet,
   FileText,
+  Film,
   Loader2,
   LogOut,
   Play,
@@ -46,8 +46,10 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Modal } from '@/components/ui/dialog';
 import { Progress } from '@/components/ui/progress';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { PageHeader } from '@/components/PageHeader.jsx';
+import { SessionStatusBadge } from '@/components/SessionStatusBadge.jsx';
 import CorporaManager from './CorporaManager.jsx';
 import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
 import { describeClipExportOutcome } from '@/lib/clipExportOutcome';
@@ -188,6 +190,9 @@ export default function OSCEAiMarkerMockup({
   // Overlay visibility only. Deliberately separate from `isUploading`, which
   // means "a transfer is in flight" and still gates the upload form.
   const [uploadOverlayDismissed, setUploadOverlayDismissed] = useState(false);
+  // The confirm dialog hands focus to the name field; the field is what the
+  // user came to fill in, and the dialog's Escape/Tab handling needs a ref.
+  const sessionNameInputRef = useRef(null);
   // Session whose transfer this tab is currently driving, so the failure path
   // can mark the right track without threading the id through every throw.
   const activeUploadSessionIdRef = useRef(null);
@@ -1487,6 +1492,13 @@ export default function OSCEAiMarkerMockup({
     setShowConfirmStart(true);
   }
 
+  // Hides the overlay only. The transfer carries on, and the session card
+  // keeps its clock and percentage (see the overlay's comment).
+  function dismissUploadOverlay() {
+    setUploadOverlayDismissed(true);
+    setNotice('Upload still running. Track its time and progress on the session card below.');
+  }
+
   function cancelStartAssessment() {
     setShowConfirmStart(false);
   }
@@ -2218,106 +2230,84 @@ export default function OSCEAiMarkerMockup({
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-6 py-4">
-          <div className="flex items-center gap-3">
-            {/* Shown while a workspace is loading too, so the header has its
-                final shape under the placeholder and does not shift when the
-                view lands. Disabled until then, as before. */}
-            {showWorkspace || workspaceLoad ? (
-              <Button
-                variant="outline"
-                size="sm"
-                className="gap-2"
-                onClick={goHome}
-                disabled={isUploading || isLoadingWorkspace}
-                title="Return to upload / saved sessions"
-              >
-                <ArrowLeft className="h-4 w-4" />
-                Back
-              </Button>
-            ) : null}
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-cyan-600 to-blue-700 text-white shadow-sm">
-              <Brain className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="text-lg font-bold">OSCE AI Marker</div>
-              <div className="text-xs text-slate-500">Local WhisperX Pipeline</div>
-            </div>
+      {/* The Back button is shown while a workspace is loading too, so the
+          header has its final shape under the placeholder and does not shift
+          when the view lands. Disabled until then, as before. */}
+      <PageHeader
+        icon={<Brain className="h-5 w-5" />}
+        title="OSCE AI Marker"
+        subtitle="Automated marking of OSCE station recordings"
+        onBack={showWorkspace || workspaceLoad ? goHome : undefined}
+        backDisabled={isUploading || isLoadingWorkspace}
+        backTitle="Return to upload / saved sessions"
+      >
+        <ConnectionBadge status={connection.status} />
+        {isDemoFallback ? <Badge variant="warning">Demo workspace</Badge> : null}
+        {notifications ? (
+          <NotificationBell
+            items={notifications.items}
+            unreadCount={notifications.unreadCount}
+            hasLoaded={notifications.hasLoaded}
+            onDismiss={notifications.dismiss}
+            onDismissAll={notifications.dismissAll}
+          />
+        ) : null}
+        <nav aria-label="Primary" className="flex flex-wrap items-center gap-2">
+          {onOpenAnalytics ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2"
+              onClick={onOpenAnalytics}
+              onMouseEnter={() => onPreloadRoute?.('analytics')}
+              onFocus={() => onPreloadRoute?.('analytics')}
+            >
+              <BarChart3 className="h-4 w-4" aria-hidden="true" />
+              Analytics
+            </Button>
+          ) : null}
+          {onOpenRubric ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2"
+              onClick={onOpenRubric}
+              onMouseEnter={() => onPreloadRoute?.('rubric')}
+              onFocus={() => onPreloadRoute?.('rubric')}
+            >
+              <FileText className="h-4 w-4" aria-hidden="true" />
+              Communication Rubric
+            </Button>
+          ) : null}
+          {onOpenSettings ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2"
+              onClick={onOpenSettings}
+              onMouseEnter={() => onPreloadRoute?.('settings')}
+              onFocus={() => onPreloadRoute?.('settings')}
+            >
+              <Settings className="h-4 w-4" aria-hidden="true" />
+              Settings
+            </Button>
+          ) : null}
+        </nav>
+        {authUsername ? (
+          <div className="flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1">
+            <User className="h-3.5 w-3.5 text-slate-500" aria-hidden="true" />
+            <span className="text-xs font-semibold text-slate-700">{authUsername}</span>
           </div>
-          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-            <ConnectionBadge status={connection.status} />
-            <Badge className="bg-slate-100 text-slate-700">Local API</Badge>
-            {isDemoFallback ? (
-              <Badge className="bg-amber-100 text-amber-700">Demo Workspace</Badge>
-            ) : (
-              <Badge className="bg-emerald-100 text-emerald-700">{currentModeLabel} Ready</Badge>
-            )}
-            {notifications ? (
-              <NotificationBell
-                items={notifications.items}
-                unreadCount={notifications.unreadCount}
-                hasLoaded={notifications.hasLoaded}
-                onDismiss={notifications.dismiss}
-                onDismissAll={notifications.dismissAll}
-              />
-            ) : null}
-            {onOpenAnalytics ? (
-              <Button
-                variant="outline"
-                size="sm"
-                className="gap-2"
-                onClick={onOpenAnalytics}
-                onMouseEnter={() => onPreloadRoute?.('analytics')}
-                onFocus={() => onPreloadRoute?.('analytics')}
-              >
-                <BarChart3 className="h-4 w-4" />
-                Analytics
-              </Button>
-            ) : null}
-            {onOpenRubric ? (
-              <Button
-                variant="outline"
-                size="sm"
-                className="gap-2"
-                onClick={onOpenRubric}
-                onMouseEnter={() => onPreloadRoute?.('rubric')}
-                onFocus={() => onPreloadRoute?.('rubric')}
-              >
-                <FileText className="h-4 w-4" />
-                Communication Rubric
-              </Button>
-            ) : null}
-            {onOpenSettings ? (
-              <Button
-                variant="outline"
-                size="sm"
-                className="gap-2"
-                onClick={onOpenSettings}
-                onMouseEnter={() => onPreloadRoute?.('settings')}
-                onFocus={() => onPreloadRoute?.('settings')}
-              >
-                <Settings className="h-4 w-4" />
-                Settings
-              </Button>
-            ) : null}
-            {authUsername ? (
-              <div className="flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1">
-                <User className="h-3.5 w-3.5 text-slate-500" />
-                <span className="text-[11px] font-semibold text-slate-700">{authUsername}</span>
-              </div>
-            ) : null}
-            {onLogout ? (
-              <Button variant="ghost" size="sm" className="gap-2 text-slate-500 hover:text-rose-600" onClick={onLogout}>
-                <LogOut className="h-4 w-4" />
-                Logout
-              </Button>
-            ) : null}
-          </div>
-        </div>
-      </header>
+        ) : null}
+        {onLogout ? (
+          <Button variant="ghost" size="sm" className="gap-2 text-slate-600 hover:text-rose-700" onClick={onLogout}>
+            <LogOut className="h-4 w-4" aria-hidden="true" />
+            Log out
+          </Button>
+        ) : null}
+      </PageHeader>
 
-      <main className="mx-auto max-w-7xl px-6 py-10">
+      <main id="main" className="mx-auto max-w-7xl px-6 py-10">
         {/* Three states share this slot: the dashboard, the placeholder for a
             workspace being fetched, and the workspace. The placeholder is a
             screen of its own — the dashboard stands down while it shows —
@@ -2329,33 +2319,61 @@ export default function OSCEAiMarkerMockup({
           <section className="grid grid-cols-1 gap-6 lg:grid-cols-3">
             <Card className="lg:col-span-2 border-slate-200 bg-white shadow-sm">
               <CardHeader>
-                <CardTitle className="text-3xl">Upload Station Video</CardTitle>
+                <CardTitle className="text-3xl">Upload a station recording</CardTitle>
                 <CardDescription>
-                  Video is stored locally, converted to MP3, then transcribed using your local WhisperX setup.
+                  The recording is transcribed with speaker labels, then marked against the rubric in
+                  the case study. Everything stays on this machine.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
-                <Tabs defaultValue={Workflow.STANDARD} className="w-full">
-                  <TabsList className="grid w-full grid-cols-2 border border-slate-200 bg-slate-50">
-                    <TabsTrigger value={Workflow.STANDARD} onClick={() => setUploadFlow(Workflow.STANDARD)}>
-                      Standard Upload
-                    </TabsTrigger>
-                    <TabsTrigger value={Workflow.LONG} onClick={() => setUploadFlow(Workflow.LONG)}>
-                      Long Video Upload (5+ min)
-                    </TabsTrigger>
-                  </TabsList>
-                </Tabs>
-
+                {/* One control for one decision. This used to be a tab bar
+                    with a coloured banner under it restating the choice; the
+                    same radio-card pattern the auto-split method uses below
+                    says what each mode is for in the option itself. */}
                 <div
-                  className={`rounded-xl border p-3 text-sm ${
-                    uploadFlow === Workflow.LONG
-                      ? 'border-violet-200 bg-violet-50 text-violet-900'
-                      : 'border-cyan-200 bg-cyan-50 text-cyan-900'
-                  }`}
+                  className="grid grid-cols-1 gap-2 sm:grid-cols-2"
+                  role="radiogroup"
+                  aria-label="What is in the recording"
                 >
-                  {uploadFlow === Workflow.LONG
-                    ? 'Long-video mode selected. Upload multi-student recordings to auto-detect clip ranges, adjust them manually, then run assessments per student.'
-                    : 'Standard mode selected. Best for single-student recordings; cropping tools are hidden.'}
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={uploadFlow === Workflow.STANDARD}
+                    onClick={() => setUploadFlow(Workflow.STANDARD)}
+                    className={`flex items-start gap-3 rounded-xl border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 focus-visible:ring-offset-2 ${
+                      uploadFlow === Workflow.STANDARD
+                        ? 'border-cyan-400 bg-cyan-50 ring-2 ring-cyan-200'
+                        : 'border-slate-200 bg-white hover:border-slate-300'
+                    }`}
+                  >
+                    <Video className="mt-0.5 h-4 w-4 shrink-0 text-cyan-700" aria-hidden="true" />
+                    <span className="min-w-0">
+                      <span className="block text-sm font-semibold text-slate-800">One student</span>
+                      <span className="block text-xs text-slate-500">
+                        A single station encounter. Marked as one session; no cropping.
+                      </span>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={uploadFlow === Workflow.LONG}
+                    onClick={() => setUploadFlow(Workflow.LONG)}
+                    className={`flex items-start gap-3 rounded-xl border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2 ${
+                      uploadFlow === Workflow.LONG
+                        ? 'border-violet-400 bg-violet-50 ring-2 ring-violet-200'
+                        : 'border-slate-200 bg-white hover:border-slate-300'
+                    }`}
+                  >
+                    <Film className="mt-0.5 h-4 w-4 shrink-0 text-violet-600" aria-hidden="true" />
+                    <span className="min-w-0">
+                      <span className="block text-sm font-semibold text-slate-800">Several students, one recording</span>
+                      <span className="block text-xs text-slate-500">
+                        Split into one clip per student — automatically, then adjusted by hand — and
+                        mark each clip on its own.
+                      </span>
+                    </span>
+                  </button>
                 </div>
 
                 {uploadFlow === Workflow.LONG && (
@@ -2369,13 +2387,13 @@ export default function OSCEAiMarkerMockup({
                         role="radio"
                         aria-checked={segmentationMethod === SegmentationMethod.BELLS}
                         onClick={() => setSegmentationMethod(SegmentationMethod.BELLS)}
-                        className={`flex items-start gap-2 rounded-lg border p-3 text-left transition ${
+                        className={`flex items-start gap-2 rounded-lg border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2 ${
                           segmentationMethod === SegmentationMethod.BELLS
                             ? 'border-violet-400 bg-violet-50 ring-2 ring-violet-200'
                             : 'border-slate-200 bg-white hover:border-slate-300'
                         }`}
                       >
-                        <BellRing className="mt-0.5 h-4 w-4 shrink-0 text-violet-600" />
+                        <BellRing className="mt-0.5 h-4 w-4 shrink-0 text-violet-600" aria-hidden="true" />
                         <span className="min-w-0">
                           <span className="block text-sm font-medium text-slate-800">Bell detection</span>
                           <span className="block text-xs text-slate-500">
@@ -2388,13 +2406,13 @@ export default function OSCEAiMarkerMockup({
                         role="radio"
                         aria-checked={segmentationMethod === SegmentationMethod.PERSON}
                         onClick={() => setSegmentationMethod(SegmentationMethod.PERSON)}
-                        className={`flex items-start gap-2 rounded-lg border p-3 text-left transition ${
+                        className={`flex items-start gap-2 rounded-lg border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2 ${
                           segmentationMethod === SegmentationMethod.PERSON
                             ? 'border-violet-400 bg-violet-50 ring-2 ring-violet-200'
                             : 'border-slate-200 bg-white hover:border-slate-300'
                         }`}
                       >
-                        <Users className="mt-0.5 h-4 w-4 shrink-0 text-violet-600" />
+                        <Users className="mt-0.5 h-4 w-4 shrink-0 text-violet-600" aria-hidden="true" />
                         <span className="min-w-0">
                           <span className="block text-sm font-medium text-slate-800">Human detection</span>
                           <span className="block text-xs text-slate-500">
@@ -2408,7 +2426,7 @@ export default function OSCEAiMarkerMockup({
                         <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                           Who is on screen during a station
                         </div>
-                        <p className="mb-2 text-[11px] text-slate-400">
+                        <p className="mb-2 text-[11px] text-slate-500">
                           Pick the rule that matches this camera angle. A hand or shoulder at the edge
                           of the frame is a person to the detector, so a one-student angle needs a
                           different rule from a wide two-person shot.
@@ -2421,7 +2439,7 @@ export default function OSCEAiMarkerMockup({
                               role="radio"
                               aria-checked={segmentationPreset === preset.id}
                               onClick={() => setSegmentationPreset(preset.id)}
-                              className={`rounded-lg border p-2.5 text-left transition ${
+                              className={`rounded-lg border p-2.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2 ${
                                 segmentationPreset === preset.id
                                   ? 'border-violet-400 bg-violet-50 ring-2 ring-violet-200'
                                   : 'border-slate-200 bg-white hover:border-slate-300'
@@ -2430,7 +2448,7 @@ export default function OSCEAiMarkerMockup({
                               <span className="flex items-center justify-between gap-2">
                                 <span className="text-sm font-medium text-slate-800">{preset.label}</span>
                                 {preset.id !== 'custom' && (
-                                  <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
+                                  <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-500">
                                     {preset.minPeople}+ on screen
                                   </span>
                                 )}
@@ -2458,7 +2476,7 @@ export default function OSCEAiMarkerMockup({
                                 }
                                 className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1 text-sm"
                               />
-                              <span className="mt-1 block text-[10px] text-slate-400">
+                              <span className="mt-1 block text-[11px] text-slate-500">
                                 Minimum for a station to count as running.
                               </span>
                             </label>
@@ -2478,7 +2496,7 @@ export default function OSCEAiMarkerMockup({
                                 }
                                 className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1 text-sm"
                               />
-                              <span className="mt-1 block text-[10px] text-slate-400">
+                              <span className="mt-1 block text-[11px] text-slate-500">
                                 Fraction of frame height. 0 counts every detection, limbs included.
                               </span>
                             </label>
@@ -2498,7 +2516,7 @@ export default function OSCEAiMarkerMockup({
                                 }
                                 className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1 text-sm"
                               />
-                              <span className="mt-1 block text-[10px] text-slate-400">
+                              <span className="mt-1 block text-[11px] text-slate-500">
                                 Seconds. Shorter detections are discarded as false starts.
                               </span>
                             </label>
@@ -2507,7 +2525,7 @@ export default function OSCEAiMarkerMockup({
                       </div>
                     )}
                     {segmentationMethod === SegmentationMethod.PERSON && (
-                      <p className="mt-2 text-[11px] text-slate-400">
+                      <p className="mt-2 text-[11px] text-slate-500">
                         Falls back to bell detection automatically if the vision model is unavailable on the worker.
                       </p>
                     )}
@@ -2517,16 +2535,16 @@ export default function OSCEAiMarkerMockup({
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                   <UploadCard
                     icon={<Video className="h-5 w-5" />}
-                    title={uploadFlow === Workflow.LONG ? 'Long Station Video' : 'Station Video'}
-                    subtitle={uploadFlow === Workflow.LONG ? '5+ min preferred (MP4 / MOV / MKV)' : 'MP4 / MOV / MKV'}
+                    title={uploadFlow === Workflow.LONG ? 'Long station recording' : 'Station recording'}
+                    subtitle={uploadFlow === Workflow.LONG ? 'MP4, MOV or MKV — usually 5 minutes or longer' : 'MP4, MOV or MKV'}
                     fileName={videoFile?.name || null}
                     onPick={() => videoInputRef.current?.click()}
                   />
 
                   <UploadCard
                     icon={<FileSpreadsheet className="h-5 w-5" />}
-                    title="Case Study"
-                    subtitle="PDF required (rubric is read from its ending checklist section)"
+                    title="Case study"
+                    subtitle="PDF. The rubric is read from its closing checklist section"
                     fileName={caseStudyFile?.name || null}
                     onPick={() => caseStudyInputRef.current?.click()}
                   />
@@ -2551,48 +2569,54 @@ export default function OSCEAiMarkerMockup({
                 <div className="flex flex-wrap items-center gap-3 pt-2">
                   <Button
                     size="lg"
-                    className="gap-2 bg-gradient-to-r from-cyan-600 to-blue-700 text-white hover:from-cyan-700 hover:to-blue-800"
+                    className="gap-2"
                     onClick={requestStartAssessment}
                     disabled={!videoFile || !caseStudyFile || isUploading || isLoadingWorkspace}
                   >
-                    <Wand2 className="h-4 w-4" />
-                    {uploadFlow === Workflow.LONG ? 'Start Long Video Assessment' : 'Start Assessment'}
+                    <Wand2 className="h-4 w-4" aria-hidden="true" />
+                    {uploadFlow === Workflow.LONG ? 'Upload and split into clips' : 'Upload and start assessment'}
                   </Button>
+                  <span className="text-sm text-slate-500" role="status">
+                    {videoFile && caseStudyFile
+                      ? 'Both files chosen. Marking runs on this machine.'
+                      : 'Choose a recording and a case study PDF to start.'}
+                  </span>
+                </div>
+
+                {/* The demos are for a first look, not for marking, so they
+                    sit under the real action at a lower weight. */}
+                <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4 text-sm text-slate-500">
+                  <span>No recording to hand?</span>
                   <Button
-                    size="lg"
+                    size="sm"
                     variant="outline"
                     className="gap-2"
                     onClick={openManualDemoMode}
                     disabled={isUploading || isLoadingWorkspace}
                   >
-                    <PlayCircle className="h-4 w-4" />
-                    Open Standard Demo
+                    <PlayCircle className="h-4 w-4" aria-hidden="true" />
+                    Open the one-student demo
                   </Button>
                   <Button
-                    size="lg"
+                    size="sm"
                     variant="outline"
                     className="gap-2 border-violet-300 text-violet-700 hover:bg-violet-50"
                     onClick={openLongVideoDemoWorkspace}
                     disabled={isUploading || isLoadingWorkspace}
                   >
-                    <Scissors className="h-4 w-4" />
-                    Open Long-Video Demo
+                    <Scissors className="h-4 w-4" aria-hidden="true" />
+                    Open the multi-student demo
                   </Button>
-                  <span className="text-sm text-slate-500">
-                    {videoFile && caseStudyFile
-                      ? 'Ready to process on local machine.'
-                      : 'Select a video and case study PDF, or open a bundled demo workspace.'}
-                  </span>
                 </div>
 
                 {error && (
-                  <div className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-sm text-rose-700">
+                  <div role="alert" className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-sm text-rose-700">
                     {error}
                   </div>
                 )}
 
                 {notice && !showWorkspace && (
-                  <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+                  <div role="status" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
                     {notice}
                   </div>
                 )}
@@ -2602,8 +2626,8 @@ export default function OSCEAiMarkerMockup({
             <div className="space-y-6">
               <Card className="border-slate-200 bg-white shadow-sm">
                 <CardHeader>
-                  <CardTitle>Saved Sessions</CardTitle>
-                  <CardDescription>Open or rename any previous session stored on disk.</CardDescription>
+                  <CardTitle>Saved sessions</CardTitle>
+                  <CardDescription>Open, rename or delete any session on this machine.</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
                   {/* First load only: rows in outline until the index answers.
@@ -2643,14 +2667,15 @@ export default function OSCEAiMarkerMockup({
                     </div>
                   ) : null}
 
-                  <div
+                  <ul
                     className={`max-h-[32rem] space-y-2 overflow-y-auto pr-1 transition-opacity ${
                       sessionIndexLoading && hasLoadedSessionIndex ? 'opacity-60' : ''
                     }`}
                     aria-busy={sessionIndexLoading && hasLoadedSessionIndex ? 'true' : undefined}
+                    aria-label="Saved sessions"
                   >
                     {visibleSessions.map((sessionEntry) => (
-                      <div
+                      <li
                         key={sessionEntry.id}
                         className="rounded-xl border border-slate-200 bg-slate-50 p-3"
                       >
@@ -2679,37 +2704,23 @@ export default function OSCEAiMarkerMockup({
                                 }
                               }}
                               disabled={renamingSessionId === sessionEntry.id}
+                              aria-label="Session name"
                               className="w-full rounded-lg border border-transparent bg-white px-2 py-1.5 text-sm font-semibold text-slate-800 shadow-sm focus:border-cyan-400 focus:outline-none focus:ring-2 focus:ring-cyan-400/30"
                             />
-                            <div className="mt-1 text-[11px] text-slate-500" title={sessionEntry.id}>
+                            <div className="mt-1 truncate text-[11px] text-slate-500" title={sessionEntry.id}>
                               {sessionEntry.id}
                             </div>
-                            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]">
-                              {(uploadTracker.isActive(sessionEntry.id) ||
-                                sessionEntry.status === SessionStatus.ASSEMBLING ||
-                                sessionEntry.status === SessionStatus.QUEUED ||
-                                sessionEntry.status === SessionStatus.PROCESSING) && (
-                                <Loader2 className="h-3 w-3 animate-spin text-cyan-600" />
-                              )}
-                              <span className={
-                                sessionEntry.status === SessionStatus.COMPLETED || sessionEntry.status === 'succeeded'
-                                  ? 'font-semibold text-emerald-600'
-                                  : sessionEntry.status === SessionStatus.FAILED
-                                  ? 'font-semibold text-rose-600'
-                                  : sessionEntry.status === SessionStatus.PROCESSING
-                                  ? 'font-semibold text-cyan-700'
-                                  : sessionEntry.status === SessionStatus.QUEUED
-                                  ? 'font-semibold text-amber-600'
-                                  : sessionEntry.status === SessionStatus.ASSEMBLING
-                                  ? 'font-semibold text-sky-600'
-                                  : 'text-slate-500'
-                              }>
-                                {sessionEntry.status || 'unknown'}
-                              </span>
+                            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                              {/* The status as a word, in its tone, from one
+                                  table (lib/sessionStatus.js). An upload still
+                                  leaving this tab is busy whatever the server
+                                  calls the row. */}
+                              <SessionStatusBadge
+                                status={sessionEntry.status}
+                                busy={uploadTracker.isActive(sessionEntry.id) || undefined}
+                              />
                               {sessionEntry.hasVideoClips || sessionEntry.status === SessionStatus.CROPPED ? (
-                                <Badge className="bg-violet-100 text-violet-700">
-                                  Folder • Long upload
-                                </Badge>
+                                <Badge variant="accent">Several students</Badge>
                               ) : null}
                             </div>
                             {(() => {
@@ -2740,17 +2751,21 @@ export default function OSCEAiMarkerMockup({
                                     <span className="flex shrink-0 items-center gap-1">
                                       {stage.elapsedSeconds === undefined ? null : (
                                         <>
-                                          <Clock3 className="h-3 w-3 text-slate-400" />
+                                          <Clock3 className="h-3 w-3 text-slate-500" aria-hidden="true" />
                                           <span className="tabular-nums">
                                             {formatRuntime(stage.elapsedSeconds)}
                                           </span>
-                                          <span className="text-slate-300">·</span>
+                                          <span className="text-slate-300" aria-hidden="true">·</span>
                                         </>
                                       )}
-                                      <span>{Math.round(stage.fraction * 100)}%</span>
+                                      <span className="tabular-nums">{Math.round(stage.fraction * 100)}%</span>
                                     </span>
                                   </div>
-                                  <Progress value={stage.fraction * 100} className="mt-1 h-1.5" />
+                                  <Progress
+                                    value={stage.fraction * 100}
+                                    className="mt-1 h-1.5"
+                                    label={`${formatProcessingStageLabel(stage)} progress`}
+                                  />
                                   {failed && uploadTracker.tracks[sessionEntry.id]?.error ? (
                                     <div className="mt-1 text-[11px] text-rose-600">
                                       {uploadTracker.tracks[sessionEntry.id].error}
@@ -2776,20 +2791,21 @@ export default function OSCEAiMarkerMockup({
                               variant="ghost"
                               onClick={() => deleteSession(sessionEntry.id)}
                               disabled={deletingSessionId === sessionEntry.id}
+                              aria-label={`Delete session ${sessionEntry.name || sessionEntry.id}`}
                               title="Delete this session and all student assessments under it"
-                              className="text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+                              className="text-rose-600 hover:bg-rose-50 hover:text-rose-700 focus-visible:ring-rose-500"
                             >
                               {deletingSessionId === sessionEntry.id ? (
-                                <Loader2 className="h-4 w-4 animate-spin" />
+                                <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
                               ) : (
-                                <Trash2 className="h-4 w-4" />
+                                <Trash2 className="h-4 w-4" aria-hidden="true" />
                               )}
                             </Button>
                           </div>
                         </div>
-                      </div>
+                      </li>
                     ))}
-                  </div>
+                  </ul>
                 </CardContent>
               </Card>
 
@@ -2878,28 +2894,20 @@ export default function OSCEAiMarkerMockup({
 
       <AnimatePresence>
         {showConfirmStart && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 px-4"
-            onClick={cancelStartAssessment}
+          <Modal
+            onClose={cancelStartAssessment}
+            labelledBy="confirm-start-title"
+            describedBy="confirm-start-description"
+            initialFocus={sessionNameInputRef}
           >
-            <motion.div
-              initial={{ scale: 0.96, y: 14 }}
-              animate={{ scale: 1, y: 0 }}
-              exit={{ scale: 0.96, y: 14 }}
-              className="w-full max-w-md"
-              onClick={(event) => event.stopPropagation()}
-            >
               <Card className="border-slate-200 bg-white shadow-xl">
                 <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-lg">
-                    <ClipboardCheck className="h-5 w-5 text-cyan-700" />
+                  <CardTitle id="confirm-start-title" className="flex items-center gap-2 text-lg">
+                    <ClipboardCheck className="h-5 w-5 text-cyan-700" aria-hidden="true" />
                     Confirm assessment
                   </CardTitle>
-                  <CardDescription>
-                    Review the files and name this session before processing starts.
+                  <CardDescription id="confirm-start-description">
+                    Check the files and name this session before it starts.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -2982,7 +2990,7 @@ export default function OSCEAiMarkerMockup({
                         </option>
                       ))}
                     </select>
-                    <p className="mt-1 text-[11px] text-slate-400">
+                    <p className="mt-1 text-[11px] text-slate-500">
                       Case-specific terms (e.g. nasal block, paracetamol) bias transcription and apply
                       to every clip marked in this session.
                     </p>
@@ -2993,12 +3001,12 @@ export default function OSCEAiMarkerMockup({
                       Session name
                     </label>
                     <input
+                      ref={sessionNameInputRef}
                       id="session-name-input"
                       type="text"
                       value={sessionNameInput}
                       onChange={(event) => setSessionNameInput(event.target.value)}
                       maxLength={80}
-                      autoFocus
                       placeholder="Leave blank to auto-generate"
                       onKeyDown={(event) => {
                         if (event.key === 'Enter') {
@@ -3007,7 +3015,7 @@ export default function OSCEAiMarkerMockup({
                       }}
                       className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
                     />
-                    <p className="mt-1 text-[11px] text-slate-400">
+                    <p className="mt-1 text-[11px] text-slate-500">
                       A unique number is appended automatically if the name already exists.
                     </p>
                   </div>
@@ -3016,48 +3024,35 @@ export default function OSCEAiMarkerMockup({
                     <Button variant="outline" size="sm" onClick={cancelStartAssessment}>
                       Cancel
                     </Button>
-                    <Button
-                      size="sm"
-                      className="gap-2 bg-gradient-to-r from-cyan-600 to-blue-700 text-white hover:from-cyan-700 hover:to-blue-800"
-                      onClick={confirmStartAssessment}
-                    >
-                      <Wand2 className="h-4 w-4" />
-                      Start assessment
+                    <Button size="sm" className="gap-2" onClick={confirmStartAssessment}>
+                      <Wand2 className="h-4 w-4" aria-hidden="true" />
+                      {uploadFlow === Workflow.LONG ? 'Upload and split into clips' : 'Upload and start assessment'}
                     </Button>
                   </div>
                 </CardContent>
               </Card>
-            </motion.div>
-          </motion.div>
+          </Modal>
         )}
       </AnimatePresence>
 
       <AnimatePresence>
         {showCorpusManager && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/45 px-4"
-            onClick={() => setShowCorpusManager(false)}
+          <Modal
+            onClose={() => setShowCorpusManager(false)}
+            labelledBy="corpora-manager-title"
+            size="lg"
+            backdropClassName="z-[60]"
           >
-            <motion.div
-              initial={{ scale: 0.96, y: 14 }}
-              animate={{ scale: 1, y: 0 }}
-              exit={{ scale: 0.96, y: 14 }}
-              className="w-full max-w-lg"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <CorporaManager
-                onClose={() => setShowCorpusManager(false)}
-                onChanged={handleCorporaChanged}
-                onCreated={(corpus) => {
-                  // Creating a corpus from the picker usually means "use it now".
-                  setSelectedCorpusId(corpus.id);
-                }}
-              />
-            </motion.div>
-          </motion.div>
+            <CorporaManager
+              titleId="corpora-manager-title"
+              onClose={() => setShowCorpusManager(false)}
+              onChanged={handleCorporaChanged}
+              onCreated={(corpus) => {
+                // Creating a corpus from the picker usually means "use it now".
+                setSelectedCorpusId(corpus.id);
+              }}
+            />
+          </Modal>
         )}
       </AnimatePresence>
 
@@ -3076,18 +3071,11 @@ export default function OSCEAiMarkerMockup({
             reads. One source, so the overlay and the card can never disagree,
             and dismissing this hides a view without stopping a transfer. */}
         {isUploading && !uploadOverlayDismissed && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 px-4"
+          <Modal
+            onClose={dismissUploadOverlay}
+            labelledBy="upload-overlay-title"
+            describedBy="upload-overlay-description"
           >
-            <motion.div
-              initial={{ scale: 0.96, y: 14 }}
-              animate={{ scale: 1, y: 0 }}
-              exit={{ scale: 0.96, y: 14 }}
-              className="w-full max-w-md"
-            >
               {(() => {
                 // Null in the moment between the transfer being committed and
                 // `isUploading` clearing; the label below covers it.
@@ -3095,18 +3083,18 @@ export default function OSCEAiMarkerMockup({
                 return (
                   <Card className="border-slate-200 bg-white shadow-xl">
                     <CardHeader>
-                      <CardTitle className="flex items-center gap-2 text-lg">
-                        <Loader2 className="h-5 w-5 animate-spin text-cyan-700" />
-                        Uploading Files
+                      <CardTitle id="upload-overlay-title" className="flex items-center gap-2 text-lg">
+                        <Loader2 className="h-5 w-5 animate-spin text-cyan-700 motion-reduce:animate-none" aria-hidden="true" />
+                        Uploading files
                       </CardTitle>
-                      <CardDescription>
+                      <CardDescription id="upload-overlay-description" aria-live="polite">
                         {stage ? formatProcessingStageLabel(stage) : 'Handing the upload to the server…'}
                       </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-3">
                       <div className="rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-center">
                         <div className="flex items-center justify-center gap-2 text-xs font-semibold uppercase tracking-wide text-cyan-700">
-                          <Clock3 className="h-3.5 w-3.5" /> Elapsed
+                          <Clock3 className="h-3.5 w-3.5" aria-hidden="true" /> Elapsed
                         </div>
                         {/* Derived from the track's own timestamps, so it keeps
                             time across a dismiss and a re-open. */}
@@ -3120,14 +3108,18 @@ export default function OSCEAiMarkerMockup({
                           <span>{stage?.label || 'Finalizing upload'}</span>
                           <span className="tabular-nums">{Math.round((stage?.fraction || 0) * 100)}%</span>
                         </div>
-                        <Progress value={(stage?.fraction || 0) * 100} className="mt-1 h-1.5" />
+                        <Progress
+                          value={(stage?.fraction || 0) * 100}
+                          className="mt-1 h-1.5"
+                          label="Upload progress"
+                        />
                         {stage?.detail ? (
-                          <div className="mt-1 text-[11px] text-amber-700">{stage.detail}</div>
+                          <div className="mt-1 text-xs text-amber-700">{stage.detail}</div>
                         ) : null}
                       </div>
 
-                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-500">
-                        Scoring starts on the server once the files land. The session card below
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
+                        Marking starts on the server once the files land. The session card
                         gauges every step and unlocks when the run finishes.
                       </div>
 
@@ -3140,23 +3132,17 @@ export default function OSCEAiMarkerMockup({
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="w-full text-slate-400 hover:text-slate-600"
-                        onClick={() => {
-                          setUploadOverlayDismissed(true);
-                          setNotice(
-                            'Upload still running. Track its time and progress on the session card below.',
-                          );
-                        }}
+                        className="w-full text-slate-500 hover:text-slate-700"
+                        onClick={dismissUploadOverlay}
                         title="Hide this card — the upload keeps running"
                       >
-                        Dismiss
+                        Hide, keep uploading
                       </Button>
                     </CardContent>
                   </Card>
                 );
               })()}
-            </motion.div>
-          </motion.div>
+          </Modal>
         )}
       </AnimatePresence>
 
@@ -3185,7 +3171,7 @@ function UploadCard({ icon, title, subtitle, fileName, onPick }) {
   return (
     <div className="flex h-full flex-col rounded-2xl border border-slate-200 bg-slate-50 p-4">
       <div className="mb-3 flex items-start gap-3">
-        <div className="rounded-xl bg-gradient-to-br from-cyan-600 to-blue-700 p-2.5 text-white">{icon}</div>
+        <div className="rounded-xl bg-gradient-to-br from-cyan-600 to-blue-700 p-2.5 text-white" aria-hidden="true">{icon}</div>
         <div className="min-h-[2.5rem]">
           <div className="text-sm font-semibold text-slate-900">{title}</div>
           <div className="text-xs text-slate-500">{subtitle}</div>
@@ -3195,14 +3181,15 @@ function UploadCard({ icon, title, subtitle, fileName, onPick }) {
       <button
         type="button"
         onClick={onPick}
-        className="flex min-h-28 w-full flex-1 flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-white text-slate-600 transition hover:border-cyan-500 hover:bg-cyan-50"
+        aria-label={`Choose ${title.toLowerCase()} file`}
+        className="flex min-h-28 w-full flex-1 flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-white text-slate-600 transition hover:border-cyan-500 hover:bg-cyan-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 focus-visible:ring-offset-2"
       >
-        <UploadCloud className="h-6 w-6" />
-        <span className="text-sm font-medium">Click to upload</span>
+        <UploadCloud className="h-6 w-6" aria-hidden="true" />
+        <span className="text-sm font-medium">{fileName ? 'Choose a different file' : 'Choose file'}</span>
       </button>
 
-      <div className="mt-3 truncate text-xs font-medium text-slate-700">
-        {fileName || 'No file selected'}
+      <div className="mt-3 truncate text-xs font-medium text-slate-700" aria-live="polite">
+        {fileName || 'No file chosen'}
       </div>
     </div>
   );
