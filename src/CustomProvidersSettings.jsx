@@ -612,7 +612,7 @@ export default function CustomProvidersSettings({ version = 0, onProvidersChange
                 : ''}{' '}
               Revoke the key at the vendor as well if you believe it leaked.
             </span>
-            <Button size="sm" className="bg-rose-600 hover:bg-rose-700" onClick={() => remove(provider.id)}>
+            <Button variant="destructive" size="sm" onClick={() => remove(provider.id)}>
               Remove
             </Button>
             <Button variant="outline" size="sm" onClick={() => setConfirmingDelete('')}>
