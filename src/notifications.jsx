@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Bell } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -229,6 +229,8 @@ export function NotificationToast({ toast, onDismiss }) {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -12, scale: 0.98 }}
             transition={{ duration: 0.2, ease: 'easeOut' }}
+            role="status"
+            aria-live="polite"
             className="pointer-events-auto rounded-xl border border-slate-200 bg-white p-4 shadow-lg"
           >
             <div className="text-sm font-semibold text-slate-800">{toast.title}</div>
@@ -252,11 +254,13 @@ function NotificationRow({ item, onDismiss }) {
     >
       <span
         className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${item.read ? 'bg-transparent' : 'bg-cyan-600'}`}
+        aria-hidden="true"
       />
+      {!item.read ? <span className="sr-only">Unread: </span> : null}
       <div className="min-w-0 flex-1">
         <div className="text-xs font-semibold text-slate-800">{item.title}</div>
         <div className="mt-0.5 text-xs leading-relaxed text-slate-600">{item.body}</div>
-        <div className="mt-1 text-[10px] text-slate-400">{timeAgo(item.createdAt)}</div>
+        <div className="mt-1 text-[11px] text-slate-500">{timeAgo(item.createdAt)}</div>
       </div>
       {!item.read ? <DismissButton id={item.id} onDismiss={onDismiss} /> : null}
     </div>
@@ -273,6 +277,8 @@ function NotificationRow({ item, onDismiss }) {
 export function NotificationBell({ items, unreadCount, hasLoaded = true, onDismiss, onDismissAll }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef(null);
+  const buttonRef = useRef(null);
+  const panelId = useId();
 
   useEffect(() => {
     if (!open) return undefined;
@@ -281,27 +287,50 @@ export function NotificationBell({ items, unreadCount, hasLoaded = true, onDismi
         setOpen(false);
       }
     }
+    // Escape closes the popover and returns focus to the bell, so a keyboard
+    // user is not left on a control that has just vanished.
+    function handleKeyDown(event) {
+      if (event.key === 'Escape') {
+        setOpen(false);
+        buttonRef.current?.focus();
+      }
+    }
     document.addEventListener('mousedown', handlePointerDown);
-    return () => document.removeEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
   }, [open]);
 
   return (
     <div ref={containerRef} className="relative">
       <button
+        ref={buttonRef}
         type="button"
         aria-label={`Notifications${unreadCount > 0 ? ` (${unreadCount} unread)` : ''}`}
+        aria-expanded={open}
+        aria-controls={panelId}
         onClick={() => setOpen((value) => !value)}
-        className="relative flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 transition hover:bg-slate-50"
+        className="relative flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 focus-visible:ring-offset-2"
       >
-        <Bell className="h-4 w-4" />
+        <Bell className="h-4 w-4" aria-hidden="true" />
         {unreadCount > 0 ? (
-          <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-rose-600 px-1 text-[10px] font-bold leading-none text-white">
+          <span
+            aria-hidden="true"
+            className="absolute -right-1.5 -top-1.5 flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-rose-600 px-1 text-[10px] font-bold leading-none text-white"
+          >
             {unreadCount > 99 ? '99+' : unreadCount}
           </span>
         ) : null}
       </button>
       {open ? (
-        <div className="absolute right-0 top-10 z-[60] w-80 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl">
+        <div
+          id={panelId}
+          role="region"
+          aria-label="Notifications"
+          className="absolute right-0 top-10 z-[60] w-80 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl"
+        >
           <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2.5">
             <span className="text-sm font-semibold text-slate-800">Notifications</span>
             {/* Offered only while there is something to dismiss, the same rule
@@ -344,6 +373,7 @@ export function NotificationFeed({ items, unreadCount, hasLoaded = true, onDismi
           {unreadCount > 0 ? (
             <span className="rounded-full bg-rose-600 px-2 py-0.5 text-[10px] font-bold text-white">
               {unreadCount}
+              <span className="sr-only"> unread</span>
             </span>
           ) : null}
         </CardTitle>

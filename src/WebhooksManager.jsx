@@ -37,19 +37,19 @@ function relativeTime(iso) {
 /** Health chip derived from the denormalised last-delivery summary. */
 function StatusChip({ webhook }) {
   if (!webhook.active) {
-    return <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-600">Paused</span>;
+    return <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-semibold text-slate-600">Paused</span>;
   }
   if (webhook.consecutiveFailures > 0) {
     return (
-      <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-semibold text-rose-700">
+      <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-semibold text-rose-700">
         {webhook.consecutiveFailures} failed
       </span>
     );
   }
   if (webhook.lastDeliveryAt) {
-    return <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">Healthy</span>;
+    return <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">Healthy</span>;
   }
-  return <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500">No deliveries</span>;
+  return <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-500">No deliveries</span>;
 }
 
 /**
@@ -282,7 +282,7 @@ export default function WebhooksManager() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-lg">
           <Webhook className="h-5 w-5 text-cyan-700" />
-          Outbound Webhooks
+          Outbound webhooks
         </CardTitle>
         <CardDescription>
           Send task events to an external system. Each delivery is signed with HMAC-SHA256 in the{' '}
@@ -343,7 +343,7 @@ export default function WebhooksManager() {
                     className="h-4 w-4 rounded border-slate-300"
                   />
                   {eventLabel(type)}
-                  <code className="text-[10px] text-slate-400">{type}</code>
+                  <code className="text-[11px] text-slate-500">{type}</code>
                 </label>
               ))}
             </fieldset>
@@ -402,13 +402,13 @@ export default function WebhooksManager() {
                       {(webhook.eventTypes?.length ? webhook.eventTypes : ['*']).map((type) => (
                         <span
                           key={type}
-                          className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600"
+                          className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600"
                         >
                           {type === '*' ? 'All events' : eventLabel(type)}
                         </span>
                       ))}
                     </div>
-                    <div className="mt-1 text-[11px] text-slate-400">
+                    <div className="mt-1 text-[11px] text-slate-500">
                       Secret {webhook.secretPreview} · last delivery {relativeTime(webhook.lastDeliveryAt)}
                       {webhook.lastStatusCode ? ` · HTTP ${webhook.lastStatusCode}` : ''}
                     </div>
