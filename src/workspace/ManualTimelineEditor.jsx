@@ -77,7 +77,6 @@ export default function ManualTimelineEditor({
           </Button>
           <Button
             size="sm"
-            className="bg-gradient-to-r from-cyan-600 to-blue-700 text-white hover:from-cyan-700 hover:to-blue-800"
             onClick={saveManualSegments}
             disabled={!session?.id || !videoDurationSeconds || isSavingManualSegments || isClipExportRunning}
           >
@@ -312,6 +311,7 @@ export default function ManualTimelineEditor({
                       type="text"
                       value={labelValue}
                       onChange={(event) => updateManualLabelAt(segmentIndex, event.target.value)}
+                      aria-label={`Label for clip ${ordinal || segmentIndex + 1}`}
                       placeholder={`Student ${ordinal || segmentIndex + 1}`}
                       className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-800 focus:border-cyan-400 focus:outline-none focus:ring-2 focus:ring-cyan-400/30"
                     />

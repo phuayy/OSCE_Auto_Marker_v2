@@ -35,6 +35,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { SessionStatusBadge } from '@/components/SessionStatusBadge.jsx';
 import { AudioProfessionalismSkeleton, CohortSummarySkeleton, LoadingRegion } from '@/components/skeletons.jsx';
 import {
   Brain,
@@ -550,23 +551,32 @@ export default function SessionWorkspace({
 
             <Card className="border-slate-200 bg-white shadow-sm">
               <CardContent className="pt-5">
-                <div className="flex flex-wrap items-center gap-3 text-sm">
-                  <div className="rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-2 text-cyan-800">
-                    Video: {session?.files?.video?.originalName || videoFile?.name || 'Not set'}
+                <dl className="flex flex-wrap items-center gap-2 text-sm">
+                  <div className="flex items-baseline gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-slate-700">
+                    <dt className="text-xs font-semibold text-slate-500">Session</dt>
+                    <dd className="font-medium text-slate-900" title={session?.id || ''}>
+                      {session?.name || session?.id || 'Pending'}
+                    </dd>
                   </div>
-                  <div className="rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-violet-800">
-                    Case Study: {session?.files?.caseStudy?.originalName || caseStudyFile?.name || 'Fallback'}
+                  <div className="flex items-baseline gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-slate-700">
+                    <dt className="text-xs font-semibold text-slate-500">Recording</dt>
+                    <dd className="max-w-[16rem] truncate" title={session?.files?.video?.originalName || videoFile?.name || ''}>
+                      {session?.files?.video?.originalName || videoFile?.name || 'Not set'}
+                    </dd>
                   </div>
-                  <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-indigo-800">
-                    Rubric Source: End of case-study PDF
+                  <div className="flex items-baseline gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-slate-700">
+                    <dt className="text-xs font-semibold text-slate-500">Case study</dt>
+                    <dd className="max-w-[16rem] truncate" title={session?.files?.caseStudy?.originalName || caseStudyFile?.name || ''}>
+                      {session?.files?.caseStudy?.originalName || caseStudyFile?.name || 'Bundled demo'}
+                    </dd>
                   </div>
-                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-slate-700">
-                    Session: <span title={session?.id || ''}>{session?.name || session?.id || 'Pending'}</span>
+                  <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-slate-700">
+                    <dt className="text-xs font-semibold text-slate-500">Status</dt>
+                    <dd>
+                      <SessionStatusBadge status={session?.status || SessionStatus.UPLOADED} />
+                    </dd>
                   </div>
-                  <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-emerald-700">
-                    Status: {session?.status || SessionStatus.UPLOADED}
-                  </div>
-                </div>
+                </dl>
                 {isClipAssessmentView ? (
                   <div className="mt-4">
                     <Button variant="outline" onClick={restoreParentSession}>
@@ -581,7 +591,7 @@ export default function SessionWorkspace({
               initial={{ opacity: 0, y: -8 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-              className="rounded-2xl border border-slate-200/90 bg-gradient-to-r from-white via-slate-50/90 to-cyan-50/40 p-4 shadow-sm ring-1 ring-slate-100/80"
+              className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-sm ring-1 ring-slate-100/80"
             >
               <div className="flex flex-wrap items-center gap-3">
                 <div className="flex items-center gap-2 rounded-xl bg-white px-3 py-2 shadow-sm ring-1 ring-slate-100">
@@ -594,7 +604,7 @@ export default function SessionWorkspace({
                   <Badge
                     className={
                       showCropWorkflow
-                        ? 'border-0 bg-gradient-to-r from-violet-600 to-indigo-600 px-3 py-1 text-xs font-semibold text-white shadow-sm'
+                        ? 'border-0 bg-violet-600 px-3 py-1 text-xs font-semibold text-white shadow-sm'
                         : 'border-0 bg-slate-800 px-3 py-1 text-xs font-semibold text-white shadow-sm'
                     }
                   >
@@ -623,7 +633,7 @@ export default function SessionWorkspace({
               <div className="space-y-6 lg:col-span-2">
                 <div ref={videoPlayerSectionRef} className="scroll-mt-6">
                 <Card className="overflow-hidden border border-slate-200/90 bg-white shadow-md shadow-slate-200/50 ring-1 ring-slate-100">
-                  <CardHeader className="space-y-0 border-b border-slate-100 bg-gradient-to-br from-white via-slate-50/40 to-cyan-50/25 pb-5">
+                  <CardHeader className="space-y-0 border-b border-slate-100 pb-5">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div className="space-y-1">
                         <CardTitle className="text-lg font-semibold tracking-tight text-slate-900">Station recording</CardTitle>
@@ -642,8 +652,8 @@ export default function SessionWorkspace({
                             <Badge
                               className={
                                 showCropWorkflow
-                                  ? 'border-0 bg-gradient-to-r from-violet-600 to-indigo-600 px-3 py-1 text-xs font-semibold text-white shadow-md'
-                                  : 'border-0 bg-slate-800 px-3 py-1 text-xs font-semibold text-white shadow-md'
+                                  ? 'border-0 bg-violet-600 px-3 py-1 text-xs font-semibold text-white shadow-sm'
+                                  : 'border-0 bg-slate-800 px-3 py-1 text-xs font-semibold text-white shadow-sm'
                               }
                             >
                               {showCropWorkflow
@@ -692,7 +702,7 @@ export default function SessionWorkspace({
                             className="w-full"
                           >
                             <TabsList
-                              className={`grid h-auto w-full gap-2 rounded-2xl border border-slate-200/90 bg-slate-100/90 p-2 shadow-inner ${
+                              className={`grid h-auto w-full gap-1 rounded-2xl border border-slate-200/90 p-1.5 ${
                                 clipEditsLocked ? 'grid-cols-1' : 'grid-cols-2'
                               }`}
                             >
@@ -764,7 +774,7 @@ export default function SessionWorkspace({
                     <Card className="border-slate-200 bg-white shadow-sm">
                       <CardHeader>
                         <CardTitle className="flex items-center gap-2 text-base">
-                          Transcript Timeline
+                          Transcript timeline
                           {session?.corpus?.name && (
                             <span
                               className="rounded-full bg-cyan-50 px-2 py-0.5 text-[11px] font-medium text-cyan-700"
@@ -819,7 +829,7 @@ export default function SessionWorkspace({
                     </Card>
 
                     <Tabs defaultValue="transcript" className="w-full">
-                  <TabsList className="grid h-auto w-full grid-cols-2 gap-2 rounded-2xl border border-slate-200/90 bg-gradient-to-r from-slate-50 via-white to-slate-100 p-2 shadow-inner sm:grid-cols-4">
+                  <TabsList className="grid h-auto w-full grid-cols-2 gap-1 rounded-2xl border border-slate-200/90 p-1.5 sm:grid-cols-4">
                     <TabsTrigger value="transcript" className="gap-2 py-2.5 text-xs sm:text-sm">
                       <MessageSquare className="h-4 w-4 shrink-0 opacity-80" />
                       Transcript
@@ -841,9 +851,9 @@ export default function SessionWorkspace({
                   <TabsContent value="transcript">
                     <Card className="border-slate-200 bg-white shadow-sm">
                       <CardHeader>
-                        <CardTitle className="text-base">Transcript JSON View (Segment Level)</CardTitle>
+                        <CardTitle className="text-base">Transcript segments</CardTitle>
                         <CardDescription>
-                          Rendered from WhisperX JSON using segment speaker, text, and timestamps.
+                          One row per spoken segment: speaker, words and timestamps from the transcription engine.
                         </CardDescription>
                       </CardHeader>
                       <CardContent>
@@ -891,7 +901,7 @@ export default function SessionWorkspace({
                   <TabsContent value="scores">
                     <Card className="border-slate-200 bg-white shadow-sm">
                       <CardHeader>
-                        <CardTitle className="text-base">Content Scores (Rubric-Aligned)</CardTitle>
+                        <CardTitle className="text-base">Content scores</CardTitle>
                         <CardDescription>
                           Clinical content rubric. Final result is determined by critical criteria and total Yes/No
                           performance.
@@ -1064,7 +1074,7 @@ export default function SessionWorkspace({
                 ) : (
                   <Card className="border-slate-200 bg-white shadow-sm">
                     <CardHeader>
-                      <CardTitle className="text-base">Long Video Workflow</CardTitle>
+                      <CardTitle className="text-base">Long recording workflow</CardTitle>
                       <CardDescription>Transcript, scores, and feedback appear per clip after export.</CardDescription>
                     </CardHeader>
                     <CardContent className="text-sm text-slate-600">
@@ -1093,7 +1103,7 @@ export default function SessionWorkspace({
               <div className="space-y-6">
                 <Card className="border-slate-200 bg-white shadow-sm">
                   <CardHeader>
-                    <CardTitle className="text-base">Run Status</CardTitle>
+                    <CardTitle className="text-base">Run status</CardTitle>
                     <CardDescription>Local model execution details</CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-3 text-sm">
@@ -1139,7 +1149,7 @@ export default function SessionWorkspace({
                 </Card>
 
                 {/* {showCropWorkflow ? (
-                  <Card className="border-violet-100 bg-gradient-to-br from-violet-50/50 via-white to-indigo-50/30 shadow-sm ring-1 ring-violet-100/70">
+                  <Card className="border-violet-200 bg-violet-50/40 shadow-sm">
                     <CardHeader className="pb-3">
                       <CardTitle className="flex items-center gap-2 text-base text-violet-950">
                         <Sparkles className="h-5 w-5 text-violet-600" />
@@ -1172,7 +1182,7 @@ export default function SessionWorkspace({
                 ) : (
                   <Card className="border-slate-200 bg-white shadow-sm">
                     <CardHeader>
-                      <CardTitle className="text-base">Single Student Mode</CardTitle>
+                      <CardTitle className="text-base">Single student mode</CardTitle>
                       <CardDescription>Clip splitting is disabled for standard assessments.</CardDescription>
                     </CardHeader>
                     <CardContent className="text-sm text-slate-600">
@@ -1184,7 +1194,7 @@ export default function SessionWorkspace({
                 {showClipAssessmentPanel ? (
                   <Card id={CLIP_ASSESSMENTS_ANCHOR_ID} className="border-slate-200 bg-white shadow-sm">
                     <CardHeader>
-                      <CardTitle className="text-base">Clip Assessments</CardTitle>
+                      <CardTitle className="text-base">Clip assessments</CardTitle>
                       <CardDescription>
                         Run full scoring on each exported student clip, or tick clips to queue them together.
                       </CardDescription>
@@ -1248,7 +1258,7 @@ export default function SessionWorkspace({
                                   <div className="text-sm font-semibold italic text-slate-500">
                                     {clip.label || 'Intermission'}
                                   </div>
-                                  <div className="text-xs text-slate-400">
+                                  <div className="text-xs text-slate-500">
                                     {formatRuntime(clip.start)} - {formatRuntime(clip.end)}
                                   </div>
                                 </div>
@@ -1444,7 +1454,7 @@ export default function SessionWorkspace({
 
                 <Card className="border-slate-200 bg-white shadow-sm">
                   <CardHeader>
-                    <CardTitle className="text-base">Audio Professionalism (openSMILE)</CardTitle>
+                    <CardTitle className="text-base">Audio professionalism</CardTitle>
                     <CardDescription>Student speech pacing, pauses, and voice features</CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-3 text-sm">
