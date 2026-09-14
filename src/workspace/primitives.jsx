@@ -37,7 +37,7 @@ export function FeedbackBlock({ title, lines }) {
         {provided.length ? (
           provided.map((line) => <div key={line}>- {line}</div>)
         ) : (
-          <div className="text-sm italic text-slate-400">{FEEDBACK_NOT_PROVIDED}</div>
+          <div className="text-sm italic text-slate-500">{FEEDBACK_NOT_PROVIDED}</div>
         )}
       </div>
     </div>

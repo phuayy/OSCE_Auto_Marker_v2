@@ -32,7 +32,7 @@ export default function CommunicationScoresTab({ criteria, summary, overallSumma
   return (
     <Card className="border-slate-200 bg-white shadow-sm">
       <CardHeader>
-        <CardTitle className="text-base">Communication Scores</CardTitle>
+        <CardTitle className="text-base">Communication scores</CardTitle>
         <CardDescription>
           Communication rubric scoring on a None / Some / Most / All scale. All=3, Most=2, Some=1, None=0.
           Pass threshold is {summary?.passThreshold ?? 11}/{summary?.maxScore ?? 21}.
@@ -107,7 +107,7 @@ export default function CommunicationScoresTab({ criteria, summary, overallSumma
               and the rubric is loaded under Settings → Communication Rubric.
             </p>
             {sessionStatus ? (
-              <p className="mt-2 text-[11px] text-slate-400">Current session status: {sessionStatus}</p>
+              <p className="mt-2 text-[11px] text-slate-500">Current session status: {sessionStatus}</p>
             ) : null}
           </div>
         ) : null}
@@ -119,18 +119,18 @@ export default function CommunicationScoresTab({ criteria, summary, overallSumma
               return (
                 <div
                   key={criterion.id}
-                  className="rounded-xl border border-slate-200 bg-slate-50 p-4 transition hover:border-purple-200 hover:bg-white"
+                  className="rounded-xl border border-slate-200 bg-slate-50 p-4 transition hover:border-cyan-200 hover:bg-white"
                 >
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
-                        <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-purple-500 to-cyan-500 text-xs font-bold text-white shadow">
+                        <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-cyan-600 to-blue-700 text-xs font-bold text-white shadow-sm">
                           {criterion.id}
                         </span>
                         <div className="font-semibold text-slate-900">{criterion.label}</div>
                       </div>
                       {criterion.section ? (
-                        <div className="ml-9 text-[11px] uppercase tracking-wider text-slate-400">
+                        <div className="ml-9 text-[11px] uppercase tracking-wider text-slate-500">
                           {criterion.section}
                         </div>
                       ) : null}

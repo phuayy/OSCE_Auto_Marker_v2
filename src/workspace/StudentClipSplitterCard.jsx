@@ -35,7 +35,7 @@ export default function StudentClipSplitterCard({
         ) : (
           <>
             <div className="max-h-60 space-y-2 overflow-y-auto pr-2">
-              {videoClips.map((clip) => {
+              {videoClips.map((clip, index) => {
                 if (clip.kind === 'intermission') {
                   // Greyed marker row — an intermission has no exported file
                   // and is not selectable/renamable/downloadable.
@@ -45,7 +45,7 @@ export default function StudentClipSplitterCard({
                       className="w-full rounded-xl border border-dashed border-slate-300 bg-slate-100 p-3 text-left opacity-70"
                       title="Intermission (break) — not a student clip."
                     >
-                      <div className="mb-1 flex items-center justify-between gap-2 text-xs text-slate-400">
+                      <div className="mb-1 flex items-center justify-between gap-2 text-xs text-slate-500">
                         <span className="text-sm font-semibold italic text-slate-500">
                           {clip.label || 'Intermission'}
                         </span>
@@ -53,7 +53,7 @@ export default function StudentClipSplitterCard({
                           {formatRuntime(clip.start)} - {formatRuntime(clip.end)}
                         </span>
                       </div>
-                      <div className="text-xs text-slate-400">
+                      <div className="text-xs text-slate-500">
                         {clip.personCount === 0
                           ? 'No people detected'
                           : clip.personCount === 1
@@ -87,6 +87,7 @@ export default function StudentClipSplitterCard({
                       <input
                         type="text"
                         defaultValue={clip.label || ''}
+                        aria-label={`Label for ${clip.label || `clip ${index + 1}`}`}
                         onClick={(event) => event.stopPropagation()}
                         onBlur={(event) => {
                           const nextLabel = event.target.value.trim();
@@ -152,9 +153,10 @@ export default function StudentClipSplitterCard({
                     </div>
 
                     <div className="space-y-2">
-                      <div className="text-xs text-slate-600">Start ({formatRuntime(cropDraft.start)})</div>
+                      <div id="crop-draft-start-label" className="text-xs text-slate-600">Start ({formatRuntime(cropDraft.start)})</div>
                       <input
                         type="range"
+                        aria-labelledby="crop-draft-start-label"
                         min={0}
                         max={Math.max(0, cropDraft.end - 0.1)}
                         step={0.1}
@@ -170,9 +172,10 @@ export default function StudentClipSplitterCard({
                         disabled={!videoDurationSeconds || isRecropping}
                       />
 
-                      <div className="text-xs text-slate-600">End ({formatRuntime(cropDraft.end)})</div>
+                      <div id="crop-draft-end-label" className="text-xs text-slate-600">End ({formatRuntime(cropDraft.end)})</div>
                       <input
                         type="range"
+                        aria-labelledby="crop-draft-end-label"
                         min={Math.min(videoDurationSeconds, cropDraft.start + 0.1)}
                         max={Math.max(0, videoDurationSeconds)}
                         step={0.1}
@@ -200,7 +203,7 @@ export default function StudentClipSplitterCard({
                       </Button>
 
                       <Button
-                        className="flex-1 bg-gradient-to-r from-cyan-600 to-blue-700 text-white hover:from-cyan-700 hover:to-blue-800"
+                        className="flex-1"
                         onClick={recropSelectedClip}
                         disabled={isRecropping || !videoDurationSeconds}
                       >
