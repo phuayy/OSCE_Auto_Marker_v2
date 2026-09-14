@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, MotionConfig, motion } from 'framer-motion';
 import { getStoredAuth, installFetchAuthShim, logout } from '@/auth';
 import { useHashRoute } from '@/lib/useHashRoute';
 import { LazyBoundary, lazyComponent, preloadComponent } from '@/lib/lazyRoute';
 import { AnalyticsSkeleton, RubricSkeleton, SettingsSkeleton } from '@/components/skeletons.jsx';
+import { SkipToContent } from '@/components/PageHeader.jsx';
 import LoginScreen from '@/LoginScreen.jsx';
 import OSCEAiMarkerMockup from '@/OSCEAiMarkerMockup.jsx';
 import { NotificationToast, useNotifications } from '@/notifications.jsx';
@@ -65,12 +66,20 @@ export default function AppShell() {
     setAuthState(null);
   }
 
+  // `reducedMotion="user"` makes every framer-motion transition in the app
+  // honour the OS "reduce motion" setting: transforms are skipped, opacity
+  // fades stay. Set once here so no page has to remember.
   if (!authState) {
-    return <LoginScreen onLoggedIn={handleLoggedIn} />;
+    return (
+      <MotionConfig reducedMotion="user">
+        <LoginScreen onLoggedIn={handleLoggedIn} />
+      </MotionConfig>
+    );
   }
 
   return (
-    <>
+    <MotionConfig reducedMotion="user">
+      <SkipToContent />
       <NotificationToast toast={notifications.toast} onDismiss={notifications.dismiss} />
       <AnimatePresence mode="wait">
       {route.view === 'rubric' ? (
@@ -131,6 +140,6 @@ export default function AppShell() {
         </motion.div>
       )}
       </AnimatePresence>
-    </>
+    </MotionConfig>
   );
 }

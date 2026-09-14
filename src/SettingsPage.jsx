@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowLeft, Settings as SettingsIcon, Wand2 } from 'lucide-react';
+import { Settings as SettingsIcon, Wand2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { LoadingRegion, ToggleRowSkeleton } from '@/components/skeletons.jsx';
+import { PageHeader } from '@/components/PageHeader.jsx';
 import CorporaManager from '@/CorporaManager.jsx';
 import CustomProvidersSettings from '@/CustomProvidersSettings.jsx';
 import LlmRoutingSettings from '@/LlmRoutingSettings.jsx';
@@ -79,25 +80,15 @@ export default function SettingsPage({ onBack }) {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-6 py-4">
-          <div className="flex items-center gap-3">
-            <Button variant="outline" size="sm" className="gap-2" onClick={onBack} title="Back to dashboard">
-              <ArrowLeft className="h-4 w-4" />
-              Back
-            </Button>
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-slate-600 to-slate-800 text-white shadow-sm">
-              <SettingsIcon className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="text-lg font-bold">Settings</div>
-              <div className="text-xs text-slate-500">Global options applied to every assessment run</div>
-            </div>
-          </div>
-        </div>
-      </header>
+      <PageHeader
+        icon={<SettingsIcon className="h-5 w-5" />}
+        title="Settings"
+        subtitle="Global options applied to every assessment run"
+        onBack={onBack}
+        backTitle="Back to dashboard"
+      />
 
-      <main className="mx-auto flex max-w-3xl flex-col gap-6 px-6 py-8">
+      <main id="main" className="mx-auto flex max-w-3xl flex-col gap-6 px-6 py-8">
         {loadError ? (
           <div className="flex items-center justify-between rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
             <span>{loadError}</span>
@@ -134,8 +125,8 @@ export default function SettingsPage({ onBack }) {
         <Card className="border-slate-200 bg-white shadow-sm">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-lg">
-              <Wand2 className="h-5 w-5 text-violet-700" />
-              LLM Transcription Preprocess
+              <Wand2 className="h-5 w-5 text-cyan-700" aria-hidden="true" />
+              Transcript clean-up by the scoring model
             </CardTitle>
             <CardDescription>
               After transcription and before scoring, an extra pass by the model selected above
@@ -155,7 +146,7 @@ export default function SettingsPage({ onBack }) {
                   <div className="text-sm font-semibold text-slate-800">
                     {llmPreprocessOn ? 'Enabled' : 'Disabled'}
                   </div>
-                  <div className="text-[11px] text-slate-500">
+                  <div className="text-xs text-slate-500">
                     {llmPreprocessOn
                       ? 'The llm_preprocess pipeline step runs on every new assessment.'
                       : 'The llm_preprocess pipeline step is skipped.'}
@@ -169,7 +160,7 @@ export default function SettingsPage({ onBack }) {
                   disabled={saving || settings === null}
                   onClick={() => updateSetting('llmTranscriptPreprocess', !llmPreprocessOn)}
                   className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-60 ${
-                    llmPreprocessOn ? 'bg-violet-600' : 'bg-slate-300'
+                    llmPreprocessOn ? 'bg-cyan-600' : 'bg-slate-300'
                   }`}
                 >
                   <span
