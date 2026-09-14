@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Bell } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { LoadingRegion, NotificationRowsSkeleton } from '@/components/skeletons.jsx';
 import { useChangeStream } from '@/changeStream';
 import { ApiError, apiJson } from '@/lib/apiFetch';
 
@@ -37,6 +38,12 @@ export function useNotifications(enabled) {
   const [items, setItems] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [toast, setToast] = useState(null);
+  // False until the first poll settles, success or failure. `items` starts
+  // empty, so without this the bell and the feed said "No notifications yet"
+  // for the whole first fetch — a false empty state, not a wait. The same
+  // rule CorporaManager keeps; the bell's dropdown and the dashboard feed
+  // read it to show rows in outline instead.
+  const [hasLoaded, setHasLoaded] = useState(false);
   // null until the first successful poll — everything already in the DB at
   // page load goes to the feed/badge without popping a toast.
   const knownIdsRef = useRef(null);
@@ -66,6 +73,11 @@ export function useNotifications(enabled) {
       // network failure, a 500 from the API is not), which is why this call no
       // longer inspects a raw status itself.
       return !(error instanceof ApiError && error.isUnreachable);
+    } finally {
+      // A failed first poll ends the wait too: the backoff loop retries on
+      // its own, and the connection badge — not the feed — is what says the
+      // backend is unreachable.
+      setHasLoaded(true);
     }
   }, []);
 
@@ -76,6 +88,7 @@ export function useNotifications(enabled) {
       setItems([]);
       setUnreadCount(0);
       setToast(null);
+      setHasLoaded(false);
       knownIdsRef.current = null;
       return undefined;
     }
@@ -189,7 +202,7 @@ export function useNotifications(enabled) {
     }
   }, [refresh]);
 
-  return { items, unreadCount, toast, dismiss, dismissAll };
+  return { items, unreadCount, hasLoaded, toast, dismiss, dismissAll };
 }
 
 function DismissButton({ id, onDismiss }) {
@@ -251,7 +264,13 @@ function NotificationRow({ item, onDismiss }) {
 }
 
 /** Header bell with unread badge; click opens a scrollable dropdown overlay. */
-export function NotificationBell({ items, unreadCount, onDismiss, onDismissAll }) {
+/**
+ * `hasLoaded` defaults to true so a caller that does not track the first poll
+ * keeps today's behaviour; the dashboard passes the hook's own flag, and only
+ * an empty list before that first answer is drawn in outline — a row pushed
+ * over the change stream before the poll lands is a row, and is shown.
+ */
+export function NotificationBell({ items, unreadCount, hasLoaded = true, onDismiss, onDismissAll }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef(null);
 
@@ -299,7 +318,11 @@ export function NotificationBell({ items, unreadCount, onDismiss, onDismissAll }
             ) : null}
           </div>
           <div className="max-h-80 overflow-y-auto">
-            {items.length === 0 ? (
+            {!hasLoaded && items.length === 0 ? (
+              <LoadingRegion label="Loading notifications">
+                <NotificationRowsSkeleton />
+              </LoadingRegion>
+            ) : items.length === 0 ? (
               <div className="px-4 py-6 text-center text-xs text-slate-500">No notifications yet.</div>
             ) : (
               items.map((item) => <NotificationRow key={item.id} item={item} onDismiss={onDismiss} />)
@@ -312,7 +335,7 @@ export function NotificationBell({ items, unreadCount, onDismiss, onDismissAll }
 }
 
 /** Full history feed card for the main page. */
-export function NotificationFeed({ items, unreadCount, onDismiss }) {
+export function NotificationFeed({ items, unreadCount, hasLoaded = true, onDismiss }) {
   return (
     <Card className="border-slate-200 bg-white shadow-sm">
       <CardHeader>
@@ -328,7 +351,11 @@ export function NotificationFeed({ items, unreadCount, onDismiss }) {
       </CardHeader>
       <CardContent className="px-2 pb-2 pt-0">
         <div className="max-h-96 overflow-y-auto">
-          {items.length === 0 ? (
+          {!hasLoaded && items.length === 0 ? (
+            <LoadingRegion label="Loading notifications">
+              <NotificationRowsSkeleton />
+            </LoadingRegion>
+          ) : items.length === 0 ? (
             <div className="px-2 pb-4 text-sm text-slate-500">
               Nothing yet — you&apos;ll be notified here when a task finishes.
             </div>

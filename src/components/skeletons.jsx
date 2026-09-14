@@ -520,16 +520,145 @@ export function RubricSkeleton({ onBack }) {
 }
 
 // ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+
+/**
+ * Saved-session rows before the index's first response: the name field, the
+ * id line and the status chip on the left, the action and delete controls on
+ * the right — the card each entry renders as. First load only: a background
+ * refresh keeps the rows it has.
+ */
+export function SessionRowsSkeleton({ rows = 3 }) {
+  return (
+    <div className="space-y-2">
+      {Array.from({ length: rows }, (_, index) => (
+        <div key={index} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
+              <Skeleton className={`h-8 rounded-lg ${index % 2 ? 'w-3/5' : 'w-4/5'}`} />
+              <Skeleton className="h-3 w-2/3" />
+              <Skeleton className="h-5 w-20 rounded-full" />
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <Skeleton className="h-8 w-16 rounded-lg" />
+              <Skeleton className="h-8 w-8 rounded-lg" />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Notification rows before the first poll answers — the bell's dropdown and
+ * the dashboard feed both list the same row (notifications.jsx
+ * NotificationRow): unread dot, title, body, time, dismiss.
+ */
+export function NotificationRowsSkeleton({ rows = 3 }) {
+  return (
+    <div>
+      {Array.from({ length: rows }, (_, index) => (
+        <div key={index} className="flex items-start gap-2 border-b border-slate-100 px-4 py-3 last:border-b-0">
+          <Skeleton className="mt-1.5 h-2 w-2 shrink-0 rounded-full" />
+          <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+            <Skeleton className={`h-3 ${index % 2 ? 'w-2/5' : 'w-1/2'}`} />
+            <Skeleton className="h-3 w-11/12" />
+            <Skeleton className="h-2.5 w-14" />
+          </div>
+          <Skeleton className="h-3 w-12 shrink-0" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Session workspace
 // ---------------------------------------------------------------------------
 
-/** A label/value line, the shape of workspace/primitives.jsx's StatusRow. */
+/** A label/value box, the shape of workspace/primitives.jsx's StatusRow. */
 function StatusRowSkeleton({ valueWidth = 'w-24' }) {
   return (
-    <div className="flex items-center justify-between gap-3 py-1">
+    <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
       <Skeleton className="h-3.5 w-28" />
       <Skeleton className={`h-3.5 ${valueWidth}`} />
     </div>
+  );
+}
+
+/**
+ * The Audio Professionalism card's body: the six headline rows the extractor
+ * reports, then the collapsed openSMILE details box. Shown by the workspace
+ * while it fetches the artefact after mount, and by WorkspaceSkeleton for the
+ * same card — one shape for both waits.
+ */
+export function AudioProfessionalismSkeleton() {
+  return (
+    <div className="space-y-3">
+      {['w-20', 'w-12', 'w-14', 'w-12', 'w-8', 'w-8'].map((width, index) => (
+        <StatusRowSkeleton key={index} valueWidth={width} />
+      ))}
+      <Skeleton className="h-10 w-full rounded-xl" />
+    </div>
+  );
+}
+
+/**
+ * The Cohort Summary card while `/clip-summaries` is computed: header with
+ * the pass-count chip, the per-student bar chart at the height it draws at,
+ * and the criterion breakdown rows. Rendered in the slot LongVideoSummaryCharts
+ * fills, so nothing below it moves when the data lands.
+ */
+export function CohortSummarySkeleton() {
+  const bars = ['h-2/5', 'h-4/5', 'h-full', 'h-3/5', 'h-1/3', 'h-3/4', 'h-1/2', 'h-2/3'];
+  return (
+    <Card className="border-slate-200 bg-white shadow-sm">
+      <CardHeader>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-5 w-5" />
+              <Skeleton className="h-5 w-36" />
+            </div>
+            <Skeleton className="h-3.5 w-72 max-w-full" />
+          </div>
+          <Skeleton className="h-9 w-64 max-w-full rounded-xl" />
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-8">
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-2">
+            <Skeleton className="h-4 w-48" />
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-3 w-28" />
+              <Skeleton className="h-3 w-36" />
+              <Skeleton className="h-8 w-24 rounded-lg" />
+            </div>
+          </div>
+          <div className="flex h-72 items-end gap-3 px-2">
+            {bars.map((height, index) => (
+              <Skeleton key={index} className={`flex-1 rounded-t-md ${height}`} />
+            ))}
+          </div>
+        </section>
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-2">
+            <Skeleton className="h-4 w-64" />
+            <Skeleton className="h-8 w-24 rounded-lg" />
+          </div>
+          <div className="space-y-2">
+            {[0, 1, 2, 3].map((index) => (
+              <div key={index} className="flex items-center gap-3">
+                <Skeleton className="h-3.5 w-40 shrink-0" />
+                <Skeleton className={`h-5 rounded ${index % 2 ? 'w-3/4' : 'w-full'}`} />
+              </div>
+            ))}
+          </div>
+        </section>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -682,12 +811,7 @@ export function WorkspaceSkeleton({ layout = WORKSPACE_LAYOUT.STANDARD, label = 
 
           {/* Audio professionalism. */}
           <WorkspaceCardSkeleton>
-            <div className="space-y-2">
-              <StatusRowSkeleton />
-              <StatusRowSkeleton valueWidth="w-16" />
-              <StatusRowSkeleton valueWidth="w-20" />
-              <StatusRowSkeleton valueWidth="w-12" />
-            </div>
+            <AudioProfessionalismSkeleton />
           </WorkspaceCardSkeleton>
         </div>
       </div>

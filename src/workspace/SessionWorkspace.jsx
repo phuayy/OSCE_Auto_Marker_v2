@@ -12,7 +12,7 @@
 // everything only this view uses: the results model derived from the score
 // sheets, the player and download handlers, and the three effects that are
 // meaningless with no player mounted.
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { resolveMediaUrl } from '@/auth';
 import { apiJson } from '@/lib/apiFetch';
@@ -35,6 +35,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { AudioProfessionalismSkeleton, CohortSummarySkeleton, LoadingRegion } from '@/components/skeletons.jsx';
 import {
   Brain,
   ClipboardCheck,
@@ -139,6 +140,11 @@ export default function SessionWorkspace({
 
     return null;
   }, [audioProfessionalism]);
+  // The artefact is normally part of the workspace payload; this covers the
+  // fetch the effect below makes when it was not (a legacy row, a 404 at open
+  // time). Local, not lifted: only this card reads it, and the dashboard's
+  // `isLoadingWorkspace` means a whole view is on its way, which this is not.
+  const [isLoadingAudioProf, setIsLoadingAudioProf] = useState(false);
 
   const audioProfMetrics = audioProfPayload?.metrics || null;
   const audioProfFeatures = audioProfPayload?.audio_features || null;
@@ -251,6 +257,10 @@ export default function SessionWorkspace({
     let cancelled = false;
 
     const loadAudioProfessionalism = async () => {
+      // The card shows the artefact's outline until this settles. Without the
+      // flag it showed the empty state — "check that openSMILE is installed"
+      // — for the length of a fetch that usually succeeds.
+      setIsLoadingAudioProf(true);
       try {
         const body = await apiJson(`/api/sessions/${session.id}/audio-professionalism`, {
           fallbackMessage: 'Audio professionalism fetch failed.',
@@ -264,6 +274,8 @@ export default function SessionWorkspace({
         if (!cancelled) {
           setAudioProfLoadError(error.message || 'Audio professionalism unavailable.');
         }
+      } finally {
+        if (!cancelled) setIsLoadingAudioProf(false);
       }
     };
 
@@ -271,6 +283,9 @@ export default function SessionWorkspace({
 
     return () => {
       cancelled = true;
+      // A session switch mid-fetch: the next session's own effect decides
+      // whether it is waiting; this one must not leave the flag raised.
+      setIsLoadingAudioProf(false);
     };
   }, [audioProfPayload, session?.id, session?.outputs?.audioProfessionalism?.fileName, session?.outputs?.audioProfessionalism?.url]);
 
@@ -1058,13 +1073,15 @@ export default function SessionWorkspace({
                   </Card>
                 )}
 
+                {/* First computation only: LongVideoSummaryCharts renders
+                    nothing without data, so this stands in its slot at its
+                    height and nothing below moves when the charts land. A
+                    recomputation (another clip finishing) keeps the charts
+                    that are up. */}
                 {showClipAssessmentPanel && isLoadingClipSummaries && !clipSummaries && !demoLongVideoSummaries ? (
-                  <Card className="border-slate-200 bg-white shadow-sm">
-                    <CardContent className="flex items-center gap-3 py-4 text-sm text-slate-500">
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      Building cohort summary charts...
-                    </CardContent>
-                  </Card>
+                  <LoadingRegion label="Building cohort summary charts">
+                    <CohortSummarySkeleton />
+                  </LoadingRegion>
                 ) : null}
                 {showClipAssessmentPanel ? (
                   <LongVideoSummaryCharts
@@ -1492,6 +1509,13 @@ export default function SessionWorkspace({
                           </div>
                         ) : null}
                       </>
+                    ) : isLoadingAudioProf ? (
+                      /* The same rows WorkspaceSkeleton drew for this card while
+                         the session opened, so a late artefact does not turn
+                         the card into an empty state on its way in. */
+                      <LoadingRegion label="Loading audio professionalism">
+                        <AudioProfessionalismSkeleton />
+                      </LoadingRegion>
                     ) : (
                       <div className="space-y-2">
                         {audioProfLoadError ? (

@@ -12,7 +12,7 @@ import { CLIP_ASSESSMENTS_ANCHOR_ID } from '@/lib/anchors';
 import { coalesceAsync } from '@/lib/coalesce';
 import { clampNumber, formatRuntime } from '@/lib/format';
 import { LazyBoundary, lazyComponent, preloadComponent } from '@/lib/lazyRoute';
-import { WorkspaceSkeleton } from '@/components/skeletons.jsx';
+import { LoadingRegion, SessionRowsSkeleton, WorkspaceSkeleton } from '@/components/skeletons.jsx';
 import { ConnectionBadge, ConnectionNotice } from '@/components/ConnectionStatus';
 import {
   IN_FLIGHT_STATUSES,
@@ -151,6 +151,10 @@ export default function OSCEAiMarkerMockup({
 
   const [sessionIndex, setSessionIndex] = useState([]);
   const [sessionIndexLoading, setSessionIndexLoading] = useState(false);
+  // False until the index has answered once. `sessionIndex` starts empty, and
+  // "no sessions yet" and "not asked yet" must not look the same: the first
+  // fetch draws rows in outline, and the empty state waits for a real answer.
+  const [hasLoadedSessionIndex, setHasLoadedSessionIndex] = useState(false);
   // Reserved for failures of an action the user took (open, rename, delete, a
   // manual refresh). Background refreshes report to `connection` instead — see
   // refreshSessionIndex.
@@ -838,6 +842,7 @@ export default function OSCEAiMarkerMockup({
 
       const sessions = Array.isArray(body.sessions) ? body.sessions : [];
       setSessionIndex(sessions);
+      setHasLoadedSessionIndex(true);
       setSessionNameDrafts((previous) => {
         const next = { ...previous };
         sessions.forEach((sessionEntry) => {
@@ -2252,6 +2257,7 @@ export default function OSCEAiMarkerMockup({
               <NotificationBell
                 items={notifications.items}
                 unreadCount={notifications.unreadCount}
+                hasLoaded={notifications.hasLoaded}
                 onDismiss={notifications.dismiss}
                 onDismissAll={notifications.dismissAll}
               />
@@ -2600,10 +2606,14 @@ export default function OSCEAiMarkerMockup({
                   <CardDescription>Open or rename any previous session stored on disk.</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  {sessionIndexLoading ? (
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
-                      Loading sessions...
-                    </div>
+                  {/* First load only: rows in outline until the index answers.
+                      A later refresh keeps the rows it has and dims the list
+                      (below); the coalesced background refreshes are silent
+                      and never raise the flag at all. */}
+                  {sessionIndexLoading && !hasLoadedSessionIndex ? (
+                    <LoadingRegion label="Loading saved sessions">
+                      <SessionRowsSkeleton />
+                    </LoadingRegion>
                   ) : null}
 
                   {/* Stale data needs an explanation where the stale data is.
@@ -2625,13 +2635,20 @@ export default function OSCEAiMarkerMockup({
                     </div>
                   ) : null}
 
-                  {!sessionIndexLoading && visibleSessions.length === 0 ? (
+                  {/* An empty state is an answer, so it waits for one: after a
+                      failed first fetch the error above is the whole story. */}
+                  {hasLoadedSessionIndex && !sessionIndexLoading && visibleSessions.length === 0 ? (
                     <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
                       No saved sessions yet. Upload a video to create one.
                     </div>
                   ) : null}
 
-                  <div className="max-h-[32rem] space-y-2 overflow-y-auto pr-1">
+                  <div
+                    className={`max-h-[32rem] space-y-2 overflow-y-auto pr-1 transition-opacity ${
+                      sessionIndexLoading && hasLoadedSessionIndex ? 'opacity-60' : ''
+                    }`}
+                    aria-busy={sessionIndexLoading && hasLoadedSessionIndex ? 'true' : undefined}
+                  >
                     {visibleSessions.map((sessionEntry) => (
                       <div
                         key={sessionEntry.id}
@@ -2780,6 +2797,7 @@ export default function OSCEAiMarkerMockup({
                 <NotificationFeed
                   items={notifications.items}
                   unreadCount={notifications.unreadCount}
+                  hasLoaded={notifications.hasLoaded}
                   onDismiss={notifications.dismiss}
                 />
               ) : null}

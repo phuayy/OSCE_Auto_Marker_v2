@@ -48,6 +48,10 @@ const OTHER_SITES = [
   ['AnalyticsPage.jsx', 'AnalyticsSkeletonBody'],
   ['CommunicationRubricPanel.jsx', 'RubricCriteriaSkeleton'],
   ['CommunicationRubricPanel.jsx', 'RubricSourceSkeleton'],
+  ['OSCEAiMarkerMockup.jsx', 'SessionRowsSkeleton'],
+  ['notifications.jsx', 'NotificationRowsSkeleton'],
+  ['workspace/SessionWorkspace.jsx', 'AudioProfessionalismSkeleton'],
+  ['workspace/SessionWorkspace.jsx', 'CohortSummarySkeleton'],
 ];
 
 // A file that had the copied first-load spinner. The tell is the spinner icon
@@ -185,6 +189,57 @@ test('the workspace skeleton takes the layout the session will open in', () => {
   // transcript timeline and the four result tabs.
   assert.match(workspace, /\{isLong \? \([\s\S]*?grid-cols-2[\s\S]*?\) : null\}/);
   assert.match(workspace, /sm:grid-cols-4/);
+});
+
+test('the saved-session list draws rows in outline on its first load, and dims on a refresh', () => {
+  // "No sessions yet" and "not asked yet" are different answers; the index
+  // starts as [] so a flag has to tell them apart.
+  assert.match(DASHBOARD, /const \[hasLoadedSessionIndex, setHasLoadedSessionIndex\] = useState\(false\)/);
+  assert.match(DASHBOARD, /setSessionIndex\(sessions\);\s*setHasLoadedSessionIndex\(true\)/);
+  // Skeleton on the first fetch only …
+  assert.match(DASHBOARD, /\{sessionIndexLoading && !hasLoadedSessionIndex \? \(\s*<LoadingRegion label="Loading saved sessions">/);
+  // … the empty state waits for a real answer …
+  assert.match(DASHBOARD, /\{hasLoadedSessionIndex && !sessionIndexLoading && visibleSessions\.length === 0 \? \(/);
+  // … and a refresh with rows on screen keeps them, dimmed, still clickable.
+  assert.match(DASHBOARD, /sessionIndexLoading && hasLoadedSessionIndex \? 'opacity-60' : ''/);
+  assert.match(DASHBOARD, /aria-busy=\{sessionIndexLoading && hasLoadedSessionIndex \? 'true' : undefined\}/);
+  assert.equal(/Loading sessions\.\.\./.test(DASHBOARD), false, 'the plain "Loading sessions..." box is gone');
+});
+
+test('the notification bell and feed wait for the first poll before saying there is nothing', () => {
+  const notifications = read('notifications.jsx');
+  // The hook owns the flag: true once the first poll settles either way, reset
+  // on logout so the next login seeds fresh.
+  assert.match(notifications, /const \[hasLoaded, setHasLoaded\] = useState\(false\)/);
+  assert.match(notifications, /\} finally \{[\s\S]*?setHasLoaded\(true\);\s*\}\s*\}, \[\]\);/);
+  assert.match(notifications, /if \(!enabled\) \{[\s\S]*?setHasLoaded\(false\);/);
+  assert.match(notifications, /return \{ items, unreadCount, hasLoaded, toast, dismiss, dismissAll \}/);
+  // Both consumers default to today's behaviour for a caller that passes
+  // nothing, and only an empty list before the first answer is bone — a row
+  // pushed over the change stream is shown.
+  assert.match(notifications, /export function NotificationBell\(\{ items, unreadCount, hasLoaded = true,/);
+  assert.match(notifications, /export function NotificationFeed\(\{ items, unreadCount, hasLoaded = true,/);
+  assert.equal((notifications.match(/\{!hasLoaded && items\.length === 0 \? \(/g) || []).length, 2);
+  // The dashboard is the caller that knows, and passes it to both.
+  assert.equal((DASHBOARD.match(/hasLoaded=\{notifications\.hasLoaded\}/g) || []).length, 2);
+});
+
+test('the workspace shows the audio artefact and the cohort charts in outline while they are fetched', () => {
+  const workspace = read('workspace/SessionWorkspace.jsx');
+  // The late audio-professionalism fetch raises a flag for its own card only,
+  // and lowers it however the fetch ends — including a session switch mid-way.
+  assert.match(workspace, /const \[isLoadingAudioProf, setIsLoadingAudioProf\] = useState\(false\)/);
+  assert.match(workspace, /setIsLoadingAudioProf\(true\);\s*try \{\s*const body = await apiJson\(`\/api\/sessions\/\$\{session\.id\}\/audio-professionalism`/);
+  assert.match(workspace, /\} finally \{\s*if \(!cancelled\) setIsLoadingAudioProf\(false\);/);
+  assert.match(workspace, /cancelled = true;[\s\S]*?setIsLoadingAudioProf\(false\);\s*\};/);
+  // The empty state ("check that openSMILE is installed") is reached only
+  // when there is neither a payload nor a fetch in flight.
+  assert.match(workspace, /\) : isLoadingAudioProf \? \([\s\S]*?<AudioProfessionalismSkeleton \/>[\s\S]*?\) : \(\s*<div className="space-y-2">/);
+  // The cohort placeholder stands in the charts' own slot, first computation only.
+  assert.match(workspace, /isLoadingClipSummaries && !clipSummaries && !demoLongVideoSummaries \? \(\s*<LoadingRegion label="Building cohort summary charts">\s*<CohortSummarySkeleton \/>/);
+  assert.equal(/Building cohort summary charts\.\.\./.test(workspace), false, 'the spinner card is gone');
+  // One shape for both waits: the workspace placeholder draws the same card.
+  assert.match(SKELETONS, /export function WorkspaceSkeleton[\s\S]*?<AudioProfessionalismSkeleton \/>/);
 });
 
 test('the generic route spinner survives only as LazyBoundary\'s last resort', () => {

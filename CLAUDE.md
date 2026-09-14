@@ -877,11 +877,23 @@ rules it is built on, and what `test/skeletons.test.mjs` pins:
   chunk is the same skeleton in the loaded session's layout.
 - **First load only.** Gate on `data === null` (or `isLoading && !data`),
   never on `isLoading` alone: a refresh keeps what is on screen and dims it
-  (the Analytics pattern); the dashboard's coalesced background refreshes must
-  never flash bone. A state that starts empty needs a "has loaded" flag before
-  it may show an empty state — `CorporaManager.hasLoaded`, the rubric panel's
-  `isLoading` starting `true` — because "No corpora yet" before the first
-  response is a false answer, not a wait.
+  (the Analytics pattern; the Saved Sessions list dims to `opacity-60` and
+  stays clickable). The dashboard's coalesced background refreshes are silent
+  and never flash bone. A state that starts empty needs a "has loaded" flag
+  before it may show an empty state — `CorporaManager.hasLoaded`, the
+  dashboard's `hasLoadedSessionIndex`, `useNotifications().hasLoaded` (set in
+  the poll's `finally`, reset on logout; `NotificationBell` / `NotificationFeed`
+  default it to `true` for a caller that does not track it), the rubric
+  panel's `isLoading` starting `true` — because "No corpora yet" before the
+  first response is a false answer, not a wait.
+- **In-page fetches after the view is up.** `SessionWorkspace` keeps
+  `isLoadingAudioProf` for the audio-professionalism fetch its effect makes when
+  the artefact was not in the workspace payload (`AudioProfessionalismSkeleton`,
+  the same card `WorkspaceSkeleton` draws), and shows `CohortSummarySkeleton`
+  in `LongVideoSummaryCharts`' own slot while `/clip-summaries` is first
+  computed — a recomputation keeps the charts that are up. Both are local
+  state: the dashboard's `isLoadingWorkspace` means a whole view is on its way,
+  which neither of these is.
 - **Announced once, hidden in detail.** Every body skeleton sits inside a
   `LoadingRegion` (`role="status"`, `aria-busy`, an sr-only label); the bones
   themselves are `aria-hidden` and `motion-reduce:animate-none`.
