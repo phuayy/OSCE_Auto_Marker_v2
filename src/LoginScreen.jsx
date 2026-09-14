@@ -160,6 +160,7 @@ export default function LoginScreen({ onLoggedIn }) {
                     initial={{ opacity: 0, y: -4 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -4 }}
+                    role="alert"
                     className="rounded-xl border border-rose-400/40 bg-rose-500/15 p-3 text-sm text-rose-200"
                   >
                     {error}
@@ -169,8 +170,9 @@ export default function LoginScreen({ onLoggedIn }) {
 
               <Button
                 type="submit"
+                variant="plain"
                 disabled={isSubmitting || didJustLogin || !username.trim() || !password}
-                className="relative h-11 w-full overflow-hidden border-0 bg-gradient-to-r from-purple-600 via-fuchsia-500 to-cyan-500 text-base font-semibold text-white shadow-[0_10px_30px_-12px_rgba(168,85,247,0.7)] hover:from-purple-500 hover:to-cyan-400 focus:ring-cyan-400/40 disabled:opacity-60"
+                className="relative h-11 w-full overflow-hidden border-0 bg-gradient-to-r from-purple-600 via-fuchsia-500 to-cyan-500 text-base font-semibold text-white shadow-[0_10px_30px_-12px_rgba(168,85,247,0.7)] hover:from-purple-500 hover:to-cyan-400 focus-visible:ring-cyan-400/60 focus-visible:ring-offset-slate-950 disabled:opacity-60"
               >
                 <span className="relative z-10 flex items-center justify-center gap-2">
                   {didJustLogin ? (

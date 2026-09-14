@@ -429,7 +429,7 @@ function ExpandChartButton({ label, expanded, chartKey, onToggle }) {
       type="button"
       size="sm"
       variant="outline"
-      className={`h-9 shrink-0 gap-2 rounded-xl border-slate-200 bg-white px-3 ${isActive ? 'ring-2 ring-indigo-300' : ''}`}
+      className={`h-9 shrink-0 gap-2 rounded-xl border-slate-200 bg-white px-3 ${isActive ? 'ring-2 ring-cyan-300' : ''}`}
       aria-pressed={isActive}
       title={`View ${label} in fullscreen`}
       onClick={() => onToggle(chartKey)}
@@ -527,8 +527,8 @@ export default function LongVideoSummaryCharts({ data }) {
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <CardTitle className="flex items-center gap-2 text-base">
-                <BarChart3 className="h-5 w-5 text-indigo-600" />
-                Cohort Summary
+                <BarChart3 className="h-5 w-5 text-cyan-700" aria-hidden="true" />
+                Cohort summary
               </CardTitle>
               <CardDescription>
                 Charts appear once at least two students have been fully assessed. Currently showing {summaries.length}{' '}
