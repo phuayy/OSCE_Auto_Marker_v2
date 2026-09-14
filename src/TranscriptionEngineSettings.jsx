@@ -217,7 +217,7 @@ export default function TranscriptionEngineSettings({ onSettingsChanged }) {
                       <span className="text-sm font-semibold text-slate-800">{candidate.label}</span>
                       {isSelected ? <Check className="h-4 w-4 text-violet-700" /> : null}
                     </div>
-                    <span className="text-[11px] uppercase tracking-wide text-slate-400">
+                    <span className="text-[11px] uppercase tracking-wide text-slate-500">
                       {candidate.vendor}
                     </span>
                     <span className="text-[11px] text-slate-600">{candidate.description}</span>
