@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import (
@@ -11,6 +11,7 @@ from app.database.models import (
     AssessmentResultRecord,
     AssessmentSessionRecord,
     ExaminerRecord,
+    SessionRecord,
     StudentRecord,
     utc_now,
 )
@@ -240,15 +241,36 @@ class AssessmentRepository:
         return True
 
     async def list_result_rows(self) -> list[dict[str, Any]]:
-        """Flat per-result rows joined with session + student, for analytics."""
+        """Flat per-result rows joined with session + student, for analytics.
+
+        Every row also names the *recording* it belongs to — ``rootSessionId``,
+        ``rootSessionName``, ``rootSessionCreatedAt``. Two different things are
+        called a session around an assessment: the *scored* session
+        (``sessionId`` — a clip child for a long recording, the upload itself
+        otherwise; one per student) and the recording that scored session was
+        cut from. The recording of a long workflow is never scored itself, so
+        it has no ``assessment_sessions`` row and its name lives only in
+        ``sessions``; without this join the analytics page could only group by
+        the child ids, and its session filter listed "Constipation run 1" once
+        per clip instead of once.
+
+        The root is resolved with a LEFT OUTER JOIN: a child whose parent row
+        has since been deleted still comes back, with the root name unresolved
+        rather than the row missing. For a standard session the root *is* the
+        session, and its live ``sessions.name`` is preferred over the
+        ``session_name`` snapshot taken at scoring time, so a rename after
+        completion shows in the filter without a re-run.
+        """
+        root_id = func.coalesce(AssessmentSessionRecord.parent_session_id, AssessmentSessionRecord.id)
         async with self.database.session() as db_session:
             rows = await db_session.execute(
-                select(AssessmentResultRecord, AssessmentSessionRecord, StudentRecord)
+                select(AssessmentResultRecord, AssessmentSessionRecord, StudentRecord, SessionRecord)
                 .join(
                     AssessmentSessionRecord,
                     AssessmentResultRecord.assessment_session_id == AssessmentSessionRecord.id,
                 )
                 .join(StudentRecord, AssessmentSessionRecord.student_id == StudentRecord.id)
+                .outerjoin(SessionRecord, SessionRecord.id == root_id)
                 .order_by(AssessmentSessionRecord.created_at)
             )
             return [
@@ -265,9 +287,37 @@ class AssessmentRepository:
                     "workflow": assessment.workflow,
                     "parentSessionId": assessment.parent_session_id,
                     "createdAt": assessment.created_at.isoformat() if assessment.created_at else None,
+                    **self._root_session_fields(assessment, root),
                 }
-                for result, assessment, student in rows.all()
+                for result, assessment, student, root in rows.all()
             ]
+
+    @staticmethod
+    def _root_session_fields(
+        assessment: AssessmentSessionRecord,
+        root: SessionRecord | None,
+    ) -> dict[str, Any]:
+        """The recording an assessment row belongs to, for grouping.
+
+        ``root`` is the live ``sessions`` row for the parent (a clip child) or
+        for the assessment's own id (a standard session); ``None`` when that
+        row is gone. A standard session with no live row still has a name —
+        the snapshot ``session_name`` — but a child with no parent row does
+        not, and reporting the child's own name there would let one clip pose
+        as a whole recording.
+        """
+        is_child = bool(assessment.parent_session_id)
+        if root is not None:
+            name = root.name
+            created_at = root.created_at
+        else:
+            name = None if is_child else assessment.session_name
+            created_at = None if is_child else assessment.created_at
+        return {
+            "rootSessionId": assessment.parent_session_id or assessment.id,
+            "rootSessionName": name,
+            "rootSessionCreatedAt": created_at.isoformat() if created_at else None,
+        }
 
     @staticmethod
     def _float_or_none(value: Any) -> float | None:

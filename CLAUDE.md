@@ -871,6 +871,30 @@ Credentials are attached in exactly one place: `installFetchAuthShim` patches
 anything else inherit it. (`authFetch` was a second, caller-less implementation
 of the same thing; it is gone.)
 
+**Analytics filters are over recordings, students, and the cascade between
+them.** `GET /api/analytics/assessments` returns one flat row per scored
+result, and two different things are called a "session" on it: the *scored*
+session (`sessionId` — a clip child of a long recording, the upload itself
+otherwise; one per `studentId`) and the *recording* it belongs to
+(`rootSessionId` / `rootSessionName` / `rootSessionCreatedAt` — the parent of a
+clip child, the session itself otherwise). The recording of a long workflow is
+never scored, so it has no `assessment_sessions` row and its name exists only
+in `sessions`; `AssessmentRepository.list_result_rows` resolves it with a LEFT
+OUTER JOIN on `coalesce(parent_session_id, id)`, which is why the page can list
+"Constipation run 1" once rather than once per clip. The filter model is
+[lib/analyticsFilters.js](src/lib/analyticsFilters.js), pure and pinned by
+`test/analyticsFilters.test.mjs`: `buildFilterCatalog` derives the session
+control (one recording per line, the students under each) and the student
+control once per load; `studentOptions` narrows the students to the chosen
+recordings; and `reconcileFilter` is the one rule — a session id the catalog no
+longer has, or a student the narrowed selection does not offer, is dropped.
+That rule runs on every write (`patchFilter` / `toggleSession`, so choosing a
+recording clears a student it does not contain in the same change) *and* during
+render against the freshly loaded catalog (a refresh can delete what a stored
+filter names), never in an effect — so no frame is drawn from a selection the
+controls could not show. The results table's Session column names the
+recording; its Student column the scored subject.
+
 ---
 
 ## Key Environment Variables

@@ -8,6 +8,7 @@ from app.database.models import AssessmentCriterionRecord, AssessmentResultRecor
 from app.database.orm import OrmDatabase
 from app.repositories.assessment_repository import AssessmentRepository
 from app.repositories.rubric_asset_repository import RubricAssetRepository
+from app.repositories.session_repository import SessionRepository
 from app.services.assessment_service import AssessmentService
 from app.services.rubric_asset_service import RubricAssetService
 
@@ -168,6 +169,88 @@ def test_assessment_service_persists_session_results(tmp_path) -> None:
         assert content_row["passFail"] == "Pass"
         assert content_row["createdAt"]
         assert by_row_type["communication"]["scoreTotal"] == 9
+        await database.shutdown()
+
+    asyncio.run(_run())
+
+
+def _scored_session(session_id: str, name: str, **fields) -> dict:
+    """A completed session with one content sheet — enough for one analytics row."""
+    return {
+        "id": session_id,
+        "name": name,
+        "status": "completed",
+        "files": {"video": {"fileName": f"{session_id}.mp4"}, "caseStudy": {"fileName": "rubric.pdf"}},
+        "outputs": {
+            "scores": {
+                "absolutePath": f"/nowhere/{session_id}.json",
+                "payload": {
+                    "scoring_summary": {"total_criteria": 2, "yes_count": 1, "no_count": 1, "pass_fail": "Fail"},
+                    "criteria": [],
+                },
+            },
+        },
+        **fields,
+    }
+
+
+def test_analytics_rows_name_the_recording_they_belong_to(tmp_path) -> None:
+    """Every analytics row carries its *root* session — the recording.
+
+    A long recording is split into clips and each clip is scored as its own
+    child session, so the assessment tables hold one row per clip and none
+    for the recording itself. The analytics page groups its session filter by
+    the recording, so the rows must say which one that is, by its live name
+    from ``sessions`` — the only table that has it.
+    """
+
+    async def _run() -> None:
+        database = OrmDatabase(tmp_path / "app.sqlite3")
+        sessions = SessionRepository(database)
+        service = AssessmentService(AssessmentRepository(database))
+
+        # The recording: cropped, never scored, so it has no assessment row.
+        await sessions.write(
+            {"id": "recording-1", "name": "Constipation run 1", "status": "cropped", "workflow": "long", "outputs": {}}
+        )
+        # Two clip children of it, each scored as its own student.
+        for clip in ("Clip 1", "Clip 2"):
+            child = _scored_session(
+                f"child-{clip[-1]}",
+                f"Constipation run 1 - {clip}",
+                parentSessionId="recording-1",
+                clipSource={"clipId": f"clip-{clip[-1]}", "label": clip, "workflow": "long"},
+            )
+            await sessions.write(child)
+            await service.record_session_results(child)
+        # A standard (short) session: it is its own recording, and its live
+        # name has changed since it was scored.
+        standard = _scored_session("standard-1", "Asthma run 3", workflow="standard")
+        await sessions.write(standard)
+        await service.record_session_results(standard)
+        await sessions.write({**await sessions.read("standard-1"), "name": "Asthma run 3 (renamed)"})
+        # A child whose parent row is gone: still reported, root unresolved.
+        orphan = _scored_session("orphan-1", "Gone run - Clip 1", parentSessionId="recording-gone")
+        await service.record_session_results(orphan)
+
+        rows = {row["sessionId"]: row for row in await service.list_result_rows()}
+
+        for child_id in ("child-1", "child-2"):
+            assert rows[child_id]["rootSessionId"] == "recording-1"
+            assert rows[child_id]["rootSessionName"] == "Constipation run 1"
+            assert rows[child_id]["rootSessionCreatedAt"]
+            # The scored session and its student are still the clip child.
+            assert rows[child_id]["sessionId"] == child_id
+            assert rows[child_id]["studentName"] == rows[child_id]["sessionName"]
+        assert rows["child-1"]["studentId"] != rows["child-2"]["studentId"]
+
+        assert rows["standard-1"]["rootSessionId"] == "standard-1"
+        assert rows["standard-1"]["rootSessionName"] == "Asthma run 3 (renamed)"
+        assert rows["standard-1"]["sessionName"] == "Asthma run 3"
+
+        assert rows["orphan-1"]["rootSessionId"] == "recording-gone"
+        assert rows["orphan-1"]["rootSessionName"] is None
+        assert rows["orphan-1"]["rootSessionCreatedAt"] is None
         await database.shutdown()
 
     asyncio.run(_run())

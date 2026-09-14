@@ -18,6 +18,18 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { apiJson } from '@/lib/apiFetch';
+import {
+  DATE_PRESETS,
+  applyFilter,
+  buildFilterCatalog,
+  describeSessionSelection,
+  emptyFilter,
+  patchFilter,
+  reconcileFilter,
+  rootSessionOf,
+  studentOptions,
+  toggleSession,
+} from '@/lib/analyticsFilters';
 
 // Series colors — validated with the dataviz palette checker (CVD ΔE and
 // contrast on white). A/B compare the two filter sets in the histograms;
@@ -27,49 +39,13 @@ const SERIES_B = '#eb6834'; // orange — comparison filter set
 const SERIES_CONTENT = '#4a3aa7'; // violet
 const SERIES_COMMUNICATION = '#1baf7a'; // aqua (sub-3:1 on white — relieved by value labels + table view)
 
-const DATE_PRESETS = [
-  { value: 'all', label: 'All time' },
-  { value: '7d', label: 'Last 7 days' },
-  { value: '30d', label: 'Last 30 days' },
-  { value: '90d', label: 'Last 90 days' },
-  { value: 'custom', label: 'Custom range' },
-];
-
 const BUCKET_COUNT = 10;
-
-function emptyFilter() {
-  return { preset: 'all', dateFrom: '', dateTo: '', sessionIds: [], studentId: '' };
-}
-
-function presetRange(preset) {
-  if (preset === 'all' || preset === 'custom') return null;
-  const days = { '7d': 7, '30d': 30, '90d': 90 }[preset];
-  const from = new Date();
-  from.setDate(from.getDate() - days);
-  return from;
-}
 
 function scorePercent(row) {
   const total = Number(row.scoreTotal);
   const max = Number(row.scoreMax);
   if (!Number.isFinite(total) || !Number.isFinite(max) || max <= 0) return null;
   return Math.min(100, Math.max(0, (total / max) * 100));
-}
-
-function applyFilter(rows, filter) {
-  const presetFrom = presetRange(filter.preset);
-  const from = filter.preset === 'custom' && filter.dateFrom ? new Date(filter.dateFrom) : presetFrom;
-  // End of the "to" day, so a same-day range includes that day's sessions.
-  const to = filter.preset === 'custom' && filter.dateTo ? new Date(`${filter.dateTo}T23:59:59.999`) : null;
-  const sessionIds = filter.sessionIds.length ? new Set(filter.sessionIds) : null;
-  return rows.filter((row) => {
-    const created = row.createdAt ? new Date(row.createdAt) : null;
-    if (from && (!created || created < from)) return false;
-    if (to && (!created || created > to)) return false;
-    if (sessionIds && !sessionIds.has(row.sessionId)) return false;
-    if (filter.studentId && row.studentId !== filter.studentId) return false;
-    return true;
-  });
 }
 
 function mean(values) {
@@ -159,9 +135,12 @@ function ChartTooltip({ tooltip }) {
 
 /* ---------- filter controls ---------- */
 
-function SessionMultiSelect({ sessions, selectedIds, onChange }) {
+/** One recording per line — a long session once, not once per clip. */
+function SessionMultiSelect({ catalog, filter, onChange }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
+  const { sessions } = catalog;
+  const selectedIds = filter.sessionIds;
 
   useEffect(() => {
     if (!open) return undefined;
@@ -172,11 +151,7 @@ function SessionMultiSelect({ sessions, selectedIds, onChange }) {
     return () => document.removeEventListener('mousedown', onDocDown);
   }, [open]);
 
-  function toggle(id) {
-    onChange(selectedIds.includes(id) ? selectedIds.filter((v) => v !== id) : [...selectedIds, id]);
-  }
-
-  const summary = selectedIds.length === 0 ? 'All sessions' : `${selectedIds.length} selected`;
+  const summary = describeSessionSelection(filter, catalog);
 
   return (
     <div ref={rootRef} className="relative">
@@ -186,6 +161,7 @@ function SessionMultiSelect({ sessions, selectedIds, onChange }) {
         className="flex h-9 w-44 items-center justify-between rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700 hover:bg-slate-50"
         aria-haspopup="listbox"
         aria-expanded={open}
+        title={summary}
       >
         <span className="truncate">{summary}</span>
         <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
@@ -195,7 +171,7 @@ function SessionMultiSelect({ sessions, selectedIds, onChange }) {
           <button
             type="button"
             className="w-full rounded-md px-2 py-1.5 text-left text-xs font-medium text-blue-700 hover:bg-slate-50"
-            onClick={() => onChange([])}
+            onClick={() => onChange(patchFilter(filter, { sessionIds: [] }, catalog))}
           >
             Clear selection (all sessions)
           </button>
@@ -205,10 +181,12 @@ function SessionMultiSelect({ sessions, selectedIds, onChange }) {
                 type="checkbox"
                 className="h-3.5 w-3.5 accent-blue-600"
                 checked={selectedIds.includes(session.id)}
-                onChange={() => toggle(session.id)}
+                onChange={() => onChange(toggleSession(filter, session.id, catalog))}
               />
-              <span className="truncate text-slate-700">{session.name || session.id}</span>
-              <span className="ml-auto shrink-0 text-[10px] text-slate-400">{formatDate(session.createdAt)}</span>
+              <span className="truncate text-slate-700">{session.name}</span>
+              <span className="ml-auto shrink-0 text-[10px] text-slate-400">
+                {session.studentIds.length} student{session.studentIds.length === 1 ? '' : 's'} · {formatDate(session.createdAt)}
+              </span>
             </label>
           ))}
           {sessions.length === 0 ? <div className="px-2 py-2 text-xs text-slate-400">No sessions yet.</div> : null}
@@ -218,10 +196,14 @@ function SessionMultiSelect({ sessions, selectedIds, onChange }) {
   );
 }
 
-function FilterRow({ label, color, filter, onChange, sessions, students, onRemove }) {
+function FilterRow({ label, color, filter, onChange, catalog, onRemove }) {
+  // Every write goes through the cascade: a session choice that no longer
+  // offers the selected student clears it in the same change.
   function patch(partial) {
-    onChange({ ...filter, ...partial });
+    onChange(patchFilter(filter, partial, catalog));
   }
+  const students = useMemo(() => studentOptions(catalog, filter.sessionIds), [catalog, filter.sessionIds]);
+  const scoped = filter.sessionIds.length > 0;
   return (
     <div className="flex flex-wrap items-center gap-2">
       <span className="inline-flex w-24 items-center gap-1.5 text-xs font-semibold text-slate-600">
@@ -257,14 +239,15 @@ function FilterRow({ label, color, filter, onChange, sessions, students, onRemov
           />
         </>
       ) : null}
-      <SessionMultiSelect sessions={sessions} selectedIds={filter.sessionIds} onChange={(ids) => patch({ sessionIds: ids })} />
+      <SessionMultiSelect catalog={catalog} filter={filter} onChange={onChange} />
       <select
         className="h-9 max-w-52 rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700"
         value={filter.studentId}
         onChange={(e) => patch({ studentId: e.target.value })}
         aria-label={`${label} student`}
+        title={scoped ? 'Students scored in the selected session(s)' : 'Students across every session'}
       >
-        <option value="">All students</option>
+        <option value="">{scoped ? `All students in selection (${students.length})` : 'All students'}</option>
         {students.map((student) => (
           <option key={student.id} value={student.id}>{student.name}</option>
         ))}
@@ -501,8 +484,8 @@ function ResultsTable({ rows }) {
             const isPass = /^pass$/i.test(String(row.passFail || ''));
             return (
               <tr key={`${row.sessionId}-${row.resultType}`} className="bg-white">
-                <td className="max-w-56 truncate px-3 py-2 text-slate-700" title={row.sessionName || row.sessionId}>
-                  {row.sessionName || row.sessionId}
+                <td className="max-w-56 truncate px-3 py-2 text-slate-700" title={rootSessionOf(row).name}>
+                  {rootSessionOf(row).name}
                 </td>
                 <td className="max-w-44 truncate px-3 py-2 text-slate-700">{row.studentName || '—'}</td>
                 <td className="px-3 py-2 capitalize text-slate-600">{String(row.resultType).replace(/_/g, ' ')}</td>
@@ -540,8 +523,8 @@ export default function AnalyticsPage({ onBack }) {
   const [rows, setRows] = useState(null); // null = never loaded
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
-  const [filterA, setFilterA] = useState(emptyFilter);
-  const [filterB, setFilterB] = useState(emptyFilter);
+  const [storedFilterA, setFilterA] = useState(emptyFilter);
+  const [storedFilterB, setFilterB] = useState(emptyFilter);
   const [compare, setCompare] = useState(false);
   const [showTable, setShowTable] = useState(false);
 
@@ -569,22 +552,12 @@ export default function AnalyticsPage({ onBack }) {
     () => (rows || []).filter((row) => row.resultType === 'content' || row.resultType === 'communication'),
     [rows],
   );
-  const sessions = useMemo(() => {
-    const byId = new Map();
-    scoredRows.forEach((row) => {
-      if (!byId.has(row.sessionId)) {
-        byId.set(row.sessionId, { id: row.sessionId, name: row.sessionName, createdAt: row.createdAt });
-      }
-    });
-    return [...byId.values()].sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
-  }, [scoredRows]);
-  const students = useMemo(() => {
-    const byId = new Map();
-    scoredRows.forEach((row) => {
-      if (!byId.has(row.studentId)) byId.set(row.studentId, { id: row.studentId, name: row.studentName || row.studentId });
-    });
-    return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
-  }, [scoredRows]);
+  const catalog = useMemo(() => buildFilterCatalog(scoredRows), [scoredRows]);
+  // A refresh can remove a recording or a student the stored filter still
+  // names; reconciling during render (not in an effect) means no frame is
+  // drawn from a selection the controls could not show.
+  const filterA = useMemo(() => reconcileFilter(storedFilterA, catalog), [storedFilterA, catalog]);
+  const filterB = useMemo(() => reconcileFilter(storedFilterB, catalog), [storedFilterB, catalog]);
 
   const rowsA = useMemo(() => applyFilter(scoredRows, filterA), [scoredRows, filterA]);
   const rowsB = useMemo(() => (compare ? applyFilter(scoredRows, filterB) : []), [scoredRows, filterB, compare]);
@@ -687,8 +660,7 @@ export default function AnalyticsPage({ onBack }) {
                   color={SERIES_A}
                   filter={filterA}
                   onChange={setFilterA}
-                  sessions={sessions}
-                  students={students}
+                  catalog={catalog}
                 />
                 {compare ? (
                   <FilterRow
@@ -696,8 +668,7 @@ export default function AnalyticsPage({ onBack }) {
                     color={SERIES_B}
                     filter={filterB}
                     onChange={setFilterB}
-                    sessions={sessions}
-                    students={students}
+                    catalog={catalog}
                     onRemove={() => setCompare(false)}
                   />
                 ) : (
