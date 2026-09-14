@@ -10,7 +10,7 @@ import { apiJson } from '@/lib/apiFetch';
 // upload pre-flight "Manage corpora" modal. Self-contained: owns its own
 // fetching; parents that track the corpus picker pass onChanged/onCreated to
 // stay in sync.
-export default function CorporaManager({ onClose = null, onCreated = null, onChanged = null }) {
+export default function CorporaManager({ onClose = null, onCreated = null, onChanged = null, titleId }) {
   const [corpora, setCorpora] = useState([]);
   // False until the first list response, success or failure. `corpora` starts
   // empty, so without this the card said "No corpora yet" for the whole first
@@ -100,8 +100,8 @@ export default function CorporaManager({ onClose = null, onCreated = null, onCha
   return (
     <Card className="border-slate-200 bg-white shadow-sm">
       <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-lg">
-          <Mic className="h-5 w-5 text-cyan-700" />
+        <CardTitle id={titleId} className="flex items-center gap-2 text-lg">
+          <Mic className="h-5 w-5 text-cyan-700" aria-hidden="true" />
           {editor ? (editor.id ? 'Edit corpus' : 'New corpus') : 'Transcription corpora'}
         </CardTitle>
         <CardDescription>
@@ -111,7 +111,7 @@ export default function CorporaManager({ onClose = null, onCreated = null, onCha
       </CardHeader>
       <CardContent className="space-y-3">
         {error && (
-          <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+          <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
             {error}
           </div>
         )}
@@ -144,7 +144,7 @@ export default function CorporaManager({ onClose = null, onCreated = null, onCha
                 placeholder={'nasal block\nrunny nose\nparacetamol'}
                 className="mt-1 w-full resize-y rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-800 outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
               />
-              <p className="mt-1 text-[11px] text-slate-400">
+              <p className="mt-1 text-xs text-slate-500">
                 Up to 200 terms; symptoms, medicines and phrases from this case study's rubric work best.
               </p>
             </div>
@@ -152,13 +152,8 @@ export default function CorporaManager({ onClose = null, onCreated = null, onCha
               <Button variant="outline" size="sm" onClick={() => setEditor(null)} disabled={saving}>
                 Back
               </Button>
-              <Button
-                size="sm"
-                className="gap-2 bg-gradient-to-r from-cyan-600 to-blue-700 text-white hover:from-cyan-700 hover:to-blue-800"
-                onClick={saveEditor}
-                disabled={saving}
-              >
-                {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+              <Button size="sm" className="gap-2" onClick={saveEditor} disabled={saving}>
+                {saving && <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />}
                 Save corpus
               </Button>
             </div>
@@ -190,12 +185,12 @@ export default function CorporaManager({ onClose = null, onCreated = null, onCha
                       Edit
                     </Button>
                     <Button
-                      variant="outline"
+                      variant="destructive"
                       size="sm"
-                      className="text-rose-600 hover:bg-rose-50"
+                      aria-label={`Delete corpus ${corpus.name}`}
                       onClick={() => removeCorpus(corpus)}
                     >
-                      <Trash2 className="h-4 w-4" />
+                      <Trash2 className="h-4 w-4" aria-hidden="true" />
                     </Button>
                   </div>
                 </div>
@@ -209,12 +204,8 @@ export default function CorporaManager({ onClose = null, onCreated = null, onCha
               ) : (
                 <span />
               )}
-              <Button
-                size="sm"
-                className="gap-2 bg-gradient-to-r from-cyan-600 to-blue-700 text-white hover:from-cyan-700 hover:to-blue-800"
-                onClick={() => openEditor()}
-              >
-                <Sparkles className="h-4 w-4" />
+              <Button size="sm" className="gap-2" onClick={() => openEditor()}>
+                <Sparkles className="h-4 w-4" aria-hidden="true" />
                 New corpus
               </Button>
             </div>
