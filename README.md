@@ -9,13 +9,16 @@
 Examiners record OSCE stations (one student, or a long multi-student video). The system:
 
 1. **Ingests** the video plus the station's case-study PDF (which embeds the marking rubric as an "Analytical Checklist" section).
-2. **Splits** long multi-student recordings into one clip per student — by **bell detection** (audio) or **human detection** (RT-DETR computer vision: session ends when fewer than 2 people stay on screen).
-3. **Transcribes** each clip with WhisperX (word-level timestamps + speaker diarisation on local GPU/CPU).
-4. **Scores** the transcript with three AI branches:
-   - **Content** — NVIDIA Nemotron LLM marks the transcript against the case-study checklist (yes/no per criterion, critical criteria, pass/fail).
-   - **Communication** — LLM scores communication skills against the PHR1012 communication rubric (None/Some/Most/All per criterion).
-   - **Audio professionalism** — librosa/openSMILE metrics (pace, pauses, clarity) computed locally.
-5. **Persists** everything (sessions, assessments, per-criterion evidence) to SQLite/PostgreSQL and streams live progress to the browser via SSE.
+2. **Splits** long multi-student recordings into one clip per student — by **bell detection** (audio) or **human detection** (RT-DETR computer vision, tuned per camera angle by an **occupancy preset**).
+3. **Transcribes** each clip with a pluggable engine — **WhisperX** (default, word-level timestamps + speaker diarisation) or **NVIDIA Canary-Qwen 2.5B** (optional, higher accuracy, no word timestamps) — chosen in Settings.
+4. **Corrects** the transcript against an operator-maintained clinical term corpus (orthographic + phonetic matching) and screens it for ASR hallucinations.
+5. **Scores** the transcript with three AI branches:
+   - **Content** — an LLM marks the transcript against the case-study checklist (yes/no per criterion, critical criteria, pass/fail). Marked by **one model** or by a **panel** of models with adjudicated disputes (operator's choice).
+   - **Communication** — an LLM scores communication skills against the PHR1012 communication rubric (None/Some/Most/All per criterion).
+   - **Audio professionalism** — librosa metrics (pace, pauses, clarity) computed locally, feeding into the communication score.
+6. **Persists** everything (sessions, assessments, per-criterion evidence) to SQLite/PostgreSQL and streams live progress to the browser.
+
+The scoring LLM is a **runtime choice, not a build-time one**: six vendors ship out of the box (NVIDIA, OpenAI, Anthropic, DeepSeek, Gemini, OpenRouter), each with automatic fallback, and an operator can add any OpenAI-compatible or Anthropic-shaped endpoint (Azure, a departmental gateway, a self-hosted vLLM box) from the Settings screen with no code change or restart.
 
 The end product: an examiner uploads a video, walks away, and comes back to a per-student score sheet with timestamped evidence for every rubric criterion — clickable back into the video.
 
@@ -25,18 +28,19 @@ The end product: an examiner uploads a video, walks away, and comes back to a pe
 
 | Layer | Technology |
 | --- | --- |
-| Frontend | React 18 + Vite, Tailwind CSS, shadcn/ui patterns, plain JS (hash routing, no react-router) |
+| Frontend | React 18 + Vite, Tailwind CSS, shadcn/ui patterns, plain JS (hash routing, no react-router). Code-split into a dashboard entry chunk and a lazily-loaded session workspace, settings pages, and analytics page |
 | Backend | FastAPI (Python 3.12), uvicorn, SQLAlchemy async |
-| Databases | SQLAlchemy async ORM throughout — sessions, assessments, rubrics, videos and the job queue on one engine, with Alembic as the single schema source. SQLite by default, PostgreSQL optional |
-| Transcription | WhisperX CLI (large-v3, CUDA float16 or CPU int8) — subprocess |
-| Vision segmentation | RT-DETRv2-R18 (`PekingU/rtdetr_v2_r18vd`) via HuggingFace `transformers` — subprocess, ~1.5 GB VRAM fp16 |
+| Databases | SQLAlchemy async ORM throughout — sessions, assessments, rubrics, videos, provider credentials and the job queue on one engine, with Alembic as the single schema source. SQLite by default, PostgreSQL optional |
+| Transcription | Pluggable engines behind a router: **WhisperX** CLI (default, diarises; large-v3, CUDA float16 or CPU int8) or **NVIDIA Canary-Qwen 2.5B** (optional, NeMo, text-only + a separate pyannote diarisation pass) — subprocess either way |
+| Vision segmentation | RT-DETRv2-R18 (`PekingU/rtdetr_v2_r18vd`) via HuggingFace `transformers` — subprocess, ~1.5 GB VRAM fp16, tuned by occupancy preset (pair / pair_strict / solo / custom) |
 | Audio segmentation | librosa bell + silence detection — subprocess |
-| LLM scoring | NVIDIA Nemotron via `https://integrate.api.nvidia.com/v1` (OpenAI-compatible client) — subprocess |
+| LLM scoring | Pluggable providers behind a router — **NVIDIA, OpenAI, Anthropic, DeepSeek, Gemini, OpenRouter** shipped, plus operator-defined custom providers (any OpenAI-compatible or Anthropic-shaped endpoint) — all OpenAI-compatible traffic shares one adapter; API keys are AES-256-GCM encrypted at rest and settable live from Settings |
 | Job queue | `local` asyncio (default) or **Hatchet** (distributed, gRPC, separate worker process) |
+| Object storage | `local` (parts relayed through the API) or `gcs` (browser uploads direct to a GCS bucket via resumable sessions) |
 | Auth | HS256-signed bearer tokens + short-lived stream tickets for SSE/`<video>` URLs |
 | Media | ffmpeg / ffprobe |
 
-**Design rule:** every heavy job (WhisperX, RT-DETR, bell detector, all three scorers) runs as an **isolated subprocess** spawned from `scripts/`. Subprocess exit releases all memory/VRAM, so the GPU is never shared between the vision model and WhisperX — segmentation always finishes before transcription starts.
+**Design rule:** every heavy job (WhisperX/Canary, RT-DETR, bell detector, all scorers) runs as an **isolated subprocess** spawned from `scripts/`. Subprocess exit releases all memory/VRAM, so the GPU is never shared between the vision model and the transcription engine — segmentation always finishes before transcription starts, and a `ResourceLease` semaphore serialises the two GPU-bound steps per process.
 
 ---
 
@@ -48,12 +52,12 @@ Browser (React)                      FastAPI API                       Worker (l
 Login ─────────────────────────────► /api/auth/login ──► bearer token
 Pick video + case study PDF
 Choose workflow: standard | long
-  (long: choose Bell 🔔 or Human 🧍 split)
+  (long: choose an occupancy preset — pair | pair_strict | solo | custom)
 Confirm ───────────────────────────► /api/uploads/initiate
                                        • creates session (status waiting_for_upload)
                                        • creates job (waiting_for_upload)
-                                       • returns per-file chunk plans
-Upload chunks ─────────────────────► PUT /api/uploads/{id}/parts/{n}
+                                       • returns per-file chunk plans / GCS resumable URI
+Upload chunks ─────────────────────► PUT /api/uploads/{id}/parts/{n}  (or direct to GCS)
 Complete ──────────────────────────► /api/uploads/{id}/complete (202)
                                        • background: assemble parts, SHA-256,
                                          ffprobe validation, register rubric asset
@@ -64,65 +68,96 @@ Long workflow: job = auto_crop                                            ▼
                                                           bells: detect_bell_segments.py
                                                           person: detect_human_segments.py (RT-DETR)
                                                             └ falls back to bells on failure
-                                                          session → cropped, clip drafts saved
-UI shows clip list, adjust/export clips
-Per-clip "Run assessment" ─────────► /sessions/{id}/clips/{cid}/assess?defer=1
-                                       • creates CHILD session + process_session job
+                                                          session → cropped, DRAFT clip ranges saved
+UI shows clip timeline; drag boundaries, "Export clips" ► /clips/manual (202) ► export_clips job
+                                                          cuts one MP4 per clip, checkpointed
+Per-clip "Run assessment" ─────────► /sessions/{id}/clips/{cid}/assess
+                                       • find-or-create CHILD session + process_session job
                                                                           │
 Standard workflow: job = process_session                                  ▼
                                                           1. audio_extraction   (ffmpeg → mp3)
-                                                          2. whisperx           (transcribe + diarise)
+                                                          2. transcription      (WhisperX or Canary-Qwen)
                                                           3. transcript_normalization
-                                                          4. ┌ audio_professionalism ┐ parallel with
-                                                          5. └ communication_scoring ┘ 6. content_scoring
+                                                             (hallucination screen + corpus term correction)
+                                                          ┌─ 4. audio_professionalism ─┐  parallel with
+                                                          │  5. communication_scoring  │  6. content_scoring
+                                                          └────────────────────────────┘  (single model, or
+                                                                                            panel + adjudicator)
                                                           7. assessment_persistence (ORM)
                                                           session → completed
-Progress overlay ◄───────────────── SSE /api/sessions/{id}/events
-                 ◄───────────────── + 4s poll of session.pipeline.steps (Hatchet-safe)
-Results workspace: transcript sync'd to video, score sheets, downloads
+Live state ◄──────────────────────── change-feed push + 12s in-flight heartbeat (coalesced, single-flight)
+Results workspace: transcript sync'd to video, score sheets, panel agreement, downloads
 ```
 
-Every pipeline step is persisted to `session.pipeline.steps` in the DB, so progress survives page reloads and works when the pipeline runs in a separate Hatchet worker process (whose in-memory SSE events can't reach the API).
+Every pipeline step is persisted to `session.pipeline.steps` in the DB, so progress survives page reloads and works when the pipeline runs in a separate Hatchet worker process. The per-session SSE stream (`/api/sessions/{id}/events`) exists but is **off by default** — the browser drives live state from the database change feed instead, which also works across worker processes.
 
 ---
 
 ## 4. Repository Layout
 
 ```text
-OSCE-AI-FYP/
-├── src/                          # React frontend
-│   ├── OSCEAiMarkerMockup.jsx    # Main app component (dashboard/workspace)
-│   ├── AppShell.jsx              # Root shell + hash-routing (#/, #/session/<id>, #/rubric)
-│   ├── auth.js                   # Bearer token + stream-ticket helpers
-│   └── lib/navigation.js         # Route parse/build helpers
+OSCE_Auto_Marker_v2/
+├── src/                              # React frontend (Vite), entry chunk
+│   ├── OSCEAiMarkerMockup.jsx        # Dashboard: upload form, session index, session state
+│   ├── AppShell.jsx                  # Root shell, hash-routing (#/, #/session/<id>, #/rubric, #/settings, #/analytics)
+│   ├── AnalyticsPage.jsx             # Cross-session results table + filters (lazy)
+│   ├── SettingsPage.jsx              # Settings shell: transcription, marking mode, provider keys, custom providers
+│   ├── MarkingModeSettings.jsx       # Single-model vs panel marking config
+│   ├── CustomProvidersSettings.jsx / ProviderKeysSettings.jsx / LlmRoutingSettings.jsx / TranscriptionEngineSettings.jsx
+│   ├── CorporaManager.jsx            # Clinical term corpus CRUD (transcript correction)
+│   ├── WebhooksManager.jsx           # Outbound event webhook subscriptions
+│   ├── notifications.jsx             # Notification center (header)
+│   ├── workspace/                    # Opened-session view, its own lazy chunk
+│   │   ├── SessionWorkspace.jsx          # Chunk root: results model, player/download handlers
+│   │   ├── ManualTimelineEditor.jsx      # Manual crop timeline (separators, labels, Export clips)
+│   │   ├── CommunicationScoresTab.jsx    # Communication rubric tab
+│   │   ├── StudentClipSplitterCard.jsx   # Auto-split clip list + per-clip trim
+│   │   └── primitives.jsx                # Shared display primitives
+│   ├── components/TargetPicker.jsx   # One provider+model choice; shared across settings cards
+│   └── lib/                          # Pure logic modules (llmProviders, resultsModel, analyticsFilters,
+│                                      #  clipAssessments, coalesce, processingStage, navigation, lazyRoute, ...)
 ├── fastapi_backend/
-│   ├── app/
-│   │   ├── main.py               # FastAPI app, auth middleware, /media mounts
-│   │   ├── core/config.py        # ALL env vars → Settings (start here for knobs)
-│   │   ├── services/             # container.py (DI root), pipeline, clips, uploads, jobs, auth...
-│   │   ├── pipeline/media.py     # ffmpeg, WhisperX, bell + person segmentation wrappers
-│   │   ├── pipeline/scoring.py   # The three scorer subprocess wrappers
-│   │   ├── queue/                # Hatchet worker + task definitions
-│   │   ├── repositories/         # DB access (ORM; uploads are JSON files on disk)
-│   │   └── api/routes/           # sessions, uploads, async_uploads, auth, jobs, health, rubrics
-│   └── tests/                    # pytest suite (98 tests)
+│   ├── alembic/                      # Schema migrations (the only schema source; app runs `upgrade head` at startup)
+│   └── app/
+│       ├── main.py                   # FastAPI app, auth middleware, /media mounts
+│       ├── core/config.py            # ALL env vars → Settings (start here for knobs)
+│       ├── database/                 # OrmDatabase (one async engine), models.py, migration runner
+│       ├── domain/                   # Status vocabulary, session lifecycle rules, notification types
+│       ├── services/                 # container.py (DI root), pipeline, clips, uploads, jobs, auth,
+│       │                             #  llm_settings_service, provider_credential_service, custom_provider_service
+│       ├── llm/                      # Pluggable scoring providers: base contract, registry, catalog,
+│       │                             #  routing, retry/circuit-breaker, router, providers/ (one module per vendor)
+│       ├── pipeline/
+│       │   ├── media.py              # ffmpeg, transcription dispatch, bell/person detection, clip crop
+│       │   ├── scoring.py            # Scorer subprocess wrappers, marking-strategy dispatch
+│       │   ├── transcription/        # Engine contract + WhisperX / Canary-Qwen adapters + diarization
+│       │   ├── marking/              # single.py / panel.py marking strategies + reconciliation logic
+│       │   └── person_presets.py     # Occupancy preset table (pair / pair_strict / solo / custom)
+│       ├── storage/                  # ObjectStorage contract: local.py, gcs.py, factory.py
+│       ├── repositories/             # DB access adapters (uploads remain JSON files on disk)
+│       └── api/routes/               # sessions, async_uploads, auth, settings, jobs, rubrics, notifications,
+│                                      #  analytics, corpora, webhooks, health, media
+│   └── tests/                        # pytest suite
 ├── scripts/
-│   ├── run_api.py                # API entry point (uvicorn launcher, Windows loop policy)
-│   ├── run_hatchet_worker.py     # Hatchet worker entry point
-│   ├── detect_bell_segments.py   # Audio segmentation (bells + silence, librosa)
-│   ├── detect_human_segments.py  # Vision segmentation (RT-DETR person presence)
-│   ├── nvidia_osce_assessor.py   # Content scorer (Nemotron, checkpoint/repair)
-│   ├── nvidia_osce_communication.py          # Communication scorer
-│   ├── audio_professionalism_extractor.py    # Audio metrics
-│   └── parse_communication_rubric.py         # Rubric PDF → JSON
-├── storage/                      # Runtime data (gitignored): inputs, outputs, DB, auth secrets
-├── docker-compose.postgres.yml   # Optional: app PostgreSQL
-├── docker-compose.hatchet.yml    # Optional: app PG + Hatchet PG + hatchet-lite server
-├── pyproject.toml                # Python deps (uv): base, dev group, canary group
-├── uv.lock                       # Exact resolved versions — committed, reproducible
-├── .python-version               # Interpreter uv provisions for this project (3.12)
-├── package.json                  # npm scripts (dev, dev:api, dev:worker, db:*, test:api)
-└── .env.example                  # Copy to .env — every knob documented
+│   ├── run_api.py                    # API entry point (uvicorn launcher, Windows loop policy)
+│   ├── run_hatchet_worker.py         # Hatchet worker entry point
+│   ├── detect_bell_segments.py       # Audio segmentation (bells + silence, librosa)
+│   ├── detect_human_segments.py      # Vision segmentation (RT-DETR person presence)
+│   ├── nvidia_osce_assessor.py       # Content scorer (checkpoint/repair loop; one marker in panel mode)
+│   ├── osce_panel_adjudicator.py     # Panel mode: reconciles marker sheets, adjudicates disputes
+│   ├── content_marking.py            # Shared content prompt, rubric extraction, sheet validator
+│   ├── nvidia_osce_communication.py  # Communication scorer
+│   ├── audio_professionalism_extractor.py  # Audio metrics
+│   ├── case_study_rubric.py          # Rubric extraction, content-addressed cache
+│   ├── canary_qwen_transcribe.py     # Canary-Qwen transcription subprocess
+│   └── llm_bootstrap.py              # Puts fastapi_backend on sys.path; re-exports the LLM router
+├── docs/                             # Design docs (multi-model marking plan, pipeline audit)
+├── storage/                          # Runtime data (gitignored): inputs, outputs, DB, auth secrets
+├── docker-compose.postgres.yml       # Optional: app PostgreSQL
+├── docker-compose.hatchet.yml        # Optional: app PG + Hatchet PG + hatchet-lite server
+├── pyproject.toml / uv.lock          # Python deps (uv): base, dev group, canary group, debug group
+├── package.json                      # npm scripts (dev, dev:api, dev:worker, db:*, test:api, lint)
+└── .env.example                      # Copy to .env — every knob documented
 ```
 
 ---
@@ -133,11 +168,12 @@ OSCE-AI-FYP/
 | --- | --- |
 | **Windows 10/11** (primary target) | Linux/macOS work; PowerShell commands below |
 | **[uv](https://docs.astral.sh/uv/) 0.6+** | Manages the Python environment. `winget install --id=astral-sh.uv` |
-| **Python 3.11–3.13** | 3.12 is the tested runtime. Native `StrEnum` requires 3.11+. 3.14 excluded (WhisperX constraint). uv downloads it for you if it is missing |
-| **Node.js 22.13+ (LTS) or 24+** | Frontend, dev orchestration, and ESLint 10 |
+| **Python 3.11–3.13** | 3.12 is the tested runtime. Native `StrEnum` requires 3.11+. uv downloads it for you if it is missing |
+| **Node.js 22.13+ (LTS) or 24+** | Frontend, dev orchestration, and ESLint |
 | **ffmpeg + ffprobe** | On PATH, or auto-detected at `C:\ffmpeg\bin\` etc., or set `FFMPEG_BIN`/`FFPROBE_BIN` |
 | **NVIDIA GPU (optional)** | 4 GB+ VRAM (RTX 3050 tested). CPU works — slower transcription |
 | **Docker Desktop (optional)** | Only for PostgreSQL and/or the Hatchet queue |
+| **At least one scoring LLM API key** | NVIDIA, OpenAI, Anthropic, DeepSeek, Gemini, OpenRouter, or a custom endpoint — see section 7 |
 
 ---
 
@@ -150,31 +186,28 @@ once (`winget install --id=astral-sh.uv`, or `irm https://astral.sh/uv/install.p
 then:
 
 ```powershell
-cd "C:\Users\<you>\Downloads\OSCE Auto Marker\OSCE-AI-FYP"
+cd "C:\path\to\OSCE_Auto_Marker_v2"
 
 # Creates .venv with the interpreter named in .python-version (3.12) and
 # installs the exact versions locked in uv.lock. No manual venv, no activation.
 uv sync
 ```
 
-`uv sync` is also how you *update* an environment: run it again after pulling and
-it adds, removes and downgrades packages until `.venv` matches `uv.lock` exactly.
-Change a pin in `pyproject.toml`, then `uv lock` to re-resolve.
+`uv sync` is **exact, not additive** — it also *removes* whatever the command line
+doesn't name. Re-run it after pulling to keep `.venv` matching `uv.lock`; change a
+pin in `pyproject.toml`, then `uv lock` to re-resolve.
 
 Prefix commands with `uv run` to use that environment without activating it
 (`uv run python ...`, `uv run pytest`, `uv run alembic upgrade head`). If you
-prefer an activated shell, `.\.venv\Scripts\Activate.ps1` still works — uv builds
-an ordinary virtual environment in the usual place.
+prefer an activated shell, `.\.venv\Scripts\Activate.ps1` still works.
 
 ### 6.2 (GPU) CUDA PyTorch
 
 Nothing to do. PyPI serves CPU-only torch wheels, so `pyproject.toml` routes
 `torch`, `torchaudio` and `torchvision` to PyTorch's CUDA 12.8 index via
-`[tool.uv.sources]`. `uv sync` installs the GPU builds directly, and no later
-install can silently swap them back for CPU wheels:
+`[tool.uv.sources]`. `uv sync` installs the GPU builds directly:
 
 ```powershell
-# Verify
 uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 # expect: 2.8.0+cu128 True
 ```
@@ -183,69 +216,33 @@ On a CPU-only host, delete the `[tool.uv.sources]` and `[[tool.uv.index]]` table
 from `pyproject.toml` and re-run `uv lock`.
 
 > **4 GB VRAM note:** the defaults are `large-v3` at `WHISPERX_COMPUTE_TYPE=float16`
-> (~3 GB, the native weight precision) with `WHISPERX_BATCH_SIZE=1`. On a 4 GB card
-> that is tight and can OOM once pyannote diarisation shares the device — set
-> `WHISPERX_COMPUTE_TYPE=int8` (~1.5 GB, near-identical accuracy) in `.env` if it
-> does. If transcription is too slow, set `WHISPERX_MODEL=distil-large-v3`.
+> (~3 GB) with `WHISPERX_BATCH_SIZE=1`. On a 4 GB card that is tight and can OOM
+> once pyannote diarisation shares the device — set `WHISPERX_COMPUTE_TYPE=int8`
+> (~1.5 GB, near-identical accuracy) in `.env` if it does.
 
 ### 6.3 (Optional) Install the Canary-Qwen transcription engine
 
 WhisperX is the default engine and needs nothing extra. Install this only to make
-**NVIDIA Canary-Qwen 2.5B** selectable in *Settings -> Transcription*; until the
-NeMo toolkit is present the settings screen reports the engine as unavailable.
+**NVIDIA Canary-Qwen 2.5B** selectable in *Settings → Transcription*:
 
 ```powershell
 uv sync --group canary
-
-# Verify (prints "nemo-ready")
-uv run python scripts\canary_qwen_transcribe.py --check
+uv run python scripts\canary_qwen_transcribe.py --check   # prints "nemo-ready"
 ```
 
-The `canary` group is not installed by a plain `uv sync`, and a plain `uv sync`
-run afterwards **removes** it again — pass `--group canary` every time on a host
-that wants the engine. Its pins are resolved together with the base dependencies
-into the one `uv.lock`, so adding it never re-resolves the rest of the stack.
+A plain `uv sync` afterwards **removes** the `canary` group again — pass
+`--group canary` every time on a host that wants the engine
+(`npm run py:sync:canary`). If the engine isn't installed, `TranscriptionRouter`
+automatically falls back to WhisperX rather than failing the run.
 
-The ~5 GB checkpoint is **not** part of that install. The backend downloads it
-into the HuggingFace cache in the background at startup whenever Canary-Qwen is
-the selected engine, so the first assessment does not wait for it. Set
-`TRANSCRIPTION_PREFETCH_MODELS=false` on a metered or air-gapped host — the
-engine then fetches the weights the first time it runs. To pre-seed the cache
-by hand (an image build, or a machine that will be offline later):
+The ~5 GB checkpoint downloads into the HuggingFace cache in the background at
+startup when Canary-Qwen is selected (`TRANSCRIPTION_PREFETCH_MODELS=true`). To
+pre-seed it by hand: `uv run python scripts\canary_qwen_transcribe.py --download`.
 
-```powershell
-uv run python scripts\canary_qwen_transcribe.py --download
-```
-
-`nemo-toolkit` pins parts of the shared stack (lightning 2.4.x, omegaconf 2.3.0,
-packaging 24.2) and does not choose a torch build. If you installed the CUDA
-wheels in 6.2, re-verify afterwards that `torch.cuda.is_available()` is still
-`True`.
-
-> **Host RAM:** loading Canary-Qwen builds its 1.7B-parameter Qwen3 half in
-> fp32 on the CPU *before* moving it to the GPU, so the transcription
-> subprocess needs roughly **12 GB of free system RAM** at load time (verified
-> here: it loads with ~16 GB free and dies with ~8 GB free). Windows reports
-> that failure as an access violation and the process exits with code 139 —
-> there is no "out of memory" message — so treat a 139 from
-> `canary_qwen_transcribe.py` as "close something and retry". It stays fp32 on
-> the GPU too: **~10.5 GB of VRAM**, against ~3 GB for WhisperX large-v3 at
-> float16.
-
-**Measured cost per run** (RTX 3090, 259 s of OSCE audio, warm model cache).
-Both engines run as a fresh subprocess per session, so the load column is paid
-on *every* transcription, including each clip of a long workflow:
-
-| Phase | WhisperX large-v3 float16 | Canary-Qwen 2.5B |
-|---|---|---|
-| Import + model load | 13 s | 46 s (16 s import, 28 s build, 3 s to GPU) |
-| Transcription | 6 s | 46 s (10 x 30 s windows, ~5 s each) |
-| Alignment (word timestamps) | 4 s | not produced |
-| Diarisation | 8 s (in-process) | 17 s (separate `pyannote_diarize.py` subprocess) |
-| **Total** | **~32 s** | **~110 s** |
-
-Canary is roughly **3.5x slower end to end** and produces no word timestamps.
-It is the accuracy option, not the throughput one.
+> **Host RAM:** loading Canary-Qwen needs roughly 12 GB of free system RAM at
+> load time; a bfloat16-first load path plus an in-place checkpoint stream keeps
+> the peak commit near ~4.6 GB rather than ~9.7 GB. See [CLAUDE.md](CLAUDE.md)
+> for the load/dtype-alignment details if you're debugging this path.
 
 ### 6.4 Install ffmpeg (if not present)
 
@@ -255,15 +252,10 @@ winget install Gyan.FFmpeg
 ffmpeg -version; ffprobe -version
 ```
 
-### 6.5 Install frontend dependencies
+### 6.5 Install frontend dependencies and configure the environment
 
 ```powershell
 npm install
-```
-
-### 6.5 Configure the environment
-
-```powershell
 Copy-Item .env.example .env
 notepad .env
 ```
@@ -276,6 +268,9 @@ NVIDIA_API_KEY=nvapi-...
 WHISPERX_HF_TOKEN=hf_...
 WHISPERX_DEVICE=cuda        # or cpu
 ```
+
+(Any one scoring provider key is enough — NVIDIA is just the default. Keys can
+also be entered later from Settings → Provider API keys instead of `.env`.)
 
 ### 6.6 Run it
 
@@ -295,39 +290,43 @@ Open <http://localhost:5173>, log in with `admin` / your `DEFAULT_ADMIN_PASSWORD
 ### 6.7 Verify
 
 ```powershell
-# Liveness + readiness (readiness reports ffmpeg/whisperx/humanDetector checks)
 Invoke-RestMethod http://localhost:8787/api/health
 Invoke-RestMethod http://localhost:8787/api/health/ready
 
-# Backend test suite (98 tests)
-npm run test:api
-
-# Frontend production build
-npm run build
+npm run test:api      # backend pytest suite
+npm run test:ui       # frontend node --test suite
+npm run build         # production frontend build
 ```
 
 ---
 
 ## 7. Tokens & API Keys — what, where, why
 
-All secrets live in `.env` (never committed). The backend reads env first, then
-`storage/auth/secrets.json` as a fallback (`AuthService._initialize_sync`).
+All secrets live in `.env` (never committed). Scoring provider keys can
+alternatively be entered from **Settings → Provider API keys**, where they are
+sealed with AES-256-GCM before being written to the database — a saved key wins
+over `.env`, so a rotation in the UI takes effect immediately, live, in every
+process (including a Hatchet worker), with no restart.
 
 | Key | Required? | Where to get it | Used by |
 | --- | --- | --- | --- |
-| `DEFAULT_ADMIN_PASSWORD` | **Yes (first boot)** | You choose it | Bootstraps `storage/auth/credentials.json` (bcrypt hash). Login = `admin` + this password. Server refuses first boot without it |
-| `NVIDIA_API_KEY` | **Yes** for content + communication scoring | [build.nvidia.com](https://build.nvidia.com) → API key (`nvapi-...`) | Forwarded to `nvidia_osce_assessor.py` and `nvidia_osce_communication.py` subprocesses (`ScoringPipeline.python_env`). Without it those two branches fail; transcription and audio metrics still run |
-| `WHISPERX_HF_TOKEN` | **Yes** for speaker diarisation | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) (read token, with gated-repo read access). Also **accept the gated model terms** for `pyannote/speaker-diarization-community-1` on its model page — that is the WhisperX 3.8.6 default diarisation pipeline (older guides name `speaker-diarization-3.1` / `segmentation-3.0`, which this version no longer downloads) | Passed to the WhisperX CLI for pyannote diarisation. Without it transcripts have no speaker labels |
-| `AUTH_SECRET` | Recommended for prod | Any 64+ char random hex (`python -c "import secrets; print(secrets.token_hex(64))"`) | HS256 signing key for bearer tokens + stream tickets. If empty, one is auto-generated into `storage/auth/secret.key` |
-| `HATCHET_CLIENT_TOKEN` | Only if `JOB_QUEUE_BACKEND=hatchet` | Hatchet dashboard (<http://localhost:8888> after `docker compose -f docker-compose.hatchet.yml up -d`) → your tenant → API tokens | gRPC auth for both the API's dispatch client and the worker (`hatchet_tasks.py`, `hatchet_worker.py`) |
-| HuggingFace model weights (no key) | First person-detection run | Automatic download (~80 MB) of `PekingU/rtdetr_v2_r18vd` into the HF cache | `detect_human_segments.py`. Needs internet once; cached afterwards |
+| `DEFAULT_ADMIN_PASSWORD` | **Yes (first boot)** | You choose it | Bootstraps `storage/auth/credentials.json` (bcrypt hash). Login = `admin` + this password |
+| `NVIDIA_API_KEY` | One provider key required | [build.nvidia.com](https://build.nvidia.com) → API key (`nvapi-...`) | Content + communication scoring. This is the default provider when nothing is selected |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` / `OPENROUTER_API_KEY` | Alternative to NVIDIA | Each vendor's own console | Selectable as the primary or fallback scoring model in Settings → Scoring model. A provider with no key shows as unavailable and is dropped from routing |
+| `<PROVIDER>_BASE_URL` | Optional | — | Per-provider endpoint override (proxy, gateway, regional endpoint) |
+| `WHISPERX_HF_TOKEN` | **Yes** for speaker diarisation | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) (read token). Also **accept the gated model terms** for `pyannote/speaker-diarization-community-1` | Passed to the WhisperX CLI. Without it transcripts have no speaker labels |
+| `AUTH_SECRET` | Recommended for prod | Any 64+ char random hex (`python -c "import secrets; print(secrets.token_hex(64))"`) | HS256 signing key for bearer tokens + stream tickets. Also the default source for `CREDENTIAL_ENCRYPTION_KEY` if that is unset |
+| `CREDENTIAL_ENCRYPTION_KEY` | Optional | 32 bytes, base64 or hex | Master key for provider API keys saved in Settings. Changing it makes stored keys unreadable and the screen asks for them again |
+| `HATCHET_CLIENT_TOKEN` | Only if `JOB_QUEUE_BACKEND=hatchet` | Hatchet dashboard (<http://localhost:8888> after `docker compose -f docker-compose.hatchet.yml up -d`) | gRPC auth for both the API's dispatch client and the worker |
+| `GCS_BUCKET` | Only if `STORAGE_BACKEND=gcs` | Your GCS bucket name | Direct-to-bucket resumable uploads instead of relaying parts through the API |
+| HuggingFace model weights (no key) | First person-detection run | Automatic download (~80 MB) of `PekingU/rtdetr_v2_r18vd` | `detect_human_segments.py`. Needs internet once; cached afterwards |
 
 ---
 
 ## 8. Docker Setup (optional)
 
-Local default needs **no Docker at all** (SQLite + in-process queue). Docker adds
-PostgreSQL and/or the distributed Hatchet queue.
+Local default needs **no Docker at all** (SQLite + in-process queue + local
+storage). Docker adds PostgreSQL and/or the distributed Hatchet queue.
 
 ### 8.1 PostgreSQL for app data
 
@@ -340,154 +339,181 @@ npm run db:logs        # follow logs
 Then point the app at it in `.env` and restart the API:
 
 ```env
-APP_DATABASE_URL=postgresql://osce_app:osce_app_dev_password@localhost:5432/osce_marker
+DATABASE_URL=postgresql://osce_app:osce_app_dev_password@localhost:5432/osce_marker
 ```
 
-Utilities:
-
-```powershell
-npm run db:check       # connectivity + table sanity check
-npm run db:reset       # wipe app tables (keeps files)
-npm run db:down        # stop the container
-```
+Utilities: `npm run db:check` (connectivity + table sanity), `npm run db:reset`
+(wipe app tables, keep files), `npm run db:down` (stop the container).
 
 ### 8.2 Hatchet distributed queue (API and worker as separate processes)
 
 ```powershell
-# Starts three containers: app-postgres (5432), hatchet-postgres (5433),
-# hatchet-lite (dashboard 8888, gRPC 7077)
 docker compose -f docker-compose.hatchet.yml up -d
 ```
 
-1. Open the dashboard at **<http://localhost:8888>**, create/log into your tenant.
-2. Create an **API token** and put it in `.env`:
+1. Open <http://localhost:8888>, create/log into your tenant, create an **API token**.
+2. Set in `.env`:
 
    ```env
    JOB_QUEUE_BACKEND=hatchet
    HATCHET_CLIENT_TOKEN=<token from dashboard>
    HATCHET_CLIENT_HOST_PORT=localhost:7077
    HATCHET_CLIENT_TLS_STRATEGY=none
-   APP_DATABASE_URL=postgresql://osce_app:osce_app@localhost:5432/osce_marker
+   DATABASE_URL=postgresql://osce_app:osce_app@localhost:5432/osce_marker
    ```
 
 3. Run all three processes:
 
 ```powershell
-# Terminal 1 — API (dispatches jobs, serves UI data)
-npm run dev:api
-
-# Terminal 2 — Hatchet worker (runs the actual pipeline: WhisperX, RT-DETR, scorers)
-npm run dev:worker
-
-# Terminal 3 — frontend
-npm run dev
+npm run dev:api        # API — dispatches jobs, serves UI data
+npm run dev:worker     # Hatchet worker — runs the pipeline: transcription, RT-DETR, scorers
+npm run dev            # frontend
 ```
 
-The worker also runs a **redispatch loop** (every `HATCHET_REDISPATCH_INTERVAL_SECONDS`,
-default 30 s) that picks up queued jobs the API failed to dispatch — so a job never
-sits stuck just because dispatch hiccuped.
+The worker also runs a **redispatch loop** (default 30 s,
+`HATCHET_REDISPATCH_INTERVAL_SECONDS`) that recovers jobs the API failed to
+dispatch. This split is the deployment seam: the API can live on a cheap CPU
+host while the worker (the only GPU consumer) runs on a GPU box.
 
-> This split is the deployment seam: the API can live on a cheap CPU host while the
-> worker (the only GPU consumer) runs on a GPU box or a scale-to-zero GPU service.
+### 8.3 Cloud object storage (optional)
+
+`STORAGE_BACKEND=gcs` moves uploads off the API host: the browser PUTs chunks
+straight to a GCS resumable session URI, and the server verifies the object by
+its own key on completion. Every job execution re-materialises the session's
+files locally before running (a no-op on `local`, a checksum-verified cached
+download on `gcs`), so ffmpeg/WhisperX/the scorers stay path-based either way.
 
 ---
 
 ## 9. Long-Video Segmentation: Bells vs Human Detection
 
-On the upload form, **Long Video Upload** exposes an *Auto-split method* toggle:
+Segmentation is **planning, not cutting** — `auto_crop` produces draft clip
+ranges with no file yet; nothing is cut until the user hits **Export clips** in
+the timeline editor.
 
 | Method | How it works | Best when |
 | --- | --- | --- |
-| 🔔 **Bell detection** (default) | librosa finds bell transitions + silence gaps in the audio track | Station bells are clearly audible |
-| 🧍 **Human detection** | RT-DETR samples 1 frame/second and counts people. A session is active with ≥ 2 people (student + patient/examiner) and **ends after ~8 s continuously below that** (~240 frames at 30 fps). Median filter + flicker-closing + hysteresis absorb missed detections | Bells are missing/unreliable; camera covers the station |
+| 🔔 **Bell detection** | librosa finds bell transitions + silence gaps in the audio track | Station bells are clearly audible |
+| 🧍 **Human detection** | RT-DETR samples the video and counts people on screen, gated by an **occupancy preset** | Bells are missing/unreliable |
 
-The choice is stored on the session, so it survives restarts and works identically
-under the local queue and Hatchet. If human detection fails (missing weights, OOM),
-the job **automatically falls back to bell detection** — the fallback reason is
-visible in the live log and recorded on the clip source metadata.
+Human detection is governed by an **occupancy preset**, chosen on the upload
+form and resolved to concrete numbers stored on the session (so a later
+retuned table can never silently re-cut an already-queued session):
 
-Tuning (all optional, in `.env`):
+| Preset | Min people | Min box height | Min session length | For |
+| --- | --- | --- | --- | --- |
+| `pair` (default) | 2 | off | off | Wide shot, both subjects fully in frame |
+| `pair_strict` | 2 | 0.40 | 120 s | Wide shot where limbs/passers-by clip the frame edge |
+| `solo` | 1 | 0.40 | 120 s | Tight shot on one student |
+| `custom` | operator-set | operator-set | operator-set | Anything else |
 
-```env
-AUTO_CROP_SEGMENTATION=bells            # server default when the form didn't choose
-ENABLE_HUMAN_DETECTOR=true
-HUMAN_SEGMENTS_SAMPLE_FPS=1.0
-HUMAN_SEGMENTS_MIN_PEOPLE=2
-HUMAN_SEGMENTS_END_AFTER_SECONDS=8      # ≈240 frames @ 30fps
-HUMAN_SEGMENTS_START_AFTER_SECONDS=4
-HUMAN_SEGMENTS_FLICKER_TOLERANCE_SECONDS=2
-HUMAN_SEGMENTS_CONFIDENCE=0.5
-HUMAN_SEGMENTS_MODEL=PekingU/rtdetr_v2_r18vd
-HUMAN_SEGMENTS_DEVICE=auto              # cuda when available
-```
+The box-height gate is load-bearing: RT-DETR scores a forearm at the frame edge
+above any usable confidence threshold, so confidence alone can't separate a
+limb from a person — height can. If human detection fails (missing weights,
+OOM), the job **automatically falls back to bell detection**, visible in the
+live log and recorded on the clip metadata.
 
-Standalone experimentation (writes per-second person counts for threshold tuning):
+After segmentation, the timeline editor lets you drag boundaries before
+exporting; **re-cropping** one clip after export is a scoped re-export
+(`/clips/{id}/recrop`) that bumps the clip's revision rather than overwriting
+the file in place, so an assessment already run against the old cut is never
+silently invalidated.
 
-```powershell
-uv run python scripts\detect_human_segments.py `
-  --video "storage\input\videos\<file>.mp4" --video-duration 3600 `
-  --dump-samples tuning.json
-```
+Tuning (all optional, in `.env`): `HUMAN_SEGMENTS_PRESET`,
+`HUMAN_SEGMENTS_MIN_PEOPLE`, `HUMAN_SEGMENTS_MIN_BOX_HEIGHT_RATIO`,
+`HUMAN_SEGMENTS_MIN_SESSION_SECONDS`, `HUMAN_SEGMENTS_CONFIDENCE`. Also exposed
+at runtime via `GET /api/settings/segmentation-presets`.
 
 ---
 
-## 10. API Surface (summary)
+## 10. Marking Modes & Multi-Provider LLM Scoring
+
+Content is marked by **one model** (default) or by a **panel**, chosen in
+Settings → Marking mode.
+
+| Mode | What runs |
+| --- | --- |
+| `single` | One assessor subprocess against the configured primary model, with automatic fallback to a secondary provider on failure |
+| `panel` | ≥ 2 markers — the same assessor script, one model each, run in parallel — then an adjudicator that settles unanimous criteria in code and asks a third model about disputed ones in a single batched call |
+
+Design rationale: independent first passes with escalation only on
+disagreement outperforms free-form synthesis or debate rounds (see
+[docs/multi-model-marking-plan.md](docs/multi-model-marking-plan.md)). A panel
+never fails an assessment single mode would have passed — if one marker fails,
+the survivor's sheet is used with a `degraded` flag and a "Single marker only"
+banner; only if every marker fails does the step fail.
+
+The final score sheet always keeps today's schema (`criteria[]`,
+`scoring_summary`, `keep_start_stop`) and, in panel mode, adds a `panel` block:
+per-marker verdicts, agreement stats (including Cohen's kappa), and each
+disputed criterion's resolution path.
+
+**Provider routing** is a runtime choice for either mode: NVIDIA, OpenAI,
+Anthropic, DeepSeek, Gemini and OpenRouter ship in the build, and an operator
+can register a **custom provider** — any OpenAI-compatible or Anthropic-shaped
+endpoint (Azure, a regional gateway, a self-hosted vLLM box) — from
+**Settings → Custom scoring providers**, routable by the next assessment with
+no release and no restart. API keys are never stored alongside the routing
+config; they're sealed separately and forwarded to the scorer subprocess only
+for the providers actually named.
+
+---
+
+## 11. API Surface (summary)
 
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /api/auth/login` · `/logout` · `GET /me` · `GET /stream-ticket` | Auth; stream tickets keep the bearer token out of SSE/media URLs |
-| `POST /api/uploads/initiate` → `PUT .../parts/{n}` → `POST .../complete` | Chunked resumable upload (video + case study) |
-| `POST /api/upload` | Legacy single-shot multipart fallback |
+| `POST /api/uploads/initiate` → `PUT .../parts/{n}` → `POST .../complete` | Chunked resumable upload (video + case study); `local` or `gcs` transport |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | Session list / detail (includes `pipeline.steps` for progress) |
-| `GET /api/sessions/{id}/events` | SSE live stream (milestones, logs, status) |
 | `GET .../transcript` · `/scores` · `/communication-scores` · `/audio-professionalism` | Result payloads |
-| `POST .../auto-crop` · `.../clips/manual` · `.../clips/{cid}/recrop` · `.../clips/{cid}/assess?defer=1` | Long-video clip workflow |
+| `POST .../auto-crop` · `.../clips/manual` · `.../clips/{cid}/recrop` · `.../clips/{cid}/assess` | Long-video clip workflow (all 202, queue-driven) |
 | `GET /api/sessions/{id}/clip-summaries` | Aggregate per-student summary for a long session |
-| `GET /api/health` · `GET /api/health/ready` | Liveness / readiness (DB, storage, ffmpeg, whisperx, humanDetector) |
+| `GET/PUT/PATCH /api/settings` · `/transcription-engines` · `/segmentation-presets` · `/llm-providers*` | Global settings: model routing, marking mode, transcription engine, custom providers, provider keys |
+| `GET /api/analytics/assessments` | Flat per-result rows for the analytics page, with session/student filters |
+| `GET/POST/PUT/DELETE /api/corpora` | Clinical term corpus CRUD (transcript correction) |
+| `GET/POST/PUT/DELETE /api/webhooks` | Outbound event webhook subscriptions (SSRF-guarded URL validation) |
+| `GET/POST /api/notifications` | Task-completion notification history |
+| `GET /api/health` · `GET /api/health/ready` | Liveness / readiness (DB, storage, ffmpeg, transcription engine, human detector, caches) |
 | `GET /media/...` | Auth-gated static artifacts (videos, clips, transcripts, scores) |
 
 ---
 
-## 11. CodeGraph ("graphify") — code intelligence for this repo
+## 12. CodeGraph ("graphify") — code intelligence for this repo
 
 This repository is indexed with **CodeGraph** (`.codegraph/` at the repo root): a
 SQLite knowledge graph of every symbol, call edge, and file, so architecture
 questions are answered with verbatim source + call paths in one query instead of
-grep loops. The index is **synced with the current codebase** (121 files,
-~2,070 symbols, ~4,790 edges, including the RT-DETR segmentation wiring and the
-2026-07-10 over-engineering cleanup — storage/job-model/time-helper consolidation).
-
-Common commands (run from the repo root):
+grep loops.
 
 ```powershell
 codegraph status .                                  # index statistics
 codegraph sync .                                    # re-index files changed since last sync
 codegraph explore "how does auto_crop pick bells vs person detection"
-codegraph explore "AsyncUploadService complete assemble dispatch"
 codegraph node JobQueueService.enqueue              # one symbol + caller/callee trail
 codegraph query "segmentation"                      # symbol search
 ```
 
 Keep it fresh after a batch of edits with `codegraph sync .` (seconds, incremental).
-AI assistants with the CodeGraph MCP tool use this same index automatically.
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 | Symptom | Fix |
 | --- | --- |
-| `Psycopg cannot use the 'ProactorEventLoop'` | Use `scripts/run_api.py` (it pins the Selector loop policy on Windows). Standalone scripts touching async PG must call `app.core.asyncio_compat.configure_windows_selector_event_loop_policy()` first |
+| `Psycopg cannot use the 'ProactorEventLoop'` | Use `scripts/run_api.py` (it pins the Selector loop policy on Windows) |
 | API hangs / "Loading sessions..." forever | You probably launched two API stacks. `taskkill` stray `python.exe` processes and start one instance |
 | CUDA out-of-memory during transcription | `WHISPERX_COMPUTE_TYPE=int8` in `.env` (~1.5 GB, near-identical accuracy) |
-| "Could not locate rubric section in case-study PDF" | The uploaded PDF has no embedded "Analytical Checklist" section — wrong file or a scanned/image-only PDF. Error text lists what was detected |
-| Human detection job says fallback to bells | First run needs internet for the ~80 MB RT-DETR weights, or torch/transformers missing — check the startup warnings in the API console and `GET /api/health/ready` → `humanDetector` |
-| Hatchet jobs sit queued | Ensure the worker is running (`npm run dev:worker`) and `HATCHET_CLIENT_TOKEN` is valid; the worker's 30 s redispatch loop recovers undispatched jobs |
-| Backend edits not applied | `npm run dev:api` runs without auto-reload by design — Ctrl+C and rerun |
+| "Could not locate rubric section in case-study PDF" | The uploaded PDF has no embedded "Analytical Checklist" section — wrong file or a scanned/image-only PDF |
+| Human detection job says fallback to bells | First run needs internet for the ~80 MB RT-DETR weights, or torch/transformers missing — check `GET /api/health/ready` → `humanDetector` |
+| `Canary-Qwen transcription failed ... NeMo toolkit is not installed` | A plain `uv sync` removed the `canary` group — re-run `uv sync --group canary` (`npm run py:sync:canary`) |
+| Hatchet jobs sit queued | Ensure the worker is running (`npm run dev:worker`) and `HATCHET_CLIENT_TOKEN` is valid; the worker's redispatch loop recovers undispatched jobs |
+| Backend edits not applied | `npm run dev:api` runs without auto-reload by default — Ctrl+C and rerun, or use `uv run python scripts/run_api.py --reload` |
 
 ---
 
-## 13. Development Reference
+## 14. Development Reference
 
 ```powershell
 npm run dev            # frontend + dev orchestration (port 5173)
@@ -495,7 +521,7 @@ npm run dev:api        # FastAPI backend (port 8787)
 npm run dev:worker     # Hatchet worker (hatchet mode only)
 npm run test:api       # pytest suite (fastapi_backend/tests)
 npm run test:ui        # Node regression tests
-npm run lint           # focused JS/Python correctness checks + enum drift
+npm run lint           # JS/Python correctness checks + enum drift
 npm run enums:generate # regenerate src/lib/enums.js after changing domain enums
 npm run build          # production frontend build
 npm run db:up|down|logs|ps|check|reset   # PostgreSQL helpers
@@ -504,13 +530,8 @@ npm run db:up|down|logs|ps|check|reset   # PostgreSQL helpers
 - All configuration lives in [.env.example](.env.example) (copy → `.env`).
 - Architecture deep-dive for contributors/AI agents: [CLAUDE.md](CLAUDE.md).
 - Extended local setup notes: [LOCAL_SETUP.md](LOCAL_SETUP.md).
-- Pipeline diagram, failure simulations, and remaining risks: [pipeline audit](docs/pipeline-audit.md).
-
-Run `uv sync --group dev` and `npm ci` before linting. These checks target
-undefined names, syntax errors, invalid control flow, hook placement, and enum
-drift; they are not a whole-project static type check. The frontend remains
-plain JavaScript. Backend tests that exercise the seeded development login
-expect `DEFAULT_ADMIN_PASSWORD=admin` in their isolated test database.
+- Multi-model marking design: [docs/multi-model-marking-plan.md](docs/multi-model-marking-plan.md).
+- Pipeline diagram, failure simulations, remaining risks: [docs/pipeline-audit.md](docs/pipeline-audit.md).
 
 *Academic FYP: current auth (single admin, in-process token revocation) suits
 local/internal use; production healthcare deployment would need RBAC, audit
