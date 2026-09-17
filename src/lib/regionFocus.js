@@ -87,6 +87,29 @@ export function buildRegionFocusOptions(regionFocus, { workflow, segmentationMet
   };
 }
 
+/**
+ * Horizontal bands, as percentages of frame width (0-100), that region focus
+ * excludes from detection — the complement of the enabled zone(s). Mirrors
+ * the geometry `boxes_in_region` applies on the backend (left zone =
+ * [0, leftRatio], right zone = [1 - rightRatio, 1]; a point counts if it
+ * falls in either enabled zone), so the overlay the operator sees is the same
+ * area the detector actually looks at, not an approximation of it.
+ *
+ * The two zones are each anchored to a frame edge, so their union can only
+ * ever leave a single contiguous gap in the middle — at most one band comes
+ * back. Returns `[]` when nothing is excluded (the full-frame default).
+ */
+export function excludedRegionBands(regionFocus) {
+  const leftEnabled = Boolean(regionFocus?.leftEnabled);
+  const rightEnabled = Boolean(regionFocus?.rightEnabled);
+  const leftZoneEnd = leftEnabled ? clampRegionRatio(regionFocus?.leftRatio) * 100 : 0;
+  const rightZoneStart = rightEnabled ? 100 - clampRegionRatio(regionFocus?.rightRatio) * 100 : 100;
+  if (leftZoneEnd >= rightZoneStart) {
+    return [];
+  }
+  return [{ start: leftZoneEnd, end: rightZoneStart }];
+}
+
 /** One-line summary for the pre-flight review card; null when there is nothing to say. */
 export function describeRegionFocus(regionFocus) {
   if (isFullFrame(regionFocus)) {

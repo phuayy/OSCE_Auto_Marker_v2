@@ -9,6 +9,7 @@ import {
   clampRegionRatio,
   defaultRegionFocus,
   describeRegionFocus,
+  excludedRegionBands,
   isFullFrame,
   isRegionFocusLocked,
   toggleRegionSide,
@@ -111,4 +112,60 @@ test('region focus is locked by default (no preset chosen yet)', () => {
   assert.equal(isRegionFocusLocked(undefined), true);
   assert.equal(isRegionFocusLocked(''), true);
   assert.equal(isRegionFocusLocked(null), true);
+});
+
+// excludedRegionBands: the frame-preview overlay's geometry. Mirrors the
+// backend's boxes_in_region exactly, so what the operator sees shaded is what
+// the detector actually ignores — see fastapi_backend/tests/test_region_focus.py
+// for the same cases against the Python side.
+
+test('excludedRegionBands: the full-frame default excludes nothing', () => {
+  assert.deepEqual(excludedRegionBands(defaultRegionFocus()), []);
+});
+
+test('excludedRegionBands: left-only shades everything past the left ratio', () => {
+  // The exact scenario from the original feature request: a patient/examiner
+  // half cut off on the right, so the right zone is off and the left is
+  // narrowed to 60% — the shaded band should be the remaining 40% on the right.
+  const bands = excludedRegionBands({ leftEnabled: true, rightEnabled: false, leftRatio: 0.6, rightRatio: 1 });
+  assert.deepEqual(bands, [{ start: 60, end: 100 }]);
+});
+
+test('excludedRegionBands: right-only shades everything before the right ratio', () => {
+  const bands = excludedRegionBands({ leftEnabled: false, rightEnabled: true, leftRatio: 1, rightRatio: 0.3 });
+  assert.deepEqual(bands, [{ start: 0, end: 70 }]);
+});
+
+test('excludedRegionBands: two narrow zones leave a shaded gap in the middle', () => {
+  const bands = excludedRegionBands({ leftEnabled: true, rightEnabled: true, leftRatio: 0.3, rightRatio: 0.3 });
+  assert.deepEqual(bands, [{ start: 30, end: 70 }]);
+});
+
+test('excludedRegionBands: overlapping zones (ratios summing over 100%) exclude nothing', () => {
+  const bands = excludedRegionBands({ leftEnabled: true, rightEnabled: true, leftRatio: 0.6, rightRatio: 0.6 });
+  assert.deepEqual(bands, []);
+});
+
+test('excludedRegionBands: zones that exactly meet exclude nothing (no gap, no overlap)', () => {
+  const bands = excludedRegionBands({ leftEnabled: true, rightEnabled: true, leftRatio: 0.5, rightRatio: 0.5 });
+  assert.deepEqual(bands, []);
+});
+
+test('excludedRegionBands: both zones disabled shades the entire frame', () => {
+  // Not reachable through the UI (toggleRegionSide refuses this), but the
+  // pure function has to agree with the backend's own both-disabled case
+  // (region_focus.resolve degrades it, boxes_in_region rejects everything)
+  // rather than assume the caller already guarded it.
+  const bands = excludedRegionBands({ leftEnabled: false, rightEnabled: false, leftRatio: 1, rightRatio: 1 });
+  assert.deepEqual(bands, [{ start: 0, end: 100 }]);
+});
+
+test('excludedRegionBands: a missing regionFocus is treated as both zones disabled', () => {
+  assert.deepEqual(excludedRegionBands(null), [{ start: 0, end: 100 }]);
+  assert.deepEqual(excludedRegionBands(undefined), [{ start: 0, end: 100 }]);
+});
+
+test('excludedRegionBands: out-of-range ratios are clamped the same as everywhere else', () => {
+  const bands = excludedRegionBands({ leftEnabled: true, rightEnabled: false, leftRatio: 5, rightRatio: 1 });
+  assert.deepEqual(bands, []); // clamped to 1.0 -> left zone covers the whole frame
 });

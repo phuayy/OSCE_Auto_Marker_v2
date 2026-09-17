@@ -50,6 +50,7 @@ import { Modal } from '@/components/ui/dialog';
 import { Progress } from '@/components/ui/progress';
 import { PageHeader } from '@/components/PageHeader.jsx';
 import { SessionStatusBadge } from '@/components/SessionStatusBadge.jsx';
+import RegionFocusPreview from '@/components/RegionFocusPreview.jsx';
 import CorporaManager from './CorporaManager.jsx';
 import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
 import { describeClipExportOutcome } from '@/lib/clipExportOutcome';
@@ -2599,7 +2600,8 @@ export default function OSCEAiMarkerMockup({
                               get counted as an occupant. Leave both at 100% to use the whole frame.</>
                           )}
                         </p>
-                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        <RegionFocusPreview videoUrl={localVideoUrl} regionFocus={regionFocus} />
+                        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
                           {[
                             { side: 'left', label: 'Left side', enabledKey: 'leftEnabled', ratioKey: 'leftRatio' },
                             { side: 'right', label: 'Right side', enabledKey: 'rightEnabled', ratioKey: 'rightRatio' },
