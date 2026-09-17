@@ -371,11 +371,15 @@ people while one side alone only ever shows one on a wide two-person shot —
 and that failure is silent: zero clips found trips `_enforce_clip_count_bounds`
 and degrades straight to bell detection with no error surfaced, so the
 operator sees a plausible-looking clip list from the wrong method. The panel
-(`isRegionFocusLocked` in [regionFocus.js](src/lib/regionFocus.js)) is
-therefore only editable under the `custom` preset; picking any other preset
-snaps the region back to the full frame (a `useEffect` keyed on the lock, not
-duplicated at every place the preset can change — the radio click and the
-catalogue's own fallback when a stored preset id no longer exists).
+(`isRegionFocusLocked` in [regionFocus.js](src/lib/regionFocus.js), including
+its live frame preview and the per-preset scenario diagrams in the picker
+above it) is therefore only rendered at all under the `custom` preset, not
+merely disabled — offering a control for a combination that cannot work is
+worse than not offering it. Picking any other preset also snaps the region
+back to the full frame (a `useEffect` keyed on the same lock, not duplicated
+at every place the preset can change — the radio click and the catalogue's
+own fallback when a stored preset id no longer exists), so the state stays
+correct underneath even while the panel is unmounted.
 
 1. Segmentation (`auto_crop` job): bell detector (`scripts/detect_bell_segments.py`) or
    person detector (RT-DETR) proposes ranges. `build_clip_drafts_from_ranges`

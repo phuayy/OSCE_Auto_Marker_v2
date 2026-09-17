@@ -51,6 +51,7 @@ import { Progress } from '@/components/ui/progress';
 import { PageHeader } from '@/components/PageHeader.jsx';
 import { SessionStatusBadge } from '@/components/SessionStatusBadge.jsx';
 import RegionFocusPreview from '@/components/RegionFocusPreview.jsx';
+import OccupancyPresetGlyph from '@/components/OccupancyPresetGlyph.jsx';
 import CorporaManager from './CorporaManager.jsx';
 import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
 import { describeClipExportOutcome } from '@/lib/clipExportOutcome';
@@ -153,13 +154,16 @@ export default function OSCEAiMarkerMockup({
   // zone(s) can never satisfy (e.g. "pair" needs 2 people while one side
   // alone only ever shows one) — that failure is silent: zero clips found
   // degrades straight to bell detection with no error surfaced. The form
-  // sidesteps it by only letting the operator touch this under "Custom",
-  // where they are already reasoning about the numbers directly.
+  // sidesteps it entirely by only offering this panel under "Custom", where
+  // the operator is already reasoning about the numbers directly.
   const [regionFocus, setRegionFocus] = useState(defaultRegionFocus());
-  // True whenever region focus is not the operator's to edit — every preset
-  // except "Custom". Kept in sync below rather than duplicated at each place
-  // `segmentationPreset` can change (the radio click, and the catalogue's own
-  // fallback when a stored preset id no longer exists).
+  // True whenever region focus is not the operator's to set — every preset
+  // except "Custom". Gates both whether the panel renders at all (below) and
+  // whether `regionFocus` gets reset to the full frame (the effect right
+  // after this), so the two can never disagree about what "locked" means.
+  // Kept in sync here rather than duplicated at each place `segmentationPreset`
+  // can change (the radio click, and the catalogue's own fallback when a
+  // stored preset id no longer exists).
   const regionFocusLocked = isRegionFocusLocked(segmentationPreset);
   useEffect(() => {
     if (regionFocusLocked) {
@@ -2488,6 +2492,12 @@ export default function OSCEAiMarkerMockup({
                           of the frame is a person to the detector, so a one-student angle needs a
                           different rule from a wide two-person shot.
                         </p>
+                        <p className="mb-2 flex items-center gap-1.5 text-[11px] text-slate-400">
+                          <User className="h-3 w-3 shrink-0 text-violet-600" aria-hidden="true" />
+                          Solid figure counts
+                          <User className="h-3 w-3 shrink-0 text-slate-300" aria-hidden="true" />
+                          faint one at the edge is seen but ignored
+                        </p>
                         <div className="grid grid-cols-1 gap-2" role="radiogroup" aria-label="Occupancy rule">
                           {segmentationPresets.map((preset) => (
                             <button
@@ -2496,21 +2506,24 @@ export default function OSCEAiMarkerMockup({
                               role="radio"
                               aria-checked={segmentationPreset === preset.id}
                               onClick={() => setSegmentationPreset(preset.id)}
-                              className={`rounded-lg border p-2.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2 ${
+                              className={`flex items-center gap-3 rounded-lg border p-2.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2 ${
                                 segmentationPreset === preset.id
                                   ? 'border-violet-400 bg-violet-50 ring-2 ring-violet-200'
                                   : 'border-slate-200 bg-white hover:border-slate-300'
                               }`}
                             >
-                              <span className="flex items-center justify-between gap-2">
-                                <span className="text-sm font-medium text-slate-800">{preset.label}</span>
-                                {preset.id !== 'custom' && (
-                                  <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-500">
-                                    {preset.minPeople}+ on screen
-                                  </span>
-                                )}
+                              <OccupancyPresetGlyph presetId={preset.id} />
+                              <span className="min-w-0 flex-1">
+                                <span className="flex items-center justify-between gap-2">
+                                  <span className="text-sm font-medium text-slate-800">{preset.label}</span>
+                                  {preset.id !== 'custom' && (
+                                    <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-500">
+                                      {preset.minPeople}+ on screen
+                                    </span>
+                                  )}
+                                </span>
+                                <span className="mt-0.5 block text-xs text-slate-500">{preset.description}</span>
                               </span>
-                              <span className="mt-0.5 block text-xs text-slate-500">{preset.description}</span>
                             </button>
                           ))}
                         </div>
@@ -2581,24 +2594,15 @@ export default function OSCEAiMarkerMockup({
                         )}
                       </div>
                     )}
-                    {segmentationMethod === SegmentationMethod.PERSON && (
-                      <fieldset
-                        disabled={regionFocusLocked}
-                        className="m-0 mt-3 min-w-0 border-0 border-t border-t-slate-100 p-0 pt-3"
-                      >
+                    {segmentationMethod === SegmentationMethod.PERSON && !regionFocusLocked && (
+                      <div className="mt-3 border-t border-slate-100 pt-3">
                         <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                           Where to look in the frame
                         </div>
                         <p className="mb-2 text-[11px] text-slate-500">
-                          {regionFocusLocked ? (
-                            <>Only available with the occupancy rule set to <strong>Custom</strong> — a
-                              predefined rule&apos;s people count is not guaranteed to fit inside a
-                              narrowed zone.</>
-                          ) : (
-                            <>Restrict detection to one side of the frame when a third party — another
-                              examiner, a doorway — is half cut off at the other edge and would otherwise
-                              get counted as an occupant. Leave both at 100% to use the whole frame.</>
-                          )}
+                          Restrict detection to one side of the frame when a third party — another
+                          examiner, a doorway — is half cut off at the other edge and would otherwise
+                          get counted as an occupant. Leave both at 100% to use the whole frame.
                         </p>
                         <RegionFocusPreview videoUrl={localVideoUrl} regionFocus={regionFocus} />
                         <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -2609,28 +2613,20 @@ export default function OSCEAiMarkerMockup({
                             <div
                               key={side}
                               className={`rounded-lg border p-2.5 transition ${
-                                regionFocusLocked
-                                  ? 'border-slate-100 bg-slate-50'
-                                  : regionFocus[enabledKey]
-                                    ? 'border-violet-200 bg-violet-50/50'
-                                    : 'border-slate-200 bg-white'
+                                regionFocus[enabledKey] ? 'border-violet-200 bg-violet-50/50' : 'border-slate-200 bg-white'
                               }`}
                             >
-                              <label
-                                className={`flex items-center gap-2 text-sm font-medium ${
-                                  regionFocusLocked ? 'text-slate-400' : 'text-slate-800'
-                                }`}
-                              >
+                              <label className="flex items-center gap-2 text-sm font-medium text-slate-800">
                                 <input
                                   type="checkbox"
                                   checked={Boolean(regionFocus[enabledKey])}
                                   onChange={() => setRegionFocus((previous) => toggleRegionSide(previous, side))}
-                                  className="h-4 w-4 rounded border-slate-300 text-violet-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 disabled:cursor-not-allowed disabled:opacity-50"
+                                  className="h-4 w-4 rounded border-slate-300 text-violet-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
                                 />
                                 {label}
                               </label>
                               <label className="mt-2 block">
-                                <span className={`block text-[11px] ${regionFocusLocked ? 'text-slate-400' : 'text-slate-500'}`}>
+                                <span className="block text-[11px] text-slate-500">
                                   Width of frame counted, measured from the {side} edge
                                 </span>
                                 <div className="mt-1 flex items-center gap-1">
@@ -2649,18 +2645,16 @@ export default function OSCEAiMarkerMockup({
                                     }
                                     className="w-20 rounded-md border border-slate-300 px-2 py-1 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
                                   />
-                                  <span className={`text-xs ${regionFocusLocked ? 'text-slate-400' : 'text-slate-500'}`}>%</span>
+                                  <span className="text-xs text-slate-500">%</span>
                                 </div>
                               </label>
                             </div>
                           ))}
                         </div>
-                        {!regionFocusLocked && (
-                          <p className="mt-2 text-[11px] text-slate-500">
-                            At least one side must stay on — the last enabled checkbox cannot be turned off.
-                          </p>
-                        )}
-                      </fieldset>
+                        <p className="mt-2 text-[11px] text-slate-500">
+                          At least one side must stay on — the last enabled checkbox cannot be turned off.
+                        </p>
+                      </div>
                     )}
                     {segmentationMethod === SegmentationMethod.PERSON && (
                       <p className="mt-2 text-[11px] text-slate-500">
