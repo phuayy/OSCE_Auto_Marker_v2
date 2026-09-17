@@ -19,6 +19,7 @@ import { apiJson } from '@/lib/apiFetch';
 import { SessionStatus } from '@/lib/enums';
 import { CLIP_ASSESSMENTS_ANCHOR_ID } from '@/lib/anchors';
 import { describeProcessingStage, formatProcessingStageLabel } from '@/lib/processingStage';
+import { describeCreator } from '@/lib/provenance';
 import { INTERMISSION_KIND } from '@/lib/manualTimeline.js';
 import { formatMetricValue, formatRuntime, prettySpeaker } from '@/lib/format';
 import { downloadBlob, rowsToCsv, toSafeDownloadName } from '@/lib/download';
@@ -119,6 +120,9 @@ export default function SessionWorkspace({
   isLoadingClipSummaries,
   demoLongVideoSummaries,
 }) {
+  // Who uploaded the recording (or queued this clip's assessment), as the
+  // server snapshotted them; null for a session recorded before creators were.
+  const creator = describeCreator(session);
   const transcriptSegments = useMemo(() => {
     const segmentList = Array.isArray(transcript?.segments) ? transcript.segments : [];
     return segmentList
@@ -570,6 +574,14 @@ export default function SessionWorkspace({
                       {session?.files?.caseStudy?.originalName || caseStudyFile?.name || 'Bundled demo'}
                     </dd>
                   </div>
+                  {creator ? (
+                    <div className="flex items-baseline gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-slate-700">
+                      <dt className="text-xs font-semibold text-slate-500">{creator.verb}</dt>
+                      <dd className="max-w-[16rem] truncate" title={session?.createdBy?.username || ''}>
+                        {creator.name}
+                      </dd>
+                    </div>
+                  ) : null}
                   <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-slate-700">
                     <dt className="text-xs font-semibold text-slate-500">Status</dt>
                     <dd>

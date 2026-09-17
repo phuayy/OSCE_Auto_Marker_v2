@@ -114,4 +114,15 @@ export const TieBreak = Object.freeze({
   "FIRST_MARKER": "first_marker"
 });
 
+export const UserRole = Object.freeze({
+  "ADMIN": "admin",
+  "MARKER": "marker"
+});
+
+export const UserStatus = Object.freeze({
+  "INVITED": "invited",
+  "ACTIVE": "active",
+  "DISABLED": "disabled"
+});
+
 export const IN_FLIGHT_STATUSES = new Set(["assembling", "processing", "queued"]);

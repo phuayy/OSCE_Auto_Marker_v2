@@ -1,10 +1,11 @@
 import React from 'react';
-import { BarChart3, FileText, RefreshCcw, Settings as SettingsIcon } from 'lucide-react';
+import { BarChart3, FileText, KeyRound, RefreshCcw, Settings as SettingsIcon, Users } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { PageHeader } from '@/components/PageHeader.jsx';
+import { AuthShell } from '@/components/AuthShell.jsx';
 import { WORKSPACE_LAYOUT } from '@/lib/sessionWorkspace';
 
 // Placeholders shaped like the content that replaces them.
@@ -329,6 +330,134 @@ export function SettingsSkeleton({ onBack }) {
         </SettingsCardSkeleton>
       </LoadingRegion>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Users (account administration) and Account
+// ---------------------------------------------------------------------------
+
+/** The invite form: three fields and a button, in the layout the card renders. */
+export function InviteFormSkeleton() {
+  return (
+    <div className="grid grid-cols-1 gap-3 md:grid-cols-[2fr_1fr_1fr_auto] md:items-end">
+      {[0, 1, 2].map((index) => (
+        <div key={index} className="flex flex-col gap-1.5">
+          <Skeleton className="h-3 w-16" />
+          <Skeleton className="h-9 w-full rounded-lg" />
+        </div>
+      ))}
+      <Skeleton className="h-9 w-24 rounded-lg" />
+    </div>
+  );
+}
+
+/** Account rows: name + email, a role and a status chip, actions on the right. */
+export function UserRowsSkeleton({ rows = 3 }) {
+  return (
+    <div className="flex flex-col gap-2">
+      {Array.from({ length: rows }, (_, index) => (
+        <div key={index} className="rounded-xl border border-slate-200 px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <Skeleton className={`h-4 ${index % 2 ? 'w-1/3' : 'w-1/4'}`} />
+                <Skeleton className="h-4 w-14 rounded-full" />
+                <Skeleton className="h-4 w-16 rounded-full" />
+              </div>
+              <Skeleton className="h-3 w-1/2" />
+            </div>
+            <div className="flex shrink-0 flex-wrap gap-1.5">
+              <Skeleton className="h-8 w-20 rounded-lg" />
+              <Skeleton className="h-8 w-16 rounded-lg" />
+              <Skeleton className="h-8 w-9 rounded-lg" />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The Users route while its chunk loads: the invite card over the account
+ * list, the same bodies the page shows until its first response.
+ */
+export function UsersSkeleton({ onBack }) {
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900">
+      <PageHeader
+        icon={<Users className="h-5 w-5" />}
+        title="Users"
+        subtitle="Who can sign in, and what they may do"
+        onBack={onBack}
+        backTitle="Back to dashboard"
+      />
+      <LoadingRegion label="Loading users" className="mx-auto flex max-w-4xl flex-col gap-6 px-6 py-8">
+        <SettingsCardSkeleton descriptionLines={2}>
+          <InviteFormSkeleton />
+        </SettingsCardSkeleton>
+        <SettingsCardSkeleton descriptionLines={1}>
+          <UserRowsSkeleton />
+        </SettingsCardSkeleton>
+      </LoadingRegion>
+    </div>
+  );
+}
+
+/** The change-password form: three fields and Save. */
+export function AccountFormSkeleton() {
+  return (
+    <div className="flex max-w-md flex-col gap-4">
+      {[0, 1, 2].map((index) => (
+        <div key={index} className="flex flex-col gap-1.5">
+          <Skeleton className="h-3 w-24" />
+          <Skeleton className="h-9 w-full rounded-lg" />
+        </div>
+      ))}
+      <Skeleton className="h-9 w-32 rounded-lg" />
+    </div>
+  );
+}
+
+/** The Account route while its chunk loads. */
+export function AccountSkeleton({ onBack }) {
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900">
+      <PageHeader
+        icon={<KeyRound className="h-5 w-5" />}
+        title="Your account"
+        subtitle="Sign-in details and password"
+        onBack={onBack}
+        backTitle="Back to dashboard"
+      />
+      <LoadingRegion label="Loading your account" className="mx-auto flex max-w-3xl flex-col gap-6 px-6 py-8">
+        <SettingsCardSkeleton descriptionLines={1}>
+          <TextLines count={3} />
+        </SettingsCardSkeleton>
+        <SettingsCardSkeleton descriptionLines={2}>
+          <AccountFormSkeleton />
+        </SettingsCardSkeleton>
+      </LoadingRegion>
+    </div>
+  );
+}
+
+/**
+ * A pre-login screen (invitation, forgot-password, reset) while its chunk
+ * loads: the same dark frame the screen itself renders, with the card's
+ * fields in outline. Bones are lighter here because the ground is dark.
+ */
+export function AuthScreenSkeleton({ title = 'One moment' }) {
+  return (
+    <AuthShell title={title}>
+      <LoadingRegion label="Loading" className="space-y-4">
+        <div aria-hidden="true" className="h-3.5 w-1/2 animate-pulse rounded bg-white/10 motion-reduce:animate-none" />
+        <div aria-hidden="true" className="h-11 w-full animate-pulse rounded-xl bg-white/10 motion-reduce:animate-none" />
+        <div aria-hidden="true" className="h-11 w-full animate-pulse rounded-xl bg-white/10 motion-reduce:animate-none" />
+        <div aria-hidden="true" className="h-11 w-full animate-pulse rounded-xl bg-white/10 motion-reduce:animate-none" />
+      </LoadingRegion>
+    </AuthShell>
   );
 }
 

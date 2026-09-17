@@ -55,6 +55,7 @@ import OccupancyPresetGlyph from '@/components/OccupancyPresetGlyph.jsx';
 import CorporaManager from './CorporaManager.jsx';
 import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
 import { describeClipExportOutcome } from '@/lib/clipExportOutcome';
+import { creatorName } from '@/lib/provenance';
 import { indexClipAssessments } from '@/lib/clipAssessments';
 import { describeRerunAction } from '@/lib/rerunAction';
 import { describeStartAction } from '@/lib/sessionStartAction';
@@ -119,11 +120,17 @@ function debugPipeline(message) {
 
 export default function OSCEAiMarkerMockup({
   authUsername = '',
+  // The signed-in identity ({username, role, displayName, email}); the header
+  // shows the name and the Account button reads it. Role logic stays in
+  // AppShell, which passes `onOpenUsers` only for an administrator.
+  authUser = null,
   routeSessionId = null,
   onNavigateSession = null,
   onOpenRubric = null,
   onOpenAnalytics = null,
   onOpenSettings = null,
+  onOpenUsers = null,
+  onOpenAccount = null,
   onPreloadRoute = null,
   onLogout = null,
   notifications = null,
@@ -2340,8 +2347,34 @@ export default function OSCEAiMarkerMockup({
               Settings
             </Button>
           ) : null}
+          {onOpenUsers ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2"
+              onClick={onOpenUsers}
+              onMouseEnter={() => onPreloadRoute?.('users')}
+              onFocus={() => onPreloadRoute?.('users')}
+            >
+              <Users className="h-4 w-4" aria-hidden="true" />
+              Users
+            </Button>
+          ) : null}
         </nav>
-        {authUsername ? (
+        {onOpenAccount ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 text-xs font-semibold text-slate-700"
+            onClick={onOpenAccount}
+            onMouseEnter={() => onPreloadRoute?.('account')}
+            onFocus={() => onPreloadRoute?.('account')}
+            title="Your account"
+          >
+            <User className="h-3.5 w-3.5 text-slate-500" aria-hidden="true" />
+            {authUser?.displayName || authUser?.username || authUsername}
+          </Button>
+        ) : authUsername ? (
           <div className="flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1">
             <User className="h-3.5 w-3.5 text-slate-500" aria-hidden="true" />
             <span className="text-xs font-semibold text-slate-700">{authUsername}</span>
@@ -2841,6 +2874,12 @@ export default function OSCEAiMarkerMockup({
                             />
                             <div className="mt-1 truncate text-[11px] text-slate-500" title={sessionEntry.id}>
                               {sessionEntry.id}
+                              {/* Who uploaded it (the list projection carries the
+                                  snapshot); a session from before creators were
+                                  recorded shows nothing rather than a guess. */}
+                              {creatorName(sessionEntry) ? (
+                                <span className="text-slate-500"> · by {creatorName(sessionEntry)}</span>
+                              ) : null}
                             </div>
                             <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                               {/* The status as a word, in its tone, from one

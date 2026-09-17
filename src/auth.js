@@ -13,6 +13,10 @@ import { apiJson } from '@/lib/apiFetch';
 const TOKEN_STORAGE_KEY = 'osce-ai-marker:auth-token';
 const EXPIRY_STORAGE_KEY = 'osce-ai-marker:auth-expires-at';
 const USERNAME_STORAGE_KEY = 'osce-ai-marker:auth-username';
+// Who the token speaks for, as the server described it at login. The role
+// decides what the screen offers (never what the API allows — it checks the
+// account row on every request); the rest is for the header and Account page.
+const IDENTITY_STORAGE_KEY = 'osce-ai-marker:auth-identity';
 
 function safeSessionStorage() {
   try {
@@ -37,10 +41,33 @@ export function getStoredAuth() {
     return null;
   }
 
-  return { token, expiresAt, username };
+  return { token, expiresAt, username, ...readIdentity(storage, username) };
 }
 
-export function setStoredAuth({ token, expiresAt, username }) {
+function readIdentity(storage, username) {
+  try {
+    const parsed = JSON.parse(storage.getItem(IDENTITY_STORAGE_KEY) || 'null');
+    if (parsed && typeof parsed === 'object') {
+      return identityFields({ username, ...parsed });
+    }
+  } catch (_error) {
+    /* a corrupt entry is the same as none */
+  }
+  return identityFields({ username });
+}
+
+/** The identity fields a client keeps, from any server response that carries them. */
+export function identityFields(source = {}) {
+  return {
+    userId: String(source.userId || ''),
+    username: String(source.username || ''),
+    role: String(source.role || ''),
+    displayName: String(source.displayName || ''),
+    email: String(source.email || ''),
+  };
+}
+
+export function setStoredAuth({ token, expiresAt, ...identity }) {
   const storage = safeSessionStorage();
   if (!storage) {
     return;
@@ -48,7 +75,20 @@ export function setStoredAuth({ token, expiresAt, username }) {
 
   storage.setItem(TOKEN_STORAGE_KEY, String(token));
   storage.setItem(EXPIRY_STORAGE_KEY, String(expiresAt));
-  storage.setItem(USERNAME_STORAGE_KEY, String(username || ''));
+  storage.setItem(USERNAME_STORAGE_KEY, String(identity.username || ''));
+  storage.setItem(IDENTITY_STORAGE_KEY, JSON.stringify(identityFields(identity)));
+}
+
+/** Update the stored identity (role, name) without touching the token. */
+export function updateStoredIdentity(identity) {
+  const storage = safeSessionStorage();
+  if (!storage || !storage.getItem(TOKEN_STORAGE_KEY)) {
+    return;
+  }
+  const current = readIdentity(storage, storage.getItem(USERNAME_STORAGE_KEY) || '');
+  const next = identityFields({ ...current, ...identity });
+  storage.setItem(USERNAME_STORAGE_KEY, next.username);
+  storage.setItem(IDENTITY_STORAGE_KEY, JSON.stringify(next));
 }
 
 export function clearStoredAuth() {
@@ -61,6 +101,7 @@ export function clearStoredAuth() {
   storage.removeItem(TOKEN_STORAGE_KEY);
   storage.removeItem(EXPIRY_STORAGE_KEY);
   storage.removeItem(USERNAME_STORAGE_KEY);
+  storage.removeItem(IDENTITY_STORAGE_KEY);
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +292,87 @@ export async function loginRequest(username, password) {
     window.dispatchEvent(new CustomEvent('osce:auth:login'));
   }
   return body;
+}
+
+/**
+ * Re-read who the token speaks for. The role is what the header and the
+ * Users route are gated on, and an administrator can change it while a tab
+ * is open; asking on load keeps the screen honest after a reload. A 401 here
+ * is handled by the fetch shim like any other (the session is cleared).
+ */
+export async function refreshIdentity() {
+  const stored = getStoredAuth();
+  if (!stored?.token) {
+    return null;
+  }
+  try {
+    const body = await apiJson('/api/auth/me', { reportConnection: false });
+    if (body?.username) {
+      updateStoredIdentity(body);
+      return getStoredAuth();
+    }
+  } catch (_error) {
+    /* offline or expired: the stored copy stands until the shim clears it */
+  }
+  return stored;
+}
+
+/**
+ * Change the signed-in account's password. The server ends every other
+ * session and answers with a fresh token for this one, which is stored so
+ * the tab stays signed in.
+ */
+export async function changePasswordRequest(currentPassword, newPassword) {
+  const body = await apiJson('/api/auth/password', {
+    method: 'POST',
+    json: { currentPassword, newPassword },
+    fallbackMessage: 'The password could not be changed.',
+  });
+  setStoredAuth(body);
+  clearStreamTicket();
+  fetchStreamTicket();
+  return body;
+}
+
+// ---------------------------------------------------------------------------
+// The emailed-link flows. No session exists yet on these screens, so nothing
+// here attaches a token; the token in the URL is the credential.
+// ---------------------------------------------------------------------------
+
+export function fetchInvitation(token) {
+  return apiJson(`/api/auth/invitations/${encodeURIComponent(token)}`, {
+    fallbackMessage: 'The invitation could not be checked.',
+  });
+}
+
+export function acceptInvitationRequest(token, { password, displayName }) {
+  return apiJson(`/api/auth/invitations/${encodeURIComponent(token)}/accept`, {
+    method: 'POST',
+    json: { password, displayName },
+    fallbackMessage: 'The account could not be activated.',
+  });
+}
+
+export function requestPasswordReset(identifier) {
+  return apiJson('/api/auth/password-reset/request', {
+    method: 'POST',
+    json: { identifier },
+    fallbackMessage: 'The reset link could not be requested.',
+  });
+}
+
+export function fetchPasswordReset(token) {
+  return apiJson(`/api/auth/password-reset/${encodeURIComponent(token)}`, {
+    fallbackMessage: 'The reset link could not be checked.',
+  });
+}
+
+export function confirmPasswordReset(token, password) {
+  return apiJson(`/api/auth/password-reset/${encodeURIComponent(token)}/confirm`, {
+    method: 'POST',
+    json: { password },
+    fallbackMessage: 'The password could not be reset.',
+  });
 }
 
 export function logout() {
