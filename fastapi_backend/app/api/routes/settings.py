@@ -9,6 +9,7 @@ from app.llm import custom as custom_providers
 from app.llm.panel import MarkingMode, PanelConfig, parse_marking_mode
 from app.llm.routing import LLMTarget
 from app.pipeline import person_presets
+from app.pipeline import region_focus
 from app.repositories.app_settings_repository import (
     LLM_FALLBACKS_KEY,
     LLM_MARKING_MODE_KEY,
@@ -65,6 +66,10 @@ async def get_segmentation_presets() -> dict[str, object]:
             "minBoxHeightRatio": list(person_presets.MIN_BOX_HEIGHT_RATIO_RANGE),
             "minSessionSeconds": list(person_presets.MIN_SESSION_SECONDS_RANGE),
         },
+        # Independent of the preset above (which side(s) of the frame count at
+        # all, rather than how many people). Same one-source-of-truth contract:
+        # the upload screen renders its checkboxes/sliders from this.
+        "regionFocus": region_focus.describe_defaults(),
     }
 
 

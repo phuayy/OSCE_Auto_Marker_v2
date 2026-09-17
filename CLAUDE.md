@@ -344,6 +344,26 @@ and the name on `session.segmentationOptions`. The job passes the numbers to the
 subprocess as explicit flags, so a retuned table can never silently re-cut a
 session that was queued under the old one.
 
+**Region focus (horizontal region-of-interest).** Orthogonal to the preset
+table above and stored separately on `session.regionFocusOptions` — the
+preset says how many people must be on screen, region focus says WHERE on
+screen the detector is allowed to look for them. Two independently
+switchable zones, `[0, leftRatio * width]` and `[(1 - rightRatio) * width,
+width]`; a detection counts if its box centre falls in an enabled zone. Fixes
+the camera angle the height gate cannot: a third party (a second examiner, a
+doorway) standing full-height at one edge of the shot clears the height gate
+and would otherwise be counted as an occupant — unchecking that side and
+narrowing the other (e.g. left only, 60%) excludes it by position instead.
+Defaults to both zones at 100% (the whole frame, i.e. no filtering — the
+pre-feature behaviour). At least one zone must stay enabled: the API
+(`region_focus.resolve(..., strict=True)`) rejects a request with both
+disabled, while a session replayed from before this existed or one carrying
+an unparseable value degrades leniently to the full frame, the same rule
+`person_presets` uses for an unknown preset id. See
+[region_focus.py](fastapi_backend/app/pipeline/region_focus.py); the same
+resolved numbers travel to `scripts/detect_human_segments.py` as explicit
+`--region-*` flags, never as a name the subprocess would have to re-resolve.
+
 1. Segmentation (`auto_crop` job): bell detector (`scripts/detect_bell_segments.py`) or
    person detector (RT-DETR) proposes ranges. `build_clip_drafts_from_ranges`
    records them; no ffmpeg runs. Session status -> `cropped`.
@@ -1031,6 +1051,8 @@ recording; its Student column the scored subject.
 | `HUMAN_SEGMENTS_MIN_SESSION_SECONDS` | preset | Discard confirmed sessions shorter than this; 0 = off. Overrides the preset |
 | `HUMAN_SEGMENTS_MIN_PEOPLE` | preset | People required on screen for a station to be active. Overrides the preset |
 | `HUMAN_SEGMENTS_CONFIDENCE` | `0.7` | RT-DETR score threshold. Not the knob for edge limbs — use the height ratio |
+| `HUMAN_SEGMENTS_REGION_LEFT_ENABLED` / `HUMAN_SEGMENTS_REGION_RIGHT_ENABLED` | `true` / `true` | Which horizontal zone(s) of the frame count at all — independent of the occupancy preset above. Standalone-CLI default only; the pipeline always passes an explicit resolved value (see `app/pipeline/region_focus.py`) |
+| `HUMAN_SEGMENTS_REGION_LEFT_RATIO` / `HUMAN_SEGMENTS_REGION_RIGHT_RATIO` | `1.0` / `1.0` | Fraction of frame width, measured from that edge inward, that counts as the enabled zone |
 | `PARALLEL_SCORING` | `true` | Run content branch parallel to communication branch |
 | `GPU_SLOTS` | `1` | Jobs that may hold the accelerator at once (transcription, person detection). 0 = unbounded. Per process |
 | `JOB_QUEUE_BACKEND` | `local` | `local` or `hatchet` |

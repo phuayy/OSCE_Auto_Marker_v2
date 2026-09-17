@@ -57,6 +57,13 @@ import { indexClipAssessments } from '@/lib/clipAssessments';
 import { describeRerunAction } from '@/lib/rerunAction';
 import { describeStartAction } from '@/lib/sessionStartAction';
 import {
+  buildRegionFocusOptions,
+  clampRegionRatio,
+  defaultRegionFocus,
+  describeRegionFocus,
+  toggleRegionSide,
+} from '@/lib/regionFocus';
+import {
   INTERMISSION_KIND,
   MIN_BOUNDARY_GAP_SECONDS,
   ensureKinds,
@@ -138,6 +145,11 @@ export default function OSCEAiMarkerMockup({
     minBoxHeightRatio: 0.4,
     minSessionSeconds: 120,
   });
+  // Horizontal region-of-interest: which side(s) of the frame the detector
+  // looks in, independent of the occupancy rule above. Defaults to the whole
+  // frame (no filtering) until the operator narrows it — the fix for a camera
+  // angle where a third party is half cut off at one edge of the shot.
+  const [regionFocus, setRegionFocus] = useState(defaultRegionFocus());
   // User-chosen name for the session about to be created, and the pre-flight
   // confirmation overlay shown before processing starts.
   const [sessionNameInput, setSessionNameInput] = useState('');
@@ -783,6 +795,11 @@ export default function OSCEAiMarkerMockup({
           presets.some((preset) => preset.id === previous) ? previous : body.defaultPreset
         );
       }
+      // Region focus is a separate block on the same response (preset-
+      // independent), so retuning its bounds is also a backend-only change.
+      if (body.regionFocus?.defaults) {
+        setRegionFocus(body.regionFocus.defaults);
+      }
     } catch (presetLoadError) {
       // Non-fatal: with no catalogue the picker is hidden and the backend
       // applies its own default preset, which is the pre-preset behaviour.
@@ -805,6 +822,16 @@ export default function OSCEAiMarkerMockup({
       minBoxHeightRatio: Number(customOccupancy.minBoxHeightRatio),
       minSessionSeconds: Number(customOccupancy.minSessionSeconds),
     };
+  }
+
+  // The region-of-interest object sent with an upload — null unless human
+  // detection is the chosen method, same gating as buildSegmentationOptions
+  // but a separate, preset-independent field.
+  function buildRegionFocusOptionsForUpload() {
+    return buildRegionFocusOptions(regionFocus, {
+      workflow: uploadFlow,
+      segmentationMethod,
+    });
   }
 
   async function refreshCorpora() {
@@ -1392,6 +1419,7 @@ export default function OSCEAiMarkerMockup({
         sessionName: sessionNameInput.trim() || null,
         segmentation: uploadFlow === Workflow.LONG ? segmentationMethod : null,
         segmentationOptions: buildSegmentationOptions(),
+        regionFocusOptions: buildRegionFocusOptionsForUpload(),
         corpusId: selectedCorpusId || null,
         files: [
           {
@@ -2525,6 +2553,69 @@ export default function OSCEAiMarkerMockup({
                       </div>
                     )}
                     {segmentationMethod === SegmentationMethod.PERSON && (
+                      <div className="mt-3 border-t border-slate-100 pt-3">
+                        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          Where to look in the frame
+                        </div>
+                        <p className="mb-2 text-[11px] text-slate-500">
+                          Restrict detection to one side of the frame when a third party — another
+                          examiner, a doorway — is half cut off at the other edge and would otherwise
+                          get counted as an occupant. Leave both at 100% to use the whole frame.
+                        </p>
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                          {[
+                            { side: 'left', label: 'Left side', enabledKey: 'leftEnabled', ratioKey: 'leftRatio' },
+                            { side: 'right', label: 'Right side', enabledKey: 'rightEnabled', ratioKey: 'rightRatio' },
+                          ].map(({ side, label, enabledKey, ratioKey }) => (
+                            <div
+                              key={side}
+                              className={`rounded-lg border p-2.5 transition ${
+                                regionFocus[enabledKey]
+                                  ? 'border-violet-200 bg-violet-50/50'
+                                  : 'border-slate-200 bg-white'
+                              }`}
+                            >
+                              <label className="flex items-center gap-2 text-sm font-medium text-slate-800">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(regionFocus[enabledKey])}
+                                  onChange={() => setRegionFocus((previous) => toggleRegionSide(previous, side))}
+                                  className="h-4 w-4 rounded border-slate-300 text-violet-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+                                />
+                                {label}
+                              </label>
+                              <label className="mt-2 block">
+                                <span className="block text-[11px] text-slate-500">
+                                  Width of frame counted, measured from the {side} edge
+                                </span>
+                                <div className="mt-1 flex items-center gap-1">
+                                  <input
+                                    type="number"
+                                    min={5}
+                                    max={100}
+                                    step={5}
+                                    disabled={!regionFocus[enabledKey]}
+                                    value={Math.round(clampRegionRatio(regionFocus[ratioKey]) * 100)}
+                                    onChange={(event) =>
+                                      setRegionFocus((previous) => ({
+                                        ...previous,
+                                        [ratioKey]: Number(event.target.value) / 100,
+                                      }))
+                                    }
+                                    className="w-20 rounded-md border border-slate-300 px-2 py-1 text-sm disabled:bg-slate-100 disabled:text-slate-400"
+                                  />
+                                  <span className="text-xs text-slate-500">%</span>
+                                </div>
+                              </label>
+                            </div>
+                          ))}
+                        </div>
+                        <p className="mt-2 text-[11px] text-slate-500">
+                          At least one side must stay on — the last enabled checkbox cannot be turned off.
+                        </p>
+                      </div>
+                    )}
+                    {segmentationMethod === SegmentationMethod.PERSON && (
                       <p className="mt-2 text-[11px] text-slate-500">
                         Falls back to bell detection automatically if the vision model is unavailable on the worker.
                       </p>
@@ -2957,6 +3048,11 @@ export default function OSCEAiMarkerMockup({
                                   + `${customOccupancy.minBoxHeightRatio}, min ${customOccupancy.minSessionSeconds}s`
                                 : segmentationPresets.find((preset) => preset.id === segmentationPreset)?.label
                                   || segmentationPreset}
+                            </div>
+                          )}
+                          {segmentationMethod === SegmentationMethod.PERSON && describeRegionFocus(regionFocus) && (
+                            <div className="text-xs text-slate-500">
+                              Region focus: {describeRegionFocus(regionFocus)}
                             </div>
                           )}
                         </div>

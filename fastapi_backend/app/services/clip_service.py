@@ -32,6 +32,7 @@ from app.domain.sessions import (
     session_video_path,
 )
 from app.pipeline import person_presets
+from app.pipeline import region_focus
 from app.pipeline.media import MediaPipeline
 from app.services.event_service import EventService
 from app.services.pipeline_service import PipelineService
@@ -143,6 +144,18 @@ class ClipService:
         """
         stored = session.get("segmentationOptions")
         return person_presets.resolve_options(stored if isinstance(stored, dict) else None)
+
+    @staticmethod
+    def _resolve_region_focus_options(session: dict[str, Any]) -> dict[str, Any]:
+        """Horizontal region-of-interest for this session's person detection.
+
+        Same leniency as ``_resolve_person_options`` and for the same reason:
+        by job time the only safe answer to a config this build cannot parse
+        (or one written before this feature existed) is the full-frame
+        default, not a failed run.
+        """
+        stored = session.get("regionFocusOptions")
+        return region_focus.resolve_options(stored if isinstance(stored, dict) else None)
 
     async def auto_crop_session_by_id(self, session_id: str, *, allow_processing: bool = False) -> dict[str, Any]:
         session = await self.sessions.read(session_id)
@@ -286,16 +299,29 @@ class ClipService:
         session_id = str(session.get("id") or "")
         if method == SegmentationMethod.PERSON:
             options = self._resolve_person_options(session)
+            region_options = self._resolve_region_focus_options(session)
+            message = (
+                "Sampling frames and detecting people (RT-DETR), occupancy rule "
+                f"'{options['preset']}': at least {options['minPeople']} person(s) on screen."
+            )
+            # Only worth a line when it changes anything — the default (both
+            # zones, full width) is silent so the common case stays quiet.
+            if not region_focus.RegionFocusConfig(
+                left_enabled=region_options["leftEnabled"],
+                right_enabled=region_options["rightEnabled"],
+                left_ratio=region_options["leftRatio"],
+                right_ratio=region_options["rightRatio"],
+            ).is_full_frame:
+                zones = []
+                if region_options["leftEnabled"]:
+                    zones.append(f"left {region_options['leftRatio']:.0%}")
+                if region_options["rightEnabled"]:
+                    zones.append(f"right {region_options['rightRatio']:.0%}")
+                message += f" Region focus: {', '.join(zones)}."
             await self.events.publish(
                 session_id,
                 "log",
-                {
-                    "source": "autocrop",
-                    "message": (
-                        "Sampling frames and detecting people (RT-DETR), occupancy rule "
-                        f"'{options['preset']}': at least {options['minPeople']} person(s) on screen."
-                    ),
-                },
+                {"source": "autocrop", "message": message},
             )
             # Readings arrive from the subprocess reader threads; the lock makes
             # the session document a single-writer resource for their duration.
@@ -306,6 +332,7 @@ class ClipService:
                     video_duration,
                     session_id=session_id,
                     options=options,
+                    region_options=region_options,
                     on_progress=lambda percent: self._record_segmentation_progress(
                         session, PERSON_DETECTION_STEP, percent, lock=progress_lock
                     ),

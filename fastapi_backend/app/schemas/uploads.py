@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.domain.enums import SegmentationMethod, UploadFileKind, Workflow
 from app.pipeline import person_presets
+from app.pipeline import region_focus
 
 UploadWorkflow = Workflow
 
@@ -64,6 +65,40 @@ class PersonSegmentationOptions(BaseModel):
     def resolved(self) -> dict[str, object]:
         """Concrete numbers to persist on the session and hand to the detector."""
         return person_presets.resolve_options(self.model_dump(), strict=True)
+
+
+class RegionFocusOptions(BaseModel):
+    """Horizontal region-of-interest for the person detector, chosen per upload.
+
+    Independent of the occupancy preset above: a camera rig can frame a third
+    party (another examiner, a doorway) at one edge of the shot close enough
+    to pass the occupancy rule's own height gate. Restricting detection to the
+    side of the frame the intended subjects occupy is the fix for that, and it
+    applies underneath whichever preset was chosen.
+    """
+
+    leftEnabled: bool = region_focus.DEFAULT_LEFT_ENABLED
+    rightEnabled: bool = region_focus.DEFAULT_RIGHT_ENABLED
+    leftRatio: float = Field(
+        default=region_focus.DEFAULT_LEFT_RATIO,
+        ge=region_focus.RATIO_RANGE[0],
+        le=region_focus.RATIO_RANGE[1],
+    )
+    rightRatio: float = Field(
+        default=region_focus.DEFAULT_RIGHT_RATIO,
+        ge=region_focus.RATIO_RANGE[0],
+        le=region_focus.RATIO_RANGE[1],
+    )
+
+    @model_validator(mode="after")
+    def at_least_one_zone_enabled(self) -> "RegionFocusOptions":
+        if not self.leftEnabled and not self.rightEnabled:
+            raise ValueError("At least one of leftEnabled/rightEnabled must be true.")
+        return self
+
+    def resolved(self) -> dict[str, object]:
+        """Concrete numbers to persist on the session and hand to the detector."""
+        return region_focus.resolve_options(self.model_dump(), strict=True)
 
 
 def coerce_segmentation_options(value: Any) -> Any:
@@ -137,6 +172,9 @@ class UploadMetadataMixin(BaseModel):
     # Person-segmentation only: the occupancy rule for this camera angle.
     # None = the detector's own default preset.
     segmentationOptions: PersonSegmentationOptions | None = None
+    # Person-segmentation only: which horizontal zone(s) of the frame to
+    # detect in. None = the detector's own default (the whole frame).
+    regionFocusOptions: RegionFocusOptions | None = None
     # Optional transcription-corpus id whose terms bias WhisperX for the whole
     # session (and every clip child). None/""/"none" = plain transcription.
     corpusId: str | None = None
@@ -181,14 +219,21 @@ class UploadMetadataMixin(BaseModel):
     def parse_segmentation_options(cls, value: Any) -> Any:
         return coerce_segmentation_options(value)
 
+    @field_validator("regionFocusOptions", mode="before")
+    @classmethod
+    def parse_region_focus_options(cls, value: Any) -> Any:
+        return coerce_segmentation_options(value)
+
     @model_validator(mode="after")
     def segmentation_only_for_long_workflow(self) -> "UploadMetadataMixin":
         if self.workflow != Workflow.LONG:
             self.segmentation = None
-        # The occupancy rule only means anything to the person detector. Kept
-        # when no method was chosen: the server default may itself be "person".
+        # The occupancy rule and the region focus only mean anything to the
+        # person detector. Kept when no method was chosen: the server default
+        # may itself be "person".
         if self.segmentation == SegmentationMethod.BELLS or self.workflow != Workflow.LONG:
             self.segmentationOptions = None
+            self.regionFocusOptions = None
         return self
 
     def resolved_segmentation_options(self) -> dict[str, object] | None:
@@ -201,6 +246,17 @@ class UploadMetadataMixin(BaseModel):
         if self.segmentationOptions is None:
             return None
         return self.segmentationOptions.resolved()
+
+    def resolved_region_focus_options(self) -> dict[str, object] | None:
+        """Numbers to persist on the session, or None when they do not apply.
+
+        Same rationale as ``resolved_segmentation_options``: resolved once at
+        upload time so the session records what was chosen, not whatever the
+        default happens to be whenever the job eventually runs.
+        """
+        if self.regionFocusOptions is None:
+            return None
+        return self.regionFocusOptions.resolved()
 
 
 class InitiateUploadRequest(UploadMetadataMixin):

@@ -130,6 +130,9 @@ class AsyncUploadService:
             # Resolved occupancy rule for the person detector (preset name plus
             # the numbers it meant at upload time), or None to use its default.
             "segmentationOptions": payload.resolved_segmentation_options(),
+            # Resolved horizontal region-of-interest for the person detector
+            # (preset-independent), or None to use the whole frame.
+            "regionFocusOptions": payload.resolved_region_focus_options(),
             # Snapshot of the chosen transcription corpus (or None); inherited
             # by clip children so one pick covers every clip in the session.
             "corpus": corpus_snapshot,

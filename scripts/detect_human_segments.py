@@ -17,6 +17,13 @@ sustained changes in person count:
   operator actually picks from (pair / pair_strict / solo / custom); see
   ``fastapi_backend/app/pipeline/person_presets.py`` for the measurements
   behind each. Explicit flags override whatever the preset chose.
+* ``--region-left-enabled`` / ``--region-right-enabled`` /
+  ``--region-left-ratio`` / ``--region-right-ratio`` restrict detection to a
+  horizontal zone of the frame, independent of the preset above. A person
+  standing full-height at the excluded edge — a second examiner, a doorway —
+  passes the height gate and would otherwise be counted; this filters by
+  WHERE the box stands, not what shape it is. See
+  ``fastapi_backend/app/pipeline/region_focus.py``.
 * Boundaries are confirmed with a tolerant **N-of-M window** (the standard
   debounce for noisy boolean sensors): a session STARTS at the first sample
   that crossed the threshold once a full ``--start-after-seconds`` window
@@ -135,6 +142,13 @@ def _optional_float_env(name: str) -> float | None:
         return None
 
 
+def read_bool_env(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
 def log(message: str) -> None:
     """Progress/diagnostic line. stderr only — stdout is reserved for the JSON
     contract (CommandRunner streams stderr into the live SSE log)."""
@@ -151,6 +165,7 @@ _BACKEND_ROOT = Path(__file__).resolve().parent.parent / "fastapi_backend"
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 from app.pipeline import person_presets  # noqa: E402
+from app.pipeline import region_focus  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -209,6 +224,13 @@ class DetectorConfig:
     # person. 0 disables the gate (historic behaviour). See person_presets for
     # the measured separation between real people and intruding limbs.
     min_box_height_ratio: float = 0.0
+    # Horizontal region-of-interest: which side(s) of the frame count at all.
+    # Defaults cover the whole frame (see region_focus.FULL_FRAME) — a rig that
+    # never touches this setting sees no behaviour change.
+    region_left_enabled: bool = region_focus.DEFAULT_LEFT_ENABLED
+    region_right_enabled: bool = region_focus.DEFAULT_RIGHT_ENABLED
+    region_left_ratio: float = region_focus.DEFAULT_LEFT_RATIO
+    region_right_ratio: float = region_focus.DEFAULT_RIGHT_RATIO
 
 
 @dataclass
@@ -228,6 +250,10 @@ class DetectionStats:
     # Surfaced in the payload so a mis-tuned gate is diagnosable from one run
     # instead of guessed at.
     rejected_small_boxes: int = 0
+    # Detections outside the enabled region-of-interest zone(s) — a third
+    # party at the excluded edge of frame, filtered before the height gate
+    # ever sees it.
+    rejected_out_of_region: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +452,42 @@ def count_valid_people(
     return kept, len(boxes) - kept
 
 
+def boxes_in_region(
+    boxes: list[tuple[float, float, float, float]],
+    frame_width: float,
+    *,
+    left_enabled: bool,
+    right_enabled: bool,
+    left_ratio: float,
+    right_ratio: float,
+) -> tuple[list[tuple[float, float, float, float]], int]:
+    """Keep only boxes whose centre falls inside an enabled horizontal zone.
+
+    Pure and independent of the height gate — this rejects a detection for
+    WHERE it stands (a person real enough to pass every other check, but on
+    the side of the frame the operator excluded), never for its shape.
+    Returns ``(kept_boxes, rejected_count)``. Both zones enabled at ratio 1.0
+    keeps everything, so a caller that never sets this pays no cost in
+    behaviour (only in cheap arithmetic).
+    """
+    if frame_width <= 0 or (left_enabled and right_enabled and left_ratio >= 1.0 and right_ratio >= 1.0):
+        return list(boxes), 0
+    left_bound = left_ratio * frame_width
+    right_bound = (1.0 - right_ratio) * frame_width
+    kept: list[tuple[float, float, float, float]] = []
+    rejected = 0
+    for box in boxes:
+        x0, _y0, x1, _y1 = box
+        center_x = (x0 + x1) / 2.0
+        in_left = left_enabled and center_x <= left_bound
+        in_right = right_enabled and center_x >= right_bound
+        if in_left or in_right:
+            kept.append(box)
+        else:
+            rejected += 1
+    return kept, rejected
+
+
 class PersonCounter:
     """Batched people-counter around an RT-DETR checkpoint.
 
@@ -568,13 +630,26 @@ class PersonCounter:
         counts: list[int] = []
         for frame, result in zip(frames, results):
             frame_height = float(frame.shape[0])
+            frame_width = float(frame.shape[1])
             person_boxes = [
                 tuple(box)
                 for label, box in zip(result["labels"].tolist(), result["boxes"].tolist())
                 if int(label) in self.person_label_ids
             ]
+            # Region-of-interest first (where the box stands), then the height
+            # gate (what shape it is) — the two filters are independent, but
+            # narrowing the candidate list first is the cheaper order.
+            in_region_boxes, region_rejected = boxes_in_region(
+                person_boxes,
+                frame_width,
+                left_enabled=self.config.region_left_enabled,
+                right_enabled=self.config.region_right_enabled,
+                left_ratio=self.config.region_left_ratio,
+                right_ratio=self.config.region_right_ratio,
+            )
+            stats.rejected_out_of_region += region_rejected
             kept, rejected = count_valid_people(
-                person_boxes, frame_height, self.config.min_box_height_ratio
+                in_region_boxes, frame_height, self.config.min_box_height_ratio
             )
             stats.rejected_small_boxes += rejected
             counts.append(kept)
@@ -830,6 +905,10 @@ def run_chunk(task: dict) -> dict:
         batch_size=task["batch_size"],
         decode_width=task["decode_width"],
         min_box_height_ratio=task["min_box_height_ratio"],
+        region_left_enabled=task["region_left_enabled"],
+        region_right_enabled=task["region_right_enabled"],
+        region_left_ratio=task["region_left_ratio"],
+        region_right_ratio=task["region_right_ratio"],
     )
     stats = DetectionStats(effective_batch_size=detector_config.batch_size)
     counter = PersonCounter(detector_config)
@@ -883,6 +962,7 @@ def run_chunk(task: dict) -> dict:
         "inference_seconds": inference_seconds,
         "oom_batch_reductions": stats.oom_batch_reductions,
         "rejected_small_boxes": stats.rejected_small_boxes,
+        "rejected_out_of_region": stats.rejected_out_of_region,
         "cpu_fallback": stats.cpu_fallback,
         "device": counter.device,
         "model": counter.resolved_model_id,
@@ -933,6 +1013,10 @@ def detect_counts_parallel(
             "batch_size": detector_config.batch_size,
             "decode_width": detector_config.decode_width,
             "min_box_height_ratio": detector_config.min_box_height_ratio,
+            "region_left_enabled": detector_config.region_left_enabled,
+            "region_right_enabled": detector_config.region_right_enabled,
+            "region_left_ratio": detector_config.region_left_ratio,
+            "region_right_ratio": detector_config.region_right_ratio,
         }
         for i, (span_start, span_end) in enumerate(spans)
     ]
@@ -956,6 +1040,7 @@ def detect_counts_parallel(
         stats.inference_seconds += result["inference_seconds"]
         stats.oom_batch_reductions += result["oom_batch_reductions"]
         stats.rejected_small_boxes += int(result.get("rejected_small_boxes") or 0)
+        stats.rejected_out_of_region += int(result.get("rejected_out_of_region") or 0)
         stats.cpu_fallback = stats.cpu_fallback or result["cpu_fallback"]
 
     device = ", ".join(sorted({r["device"] for r in results}))
@@ -1099,6 +1184,50 @@ def self_check() -> None:
     assert person_presets.resolve("pair").min_box_height_ratio == 0.0
     assert person_presets.resolve("nonsense").id == person_presets.DEFAULT_PRESET
 
+    # Region focus: default (both zones, ratio 1.0) keeps everything.
+    body_left = (0.05, 0.2, 0.15, 0.8)  # centre x = 0.10
+    body_right = (0.85, 0.2, 0.95, 0.8)  # centre x = 0.90
+    full_frame = region_focus.FULL_FRAME
+    kept, rejected = boxes_in_region(
+        [body_left, body_right],
+        1.0,
+        left_enabled=full_frame.left_enabled,
+        right_enabled=full_frame.right_enabled,
+        left_ratio=full_frame.left_ratio,
+        right_ratio=full_frame.right_ratio,
+    )
+    assert kept == [body_left, body_right] and rejected == 0
+
+    # Left-only at 0.6: the left-hand box survives, the right-hand one (centre
+    # 0.90, outside [0, 0.6]) is rejected — the "patient cut off on the right"
+    # scenario from the feature request.
+    kept, rejected = boxes_in_region(
+        [body_left, body_right], 1.0, left_enabled=True, right_enabled=False, left_ratio=0.6, right_ratio=1.0
+    )
+    assert kept == [body_left] and rejected == 1
+
+    # Right-only at 0.2: only a box centred within the rightmost 20% survives.
+    edge_right = (0.85, 0.2, 0.95, 0.8)  # centre x = 0.90, inside [0.8, 1.0]
+    kept, rejected = boxes_in_region(
+        [body_left, edge_right], 1.0, left_enabled=False, right_enabled=True, left_ratio=1.0, right_ratio=0.2
+    )
+    assert kept == [edge_right] and rejected == 1
+
+    # Both zones disabled is nonsense on the API boundary (strict) and a
+    # lenient degrade to the full frame everywhere else (a replayed session).
+    try:
+        region_focus.resolve({"leftEnabled": False, "rightEnabled": False}, strict=True)
+        raise AssertionError("expected RegionFocusError")
+    except region_focus.RegionFocusError:
+        pass
+    degraded = region_focus.resolve({"leftEnabled": False, "rightEnabled": False})
+    assert degraded.left_enabled and degraded.right_enabled
+
+    # Ratios clamp into range rather than rejecting an out-of-bounds request.
+    clamped = region_focus.resolve({"leftRatio": 5.0, "rightRatio": -1.0})
+    assert clamped.left_ratio == region_focus.RATIO_RANGE[1]
+    assert clamped.right_ratio == region_focus.RATIO_RANGE[0]
+
     print("self-check OK")
 
 
@@ -1172,6 +1301,40 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Discard confirmed sessions shorter than this (preset default; 0 disables)",
+    )
+    # Region-of-interest: which side(s) of the frame the detector counts
+    # people in. None means "not given on the CLI" so the caller's explicit
+    # flag can win over the environment default, same trick as the three
+    # preset-backed knobs above.
+    parser.add_argument(
+        "--region-left-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Count people in the left zone (default: enabled, or HUMAN_SEGMENTS_REGION_LEFT_ENABLED)",
+    )
+    parser.add_argument(
+        "--region-right-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Count people in the right zone (default: enabled, or HUMAN_SEGMENTS_REGION_RIGHT_ENABLED)",
+    )
+    parser.add_argument(
+        "--region-left-ratio",
+        type=float,
+        default=None,
+        help=(
+            "Fraction of frame width, measured from the left edge, that counts as "
+            "the left zone when it is enabled (default 1.0, or HUMAN_SEGMENTS_REGION_LEFT_RATIO)"
+        ),
+    )
+    parser.add_argument(
+        "--region-right-ratio",
+        type=float,
+        default=None,
+        help=(
+            "Fraction of frame width, measured from the right edge, that counts as "
+            "the right zone when it is enabled (default 1.0, or HUMAN_SEGMENTS_REGION_RIGHT_RATIO)"
+        ),
     )
     parser.add_argument(
         "--start-after-seconds",
@@ -1297,6 +1460,39 @@ def main() -> int:
         f"min_session_seconds={preset.min_session_seconds:g}."
     )
 
+    region = region_focus.resolve(
+        {
+            "leftEnabled": (
+                args.region_left_enabled
+                if args.region_left_enabled is not None
+                else read_bool_env("HUMAN_SEGMENTS_REGION_LEFT_ENABLED", region_focus.DEFAULT_LEFT_ENABLED)
+            ),
+            "rightEnabled": (
+                args.region_right_enabled
+                if args.region_right_enabled is not None
+                else read_bool_env("HUMAN_SEGMENTS_REGION_RIGHT_ENABLED", region_focus.DEFAULT_RIGHT_ENABLED)
+            ),
+            "leftRatio": (
+                args.region_left_ratio
+                if args.region_left_ratio is not None
+                else read_float_env("HUMAN_SEGMENTS_REGION_LEFT_RATIO", region_focus.DEFAULT_LEFT_RATIO)
+            ),
+            "rightRatio": (
+                args.region_right_ratio
+                if args.region_right_ratio is not None
+                else read_float_env("HUMAN_SEGMENTS_REGION_RIGHT_RATIO", region_focus.DEFAULT_RIGHT_RATIO)
+            ),
+        }
+    )
+    if region.is_full_frame:
+        log("Region focus: whole frame (no zone restriction).")
+    else:
+        log(
+            f"Region focus: left={'on' if region.left_enabled else 'off'}"
+            f"({region.left_ratio:g}) right={'on' if region.right_enabled else 'off'}"
+            f"({region.right_ratio:g})."
+        )
+
     segmenter_config = SegmenterConfig(
         sample_fps=max(0.1, float(args.sample_fps)),
         min_people=preset.min_people,
@@ -1315,6 +1511,10 @@ def main() -> int:
         batch_size=max(1, int(args.batch_size)),
         decode_width=max(160, int(args.decode_width)),
         min_box_height_ratio=preset.min_box_height_ratio,
+        region_left_enabled=region.left_enabled,
+        region_right_enabled=region.right_enabled,
+        region_left_ratio=region.left_ratio,
+        region_right_ratio=region.right_ratio,
     )
     workers = max(1, int(args.workers))
 
@@ -1427,6 +1627,10 @@ def main() -> int:
         "min_people": segmenter_config.min_people,
         "min_box_height_ratio": detector_config.min_box_height_ratio,
         "min_session_seconds": segmenter_config.min_session_seconds,
+        "region_left_enabled": region.left_enabled,
+        "region_right_enabled": region.right_enabled,
+        "region_left_ratio": region.left_ratio,
+        "region_right_ratio": region.right_ratio,
         "start_after_seconds": segmenter_config.start_after_seconds,
         "end_after_seconds": segmenter_config.end_after_seconds,
         "flicker_tolerance_seconds": segmenter_config.flicker_tolerance_seconds,
@@ -1445,6 +1649,7 @@ def main() -> int:
             "workers": stats.workers,
             "padded_samples": stats.padded_samples,
             "rejected_small_boxes": stats.rejected_small_boxes,
+            "rejected_out_of_region": stats.rejected_out_of_region,
             "oom_batch_reductions": stats.oom_batch_reductions,
             "cpu_fallback": stats.cpu_fallback,
             "decode_resolution": f"{out_width}x{out_height}",

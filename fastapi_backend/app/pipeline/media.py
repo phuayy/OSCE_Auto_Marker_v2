@@ -16,6 +16,7 @@ from app.core.process import CommandRunner
 from app.core.resources import ResourceLease
 from app.core.utils import atomic_replace, clamp_number, format_timestamp, utc_now_iso
 from app.pipeline import person_presets
+from app.pipeline import region_focus
 from app.pipeline.progress_tracker import ProgressTracker
 from app.pipeline.whisperx_options import WhisperxRunOptions
 from app.services.auth_service import AuthService
@@ -523,6 +524,7 @@ class MediaPipeline:
         session_id: str | None = None,
         on_progress: ProgressCallback | None = None,
         options: dict[str, Any] | None = None,
+        region_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Detect student clip ranges from person presence (RT-DETR).
 
@@ -542,6 +544,10 @@ class MediaPipeline:
         rather than as a preset name so the subprocess cannot resolve the same
         session differently from the caller that queued it; the name travels
         too, purely so the run's log and payload say which rule was picked.
+
+        ``region_options`` is the resolved horizontal region-of-interest (see
+        ``app/pipeline/region_focus.py``) — same rationale, explicit numbers
+        rather than a name the subprocess would have to re-resolve.
         """
         if not self.settings.enable_human_detector:
             raise RuntimeError("Human detector is disabled (ENABLE_HUMAN_DETECTOR=false).")
@@ -574,6 +580,16 @@ class MediaPipeline:
             str(resolved_options["minBoxHeightRatio"]),
             "--min-session-seconds",
             str(resolved_options["minSessionSeconds"]),
+        ]
+
+        resolved_region = region_focus.resolve_options(region_options)
+        args += [
+            "--region-left-enabled" if resolved_region["leftEnabled"] else "--no-region-left-enabled",
+            "--region-right-enabled" if resolved_region["rightEnabled"] else "--no-region-right-enabled",
+            "--region-left-ratio",
+            str(resolved_region["leftRatio"]),
+            "--region-right-ratio",
+            str(resolved_region["rightRatio"]),
         ]
 
         # The detector counts once, straight through, so a single span — unlike
@@ -654,6 +670,14 @@ class MediaPipeline:
                 "minBoxHeightRatio": payload.get("min_box_height_ratio"),
                 "minSessionSeconds": payload.get("min_session_seconds"),
                 "rejectedSmallBoxes": int(debug.get("rejected_small_boxes") or 0),
+                # The region-of-interest the detector actually ran with, read
+                # back from its own payload for the same reason as the
+                # occupancy numbers above.
+                "regionLeftEnabled": bool(payload.get("region_left_enabled", resolved_region["leftEnabled"])),
+                "regionRightEnabled": bool(payload.get("region_right_enabled", resolved_region["rightEnabled"])),
+                "regionLeftRatio": payload.get("region_left_ratio", resolved_region["leftRatio"]),
+                "regionRightRatio": payload.get("region_right_ratio", resolved_region["rightRatio"]),
+                "rejectedOutOfRegion": int(debug.get("rejected_out_of_region") or 0),
                 "endAfterSeconds": payload.get("end_after_seconds"),
                 "startAfterSeconds": payload.get("start_after_seconds"),
                 "personCountHistogram": payload.get("person_count_histogram") or {},

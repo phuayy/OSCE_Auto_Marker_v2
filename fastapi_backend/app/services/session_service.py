@@ -325,6 +325,10 @@ class SessionService:
             # payload fields must be whitelisted here or the browser never sees
             # them (see the videoClips "kind" lesson).
             "segmentationOptions": session.get("segmentationOptions") or None,
+            # Region-of-interest the person detector ran (or will run) with.
+            # New payload fields must be whitelisted here or the browser
+            # never sees them (see the videoClips "kind" lesson).
+            "regionFocusOptions": session.get("regionFocusOptions") or None,
             "pipeline": session.get("pipeline"),
             "parentSessionId": session.get("parentSessionId"),
             "clipSource": session.get("clipSource"),

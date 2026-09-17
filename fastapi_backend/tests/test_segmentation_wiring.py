@@ -67,8 +67,11 @@ class FakeMedia:
         session_id: str | None = None,
         on_progress: Any | None = None,
         options: dict[str, Any] | None = None,
+        region_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        self.person_calls.append({"path": source_path, "sessionId": session_id, "options": options})
+        self.person_calls.append(
+            {"path": source_path, "sessionId": session_id, "options": options, "regionOptions": region_options}
+        )
         for percent in self.person_progress:
             if on_progress is not None:
                 await on_progress(percent)
@@ -134,6 +137,7 @@ def build_long_session(
     tmp_path: Path,
     segmentation: str | None,
     segmentation_options: dict[str, Any] | None = None,
+    region_focus_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     video_path = tmp_path / "long.mp4"
     video_path.write_bytes(b"video")
@@ -144,6 +148,7 @@ def build_long_session(
         "workflow": "long",
         "segmentation": segmentation,
         "segmentationOptions": segmentation_options,
+        "regionFocusOptions": region_focus_options,
         "files": {"video": {"absolutePath": str(video_path)}},
         "outputs": {},
         "error": None,
@@ -157,10 +162,13 @@ def build_clip_service(
     person_error: Exception | None = None,
     person_progress: tuple[float, ...] = (),
     segmentation_options: dict[str, Any] | None = None,
+    region_focus_options: dict[str, Any] | None = None,
 ):
     settings = build_settings(tmp_path)
     media = FakeMedia(settings, person_error=person_error, person_progress=person_progress)
-    sessions = FakeSessions(build_long_session(tmp_path, segmentation, segmentation_options))
+    sessions = FakeSessions(
+        build_long_session(tmp_path, segmentation, segmentation_options, region_focus_options)
+    )
     events = FakeEvents()
     service = ClipService(sessions=sessions, events=events, media=media, pipeline=None, jobs=None)
     return service, media, sessions, events
@@ -242,6 +250,62 @@ def test_auto_crop_falls_back_to_the_default_preset(tmp_path) -> None:
     )
     asyncio.run(service.auto_crop_session_by_id("session-long-1"))
     assert media.person_calls[0]["options"]["preset"] == "pair"
+
+
+def test_auto_crop_forwards_the_chosen_region_focus(tmp_path) -> None:
+    """Region focus is preset-independent: it has to reach the detector call
+    alongside the occupancy options, not instead of them."""
+    service, media, _sessions, events = build_clip_service(
+        tmp_path,
+        "person",
+        region_focus_options={
+            "leftEnabled": True,
+            "rightEnabled": False,
+            "leftRatio": 0.6,
+            "rightRatio": 1.0,
+        },
+    )
+    asyncio.run(service.auto_crop_session_by_id("session-long-1"))
+
+    assert media.person_calls[0]["regionOptions"] == {
+        "leftEnabled": True,
+        "rightEnabled": False,
+        "leftRatio": 0.6,
+        "rightRatio": 1.0,
+    }
+    # A non-default region is worth a line in the live log — the operator
+    # excluded half the frame on purpose and should be able to see it took.
+    log_messages = [payload.get("message", "") for _sid, kind, payload in events.items if kind == "log"]
+    assert any("Region focus" in message and "left 60%" in message for message in log_messages)
+
+
+def test_auto_crop_default_region_focus_is_silent(tmp_path) -> None:
+    """The common case (whole frame) must not add a log line every run."""
+    service, _media, _sessions, events = build_clip_service(tmp_path, "person")
+    asyncio.run(service.auto_crop_session_by_id("session-long-1"))
+
+    log_messages = [payload.get("message", "") for _sid, kind, payload in events.items if kind == "log"]
+    assert not any("Region focus" in message for message in log_messages)
+
+
+def test_auto_crop_falls_back_to_full_frame_region(tmp_path) -> None:
+    """A session with no region focus stored (uploaded before the feature
+    existed) or one carrying garbage must still run — full frame, not a crash."""
+    service, media, _sessions, _events = build_clip_service(tmp_path, "person")
+    asyncio.run(service.auto_crop_session_by_id("session-long-1"))
+    assert media.person_calls[0]["regionOptions"] == {
+        "leftEnabled": True,
+        "rightEnabled": True,
+        "leftRatio": 1.0,
+        "rightRatio": 1.0,
+    }
+
+    service, media, _sessions, _events = build_clip_service(
+        tmp_path, "person", region_focus_options={"leftEnabled": False, "rightEnabled": False}
+    )
+    asyncio.run(service.auto_crop_session_by_id("session-long-1"))
+    assert media.person_calls[0]["regionOptions"]["leftEnabled"] is True
+    assert media.person_calls[0]["regionOptions"]["rightEnabled"] is True
 
 
 def test_auto_crop_defaults_to_bell_detector(tmp_path) -> None:
@@ -557,10 +621,71 @@ def test_detector_argv_carries_the_resolved_occupancy_rule(tmp_path) -> None:
     assert result["source"]["rejectedSmallBoxes"] == 42
 
 
+def test_detector_argv_carries_the_resolved_region_focus(tmp_path) -> None:
+    """Same contract as the occupancy rule: explicit numbers on the argv, not a
+    name the subprocess would have to re-resolve on its own."""
+    import json
+    from types import SimpleNamespace
+
+    from app.core.process import CommandResult
+    from app.pipeline.media import MediaPipeline
+
+    recorded: dict[str, Any] = {}
+
+    class ArgvRunner:
+        async def run(self, command: str, args: list[str], label: str, **kwargs: Any) -> CommandResult:
+            recorded["args"] = list(args)
+            return CommandResult(
+                stdout=json.dumps(
+                    {
+                        "clip_ranges": [{"start": 0.0, "end": 60.0}],
+                        "timeline_segments": [],
+                        "region_left_enabled": True,
+                        "region_right_enabled": False,
+                        "region_left_ratio": 0.6,
+                        "region_right_ratio": 1.0,
+                        "debug": {"workers": 1, "rejected_out_of_region": 7},
+                    }
+                ),
+                stderr="",
+            )
+
+    settings = build_settings(tmp_path)
+    script = settings.human_detector_script_path
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("# stand-in", encoding="utf-8")
+    media = MediaPipeline(
+        settings,
+        runner=ArgvRunner(),
+        events=FakeEvents(),
+        auth=SimpleNamespace(runtime=SimpleNamespace(whisperx_hf_token="")),
+    )
+
+    result = asyncio.run(
+        media.detect_person_clip_ranges_with_python(
+            tmp_path / "long.mp4",
+            600.0,
+            region_options={"leftEnabled": True, "rightEnabled": False, "leftRatio": 0.6, "rightRatio": 1.0},
+        )
+    )
+
+    args = recorded["args"]
+    assert "--region-left-enabled" in args
+    assert "--no-region-right-enabled" in args
+    assert args[args.index("--region-left-ratio") + 1] == "0.6"
+    assert args[args.index("--region-right-ratio") + 1] == "1.0"
+
+    assert result["source"]["regionLeftEnabled"] is True
+    assert result["source"]["regionRightEnabled"] is False
+    assert result["source"]["regionLeftRatio"] == 0.6
+    assert result["source"]["rejectedOutOfRegion"] == 7
+
+
 def test_segmentation_presets_endpoint_lists_every_preset(tmp_path) -> None:
     """The upload screen renders its picker from this endpoint, so a preset
     added or retuned in the backend needs no frontend change."""
     from app.pipeline import person_presets
+    from app.pipeline import region_focus
 
     client = build_test_client(tmp_path)
     token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
@@ -577,6 +702,15 @@ def test_segmentation_presets_endpoint_lists_every_preset(tmp_path) -> None:
     # Bounds ship with the catalogue so the custom form validates the same
     # range the API enforces instead of hardcoding a second copy.
     assert body["bounds"]["minPeople"] == [1, 10]
+    # Region focus is a separate, preset-independent block on the same
+    # response — one network round trip for the whole occupancy screen.
+    assert body["regionFocus"]["defaults"] == {
+        "leftEnabled": True,
+        "rightEnabled": True,
+        "leftRatio": 1.0,
+        "rightRatio": 1.0,
+    }
+    assert body["regionFocus"]["bounds"]["ratio"] == list(region_focus.RATIO_RANGE)
 
 
 def test_initiate_persists_resolved_segmentation_options(tmp_path) -> None:
@@ -688,6 +822,98 @@ def test_initiate_ignores_occupancy_options_for_bell_detection(tmp_path) -> None
     )
     assert response.status_code == 201, response.text
     assert response.json()["session"]["segmentationOptions"] is None
+
+
+def test_initiate_persists_resolved_region_focus_options(tmp_path) -> None:
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    response = client.post(
+        "/api/uploads/initiate",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "workflow": "long",
+            "autoProcess": True,
+            "segmentation": "person",
+            "regionFocusOptions": {"leftEnabled": True, "rightEnabled": False, "leftRatio": 0.6},
+            "files": [
+                {"kind": "video", "originalName": "station.mp4", "mimeType": "video/mp4", "sizeBytes": 5},
+                {"kind": "caseStudy", "originalName": "case.pdf", "mimeType": "application/pdf", "sizeBytes": 4},
+            ],
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["session"]["regionFocusOptions"] == {
+        "leftEnabled": True,
+        "rightEnabled": False,
+        "leftRatio": 0.6,
+        "rightRatio": 1.0,
+    }
+
+    stored = asyncio.run(client.app.state.container.sessions.read(response.json()["session"]["id"]))
+    assert stored["regionFocusOptions"]["leftRatio"] == 0.6
+
+
+def test_initiate_rejects_both_region_zones_disabled(tmp_path) -> None:
+    """Disabling both sides would never match a person — reject at the API
+    boundary, the same way an out-of-range occupancy number is rejected."""
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    response = client.post(
+        "/api/uploads/initiate",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "workflow": "long",
+            "autoProcess": True,
+            "segmentation": "person",
+            "regionFocusOptions": {"leftEnabled": False, "rightEnabled": False},
+            "files": [
+                {"kind": "video", "originalName": "station.mp4", "mimeType": "video/mp4", "sizeBytes": 5},
+                {"kind": "caseStudy", "originalName": "case.pdf", "mimeType": "application/pdf", "sizeBytes": 4},
+            ],
+        },
+    )
+    assert response.status_code in {400, 422}, response.text
+
+
+def test_initiate_rejects_out_of_range_region_ratio(tmp_path) -> None:
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    response = client.post(
+        "/api/uploads/initiate",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "workflow": "long",
+            "autoProcess": True,
+            "segmentation": "person",
+            "regionFocusOptions": {"leftRatio": 1.5},
+            "files": [
+                {"kind": "video", "originalName": "station.mp4", "mimeType": "video/mp4", "sizeBytes": 5},
+                {"kind": "caseStudy", "originalName": "case.pdf", "mimeType": "application/pdf", "sizeBytes": 4},
+            ],
+        },
+    )
+    assert response.status_code in {400, 422}, response.text
+
+
+def test_initiate_ignores_region_focus_options_for_bell_detection(tmp_path) -> None:
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    response = client.post(
+        "/api/uploads/initiate",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "workflow": "long",
+            "autoProcess": True,
+            "segmentation": "bells",
+            "regionFocusOptions": {"leftEnabled": True, "rightEnabled": False, "leftRatio": 0.6},
+            "files": [
+                {"kind": "video", "originalName": "station.mp4", "mimeType": "video/mp4", "sizeBytes": 5},
+                {"kind": "caseStudy", "originalName": "case.pdf", "mimeType": "application/pdf", "sizeBytes": 4},
+            ],
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["session"]["regionFocusOptions"] is None
 
 
 def test_initiate_standard_workflow_drops_segmentation(tmp_path) -> None:
