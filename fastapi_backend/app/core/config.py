@@ -234,7 +234,44 @@ class Settings:
     auth_token_ttl_seconds: int = read_int_env("AUTH_TOKEN_TTL_SECONDS", 60 * 60 * 8)
     default_admin_username: str = os.getenv("DEFAULT_ADMIN_USERNAME", "admin")
     default_admin_password: str = os.getenv("DEFAULT_ADMIN_PASSWORD", "")
+    # Optional: gives the bootstrap admin an address so a password reset can
+    # reach it. Without one the admin can still sign in and set an address later.
+    default_admin_email: str = os.getenv("DEFAULT_ADMIN_EMAIL", "").strip().lower()
     auth_bcrypt_rounds: int = read_int_env("AUTH_BCRYPT_ROUNDS", 12)
+
+    # --- accounts and the emailed links that activate them -----------------
+    # Where the links in an invitation or a password-reset email point. Must
+    # be the origin the browser loads the app from (https://osce.example.edu);
+    # the development default is the Vite dev server.
+    app_public_url: str = os.getenv("APP_PUBLIC_URL", "").strip() or "http://localhost:5173"
+    # How long an invitation link may sit unread in an inbox, and how long a
+    # password-reset link may. Days for one, minutes for the other: an
+    # invitation is expected to wait for someone's next working day; a reset
+    # is asked for and used in the same sitting.
+    invite_token_ttl_hours: int = read_int_env("INVITE_TOKEN_TTL_HOURS", 72)
+    password_reset_token_ttl_minutes: int = read_int_env("PASSWORD_RESET_TOKEN_TTL_MINUTES", 30)
+    # Whether the admin screen may show an invitation link to copy. Unset, it
+    # follows the mail backend: shown when nothing can deliver the email
+    # (console), hidden once a relay is configured. "true"/"false" overrides.
+    invite_link_visible_to_admin: str = os.getenv("INVITE_LINK_VISIBLE_TO_ADMIN", "").strip().lower()
+    # Per-IP throttle on the public token endpoints (accept an invitation,
+    # request/confirm a password reset). The tokens are unguessable; this is
+    # for the mailbox-flooding and hammering cases.
+    token_rate_limit_max_attempts: int = read_int_env("TOKEN_RATE_LIMIT_MAX_ATTEMPTS", 20)
+    token_rate_limit_window_seconds: int = read_int_env("TOKEN_RATE_LIMIT_WINDOW_SECONDS", 600)
+
+    # --- outbound email ---------------------------------------------------
+    # console (the default) writes each message to the server log instead of
+    # sending it; smtp delivers through a relay with aiosmtplib.
+    email_backend: str = os.getenv("EMAIL_BACKEND", "console").strip().lower() or "console"
+    email_from: str = os.getenv("EMAIL_FROM", "").strip()
+    smtp_host: str = os.getenv("SMTP_HOST", "").strip()
+    smtp_port: int = read_int_env("SMTP_PORT", 587)
+    smtp_username: str = os.getenv("SMTP_USERNAME", "").strip()
+    smtp_password: str = os.getenv("SMTP_PASSWORD", "")
+    smtp_starttls: bool = read_bool_env("SMTP_STARTTLS", True)
+    smtp_use_tls: bool = read_bool_env("SMTP_USE_TLS", False)
+    smtp_timeout_seconds: float = read_float_env("SMTP_TIMEOUT_SECONDS", 15.0)
     # Master key for the provider API keys the settings screen stores, as 32
     # bytes in base64 or 64 hex characters. Left empty, the key is derived from
     # this deployment's auth secret (HKDF, separate info label), which keeps a
@@ -671,7 +708,29 @@ class Settings:
                 "PROTECT_MEDIA_ENDPOINTS is disabled; /media artifacts (videos, "
                 "PDFs, scores) are served without authentication."
             )
+        warnings.extend(self._account_warnings())
         warnings.extend(self._human_detector_warnings())
+        return warnings
+
+    def _account_warnings(self) -> list[str]:
+        """Warn when invitations and password resets cannot actually reach anyone.
+
+        Neither condition breaks a boot — an admin can still copy an invitation
+        link out of the screen — but a deployment that expects emails to go out
+        should learn at startup, not from a colleague who never got one.
+        """
+        warnings: list[str] = []
+        if self.email_backend == "console":
+            warnings.append(
+                "EMAIL_BACKEND=console: invitation and password-reset emails are written to "
+                "the server log instead of being sent. Set EMAIL_BACKEND=smtp with SMTP_HOST "
+                "and EMAIL_FROM before inviting markers by email."
+            )
+        if not self.app_public_url.lower().startswith("https://") and "localhost" not in self.app_public_url:
+            warnings.append(
+                f"APP_PUBLIC_URL ({self.app_public_url}) is not https; the links in invitation "
+                "and password-reset emails will be sent over plaintext."
+            )
         return warnings
 
     def _human_detector_warnings(self) -> list[str]:

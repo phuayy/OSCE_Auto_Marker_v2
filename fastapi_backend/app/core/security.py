@@ -6,6 +6,7 @@ import hmac
 import json
 import secrets
 import time
+from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
@@ -74,18 +75,42 @@ def verify_signed_token(token: str, secret_key: str) -> dict[str, Any] | None:
     return payload
 
 
-def build_auth_payload(username: str, ttl_seconds: int) -> tuple[dict[str, Any], int]:
+@dataclass(frozen=True)
+class TokenSubject:
+    """Who a bearer token or stream ticket speaks for.
+
+    ``token_version`` is copied from the account row at issue time and
+    compared with the row on every verification; bumping the row's version is
+    how the account's tokens are revoked without a shared revocation store.
+    ``role`` is carried for callers that only hold the token, but it is
+    informative — verification refreshes it from the row.
+    """
+
+    user_id: str
+    username: str
+    role: str
+    token_version: int
+
+
+def _base_claims(subject: TokenSubject, ttl_seconds: int) -> tuple[dict[str, Any], int]:
     now_ms = int(time.time() * 1000)
     expires_at = now_ms + ttl_seconds * 1000
     return (
         {
-            "username": username,
+            "sub": subject.user_id,
+            "username": subject.username,
+            "role": subject.role,
+            "tokenVersion": int(subject.token_version),
             "issuedAt": now_ms,
             "expiresAt": expires_at,
             "tokenId": str(uuid4()),
         },
         expires_at,
     )
+
+
+def build_auth_payload(subject: TokenSubject, ttl_seconds: int) -> tuple[dict[str, Any], int]:
+    return _base_claims(subject, ttl_seconds)
 
 
 # Scope claim that distinguishes short-lived media/SSE tickets from full
@@ -93,16 +118,26 @@ def build_auth_payload(username: str, ttl_seconds: int) -> tuple[dict[str, Any],
 STREAM_TICKET_SCOPE = "stream"
 
 
-def build_stream_ticket_payload(username: str, ttl_seconds: int) -> tuple[dict[str, Any], int]:
-    now_ms = int(time.time() * 1000)
-    expires_at = now_ms + ttl_seconds * 1000
-    return (
-        {
-            "username": username,
-            "scope": STREAM_TICKET_SCOPE,
-            "issuedAt": now_ms,
-            "expiresAt": expires_at,
-            "tokenId": str(uuid4()),
-        },
-        expires_at,
-    )
+def build_stream_ticket_payload(subject: TokenSubject, ttl_seconds: int) -> tuple[dict[str, Any], int]:
+    payload, expires_at = _base_claims(subject, ttl_seconds)
+    payload["scope"] = STREAM_TICKET_SCOPE
+    return payload, expires_at
+
+
+# --- emailed action tokens ---------------------------------------------------
+#
+# An invitation or password-reset link carries a capability, not a session: it
+# is single-use, short-lived, and stored only as a hash. 32 random bytes is 256
+# bits of entropy, which is why a plain SHA-256 (rather than a slow password
+# hash) is the right thing to store — there is nothing an attacker could
+# brute-force offline in the lifetime of the token.
+
+ACTION_TOKEN_BYTES = 32
+
+
+def new_action_token() -> str:
+    return secrets.token_urlsafe(ACTION_TOKEN_BYTES)
+
+
+def hash_action_token(raw_token: str) -> str:
+    return hashlib.sha256(str(raw_token or "").encode("utf-8")).hexdigest()

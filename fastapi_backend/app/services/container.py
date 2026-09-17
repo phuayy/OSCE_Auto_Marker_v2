@@ -15,6 +15,7 @@ from app.database.change_tracking import install_change_tracking
 from app.database.migration_runner import run_database_migrations
 from app.database.migrations import apply_additive_migrations
 from app.database.orm import OrmDatabase
+from app.mail import EmailSender, create_email_sender
 from app.pipeline.llm_preprocess import TranscriptPreprocessor
 from app.pipeline.media import MediaPipeline
 from app.pipeline.transcription.registry import EngineDependencies
@@ -33,6 +34,7 @@ from app.repositories.rubric_asset_repository import RubricAssetRepository
 from app.repositories.session_repository import SessionRepository
 from app.repositories.webhook_repository import WebhookRepository
 from app.repositories.upload_repository import UploadRepository
+from app.repositories.user_repository import UserRepository
 from app.repositories.video_repository import VideoRepository
 from app.services.assessment_service import AssessmentService
 from app.services.change_feed_service import ChangeFeedService
@@ -51,6 +53,8 @@ from app.services.session_maintenance_service import SessionMaintenanceService
 from app.services.session_service import SessionService
 from app.storage import ObjectStorage, create_storage_service
 from app.services.transcription_router import TranscriptionRouter
+from app.services.user_admin_service import UserAdminService
+from app.services.user_directory import UserDirectory
 
 
 logger = logging.getLogger(__name__)
@@ -103,6 +107,17 @@ class AppContainer:
     videos: VideoRepository
     session_maintenance: SessionMaintenanceService
     login_rate_limiter: FixedWindowRateLimiter
+    # Accounts: the store, the per-request cached view AuthService verifies
+    # against, the administration service, and the mail backend invitations
+    # and resets go out through.
+    users: UserRepository
+    user_directory: UserDirectory
+    user_admin: UserAdminService
+    mailer: EmailSender
+    # Per-IP throttle on the public emailed-link endpoints (accept an
+    # invitation, request/confirm a reset), separate from the login throttle
+    # so one cannot exhaust the other.
+    token_rate_limiter: FixedWindowRateLimiter
     changes: ChangeFeedService
     read_cache: VersionedCache
     # The one accelerator lease every GPU step in this process contends on.
@@ -166,6 +181,10 @@ class AppContainer:
         await self.changes.start(push_enabled=push_enabled)
         await self.auth.initialize()
         if api:
+            # The first administrator, from the legacy credentials file or
+            # DEFAULT_ADMIN_*; a no-op once any account exists. API only: one
+            # process seeds, and a worker never verifies a token.
+            await self.user_admin.startup()
             await self.sessions.migrate_legacy_sessions()
             await self.corpora.seed_defaults()
             await self.rubrics.ensure_parsed()
@@ -201,7 +220,9 @@ class AppContainer:
         await self.orm_database.shutdown()
 
 
-def create_container(settings: Settings | None = None) -> AppContainer:
+def create_container(settings: Settings | None = None, *, mailer: EmailSender | None = None) -> AppContainer:
+    """Wire every service. ``mailer`` overrides the backend ``EMAIL_BACKEND``
+    would build — how the tests capture the links an invitation carries."""
     active_settings = settings or Settings.load()
     orm_database = OrmDatabase(active_settings.resolved_database_source)
     runner = CommandRunner(
@@ -209,9 +230,14 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         default_timeout_seconds=active_settings.subprocess_timeout_seconds,
     )
     artifacts = ArtifactService(active_settings)
-    auth = AuthService(active_settings)
     events = EventService(active_settings)
     changes = ChangeFeedService(orm_database)
+    # Accounts are rows, and the row is consulted on every authenticated
+    # request through this cache — evicted by the change feed, so an admin's
+    # "disable" reaches every API process on the marker's next request.
+    users = UserRepository(orm_database)
+    user_directory = UserDirectory(users, changes=changes)
+    auth = AuthService(active_settings, users=users, directory=user_directory)
     read_cache = VersionedCache(enabled=active_settings.cache_enabled)
     # The database announces a committed write; this hook turns that
     # announcement into an eviction, so the cache is corrected by the write
@@ -326,6 +352,12 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         max_attempts=active_settings.login_rate_limit_max_attempts,
         window_seconds=active_settings.login_rate_limit_window_seconds,
     )
+    token_rate_limiter = FixedWindowRateLimiter(
+        max_attempts=active_settings.token_rate_limit_max_attempts,
+        window_seconds=active_settings.token_rate_limit_window_seconds,
+    )
+    active_mailer = mailer if mailer is not None else create_email_sender(active_settings)
+    user_admin = UserAdminService(active_settings, users, user_directory, auth, active_mailer)
     async_uploads = AsyncUploadService(
         active_settings,
         UploadRepository(active_settings.paths.uploads_dir),
@@ -368,6 +400,11 @@ def create_container(settings: Settings | None = None) -> AppContainer:
         videos=videos,
         session_maintenance=session_maintenance,
         login_rate_limiter=login_rate_limiter,
+        users=users,
+        user_directory=user_directory,
+        user_admin=user_admin,
+        mailer=active_mailer,
+        token_rate_limiter=token_rate_limiter,
         changes=changes,
         read_cache=read_cache,
         gpu=gpu,
