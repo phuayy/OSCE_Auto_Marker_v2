@@ -348,18 +348,101 @@ class CustomProviderRecord(Base):
     updated_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
 
+class UserRecord(Base):
+    """One account that can sign in.
+
+    Two roles and three statuses (``app/domain/users.py``). There is no
+    per-session ownership, so the row carries nothing about what a user may
+    *see* — only who they are, whether they may sign in at all, and the one
+    number that revokes every bearer token they hold.
+
+    ``token_version`` is that number. A bearer token records the version it was
+    issued under and ``AuthService.verify_token`` compares it with the row on
+    every request; disabling the account, changing its role or setting a new
+    password bumps it, so the change takes effect on the user's next request
+    rather than when their eight-hour token happens to expire. The row is read
+    through a change-feed-evicted cache (``UserDirectory``), so that comparison
+    normally costs no query.
+
+    ``username`` and ``email`` are stored lowercased and compared as such; the
+    invitation flow uses the email as the username, so a marker signs in with
+    the address they were invited at. ``password_hash`` is null while invited:
+    an account with no credential cannot authenticate, whatever its status.
+    """
+
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("username", name="uq_users_username"),
+        UniqueConstraint("email", name="uq_users_email"),
+        Index("idx_users_status", "status"),
+        Index("idx_users_role", "role"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    username: Mapped[str] = mapped_column(String(120), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    # The admin who created the row; null for the bootstrap admin.
+    created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class UserActionTokenRecord(Base):
+    """One emailed, single-use capability: accept an invitation, reset a password.
+
+    The row holds a SHA-256 of the token, never the token — the raw value
+    exists only in the email (and in the admin's copy-link panel when no mail
+    server is configured). It is 256 bits from a CSPRNG, so a fast hash is
+    enough: there is nothing to brute-force offline. ``used_at`` is set by an
+    atomic conditional update, which is what makes a link single-use under two
+    simultaneous clicks; re-issuing a token voids the earlier one the same way.
+    """
+
+    __tablename__ = "user_action_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_user_action_tokens_hash"),
+        Index("idx_user_action_tokens_user_purpose", "user_id", "purpose"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(32), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Null = live. Set on consumption *and* on supersession, so one column
+    # answers "can this link still be followed?".
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
 class SessionRecord(Base):
     __tablename__ = "sessions"
     __table_args__ = (
         Index("idx_sessions_status", "status"),
         Index("idx_sessions_parent_session_id", "parent_session_id"),
         Index("idx_sessions_created_at", "created_at"),
+        Index("idx_sessions_created_by", "created_by"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str | None] = mapped_column(String(512), nullable=True)
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="uploaded")
     parent_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # The account that created the row — the uploader, or whoever queued a
+    # clip's assessment. Mirrors ``payload["createdBy"]["userId"]`` the way
+    # ``parent_session_id`` mirrors the payload, so "sessions by this user" is
+    # an indexed query rather than a JSON scan. The payload keeps the whole
+    # snapshot (username, display name) because an account can be renamed or
+    # deleted after the fact and the session must still say who. Null for a
+    # session recorded before creators were, or created with no actor.
+    created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     # Stores the clip provenance object {"clipId": ..., "label": ...} for child
     # sessions created from exported clips; null for top-level sessions. Declared
     # as JSON because the application model is a structured object, not a scalar.

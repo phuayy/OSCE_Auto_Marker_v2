@@ -43,6 +43,10 @@ ADDITIVE_MIGRATIONS: tuple[AddColumn, ...] = (
         # labelling them keeps webhook filtering and the UI consistent.
         backfill_sql="UPDATE notifications SET event_type = 'scoring.completed' WHERE event_type IS NULL",
     ),
+    # Who created the session (revision 0009). No backfill: rows from before
+    # creators were recorded genuinely have none. The index that revision adds
+    # is not reproduced here — this fallback keeps queries *working*, not fast.
+    AddColumn(table="sessions", column="created_by", definition="VARCHAR(36)"),
 )
 
 
