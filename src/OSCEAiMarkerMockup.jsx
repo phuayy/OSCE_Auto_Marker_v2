@@ -1,6 +1,6 @@
 import { ClipExportScope, ClipExportStatus, SegmentationMethod, SessionStatus, Workflow } from '@/lib/enums';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AnimatePresence } from 'framer-motion';
+import { AnimatePresence, motion } from 'framer-motion';
 import { ensureStreamTicket } from '@/auth';
 import { useChangeStream } from '@/changeStream';
 import { ApiError, ERROR_KIND, apiJson } from '@/lib/apiFetch';
@@ -61,6 +61,7 @@ import {
   clampRegionRatio,
   defaultRegionFocus,
   describeRegionFocus,
+  isRegionFocusLocked,
   toggleRegionSide,
 } from '@/lib/regionFocus';
 import {
@@ -146,10 +147,24 @@ export default function OSCEAiMarkerMockup({
     minSessionSeconds: 120,
   });
   // Horizontal region-of-interest: which side(s) of the frame the detector
-  // looks in, independent of the occupancy rule above. Defaults to the whole
-  // frame (no filtering) until the operator narrows it — the fix for a camera
-  // angle where a third party is half cut off at one edge of the shot.
+  // looks in. The backend treats this as independent of the occupancy rule
+  // above, but a predefined preset can pick a people count the enabled
+  // zone(s) can never satisfy (e.g. "pair" needs 2 people while one side
+  // alone only ever shows one) — that failure is silent: zero clips found
+  // degrades straight to bell detection with no error surfaced. The form
+  // sidesteps it by only letting the operator touch this under "Custom",
+  // where they are already reasoning about the numbers directly.
   const [regionFocus, setRegionFocus] = useState(defaultRegionFocus());
+  // True whenever region focus is not the operator's to edit — every preset
+  // except "Custom". Kept in sync below rather than duplicated at each place
+  // `segmentationPreset` can change (the radio click, and the catalogue's own
+  // fallback when a stored preset id no longer exists).
+  const regionFocusLocked = isRegionFocusLocked(segmentationPreset);
+  useEffect(() => {
+    if (regionFocusLocked) {
+      setRegionFocus(defaultRegionFocus());
+    }
+  }, [regionFocusLocked]);
   // User-chosen name for the session about to be created, and the pre-flight
   // confirmation overlay shown before processing starts.
   const [sessionNameInput, setSessionNameInput] = useState('');
@@ -2342,9 +2357,22 @@ export default function OSCEAiMarkerMockup({
             because that is what the click asked for: the next screen, in
             outline, until its data arrives. `showWorkspace` itself only flips
             once the payload is in, so the URL sync effects above see the
-            same sequence they always did. */}
+            same sequence they always did.
+
+            Opening a session is a route change (#/session/<id>) even though
+            it stays inside AppShell's single "dashboard" AnimatePresence
+            entry, so the fade between these three states is the same one
+            AppShell gives every other route: opacity only, 0.25s, one state
+            in flight at a time (`mode="wait"`). */}
+        <AnimatePresence mode="wait">
         {!showWorkspace && !workspaceLoad && (
-          <section className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+          <motion.section
+            key="dashboard-form"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.25 }}
+            className="grid grid-cols-1 gap-6 lg:grid-cols-3">
             <Card className="lg:col-span-2 border-slate-200 bg-white shadow-sm">
               <CardHeader>
                 <CardTitle className="text-3xl">Upload a station recording</CardTitle>
@@ -2553,14 +2581,23 @@ export default function OSCEAiMarkerMockup({
                       </div>
                     )}
                     {segmentationMethod === SegmentationMethod.PERSON && (
-                      <div className="mt-3 border-t border-slate-100 pt-3">
+                      <fieldset
+                        disabled={regionFocusLocked}
+                        className="m-0 mt-3 min-w-0 border-0 border-t border-t-slate-100 p-0 pt-3"
+                      >
                         <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                           Where to look in the frame
                         </div>
                         <p className="mb-2 text-[11px] text-slate-500">
-                          Restrict detection to one side of the frame when a third party — another
-                          examiner, a doorway — is half cut off at the other edge and would otherwise
-                          get counted as an occupant. Leave both at 100% to use the whole frame.
+                          {regionFocusLocked ? (
+                            <>Only available with the occupancy rule set to <strong>Custom</strong> — a
+                              predefined rule&apos;s people count is not guaranteed to fit inside a
+                              narrowed zone.</>
+                          ) : (
+                            <>Restrict detection to one side of the frame when a third party — another
+                              examiner, a doorway — is half cut off at the other edge and would otherwise
+                              get counted as an occupant. Leave both at 100% to use the whole frame.</>
+                          )}
                         </p>
                         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                           {[
@@ -2570,22 +2607,28 @@ export default function OSCEAiMarkerMockup({
                             <div
                               key={side}
                               className={`rounded-lg border p-2.5 transition ${
-                                regionFocus[enabledKey]
-                                  ? 'border-violet-200 bg-violet-50/50'
-                                  : 'border-slate-200 bg-white'
+                                regionFocusLocked
+                                  ? 'border-slate-100 bg-slate-50'
+                                  : regionFocus[enabledKey]
+                                    ? 'border-violet-200 bg-violet-50/50'
+                                    : 'border-slate-200 bg-white'
                               }`}
                             >
-                              <label className="flex items-center gap-2 text-sm font-medium text-slate-800">
+                              <label
+                                className={`flex items-center gap-2 text-sm font-medium ${
+                                  regionFocusLocked ? 'text-slate-400' : 'text-slate-800'
+                                }`}
+                              >
                                 <input
                                   type="checkbox"
                                   checked={Boolean(regionFocus[enabledKey])}
                                   onChange={() => setRegionFocus((previous) => toggleRegionSide(previous, side))}
-                                  className="h-4 w-4 rounded border-slate-300 text-violet-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+                                  className="h-4 w-4 rounded border-slate-300 text-violet-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 disabled:cursor-not-allowed disabled:opacity-50"
                                 />
                                 {label}
                               </label>
                               <label className="mt-2 block">
-                                <span className="block text-[11px] text-slate-500">
+                                <span className={`block text-[11px] ${regionFocusLocked ? 'text-slate-400' : 'text-slate-500'}`}>
                                   Width of frame counted, measured from the {side} edge
                                 </span>
                                 <div className="mt-1 flex items-center gap-1">
@@ -2602,18 +2645,20 @@ export default function OSCEAiMarkerMockup({
                                         [ratioKey]: Number(event.target.value) / 100,
                                       }))
                                     }
-                                    className="w-20 rounded-md border border-slate-300 px-2 py-1 text-sm disabled:bg-slate-100 disabled:text-slate-400"
+                                    className="w-20 rounded-md border border-slate-300 px-2 py-1 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
                                   />
-                                  <span className="text-xs text-slate-500">%</span>
+                                  <span className={`text-xs ${regionFocusLocked ? 'text-slate-400' : 'text-slate-500'}`}>%</span>
                                 </div>
                               </label>
                             </div>
                           ))}
                         </div>
-                        <p className="mt-2 text-[11px] text-slate-500">
-                          At least one side must stay on — the last enabled checkbox cannot be turned off.
-                        </p>
-                      </div>
+                        {!regionFocusLocked && (
+                          <p className="mt-2 text-[11px] text-slate-500">
+                            At least one side must stay on — the last enabled checkbox cannot be turned off.
+                          </p>
+                        )}
+                      </fieldset>
                     )}
                     {segmentationMethod === SegmentationMethod.PERSON && (
                       <p className="mt-2 text-[11px] text-slate-500">
@@ -2909,17 +2954,32 @@ export default function OSCEAiMarkerMockup({
                 />
               ) : null}
             </div>
-          </section>
+          </motion.section>
         )}
 
-        {workspaceLoad ? (
-          <WorkspaceSkeleton layout={workspaceLoad.layout} label={workspaceLoad.label} />
-        ) : null}
+        {workspaceLoad && (
+          <motion.div
+            key="workspace-loading"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.25 }}
+          >
+            <WorkspaceSkeleton layout={workspaceLoad.layout} label={workspaceLoad.label} />
+          </motion.div>
+        )}
 
         {/* The chunk fallback is the same skeleton, in the layout the loaded
             session actually has: if the chunk arrives after the payload — a
             slow network beats the preload — the placeholder simply stays. */}
         {showWorkspace && !workspaceLoad && (
+          <motion.div
+            key="workspace"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.25 }}
+          >
           <LazyBoundary fallback={<WorkspaceSkeleton layout={workspaceLayoutFor(session)} />}>
             <SessionWorkspace
               session={session}
@@ -2980,7 +3040,9 @@ export default function OSCEAiMarkerMockup({
               demoLongVideoSummaries={demoLongVideoSummaries}
             />
           </LazyBoundary>
+          </motion.div>
         )}
+        </AnimatePresence>
       </main>
 
       <AnimatePresence>

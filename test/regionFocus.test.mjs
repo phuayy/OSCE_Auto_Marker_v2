@@ -10,6 +10,7 @@ import {
   defaultRegionFocus,
   describeRegionFocus,
   isFullFrame,
+  isRegionFocusLocked,
   toggleRegionSide,
   REGION_FOCUS_RATIO_MAX,
   REGION_FOCUS_RATIO_MIN,
@@ -92,4 +93,22 @@ test('describeRegionFocus names the enabled zone(s) and their width', () => {
     describeRegionFocus({ leftEnabled: true, rightEnabled: true, leftRatio: 0.5, rightRatio: 0.3 }),
     'left 50%, right 30%'
   );
+});
+
+test('region focus is locked under every preset except custom', () => {
+  // A predefined preset can name a people count the enabled zone(s) can
+  // never satisfy (e.g. "pair" needs 2 people while one side alone only ever
+  // shows one) — that failure degrades silently to bell detection, so the
+  // panel is only editable where the operator is already reasoning about the
+  // numbers directly.
+  assert.equal(isRegionFocusLocked('pair'), true);
+  assert.equal(isRegionFocusLocked('pair_strict'), true);
+  assert.equal(isRegionFocusLocked('solo'), true);
+  assert.equal(isRegionFocusLocked('custom'), false);
+});
+
+test('region focus is locked by default (no preset chosen yet)', () => {
+  assert.equal(isRegionFocusLocked(undefined), true);
+  assert.equal(isRegionFocusLocked(''), true);
+  assert.equal(isRegionFocusLocked(null), true);
 });

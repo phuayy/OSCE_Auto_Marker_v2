@@ -22,6 +22,20 @@ export function defaultRegionFocus() {
   return { leftEnabled: true, rightEnabled: true, leftRatio: 1, rightRatio: 1 };
 }
 
+/**
+ * Region focus only means anything under the "custom" occupancy preset. A
+ * predefined preset (e.g. "pair", which needs 2 people) can name a people
+ * count the enabled zone(s) can never satisfy — a two-person wide shot
+ * restricted to one side alone only ever shows one — and that failure is
+ * silent: zero clips found degrades straight to bell detection with no error
+ * surfaced. The upload form sidesteps the whole failure mode by only letting
+ * the operator touch this panel under "Custom", where they are already
+ * reasoning about the numbers directly.
+ */
+export function isRegionFocusLocked(segmentationPreset) {
+  return segmentationPreset !== 'custom';
+}
+
 export function clampRegionRatio(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {

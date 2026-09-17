@@ -364,6 +364,19 @@ an unparseable value degrades leniently to the full frame, the same rule
 resolved numbers travel to `scripts/detect_human_segments.py` as explicit
 `--region-*` flags, never as a name the subprocess would have to re-resolve.
 
+**The upload form narrows this further than the backend requires.** The
+backend accepts region focus under any preset, but a predefined preset can
+name a people count the enabled zone(s) can never satisfy — "pair" needs 2
+people while one side alone only ever shows one on a wide two-person shot —
+and that failure is silent: zero clips found trips `_enforce_clip_count_bounds`
+and degrades straight to bell detection with no error surfaced, so the
+operator sees a plausible-looking clip list from the wrong method. The panel
+(`isRegionFocusLocked` in [regionFocus.js](src/lib/regionFocus.js)) is
+therefore only editable under the `custom` preset; picking any other preset
+snaps the region back to the full frame (a `useEffect` keyed on the lock, not
+duplicated at every place the preset can change — the radio click and the
+catalogue's own fallback when a stored preset id no longer exists).
+
 1. Segmentation (`auto_crop` job): bell detector (`scripts/detect_bell_segments.py`) or
    person detector (RT-DETR) proposes ranges. `build_clip_drafts_from_ranges`
    records them; no ffmpeg runs. Session status -> `cropped`.
