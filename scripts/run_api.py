@@ -14,6 +14,12 @@ BACKEND_DIR = ROOT_DIR / "fastapi_backend"
 sys.path.insert(0, str(BACKEND_DIR))
 
 from app.core.asyncio_compat import configure_windows_selector_event_loop_policy  # noqa: E402
+# Importing the config module applies the project's .env before the argument
+# defaults below are read, so API_HOST / API_PORT set there take effect when
+# this script is run directly and not only through scripts/dev.mjs (which
+# loads .env itself). Settings.load() is deliberately not called here: it
+# resolves ffmpeg and the interpreters, which is the app's job at startup.
+from app.core.config import server_bind_from_env  # noqa: E402
 
 
 configure_windows_selector_event_loop_policy()
@@ -127,8 +133,13 @@ def run_with_reload(host: str, port: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the OSCE AI Marker FastAPI server.")
-    parser.add_argument("--host", default=os.getenv("API_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.getenv("API_PORT", "8787")))
+    default_host, default_port = server_bind_from_env()
+    parser.add_argument(
+        "--host",
+        default=default_host,
+        help="Interface to listen on (API_HOST). 127.0.0.1 = this machine only; 0.0.0.0 = every interface.",
+    )
+    parser.add_argument("--port", type=int, default=default_port, help="Port to listen on (API_PORT).")
     parser.add_argument("--reload", action="store_true")
     parser.add_argument(
         "--allow-port-conflict",

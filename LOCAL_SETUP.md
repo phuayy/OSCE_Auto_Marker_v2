@@ -155,8 +155,13 @@ npm run dev
 
 This starts:
 
-- FastAPI/Uvicorn on `http://localhost:8787` or the next available port.
-- Vite on `http://localhost:5173`.
+- FastAPI/Uvicorn on `http://127.0.0.1:8787` or the next available port.
+- Vite on `http://127.0.0.1:5173`.
+
+Both bind loopback by default, so nothing else on the network sees a
+half-set-up machine. `API_HOST`, `API_PORT`, `DEV_SERVER_HOST` and
+`DEV_SERVER_PORT` in `.env` move them; the Vite proxy follows `API_HOST` /
+`API_PORT` on its own (`scripts/dev-hosts.mjs`).
 
 Open:
 
@@ -384,6 +389,9 @@ Frontend production build:
 ```powershell
 npm run build
 ```
+
+To serve that build from the API itself and reach it from other devices —
+a VM deployment — see [docs/deployment-vm.md](docs/deployment-vm.md).
 
 Hatchet import smoke test:
 

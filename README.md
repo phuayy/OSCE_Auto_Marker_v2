@@ -536,6 +536,8 @@ npm run db:up|down|logs|ps|check|reset   # PostgreSQL helpers
 ```
 
 - All configuration lives in [.env.example](.env.example) (copy → `.env`).
+- Putting it on a VM that other devices upload to: [docs/deployment-vm.md](docs/deployment-vm.md)
+  (`API_HOST`, `SERVE_FRONTEND`, the reverse-proxy settings that matter).
 - Architecture deep-dive for contributors/AI agents: [CLAUDE.md](CLAUDE.md).
 - Extended local setup notes: [LOCAL_SETUP.md](LOCAL_SETUP.md).
 - Multi-model marking design: [docs/multi-model-marking-plan.md](docs/multi-model-marking-plan.md).

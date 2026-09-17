@@ -1,0 +1,36 @@
+# systemd unit for the OSCE AI Marker API on a Linux VM.
+#
+# Copy to /etc/systemd/system/osce-marker.service, edit the paths and the
+# user, then:
+#   systemctl daemon-reload && systemctl enable --now osce-marker
+#   journalctl -u osce-marker -f
+#
+# Everything the process needs comes from the project's .env (read by the app
+# at import time), so there is nothing to duplicate here. The API migrates the
+# database at startup (DB_AUTO_MIGRATE=true) and serves dist/ when
+# SERVE_FRONTEND=true — build it first with `npm run build`.
+
+[Unit]
+Description=OSCE AI Marker API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=osce
+Group=osce
+WorkingDirectory=/opt/osce-marker
+# uv owns the Python environment; --no-sync so a start never modifies it.
+ExecStart=/usr/local/bin/uv run --no-sync python scripts/run_api.py
+Restart=on-failure
+RestartSec=5
+# Uvicorn's graceful shutdown is 10 s (scripts/run_api.py); give it that plus
+# a margin before systemd SIGKILLs the process and an in-flight upload part
+# is lost.
+TimeoutStopSec=20
+# WhisperX and the scorers are subprocesses of this one; a limit here bounds
+# them all. Raise for large models.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

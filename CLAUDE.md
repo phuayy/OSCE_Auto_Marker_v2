@@ -46,7 +46,8 @@ OSCE-AI-FYP/
 │   │   ├── AuthShell.jsx       # The dark pre-login frame + its fields/buttons; every pre-login screen composes it
 │   │   ├── AuthNewPasswordFields.jsx # "New password" + "Confirm" on that frame (invitation and reset screens)
 │   │   ├── TargetPicker.jsx    # One provider+model choice; shared by every settings card that asks for one
-│   │   ├── PageHeader.jsx      # The sticky page bar every route shares (h1, Back, actions) + SkipToContent
+│   │   ├── PageHeader.jsx      # The sticky page bar every route shares (h1, Back, actions, theme toggle) + SkipToContent
+│   │   ├── ThemeToggle.jsx     # One click between light and dark, rendered by PageHeader
 │   │   ├── SessionStatusBadge.jsx # A session's status as a word in its tone (reads lib/sessionStatus.js)
 │   │   ├── skeletons.jsx       # First-load placeholders: route/page frames, settings card bodies, the workspace outline (entry chunk)
 │   │   ├── ui/dialog.jsx       # Modal: dialog semantics, Escape, focus trap + restore, backdrop
@@ -70,8 +71,13 @@ OSCE-AI-FYP/
 │   │   ├── provenance.js       # creatorName / describeCreator — who created a session, in words (pure)
 │   │   ├── userAdmin.js        # Users screen rules: status chips, row actions, password check, delivery banner (pure)
 │   │   ├── lazyRoute.jsx       # Code-splitting plumbing: lazy + preload + chunk error boundary
+│   │   ├── theme.js            # Theme preference: rules + the store that owns <html class="dark"> and localStorage (pure)
+│   │   ├── useTheme.js         # useSyncExternalStore over that store; no provider
 │   │   └── useHashRoute.js     # React hook for URL <-> state sync
 │   └── auth.js                 # Session storage (token + identity), fetch shim, stream tickets, the account request helpers
+├── index.html                  # Carries the theme boot script (applies the dark class before React loads)
+├── tailwind.palette.js         # The tonal palette: light values, the dark ramp, and the rules for what re-maps
+├── tailwind.config.js          # darkMode: 'selector'; spreads tailwind.palette.js into the theme
 ├── fastapi_backend/
 │   ├── alembic.ini             # Alembic config; URL comes from Settings, not this file
 │   ├── alembic/
@@ -180,6 +186,7 @@ OSCE-AI-FYP/
 │       │   └── scoring.py      # ScoringPipeline — facade over the scorer subprocesses; picks the marking strategy
 │       ├── api/
 │       │   ├── dependencies.py          # get_container, authorize_request
+│       │   ├── frontend.py              # SERVE_FRONTEND: dist/ mounted last, SPA fallback, cache policy
 │       │   └── routes/
 │       │       ├── sessions.py          # /api/sessions/** (list, get, events SSE, process, clips)
 │       │       ├── async_uploads.py     # /api/uploads/** (initiate, part, complete, abort) — the ONLY ingest path
@@ -194,8 +201,12 @@ OSCE-AI-FYP/
 │       └── queue/
 │           ├── hatchet_worker.py    # Hatchet worker lifespan + redispatch loop
 │           └── hatchet_tasks.py     # @hatchet.task definitions
+├── deploy/
+│   ├── nginx/osce-marker.conf.example     # Optional reverse proxy: part-size body limit, SSE unbuffered
+│   └── systemd/osce-marker.service.example
 ├── scripts/
-│   ├── run_api.py                   # Entry point: uvicorn launcher
+│   ├── run_api.py                   # Entry point: uvicorn launcher (API_HOST/API_PORT from config)
+│   ├── dev-hosts.mjs                # Pure: Vite bind + proxy target from the same .env the API reads
 │   ├── llm_bootstrap.py             # Puts fastapi_backend on sys.path; re-exports the LLM router
 │   ├── nvidia_osce_assessor.py      # Content scoring subprocess: model call + checkpoint + repair loop
 │   ├── content_marking.py           # Content prompt, rubric extraction, sheet validator, adjudication prompts (shared)
@@ -1149,6 +1160,44 @@ deliberately loud surface (dark, purple→cyan) and paints its own button
   honour the OS setting; CSS animations carry their own `motion-reduce` /
   `prefers-reduced-motion` guards.
 
+**Themes.** The app has a light and a dark theme, and the palette above is
+written once for both. Every palette name is used as a *role* — `text-slate-500`
+is muted text, `border-slate-200` a border, `bg-white` the surface, `bg-rose-50
+text-rose-700` a warning box — so the palette is **tonal**: each step is a CSS
+variable, `:root` holds Tailwind's values and `.dark` re-maps them
+([tailwind.palette.js](tailwind.palette.js), the model Radix Colors uses). No
+call site changed for dark mode and none carries a `dark:` variant;
+`test/theme.test.mjs` fails if one appears, because a second mechanism for the
+same job is exactly what the palette exists to make unnecessary. The rules, as
+the palette file states them: the neutral scale (slate) re-maps at every step in
+every utility, so a tonal fill takes a tonal text (`bg-slate-800 text-slate-50`,
+never `text-white`); an accent hue re-maps in its tints (50–200) and as text
+(600+) and stays literal as a solid, so `bg-rose-600 text-white` and the primary
+gradient are the same in both themes; `white` is the surface where it fills
+(`bg-`, gradient stops) and white where it draws (`text-`, `border-`); a thing
+that is dark in both themes says `bg-black` (a scrim, a video frame); and a
+subtree that keeps the base palette under any theme — the pre-login hero, dark
+by design — carries `theme-fixed`. The dark ramp is chosen so every text/ground
+pair the app uses clears 4.5:1, and the test computes that from the palette
+itself rather than trusting the table.
+
+The preference is the **browser's, not the account's** ([lib/theme.js](src/lib/theme.js)):
+the pre-login screens need it before any account is known, one person marks on a
+projector and in a dim office, and `app_settings` is the operator's table — one
+value for everyone. Three values — `system` (default; follows
+`prefers-color-scheme` and keeps following it), `light`, `dark` — in
+localStorage under `osce-ai-marker:theme`; a garbage value means `system`. The
+inline script in `index.html` applies the class before React loads (no white
+flash for a dark user) with its own three-line copy of the rule, and the test
+evaluates that script against the module for every combination so the copy
+cannot drift. One store (`createThemeStore`, environment injected, so the tests
+run it against fakes) owns `<html class="dark">`, localStorage, the media-query
+listener and the cross-tab `storage` event; `useTheme()` is
+`useSyncExternalStore` over it, no provider. The header's `ThemeToggle` — part
+of `PageHeader`, so no page can forget it and the route skeletons offer it too —
+sets the explicit opposite of what is on screen; the three-way choice is a
+radio-card group on the Account page.
+
 **One API client.** Every request goes through `apiFetch` / `apiJson`
 ([lib/apiFetch.js](src/lib/apiFetch.js)), which classifies the failure (no
 response vs. a refusal), retries the safe ones with jittered backoff, reports
@@ -1194,6 +1243,11 @@ recording; its Student column the scored subject.
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `API_HOST` / `API_PORT` | `127.0.0.1` / `8787` | Where uvicorn listens. Loopback by default; `0.0.0.0` for a VM other devices upload to. Read by `scripts/run_api.py` through `server_bind_from_env()` so `.env` applies without `dev.mjs` |
+| `SERVE_FRONTEND` / `FRONTEND_DIST_DIR` | `false` / `<root>/dist` | Serve the built frontend from the API at `/` (same origin as `/api`, so no CORS). `app/api/frontend.py`; a missing build is a startup warning and 404s, not a crash |
+| `DEV_SERVER_HOST` / `DEV_SERVER_PORT` / `PREVIEW_PORT` | `127.0.0.1` / `5173` / `4173` | Vite's own bind. The proxy target follows `API_HOST` / `API_PORT` (`scripts/dev-hosts.mjs` maps `0.0.0.0` to loopback) |
+| `CORS_ALLOW_ORIGINS` | `*` | Browser origins allowed to call `/api`. Moot when the frontend is served from the same origin; set it to that origin to clear the warning |
+| `TRUSTED_PROXY_COUNT` | `0` | Reverse proxies in front. Must match the hop count or the login rate limit keys on the proxy's address |
 | `TRANSCRIPTION_ENGINE` | `whisperx` | Fallback engine when Settings has no stored selection (`whisperx` \| `canary-qwen`) |
 | `CANARY_MODEL` | `nvidia/canary-qwen-2.5b` | NeMo SALM checkpoint for the Canary engine (`uv sync --group canary`) |
 | `TRANSCRIPTION_PREFETCH_MODELS` | `true` | Download the selected engine's weights in the background at startup; false = fetch on first run |
@@ -1288,6 +1342,25 @@ cd fastapi_backend && uv run alembic check      # models vs. migrations are in s
 # Hatchet worker (only when JOB_QUEUE_BACKEND=hatchet)
 uv run python -m app.queue.hatchet_worker
 ```
+
+**Deploying on one VM, uploads from other devices.** Supported with local
+storage as-is: parts go through `/api/uploads`, the server owns the disk, and
+every frontend URL is relative to the page's origin. What the defaults
+withhold is *reach*: `API_HOST=127.0.0.1` and nothing serving `dist/`. The
+deployment sets `API_HOST=0.0.0.0` and `SERVE_FRONTEND=true`, and the API
+mounts the build itself — `app/api/frontend.py`, mounted **after** every
+router so the catch-all only sees what `/api` and `/media` did not claim.
+The mount knows Vite's output: `assets/*` is content-hashed and cached
+immutable for a year; `index.html` is `no-cache` (revalidated, so a new
+deploy's chunk names reach a returning browser); a path with no extension
+answers `index.html` so a pasted link boots the app; a missing asset still
+404s so a stale chunk request fails loudly for `lazyRoute.jsx`'s boundary
+rather than executing HTML. A reverse proxy is optional and
+[deploy/nginx/](deploy/nginx/osce-marker.conf.example) shows the three
+settings that break this app at their defaults (body limit below the 8 MB
+part, buffered SSE, untrusted `X-Forwarded-For`). Full recipe:
+[docs/deployment-vm.md](docs/deployment-vm.md). Local storage remains one
+filesystem — a worker on a second machine needs `STORAGE_BACKEND=gcs`.
 
 **Dependencies:** `pyproject.toml` + `uv.lock` (both committed) are the single
 source of truth; the old `requirements.txt` / `requirements-canary.txt` /

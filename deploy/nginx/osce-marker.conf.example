@@ -1,0 +1,89 @@
+# nginx in front of the OSCE AI Marker API — optional.
+#
+# The API can serve the built frontend itself (SERVE_FRONTEND=true), so a
+# single VM needs no proxy at all. Put one in front when you want TLS, a
+# hostname, or to serve dist/ from nginx directly. Either way the three
+# settings below are what a proxy must get right for THIS app; the defaults
+# of every one of them break it.
+#
+# Copy to /etc/nginx/sites-available/osce-marker, edit the server_name and the
+# paths, symlink into sites-enabled, then: nginx -t && systemctl reload nginx.
+# Set TRUSTED_PROXY_COUNT=1 in the app's .env so the login rate limit keys on
+# the real client address, not on nginx's.
+
+upstream osce_api {
+    # Where uvicorn listens (API_HOST / API_PORT). With a proxy in front the
+    # API should stay on loopback: nothing else needs to reach it directly.
+    server 127.0.0.1:8787;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    server_name osce.example.edu;
+
+    # 1. Upload parts. The browser sends the video in parts of
+    #    UPLOAD_PART_SIZE_MB (8 MB by default), several in parallel. nginx's
+    #    default client_max_body_size is 1 MB, which 413s every part before the
+    #    API ever sees it. Keep this above the part size; it does not need to
+    #    hold the whole video.
+    client_max_body_size 16m;
+
+    # 2. Long requests. Transcription and scoring run in the background and
+    #    the browser polls, so no request is minutes long — except the change
+    #    feed below, which is an open SSE stream.
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    # 3. The change feed (/api/events) is server-sent events: an open response
+    #    the API writes to for as long as the tab is open. Buffering would hold
+    #    every event back until the buffer fills, and the default 60 s read
+    #    timeout would cut the stream during any quiet minute. The browser
+    #    reconnects, but every reconnect is a full session-index refetch.
+    location /api/events {
+        proxy_pass http://osce_api;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+    }
+
+    location /api/ {
+        proxy_pass http://osce_api;
+        # Part uploads are relayed as they arrive rather than spooled to disk
+        # first — halves the wall-clock of a 2 GB transfer over a slow link.
+        proxy_request_buffering off;
+    }
+
+    # Videos and clips are played from here with HTTP range requests, which
+    # the API's static mounts already answer; nginx passes them through.
+    location /media/ {
+        proxy_pass http://osce_api;
+        proxy_buffering off;
+    }
+
+    # The frontend. Either of the two:
+    #
+    # (a) Let the API serve it (SERVE_FRONTEND=true in .env) — then this is
+    #     one more proxy_pass, and cache headers come from the app: hashed
+    #     assets immutable for a year, index.html revalidated every load.
+    location / {
+        proxy_pass http://osce_api;
+    }
+    #
+    # (b) Serve dist/ from nginx (SERVE_FRONTEND=false). Uncomment, and delete
+    #     the block above. The app routes on the URL hash, so `/` is the only
+    #     document; try_files is there for a pasted deep link.
+    # root /opt/osce-marker/dist;
+    # location / {
+    #     try_files $uri /index.html;
+    # }
+    # location /assets/ {
+    #     add_header Cache-Control "public, max-age=31536000, immutable";
+    # }
+    # location = /index.html {
+    #     add_header Cache-Control "no-cache";
+    # }
+}

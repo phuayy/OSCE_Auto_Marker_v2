@@ -36,6 +36,26 @@ def load_env_file(root_dir: Path, file_name: str = ".env") -> bool:
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 load_env_file(PROJECT_ROOT)
 
+# Where uvicorn listens. Loopback is the development default: the Vite dev
+# server proxies to it and nothing else on the network can reach a half-set-up
+# instance. A deployment that other devices upload to binds 0.0.0.0 (or one
+# interface) through API_HOST — see docs/deployment-vm.md. Both the launcher
+# (scripts/run_api.py) and Settings read these, so the two cannot disagree.
+DEFAULT_API_HOST = "127.0.0.1"
+DEFAULT_API_PORT = 8787
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def server_bind_from_env() -> tuple[str, int]:
+    """``(host, port)`` the API should listen on, from API_HOST / API_PORT.
+
+    Read after the .env file above has been applied, so a launcher that imports
+    this module gets the same answer whether the values came from the shell or
+    from the file.
+    """
+    host = os.getenv("API_HOST", "").strip() or DEFAULT_API_HOST
+    return host, read_int_env("API_PORT", DEFAULT_API_PORT)
+
 
 def winget_packages_dir() -> Path:
     """Root of winget's per-user package installs; a non-existent path when unset."""
@@ -228,7 +248,16 @@ class StoragePaths:
 class Settings:
     backend_root: Path = Path(__file__).resolve().parents[2]
     root_dir: Path = Path(__file__).resolve().parents[3]
-    api_port: int = read_int_env("API_PORT", 8787)
+    api_host: str = os.getenv("API_HOST", "").strip() or DEFAULT_API_HOST
+    api_port: int = read_int_env("API_PORT", DEFAULT_API_PORT)
+    # Serve the built frontend (``npm run build`` -> dist/) from this process,
+    # so a single-box deployment needs no second web server: the browser loads
+    # the app and calls /api and /media on the same origin, which is also what
+    # keeps CORS out of the picture. Off in development, where Vite serves the
+    # sources and proxies to this API instead. FRONTEND_DIST_DIR points at a
+    # build kept outside the checkout.
+    serve_frontend: bool = read_bool_env("SERVE_FRONTEND", False)
+    frontend_dist_dir_override: str = os.getenv("FRONTEND_DIST_DIR", "").strip()
     max_video_upload_mb: int = read_int_env("MAX_VIDEO_UPLOAD_MB", 2048)
     max_case_study_upload_mb: int = read_int_env("MAX_CASE_STUDY_UPLOAD_MB", 50)
     auth_token_ttl_seconds: int = read_int_env("AUTH_TOKEN_TTL_SECONDS", 60 * 60 * 8)
@@ -551,6 +580,22 @@ class Settings:
         return self.paths.storage_root / "cache" / "objects"
 
     @property
+    def frontend_dist_dir(self) -> Path:
+        """Directory holding the built frontend (index.html + assets/)."""
+        if self.frontend_dist_dir_override:
+            return Path(self.frontend_dist_dir_override).expanduser()
+        return self.root_dir / "dist"
+
+    @property
+    def frontend_index_path(self) -> Path:
+        return self.frontend_dist_dir / "index.html"
+
+    @property
+    def binds_loopback_only(self) -> bool:
+        """True when only this machine can reach the API (the dev default)."""
+        return self.api_host.strip().lower() in LOOPBACK_HOSTS
+
+    @property
     def object_storage_root(self) -> Path:
         raw = os.getenv("OBJECT_STORAGE_ROOT", "").strip()
         return Path(raw).expanduser() if raw else self.paths.storage_root / "objects"
@@ -709,8 +754,27 @@ class Settings:
                 "PDFs, scores) are served without authentication."
             )
         warnings.extend(self._account_warnings())
+        warnings.extend(self._frontend_warnings())
         warnings.extend(self._human_detector_warnings())
         return warnings
+
+    def _frontend_warnings(self) -> list[str]:
+        """Warn when the built frontend is asked for but is not there.
+
+        Not a refusal: the API is complete without it (a reverse proxy may be
+        serving dist/ instead). But an operator who set SERVE_FRONTEND=true and
+        forgot ``npm run build`` should read why the root URL answers 404 at
+        boot, not in the browser.
+        """
+        if not self.serve_frontend:
+            return []
+        if self.frontend_index_path.is_file():
+            return []
+        return [
+            f"SERVE_FRONTEND is enabled but no build was found at {self.frontend_dist_dir} "
+            "(no index.html). Run 'npm run build' or point FRONTEND_DIST_DIR at the build; "
+            "until then the root URL answers 404 and only /api and /media are served."
+        ]
 
     def _account_warnings(self) -> list[str]:
         """Warn when invitations and password resets cannot actually reach anyone.

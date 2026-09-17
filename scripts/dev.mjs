@@ -5,6 +5,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { loadEnvFile } from './load-env.mjs';
+import { DEFAULT_API_PORT as FALLBACK_API_PORT } from './dev-hosts.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,7 +23,7 @@ const viteBin = path.join(rootDir, 'node_modules', 'vite', 'bin', 'vite.js');
 const pythonOverride = process.env.PYTHON_BIN;
 const apiCommand = pythonOverride || (process.platform === 'win32' ? 'uv.exe' : 'uv');
 const apiCommandPrefix = pythonOverride ? [] : ['run', '--no-sync', 'python'];
-const DEFAULT_API_PORT = Number(process.env.API_PORT || 8787);
+const DEFAULT_API_PORT = Number(process.env.API_PORT || FALLBACK_API_PORT);
 const PORT_SCAN_LIMIT = 20;
 
 // One dev process dying should not take the other down with it — a crashed API
@@ -70,7 +71,7 @@ function isPortAvailable(port) {
 }
 
 async function resolveApiPort() {
-  const preferredPort = Number.isInteger(DEFAULT_API_PORT) && DEFAULT_API_PORT > 0 ? DEFAULT_API_PORT : 8787;
+  const preferredPort = Number.isInteger(DEFAULT_API_PORT) && DEFAULT_API_PORT > 0 ? DEFAULT_API_PORT : FALLBACK_API_PORT;
 
   if (await isPortAvailable(preferredPort)) {
     return { selectedPort: preferredPort, preferredPort };

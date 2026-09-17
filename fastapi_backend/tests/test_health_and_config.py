@@ -80,3 +80,38 @@ def test_unprotected_media_produces_warning() -> None:
     )
     warnings = settings.collect_runtime_warnings()
     assert any("PROTECT_MEDIA_ENDPOINTS" in warning for warning in warnings)
+
+
+# --- where the API listens ---------------------------------------------------
+
+def test_bind_defaults_to_loopback(monkeypatch) -> None:
+    """Nothing on the network reaches a half-set-up instance unless asked."""
+    from app.core.config import DEFAULT_API_HOST, DEFAULT_API_PORT, server_bind_from_env
+
+    monkeypatch.delenv("API_HOST", raising=False)
+    monkeypatch.delenv("API_PORT", raising=False)
+    assert server_bind_from_env() == (DEFAULT_API_HOST, DEFAULT_API_PORT)
+    assert Settings(ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe", scorer_python_bin="python").binds_loopback_only
+
+
+def test_bind_reads_api_host_and_port(monkeypatch) -> None:
+    from app.core.config import server_bind_from_env
+
+    monkeypatch.setenv("API_HOST", " 0.0.0.0 ")
+    monkeypatch.setenv("API_PORT", "9000")
+    assert server_bind_from_env() == ("0.0.0.0", 9000)
+    settings = Settings(
+        ffmpeg_bin="ffmpeg",
+        ffprobe_bin="ffprobe",
+        scorer_python_bin="python",
+        api_host="0.0.0.0",
+    )
+    assert settings.binds_loopback_only is False
+
+
+def test_bind_ignores_a_blank_host(monkeypatch) -> None:
+    """``API_HOST=`` left empty in .env means the default, not bind to ''."""
+    from app.core.config import DEFAULT_API_HOST, server_bind_from_env
+
+    monkeypatch.setenv("API_HOST", "")
+    assert server_bind_from_env()[0] == DEFAULT_API_HOST

@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.dependencies import authorize_request
+from app.api.frontend import mount_frontend
 from app.api.routes import (
     analytics,
     async_uploads,
@@ -146,3 +147,7 @@ app.include_router(notifications.router, prefix="/api")
 app.include_router(webhooks.router, prefix="/api")
 app.include_router(corpora.router, prefix="/api")
 app.include_router(settings_routes.router, prefix="/api")
+
+# Last on purpose: a catch-all for the built frontend can only serve what the
+# routers and media mounts above did not claim.
+mount_frontend(app, settings)
