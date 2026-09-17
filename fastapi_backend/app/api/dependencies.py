@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
-from fastapi import Request
+from fastapi import HTTPException, Request, status
 
+from app.domain.actors import Actor
+from app.domain.users import UserRole
 from app.services.container import AppContainer
 
 
@@ -11,9 +13,19 @@ from app.services.container import AppContainer
 # and the token-check endpoint which validates its own token).
 OPEN_API_PATHS = {"/api/health", "/api/health/ready", "/api/auth/login", "/api/auth/me"}
 
+# Path prefixes reachable without a token: the emailed-link flows. The person
+# following an invitation or a password-reset link has, by definition, no
+# session yet. Each of these endpoints is gated by the token in its own URL and
+# by a per-IP rate limit instead.
+OPEN_API_PREFIXES = ("/api/auth/invitations/", "/api/auth/password-reset")
+
 
 def get_container(request: Request) -> AppContainer:
     return request.app.state.container
+
+
+def is_open_path(path: str) -> bool:
+    return path in OPEN_API_PATHS or path.startswith(OPEN_API_PREFIXES)
 
 
 def is_session_events_path(path: str) -> bool:
@@ -26,7 +38,7 @@ def is_stream_path(path: str) -> bool:
     return path == "/api/events" or is_session_events_path(path)
 
 
-def authorize_request(
+async def authorize_request(
     request: Request,
     container: AppContainer,
     *,
@@ -41,9 +53,13 @@ def authorize_request(
     Media (``/media/*``) and the SSE events endpoint additionally accept a
     short-lived stream ticket (``?ticket=``) because ``<video>`` tags and
     EventSource cannot send an Authorization header.
+
+    Async because verification now consults the account row behind the token
+    (through a cache the change feed evicts), which is how a disabled account
+    is refused on its next request rather than at its token's expiry.
     """
     path = request.url.path
-    if path in OPEN_API_PATHS:
+    if is_open_path(path):
         return True, None
 
     is_media = path.startswith("/media/")
@@ -53,9 +69,9 @@ def authorize_request(
     if is_media and not protect_media:
         return True, None
 
-    payload = container.auth.verify_token(extract_bearer_token(request))
+    payload = await container.auth.verify_token(extract_bearer_token(request))
     if payload is None and (is_media or is_stream_path(path)):
-        payload = container.auth.verify_stream_ticket(extract_stream_ticket(request))
+        payload = await container.auth.verify_stream_ticket(extract_stream_ticket(request))
     if not payload:
         return False, None
     return True, payload
@@ -82,3 +98,67 @@ def extract_stream_ticket(request: Request) -> str:
 def get_auth_payload(request: Request) -> dict[str, Any] | None:
     payload = getattr(request.state, "auth_user", None)
     return payload if isinstance(payload, dict) else None
+
+
+def current_actor(request: Request) -> Actor | None:
+    """Who this request acts as, for services that record or attribute a
+    change. None on the open endpoints (no session). Routes pass it on as an
+    ``actor=`` keyword rather than handing a service the request."""
+    return Actor.from_auth_payload(get_auth_payload(request))
+
+
+def require_role(*roles: UserRole) -> Callable[[Request], dict[str, Any]]:
+    """A dependency that admits only the given roles.
+
+    The middleware has already authenticated the request, so the payload on
+    ``request.state`` is trusted; this only reads its ``role``, which
+    ``AuthService`` refreshed from the account row. Applied at the *router*
+    (``APIRouter(dependencies=[Depends(require_admin)])``) so a new admin route
+    cannot be added without it — ``tests/test_admin_routes_are_guarded.py``
+    checks that.
+    """
+    allowed = {role.value for role in roles}
+
+    def _dependency(request: Request) -> dict[str, Any]:
+        payload = get_auth_payload(request)
+        if payload is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+        if str(payload.get("role") or "") not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Administrator access is required for this action.",
+            )
+        return payload
+
+    # Named so the route-guard test can recognise the dependency by identity.
+    _dependency.__name__ = f"require_role[{','.join(sorted(allowed))}]"
+    _dependency.required_roles = frozenset(allowed)  # type: ignore[attr-defined]
+    return _dependency
+
+
+require_admin = require_role(UserRole.ADMIN)
+
+
+def client_ip(request: Request, trusted_proxy_count: int = 0) -> str:
+    """The address the rate limiters key on.
+
+    With no proxy the socket address is the client. Behind ``n`` trusted
+    proxies, the originating address is the ``n``-th entry from the *right* of
+    X-Forwarded-For: each proxy appends the peer it saw, so the rightmost
+    entries are the ones our own infrastructure wrote and the leftmost are
+    whatever the client chose to send. Counting from the right is what stops a
+    client from forging its way into a fresh rate-limit bucket per request.
+    """
+    socket_host = request.client.host if request.client else "unknown"
+    if trusted_proxy_count <= 0:
+        return socket_host
+
+    forwarded = str(request.headers.get("x-forwarded-for") or "")
+    hops = [item.strip() for item in forwarded.split(",") if item.strip()]
+    if not hops:
+        return socket_host
+    # One proxy -> the last entry; two -> the second-to-last, and so on. A
+    # shorter chain than configured means the request did not traverse them all,
+    # so fall back to the leftmost entry we actually have.
+    index = max(0, len(hops) - trusted_proxy_count)
+    return hops[index] if index < len(hops) else hops[0]

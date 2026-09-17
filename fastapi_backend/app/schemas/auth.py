@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class LoginRequest(BaseModel):
+    # Kept as ``username`` on the wire for compatibility; the value may be a
+    # username or an email address, and the server matches either.
     username: str = Field(min_length=1)
     password: str = Field(min_length=1)
 
@@ -25,14 +27,22 @@ class LoginRequest(BaseModel):
         return value
 
 
-class AuthResponse(BaseModel):
+class IdentityFields(BaseModel):
+    """What a client is allowed to know about the account it holds a token for."""
+
+    userId: str
+    username: str
+    role: str
+    displayName: str = ""
+    email: str = ""
+
+
+class AuthResponse(IdentityFields):
     token: str
     expiresAt: int
-    username: str
 
 
-class AuthMeResponse(BaseModel):
-    username: str
+class AuthMeResponse(IdentityFields):
     expiresAt: int
 
 

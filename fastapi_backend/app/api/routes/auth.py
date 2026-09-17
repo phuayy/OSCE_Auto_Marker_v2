@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from app.api.dependencies import extract_bearer_token, get_container
+from app.api.dependencies import client_ip, extract_bearer_token, get_auth_payload, get_container
+from app.domain.users import ActionTokenPurpose
 from app.schemas.auth import (
     AuthMeResponse,
     AuthResponse,
@@ -10,10 +11,19 @@ from app.schemas.auth import (
     LogoutResponse,
     StreamTicketResponse,
 )
+from app.schemas.users import (
+    AcceptInvitationRequest,
+    ChangePasswordRequest,
+    PasswordResetConfirmRequest,
+    PasswordResetRequest,
+)
 from app.services.container import AppContainer
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+# --- sessions -------------------------------------------------------------------
 
 
 @router.post("/login", response_model=AuthResponse)
@@ -22,9 +32,11 @@ async def login(
     payload: LoginRequest,
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
-    container.login_rate_limiter.check(_client_ip(request, container.settings.trusted_proxy_count))
+    container.login_rate_limiter.check(client_ip(request, container.settings.trusted_proxy_count))
     result = await container.auth.authenticate(payload.username, payload.password)
     if not result:
+        # One message for every refusal — unknown account, not yet activated,
+        # disabled, wrong password — so the endpoint cannot enumerate accounts.
         raise HTTPException(status_code=401, detail="Invalid username or password.")
     return result
 
@@ -32,20 +44,29 @@ async def login(
 @router.get("/me", response_model=AuthMeResponse)
 async def me(request: Request, container: AppContainer = Depends(get_container)) -> dict[str, object]:
     token = extract_bearer_token(request)
-    payload = container.auth.verify_token(token)
+    payload = await container.auth.verify_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Authentication required.")
-    return {"username": payload["username"], "expiresAt": payload["expiresAt"]}
+    return {
+        "userId": payload["sub"],
+        "username": payload["username"],
+        "role": payload["role"],
+        "displayName": payload.get("displayName") or "",
+        "email": payload.get("email") or "",
+        "expiresAt": payload["expiresAt"],
+    }
 
 
 @router.get("/stream-ticket", response_model=StreamTicketResponse)
 async def stream_ticket(request: Request, container: AppContainer = Depends(get_container)) -> dict[str, object]:
     """Mint a short-lived ticket for SSE/media URLs (requires a valid bearer token)."""
-    token = extract_bearer_token(request)
-    payload = container.auth.verify_token(token)
+    payload = get_auth_payload(request)
     if not payload:
         raise HTTPException(status_code=401, detail="Authentication required.")
-    return container.auth.issue_stream_ticket(str(payload["username"]))
+    ticket = await container.auth.issue_stream_ticket(str(payload["sub"]))
+    if ticket is None:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    return ticket
 
 
 @router.post("/logout", response_model=LogoutResponse)
@@ -55,26 +76,98 @@ async def logout(request: Request, container: AppContainer = Depends(get_contain
     return {"revoked": revoked}
 
 
-def _client_ip(request: Request, trusted_proxy_count: int = 0) -> str:
-    """The address the rate limiter keys on.
+@router.post("/password", response_model=AuthResponse)
+async def change_password(
+    request: Request,
+    payload: ChangePasswordRequest,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Change the signed-in account's own password.
 
-    With no proxy the socket address is the client. Behind ``n`` trusted
-    proxies, the originating address is the ``n``-th entry from the *right* of
-    X-Forwarded-For: each proxy appends the peer it saw, so the rightmost
-    entries are the ones our own infrastructure wrote and the leftmost are
-    whatever the client chose to send. Counting from the right is what stops a
-    client from forging its way into a fresh rate-limit bucket per request.
+    Every other session the account holds ends (the token version moves); the
+    response carries a fresh token so *this* one continues without a new
+    sign-in.
     """
-    socket_host = request.client.host if request.client else "unknown"
-    if trusted_proxy_count <= 0:
-        return socket_host
+    actor = get_auth_payload(request)
+    if not actor:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    return await container.user_admin.change_own_password(
+        str(actor["sub"]),
+        current_password=payload.currentPassword,
+        new_password=payload.newPassword,
+    )
 
-    forwarded = str(request.headers.get("x-forwarded-for") or "")
-    hops = [item.strip() for item in forwarded.split(",") if item.strip()]
-    if not hops:
-        return socket_host
-    # One proxy -> the last entry; two -> the second-to-last, and so on. A
-    # shorter chain than configured means the request did not traverse them all,
-    # so fall back to the leftmost entry we actually have.
-    index = max(0, len(hops) - trusted_proxy_count)
-    return hops[index] if index < len(hops) else hops[0]
+
+# --- emailed links ----------------------------------------------------------------
+#
+# Reachable without a session (see OPEN_API_PREFIXES): the person following an
+# invitation has no account yet, and the one resetting a password has lost the
+# way into theirs. The token in the URL is the credential, and a per-IP throttle
+# stands in front of every one of these.
+
+
+def _throttle(request: Request, container: AppContainer) -> None:
+    container.token_rate_limiter.check(client_ip(request, container.settings.trusted_proxy_count))
+
+
+@router.get("/invitations/{token}")
+async def describe_invitation(
+    token: str, request: Request, container: AppContainer = Depends(get_container)
+) -> dict[str, object]:
+    """Whose invitation this is and whether it still works — what the screen
+    shows before asking for a password. Always 200: an unusable link is an
+    answer, not an error."""
+    _throttle(request, container)
+    description = await container.user_admin.describe_token(token, ActionTokenPurpose.INVITE)
+    return description.to_public()
+
+
+@router.post("/invitations/{token}/accept")
+async def accept_invitation(
+    token: str,
+    payload: AcceptInvitationRequest,
+    request: Request,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Set the first password and activate the account. No session is issued:
+    the person signs in normally next, which is also how the screen confirms
+    the password they chose actually works."""
+    _throttle(request, container)
+    user = await container.user_admin.accept_invitation(
+        token, password=payload.password, display_name=payload.displayName
+    )
+    return {"ok": True, "username": user["username"], "email": user["email"]}
+
+
+@router.post("/password-reset/request")
+async def request_password_reset(
+    payload: PasswordResetRequest,
+    request: Request,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Always the same answer, whatever the identifier names. If it names an
+    account with an address, that mailbox gets a link."""
+    _throttle(request, container)
+    await container.user_admin.request_password_reset(payload.identifier)
+    return {"ok": True, "message": "If that account exists, an email with a reset link is on its way."}
+
+
+@router.get("/password-reset/{token}")
+async def describe_password_reset(
+    token: str, request: Request, container: AppContainer = Depends(get_container)
+) -> dict[str, object]:
+    _throttle(request, container)
+    description = await container.user_admin.describe_token(token, ActionTokenPurpose.PASSWORD_RESET)
+    return description.to_public()
+
+
+@router.post("/password-reset/{token}/confirm")
+async def confirm_password_reset(
+    token: str,
+    payload: PasswordResetConfirmRequest,
+    request: Request,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    _throttle(request, container)
+    user = await container.user_admin.reset_password(token, password=payload.password)
+    return {"ok": True, "username": user["username"]}
