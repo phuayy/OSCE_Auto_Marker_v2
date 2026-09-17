@@ -11,6 +11,7 @@ from uuid import uuid4
 from app.core.exceptions import AppError
 from app.core.locks import KeyedLocks
 from app.core.logging_utils import log_context
+from app.domain.actors import PROVENANCE_KEY, Actor, provenance_of
 from app.domain.enums import (
     ClipExportScope,
     ClipExportStatus,
@@ -1016,7 +1017,7 @@ class ClipService:
                 "Could not delete the superseded clip file %s.", superseded, exc_info=True
             )
 
-    async def assess_clip(self, session_id: str, clip_id: str) -> dict[str, Any]:
+    async def assess_clip(self, session_id: str, clip_id: str, *, actor: Actor | None = None) -> dict[str, Any]:
         """Assess one exported clip — idempotently, one child session per clip.
 
         Always queued, never run in the request. The child is a full pipeline
@@ -1037,9 +1038,11 @@ class ClipService:
         one would score footage the user has already replaced.
         """
         async with self._assess_locks.hold(f"{session_id}:{clip_id}"):
-            return await self._assess_clip_locked(session_id, clip_id)
+            return await self._assess_clip_locked(session_id, clip_id, actor=actor)
 
-    async def _assess_clip_locked(self, session_id: str, clip_id: str) -> dict[str, Any]:
+    async def _assess_clip_locked(
+        self, session_id: str, clip_id: str, *, actor: Actor | None = None
+    ) -> dict[str, Any]:
         parent_session = await self.sessions.read(session_id)
         clip = find_clip(parent_session, clip_id)
         if str(clip.get("kind") or "").lower() == ClipKind.INTERMISSION:
@@ -1078,6 +1081,10 @@ class ClipService:
             },
             "parentSessionId": parent_session["id"],
             "clipSource": self._clip_source(clip),
+            # The account that queued this assessment; failing that, the
+            # recording's own uploader, so a child is never less attributed
+            # than its parent.
+            PROVENANCE_KEY: actor.to_provenance() if actor is not None else provenance_of(parent_session),
             # Inherit the parent's transcription-corpus snapshot so the corpus
             # picked at upload biases every clip assessed within the session.
             "corpus": parent_session.get("corpus"),

@@ -11,6 +11,7 @@ from app.core.config import Settings
 from app.core.exceptions import StaleSessionError
 from app.core.utils import normalize_session_name, parse_iso, session_name_key
 from app.core.versioned_cache import VersionedCache
+from app.domain.actors import PROVENANCE_KEY, provenance_of
 from app.domain.constants import SESSION_NAME_ADJECTIVES, SESSION_NAME_NOUNS
 from app.repositories.session_repository import SessionEntry, SessionRepository
 from app.services.change_feed_service import ChangeFeedService
@@ -332,6 +333,9 @@ class SessionService:
             "pipeline": session.get("pipeline"),
             "parentSessionId": session.get("parentSessionId"),
             "clipSource": session.get("clipSource"),
+            # Who created it, as they were at the time; None for a session
+            # recorded before creators were.
+            PROVENANCE_KEY: provenance_of(session),
             # Progress of the durable clip-export job, or None when this session
             # has never been split. Drives the timeline editor's export gauge.
             "clipExport": session.get("clipExport") or None,

@@ -24,6 +24,7 @@ from app.api.routes import (
     rubrics,
     sessions,
     settings as settings_routes,
+    users as users_routes,
     webhooks,
 )
 from app.core.asyncio_compat import configure_windows_selector_event_loop_policy
@@ -80,7 +81,7 @@ app.add_middleware(
 @app.middleware("http")
 async def require_auth(request: Request, call_next):
     container: AppContainer = request.app.state.container
-    allowed, payload = authorize_request(
+    allowed, payload = await authorize_request(
         request,
         container,
         protect_media=settings.protect_media_endpoints,
@@ -135,6 +136,7 @@ app.mount("/media/source", StaticFiles(directory=str(settings.object_storage_roo
 app.include_router(health.router, prefix="/api")
 app.include_router(events_routes.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
+app.include_router(users_routes.router, prefix="/api")
 app.include_router(rubrics.router, prefix="/api")
 app.include_router(async_uploads.router, prefix="/api")
 app.include_router(jobs.router, prefix="/api")

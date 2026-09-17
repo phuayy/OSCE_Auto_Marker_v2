@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Path, Query, Request, status
 
-from app.api.dependencies import get_container
+from app.api.dependencies import current_actor, get_container
 from app.api.errors import http_error
 from app.core.exceptions import AppError
 from app.schemas.uploads import CompleteUploadRequest, InitiateUploadRequest
@@ -15,10 +15,13 @@ router = APIRouter(prefix="/uploads", tags=["async uploads"])
 @router.post("/initiate", status_code=status.HTTP_201_CREATED)
 async def initiate_upload(
     payload: InitiateUploadRequest,
+    request: Request,
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
+    """Reserve the session and its job. The signed-in account is recorded on
+    the session as its creator — the answer to "who uploaded this?"."""
     try:
-        return await container.async_uploads.initiate(payload)
+        return await container.async_uploads.initiate(payload, actor=current_actor(request))
     except Exception as error:
         raise http_error(error, fallback_message="Upload initiation failed.", not_found_message="Upload not found.") from error
 

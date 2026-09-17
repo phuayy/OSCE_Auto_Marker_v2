@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from app.api.dependencies import get_auth_payload, get_container
+from app.api.dependencies import current_actor, get_container
 from app.llm import custom as custom_providers
 from app.llm.panel import MarkingMode, PanelConfig, parse_marking_mode
 from app.llm.routing import LLMTarget
@@ -125,7 +125,9 @@ async def _resolve_provider_id(container: AppContainer, provider_id: str) -> str
 
 
 def _actor(request: Request) -> str:
-    return str((get_auth_payload(request) or {}).get("username") or "")
+    """The username recorded as ``updated_by`` on a provider or credential row."""
+    actor = current_actor(request)
+    return actor.username if actor is not None else ""
 
 
 @router.post("/llm-providers", status_code=status.HTTP_201_CREATED)

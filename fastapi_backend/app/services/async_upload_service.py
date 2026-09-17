@@ -12,6 +12,7 @@ from app.core.exceptions import AppError
 from app.core.locks import KeyedLocks
 from app.core.tasks import BackgroundTaskRegistry
 from app.core.utils import parse_iso, utc_now_iso
+from app.domain.actors import PROVENANCE_KEY, Actor
 from app.domain.enums import TaskType, UploadStatus, Workflow
 from app.domain.session_lifecycle import fail_session
 from app.domain.sessions import SessionStatus, empty_outputs
@@ -71,7 +72,15 @@ class AsyncUploadService:
         # cannot garbage-collect them mid-execution (see BackgroundTaskRegistry).
         self._background_tasks = BackgroundTaskRegistry()
 
-    async def initiate(self, payload: InitiateUploadRequest) -> dict[str, Any]:
+    async def initiate(self, payload: InitiateUploadRequest, *, actor: Actor | None = None) -> dict[str, Any]:
+        """Reserve a session and its job for a chunked upload.
+
+        ``actor`` is the account making the request; the session records it as
+        its creator (a snapshot, so a later rename or deletion of the account
+        does not rewrite history). None only for a caller with no session,
+        which the API never allows here — it is optional so the service stays
+        usable from tests and scripts.
+        """
         self._validate_declared_files(payload)
         corpus_snapshot = await self._resolve_corpus_snapshot(payload.corpusId)
         session_id = str(uuid4())
@@ -122,6 +131,8 @@ class AsyncUploadService:
             "id": session_id,
             "name": payload.sessionName or "",
             "createdAt": utc_now_iso(),
+            # Who uploaded it, as they were at the time.
+            PROVENANCE_KEY: actor.to_provenance() if actor is not None else None,
             "status": SessionStatus.WAITING_FOR_UPLOAD,
             "workflow": payload.workflow,
             # Long-workflow auto-crop method ("bells" | "person"); None defers

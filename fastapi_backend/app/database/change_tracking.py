@@ -62,6 +62,13 @@ TRACKED_TABLES: tuple[str, ...] = (
     # not learned about an edited endpoint would keep sending this deployment's
     # key to the address the definition used to name.
     "llm_providers",
+    # Accounts are read on *every* authenticated request: the bearer token
+    # names a user and a token version, and the row decides whether that user
+    # is still active and still on that version. Cached per process
+    # (``UserDirectory``) for the same reason the credentials are, and tracked
+    # for the same reason too — an admin disabling a marker has to reach every
+    # API process on the marker's next request, not at their next restart.
+    "users",
 )
 
 _VERSION_TABLE = "table_versions"

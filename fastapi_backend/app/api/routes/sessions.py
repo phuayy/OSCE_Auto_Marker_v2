@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from app.api.dependencies import get_container
+from app.api.dependencies import current_actor, get_container
 from app.api.errors import http_error
 from app.schemas.sessions import (
     ManualClipsRequest,
@@ -221,15 +221,17 @@ async def recrop_clip(
 async def assess_clip(
     session_id: str,
     clip_id: str,
+    request: Request,
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
     """Create the clip's child session and queue its assessment.
 
     Always deferred: the former ``?defer`` switch is accepted and ignored so
     older clients keep working, but nothing scores inside the request any more.
+    The child records the signed-in account as its creator.
     """
     try:
-        return await container.clips.assess_clip(session_id, clip_id)
+        return await container.clips.assess_clip(session_id, clip_id, actor=current_actor(request))
     except Exception as error:
         raise http_error(error, fallback_message="Clip assessment could not be queued.", not_found_message="Session not found.") from error
 

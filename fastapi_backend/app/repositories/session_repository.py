@@ -16,6 +16,7 @@ from app.core.json_utils import read_json_file
 from app.core.utils import parse_iso, session_name_key
 from app.database.models import SessionRecord, utc_now
 from app.database.orm import OrmDatabase
+from app.domain.actors import PROVENANCE_KEY, provenance_of, provenance_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,7 @@ class SessionRepository:
                     status=str(session.get("status") or "uploaded"),
                     parent_session_id=session.get("parentSessionId"),
                     clip_source=session.get("clipSource"),
+                    created_by=provenance_user_id(session),
                     payload=payload,
                     created_at=_parse_created_at(session),
                     updated_at=now,
@@ -186,6 +188,7 @@ class SessionRepository:
                         status=str(session.get("status") or existing.status),
                         parent_session_id=session.get("parentSessionId"),
                         clip_source=session.get("clipSource"),
+                        created_by=provenance_user_id(session),
                         payload=payload,
                         updated_at=now,
                     )
@@ -316,6 +319,7 @@ class SessionRepository:
             payload["clipExport", "completed"].as_float().label("clip_export_completed"),
             payload["clipExport", "total"].as_float().label("clip_export_total"),
             payload["error"].as_string().label("error"),
+            payload[PROVENANCE_KEY].as_json().label("created_by"),
         ).order_by(SessionRecord.created_at.desc())
 
         async with self.database.session() as db_session:
@@ -355,6 +359,9 @@ class SessionRepository:
                     # user sees a session they cannot open, so the reason has
                     # to travel with the list, not just the full document.
                     "error": row.error or None,
+                    # Who created the session, as they were at the time (the
+                    # card says "by Dr M"); None for a row that predates this.
+                    "createdBy": provenance_of({PROVENANCE_KEY: row.created_by}),
                 }
             )
         return projections
