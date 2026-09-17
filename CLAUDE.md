@@ -16,7 +16,7 @@ Final-year project (FYP) that automatically marks OSCE (Objective Structured Cli
 | AI scoring | Pluggable LLM providers behind a router (NVIDIA, OpenAI, Anthropic, DeepSeek, Gemini, OpenRouter) for content + communication; librosa for audio professionalism — all run as **subprocesses** via `scripts/`. Primary and fallback model chosen in Settings, stored in `app_settings`, read live per run |
 | Transcription | Pluggable engines behind a router: **WhisperX** (default, diarises) or **NVIDIA Canary-Qwen 2.5B** (optional, NeMo; text-only + separate pyannote pass). Chosen in Settings, stored in `app_settings`, read live per run |
 | Job queue | **local** asyncio (default) or **Hatchet** (optional distributed queue) |
-| Auth | HS256 JWT bearer tokens; short-lived stream tickets for SSE/media |
+| Auth | Accounts in the `users` table (two roles: `admin`, `marker`); HMAC-signed bearer tokens that name an account + token version, verified against the row on every request; short-lived stream tickets for SSE/media; invitation / password-reset links by email |
 | Video processing | ffmpeg / ffprobe |
 
 ---
@@ -27,7 +27,13 @@ Final-year project (FYP) that automatically marks OSCE (Objective Structured Cli
 OSCE-AI-FYP/
 ├── src/                        # React frontend (Vite)
 │   ├── OSCEAiMarkerMockup.jsx  # The dashboard: upload form, session index, session state (entry chunk)
-│   ├── AppShell.jsx            # Root shell, hash-routing driver
+│   ├── AppShell.jsx            # Root shell, hash-routing driver, role gate for admin routes
+│   ├── LoginScreen.jsx         # Sign in (username or email); "Forgot your password?"
+│   ├── UsersAdminPage.jsx      # #/users — invite, re-invite, disable, role, reset, delete (admins only, lazy)
+│   ├── AccountPage.jsx         # #/account — who you are + change your own password (lazy)
+│   ├── AcceptInviteScreen.jsx  # #/accept-invite/<token> — pre-login: set the first password (lazy)
+│   ├── ForgotPasswordScreen.jsx# #/forgot-password — pre-login: ask for a reset link (lazy)
+│   ├── ResetPasswordScreen.jsx # #/reset-password/<token> — pre-login: choose a new password (lazy)
 │   ├── MarkingModeSettings.jsx # Settings card: single-model vs panel marking
 │   ├── PanelMarkingSummary.jsx # Score tab: how a panel marked (summary + per-criterion votes)
 │   ├── workspace/              # The opened-session view — its own chunk, loaded by the click that opens a session
@@ -37,6 +43,8 @@ OSCE-AI-FYP/
 │   │   ├── StudentClipSplitterCard.jsx # Auto-split clip list + per-clip trim
 │   │   └── primitives.jsx              # StatusRow / Metric / FeedbackBlock / ContentSheetEmptyState / IndicatorList
 │   ├── components/
+│   │   ├── AuthShell.jsx       # The dark pre-login frame + its fields/buttons; every pre-login screen composes it
+│   │   ├── AuthNewPasswordFields.jsx # "New password" + "Confirm" on that frame (invitation and reset screens)
 │   │   ├── TargetPicker.jsx    # One provider+model choice; shared by every settings card that asks for one
 │   │   ├── PageHeader.jsx      # The sticky page bar every route shares (h1, Back, actions) + SkipToContent
 │   │   ├── SessionStatusBadge.jsx # A session's status as a word in its tone (reads lib/sessionStatus.js)
@@ -57,10 +65,13 @@ OSCE-AI-FYP/
 │   │   ├── coalesce.js         # Single-flight wrapper: a burst of refresh triggers = one run + one catch-up (pure)
 │   │   ├── clipExportOutcome.js # What the editor does when an export/recrop job lands (pure)
 │   │   ├── processingStage.js  # Session card's stage gauge, from the projection's `steps` (pure)
-│   │   ├── navigation.js       # parseRoute / buildRoute (hash-based deep links)
+│   │   ├── navigation.js       # parseRoute / buildRoute (hash-based deep links); PUBLIC_VIEWS / ADMIN_VIEWS
+│   │   ├── authz.js            # canManageUsers / roleLabel — what an identity may open (pure)
+│   │   ├── provenance.js       # creatorName / describeCreator — who created a session, in words (pure)
+│   │   ├── userAdmin.js        # Users screen rules: status chips, row actions, password check, delivery banner (pure)
 │   │   ├── lazyRoute.jsx       # Code-splitting plumbing: lazy + preload + chunk error boundary
 │   │   └── useHashRoute.js     # React hook for URL <-> state sync
-│   └── auth.js                 # fetchStreamTicket, resolveMediaUrl helpers
+│   └── auth.js                 # Session storage (token + identity), fetch shim, stream tickets, the account request helpers
 ├── fastapi_backend/
 │   ├── alembic.ini             # Alembic config; URL comes from Settings, not this file
 │   ├── alembic/
@@ -73,13 +84,16 @@ OSCE-AI-FYP/
 │   │       ├── 0004_provider_credentials.py      # encrypted operator-managed LLM API keys
 │   │       ├── 0005_cache_invalidation_triggers.py  # change tracking on the two cached tables
 │   │       ├── 0006_custom_llm_providers.py     # operator-defined scoring providers (+ tracking)
-│   │       └── 0007_jobs_tables_in_orm_metadata.py  # jobs/job_attempts/job_events become ORM models
+│   │       ├── 0007_jobs_tables_in_orm_metadata.py  # jobs/job_attempts/job_events become ORM models
+│   │       ├── 0008_users_and_action_tokens.py  # accounts + emailed action tokens (+ tracking on users)
+│   │       └── 0009_sessions_created_by.py      # sessions.created_by mirrors the createdBy snapshot
 │   └── app/
 │       ├── main.py             # FastAPI app, middleware, startup/shutdown
 │       ├── core/
 │       │   ├── config.py       # Settings (pydantic-settings), all env vars
 │       │   ├── process.py      # CommandRunner — async subprocess wrapper
-│       │   ├── rate_limit.py   # FixedWindowRateLimiter (login endpoint)
+│       │   ├── rate_limit.py   # FixedWindowRateLimiter (login + the public link endpoints)
+│       │   ├── security.py     # bcrypt, HMAC tokens (TokenSubject), action-token mint/hash
 │       │   ├── secret_box.py   # AES-256-GCM for operator-entered secrets at rest
 │       │   ├── snapshot_cache.py # One cached value, evicted by the database's own change feed
 │       │   ├── tasks.py        # BackgroundTaskRegistry (strong-ref fire-and-forget)
@@ -90,7 +104,18 @@ OSCE-AI-FYP/
 │       │   ├── models.py       # SQLAlchemy models (see DB Models section)
 │       │   ├── schema_ownership.py  # The only tables Alembic autogenerate ignores
 │       │   └── migration_runner.py  # Runs "alembic upgrade head" at startup
+│       ├── domain/
+│       │   ├── users.py        # UserRole / UserStatus / ActionTokenPurpose, normalisers, password policy
+│       │   └── actors.py       # Actor (who a request acts as) + the createdBy provenance snapshot
+│       ├── mail/               # Outbound email: one contract, one backend per deployment
+│       │   ├── base.py             # EmailMessage, EmailSender Protocol, EmailDeliveryError
+│       │   ├── smtp.py             # SmtpEmailSender (aiosmtplib)
+│       │   ├── console.py          # ConsoleEmailSender — logs the message; the dev default
+│       │   ├── templates.py        # invitation / password_reset / password_changed (text + HTML)
+│       │   ├── links.py            # invite_link / password_reset_link — the #/ routes, spelled once
+│       │   └── factory.py          # create_email_sender() — switches on EMAIL_BACKEND
 │       ├── repositories/
+│       │   ├── user_repository.py       # Accounts + action tokens; atomic single-use consume; to_public whitelist
 │       │   ├── session_repository.py    # SessionRecord CRUD + legacy JSON migration
 │       │   ├── job_repository.py        # Raw SQL jobs store
 │       │   ├── provider_credential_repository.py  # Sealed LLM API keys (ciphertext only)
@@ -112,7 +137,9 @@ OSCE-AI-FYP/
 │       │   ├── job_queue_service.py     # Local asyncio + Hatchet dispatch
 │       │   ├── job_tasks.py             # Job task-type registry (handler + status ownership)
 │       │   ├── event_service.py         # In-process SSE pub/sub
-│       │   ├── auth_service.py          # JWT issue/verify/revoke
+│       │   ├── auth_service.py          # Token issue/verify/revoke; verify = signature + account row
+│       │   ├── user_directory.py        # Cached per-request view of `users` (SnapshotCache, change-feed evicted)
+│       │   ├── user_admin_service.py    # Invite / resend / role / disable / delete / reset / accept / change password
 │       │   ├── rubric_service.py        # Communication rubric parse/upload
 │       │   ├── rubric_asset_service.py
 │       │   ├── assessment_service.py
@@ -156,7 +183,8 @@ OSCE-AI-FYP/
 │       │   └── routes/
 │       │       ├── sessions.py          # /api/sessions/** (list, get, events SSE, process, clips)
 │       │       ├── async_uploads.py     # /api/uploads/** (initiate, part, complete, abort) — the ONLY ingest path
-│       │       ├── auth.py              # /api/auth/login|me|logout|stream-ticket
+│       │       ├── auth.py              # /api/auth/login|me|logout|stream-ticket|password + the public link endpoints
+│       │       ├── users.py             # /api/admin/users/** — router-level require_admin
 │       │       ├── health.py            # /api/health (liveness) + /api/health/ready (readiness)
 │       │       ├── jobs.py              # /api/jobs/**
 │       │       ├── rubrics.py           # /api/rubrics/**
@@ -215,10 +243,15 @@ AppContainer
  ├── pipeline          PipelineService(sessions, events, media, scoring, assessments)
  ├── clips             ClipService(sessions, events, media, pipeline, jobs)
  ├── async_uploads     AsyncUploadService(settings, repo, sessions, storage, jobs, media, events, rubric_assets, videos)
- └── login_rate_limiter FixedWindowRateLimiter
+ ├── users             UserRepository(orm_database)
+ ├── user_directory    UserDirectory(users, changes) — what AuthService verifies every token against
+ ├── user_admin        UserAdminService(settings, users, user_directory, auth, mailer)
+ ├── mailer            EmailSender — create_email_sender(settings), or the double a test injects
+ ├── login_rate_limiter FixedWindowRateLimiter
+ └── token_rate_limiter FixedWindowRateLimiter (accept-invite / password-reset endpoints)
 ```
 
-`startup(role=ContainerRole.API)` runs: config warnings -> storage layout -> **alembic upgrade head** -> DB init -> ORM init -> additive migrations -> change-tracking triggers -> auth init -> legacy session migration -> rubric parse -> stale upload recovery -> job queue startup (recover + dispatch) -> background transcription-model prefetch.
+`startup(role=ContainerRole.API)` runs: config warnings -> storage layout -> **alembic upgrade head** -> DB init -> ORM init -> additive migrations -> change-tracking triggers -> auth init -> **bootstrap admin** (`user_admin.startup()`: seed the first account when the table is empty, sweep spent tokens) -> legacy session migration -> rubric parse -> stale upload recovery -> job queue startup (recover + dispatch) -> background transcription-model prefetch.
 
 The same container boots in two processes with different duties, so
 `startup` takes a `ContainerRole`. **API** does everything above. **WORKER**
@@ -551,7 +584,7 @@ Defined in [models.py](fastapi_backend/app/database/models.py):
 
 | Table | Model | Purpose |
 |---|---|---|
-| `sessions` | `SessionRecord` | Session state + full payload JSON |
+| `sessions` | `SessionRecord` | Session state + full payload JSON. `created_by` mirrors `payload.createdBy.userId` (indexed, nullable) the way `parent_session_id` mirrors the parent — see **Who created a session** |
 | `rubric_assets` | `RubricAsset` | Deduped case-study PDFs and communication rubrics |
 | `source_videos` | `VideoRecord` | Video file provenance per session |
 | `students` | `StudentRecord` | Student entities |
@@ -562,6 +595,8 @@ Defined in [models.py](fastapi_backend/app/database/models.py):
 | `notifications` | `NotificationRecord` | Task-completion notification history; `read_at` null = unread |
 | `provider_credentials` | `ProviderCredentialRecord` | Per-provider LLM API key as AES-256-GCM ciphertext; never serialised to a client |
 | `llm_providers` | `CustomProviderRecord` | Scoring providers an operator defined at runtime — endpoint, auth placement, versions, extra headers/query/body. No key column: the credential lives in `provider_credentials` like every other provider's |
+| `users` | `UserRecord` | Accounts: `username` / `email` (lowercased, unique), `display_name`, `role` (`admin` \| `marker`), `status` (`invited` \| `active` \| `disabled`), bcrypt `password_hash` (null while invited), `token_version` — bumped by activation, a password change/reset and suspension, so every bearer token the account holds dies on its next request |
+| `user_action_tokens` | `UserActionTokenRecord` | The emailed capabilities: `purpose` (`invite` \| `password_reset`), SHA-256 `token_hash` (the token itself is never stored), `expires_at`, `used_at` (set by an atomic conditional update — single use, and a resend voids the earlier link) |
 | `app_settings` | `AppSettingRecord` | Global key/value settings — model routing, marking mode + panel, transcription engine, preprocess toggle — written by `PUT /api/settings` (replace) or `PATCH /api/settings` (merge only the keys sent; what the settings cards use, so no card can revert another's save) |
 
 The queue's tables (`jobs`, `job_attempts`, `job_events`) are models like the
@@ -641,6 +676,25 @@ string used as a `status` value, a `status` comparison or a `status in {...}`
 membership test. It is what caught the job queue writing `"processing"` onto a
 session, the since-removed single-shot upload route's `"uploaded"`, and the
 upload-file records in `app/storage/` that predate `UploadStatus`.
+
+**Who created a session.** Every session records its creator as a
+**snapshot** — `payload.createdBy = {userId, username, displayName}` as the
+account was at that moment — because an account can be renamed, disabled or
+deleted later and the record must still say who. The value type is
+[domain/actors.py](fastapi_backend/app/domain/actors.py): a route reads the
+`Actor` off the verified request once (`current_actor(request)` in
+`api/dependencies.py`) and hands it to the service as an `actor=` keyword, so
+no service ever sees a request. `AsyncUploadService.initiate` stamps the
+uploader; `ClipService.assess_clip` stamps whoever queued the clip's
+assessment, falling back to the recording's own uploader so a child is never
+less attributed than its parent. `SessionRepository` mirrors the user id into
+the indexed `sessions.created_by` column on every write (revision `0009`; the
+additive fallback adds the column, not the index), the list projection carries
+`createdBy`, `public_session` exposes it, and the browser turns it into words
+in one place — [lib/provenance.js](src/lib/provenance.js): the card says
+"· by Dr M", the workspace strip "Uploaded by" / "Queued by". A session from
+before this has `createdBy: null` and shows nothing rather than a guess. This
+is attribution, not ownership: every marker still sees every session.
 
 ---
 
@@ -743,12 +797,98 @@ own publish calls, which `publish` no-ops anyway.
 
 ---
 
-## Authentication
+## Authentication and accounts
 
-- Single admin user; credentials in `.env` (`AUTH_USERNAME`, `AUTH_PASSWORD_HASH`).
-- `POST /api/auth/login` -> JWT bearer token (rate-limited: 10 req/60s per IP).
-- Short-lived **stream tickets** (`GET /api/auth/stream-ticket`) for SSE and `<video>` URLs that cannot send `Authorization` headers.
-- `POST /api/auth/logout` revokes token in `TokenRevocationRegistry` (in-process only).
+Design and the reasoning behind it: [docs/user-administration.md](docs/user-administration.md).
+
+**Accounts are rows** (`users`), with two roles — `admin` is `marker` plus
+account management; a marker can do everything else — and three statuses
+(`invited`, `active`, `disabled`). The vocabulary is
+[domain/users.py](fastapi_backend/app/domain/users.py) and is guarded by
+`test_status_vocabulary.py` like every other status word. There is no
+per-session ownership: every marker sees every session.
+
+**The first administrator is seeded at startup, API role only**
+(`UserAdminService.ensure_bootstrap_admin`). An empty table is filled from the
+legacy `storage/auth/credentials.json` when one exists — same username, same
+bcrypt hash, so an upgraded deployment keeps its password — else from
+`DEFAULT_ADMIN_USERNAME` / `DEFAULT_ADMIN_PASSWORD` (`DEFAULT_ADMIN_EMAIL`
+optional). Once any account exists it does nothing; a deleted bootstrap account
+does not come back.
+
+**A bearer token names an account and a version.** `POST /api/auth/login`
+(username *or* email; rate-limited 10 req/60 s per IP; every refusal costs one
+bcrypt verify and reads the same, so the endpoint cannot enumerate accounts)
+answers with `{token, expiresAt, userId, username, role, displayName, email}`.
+The signed payload carries `sub`, `role` and `tokenVersion`. Verification
+(`AuthService.verify_token`, now async) checks the signature and expiry, then
+the account row — present, `active`, and on that `token_version` — through
+`UserDirectory`, a `SnapshotCache` over `users` evicted by the change feed
+(`users` is in `TRACKED_TABLES`; revision `0008` installs the trigger). The
+role handed to the request is the *row's*. Consequences:
+
+* disabling an account, deleting it, resetting or changing its password bumps
+  `token_version`, so every token it holds is refused on the next request in
+  every API process — no waiting for the 8-hour expiry, no shared revocation store;
+* a role change applies on the next request without a new sign-in (the browser
+  re-reads `/api/auth/me` on load to catch up its header);
+* warm on PostgreSQL, the row check costs no query; on SQLite one
+  `table_versions` read. `GET /api/health/ready` reports it as `caches.userDirectory`;
+* a token from before this change carries no `sub` and is refused — everyone
+  signs in once after the upgrade.
+
+Short-lived **stream tickets** (`GET /api/auth/stream-ticket`) for SSE and
+`<video>` URLs carry the same claims and die with the account. `POST
+/api/auth/logout` still revokes one token in `TokenRevocationRegistry`
+(in-process); `POST /api/auth/password` changes the caller's own password,
+ends every *other* session, and answers with a fresh token so the tab stays in.
+
+**Authorization is a router-level dependency.** `require_admin`
+([api/dependencies.py](fastapi_backend/app/api/dependencies.py)) is declared on
+`APIRouter("/admin/users", dependencies=[Depends(require_admin)])`, so a route
+added there is protected by construction; `tests/test_admin_routes_are_guarded.py`
+walks the real app and fails if any `/api/admin/*` path lacks it. 401 with no
+session, 403 for a marker. Nothing else in the API is role-gated.
+
+**Invitations and password resets are emailed capabilities.**
+
+```
+admin   POST /api/admin/users {email, role, displayName}
+        -> users row (invited, no password) + user_action_tokens row (purpose=invite, 72 h)
+        -> email with  {APP_PUBLIC_URL}/#/accept-invite/<token>
+        -> 201 {user, mailSent, mailError, inviteLink?}
+invitee GET  /api/auth/invitations/<token>          -> {valid, reason, email, displayName, expiresAt}
+        POST /api/auth/invitations/<token>/accept    {password, displayName?}  -> account active; sign in next
+anyone  POST /api/auth/password-reset/request {identifier}   -> always {ok: true}
+        GET  /api/auth/password-reset/<token> / POST …/confirm {password}
+```
+
+The token is 256 bits from a CSPRNG, stored as a **SHA-256** (never the token),
+**single-use by an atomic conditional update** (`UserRepository.consume_token`),
+**voided by a resend**, expired after `INVITE_TOKEN_TTL_HOURS` /
+`PASSWORD_RESET_TOKEN_TTL_MINUTES`, and judged against the account's state too
+(an invitation cannot activate an account disabled meanwhile). It rides in the
+URL fragment, which browsers never send to the server. The password policy
+(≥ 10 chars, ≤ 72 bytes — bcrypt's limit — not the account's own identifier) is
+checked *before* the token is consumed, so a weak first attempt does not burn
+the link. The public endpoints are open (`OPEN_API_PREFIXES`) and throttled per
+IP by `token_rate_limiter`. Every rule — last active admin cannot be demoted,
+disabled or deleted (checked first, so a sole admin hears "promote someone
+first"); nobody disables, deletes or demotes *themselves*; an invited account
+is re-invited, not enabled — lives in
+[user_admin_service.py](fastapi_backend/app/services/user_admin_service.py) and
+the routes only translate.
+
+**Mail is a backend behind a Protocol** ([app/mail/](fastapi_backend/app/mail/)):
+`smtp` (aiosmtplib; `SMTP_HOST`, `EMAIL_FROM` required — the factory refuses to
+boot without them, like GCS without a bucket) or `console` (the default: the
+message goes to the server log). A failed delivery never rolls the account
+back: the response says `mailSent: false` with the relay's wording and the
+screen offers Resend. With the console backend the response also carries the
+raw link (`inviteLink` / `resetLink`) for the admin to copy — nothing can
+deliver it otherwise; `INVITE_LINK_VISIBLE_TO_ADMIN` overrides. `create_container`
+takes a `mailer=` override, which is how `tests/fixtures/mail.py`'s
+`RecordingEmailSender` lets a test follow the link an email carried.
 
 ---
 
@@ -762,12 +902,24 @@ form, session index, and the session state everything else reads — rendered by
 opened-session view, and loads as its own chunk.
 
 **Hash routing** — no react-router:
-- Routes: `#/` (dashboard), `#/session/<id>` (workspace), `#/rubric`.
+- Routes: `#/` (dashboard), `#/session/<id>` (workspace), `#/rubric`, `#/analytics`,
+  `#/settings`, `#/users` (administrators — `ADMIN_VIEWS`; `AppShell` bounces anyone
+  else to the dashboard and the API 403s regardless), `#/account`; and three
+  **pre-login** routes an emailed link opens (`PUBLIC_VIEWS`, rendered for everyone,
+  signed in or not): `#/accept-invite/<token>`, `#/forgot-password`,
+  `#/reset-password/<token>`. `parseRoute` returns `{view, sessionId, token}`.
 - `useHashRoute` hook syncs React state <-> URL. Back/forward and deep-links work.
+- The identity (`userId, username, role, displayName, email`) is stored beside
+  the token by `auth.js`; `AppShell` re-reads `/api/auth/me` once per token so a
+  role changed by an administrator reaches the header on the next load. The
+  dashboard has no role logic: `AppShell` passes `onOpenUsers` only for an admin.
+- Every pre-login screen composes `components/AuthShell.jsx` — the dark frame
+  the login screen always had, extracted so four screens share one.
 
 **Code splitting.** The login screen and the dashboard are what a first paint
-has to contain; Settings, Analytics and the Communication Rubric are whole pages
-reached by a deliberate click, so `AppShell` loads each as its own chunk through
+has to contain; Settings, Analytics, the Communication Rubric, Users and Account
+are whole pages reached by a deliberate click — and the three pre-login screens
+by a link in an email — so `AppShell` loads each as its own chunk through
 [lib/lazyRoute.jsx](src/lib/lazyRoute.jsx). Three things that module adds over a
 bare `React.lazy`, because a deployed app needs all three:
 
@@ -1080,6 +1232,12 @@ recording; its Student column the scored subject.
 | `GCS_SIGNED_URL_TTL_SECONDS` | `3600` | Lifetime of V4 signed playback URLs |
 | `DATABASE_URL` | SQLite in storage/ | PostgreSQL or SQLite URL |
 | `DB_AUTO_MIGRATE` | `true` | Run `alembic upgrade head` at startup; false = migrate as a deploy step |
+| `DEFAULT_ADMIN_USERNAME` / `DEFAULT_ADMIN_PASSWORD` / `DEFAULT_ADMIN_EMAIL` | `admin` / — / — | The first administrator, seeded on the first boot of an empty `users` table (a legacy `credentials.json` wins). Never read again once any account exists |
+| `APP_PUBLIC_URL` | `http://localhost:5173` | Origin every emailed link starts with; must be the deployment's public https address |
+| `INVITE_TOKEN_TTL_HOURS` / `PASSWORD_RESET_TOKEN_TTL_MINUTES` | `72` / `30` | Lifetime of an invitation link and of a reset link; both single-use |
+| `INVITE_LINK_VISIBLE_TO_ADMIN` | follows `EMAIL_BACKEND` | Whether the Users screen is handed the raw link to copy; unset = only when nothing can email it |
+| `TOKEN_RATE_LIMIT_MAX_ATTEMPTS` / `TOKEN_RATE_LIMIT_WINDOW_SECONDS` | `20` / `600` | Per-IP throttle on the public accept-invite / password-reset endpoints |
+| `EMAIL_BACKEND` | `console` | `console` logs each message; `smtp` delivers via aiosmtplib (`SMTP_HOST`, `SMTP_PORT`=587, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_STARTTLS`=true, `SMTP_USE_TLS`=false, `SMTP_TIMEOUT_SECONDS`=15, `EMAIL_FROM` required) |
 | `CREDENTIAL_ENCRYPTION_KEY` | derived from `AUTH_SECRET` | Master key (32 bytes, base64 or hex) for the provider API keys saved in Settings. Changing it makes stored keys unreadable and the screen asks for them again |
 | `NVIDIA_API_KEY` | — | Credentials for the NVIDIA scoring provider (also the default when nothing is selected). Overridden by a key saved in Settings for the same provider |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` / `OPENROUTER_API_KEY` | — | Credentials for the other scoring providers. A provider with no key is shown as unavailable in Settings and dropped from routing |
@@ -1214,9 +1372,14 @@ call is neither — those live in `debug_scripts/` and are run by hand
 (`debug_scripts/check_nvidia_api.py`). Shared Python doubles live in
 `fastapi_backend/tests/fixtures/`: `events.py` (`RecordingEvents` — one double
 for `EventService`, replacing thirteen bespoke copies that each knew only
-`publish`) and `scoring_doubles.py` (`ContentMarkingSeam`, which gives a
+`publish`), `scoring_doubles.py` (`ContentMarkingSeam`, which gives a
 `run_content_scoring`-shaped double the prepared-run seam the pipeline actually
-calls).
+calls) and `mail.py` (`RecordingEmailSender` — the mail backend
+`build_test_client` injects, which keeps every message and hands back the link
+an email carried so a test can follow an invitation the way a person would;
+`configured=False` imitates the console backend, `fail_with=` a dead relay).
+`test_routes.build_test_client` seeds the bootstrap admin (`admin` / `admin`)
+the way `startup()` does.
 
 **Windows:** `run_api.py` always sets `loop="none"` so uvicorn keeps the `WindowsSelectorEventLoopPolicy` that async psycopg needs. `--reload` is driven by `watchfiles.run_process`, not uvicorn's own reloader: uvicorn restarts its worker with `os.kill(pid, CTRL_C_EVENT)`, and Windows delivers a console control event to *every* process on the console — under `npm run dev` that killed node, vite and npm too, which looked like the server shutting itself down on save. Never run two API instances on same port.
 
@@ -1573,7 +1736,9 @@ key taken from another.
 | Cold cache / after any change | 1 read per table, shared by every concurrent caller |
 
 `GET /api/health/ready` reports `caches.providerCredentials`,
-`caches.appSettings`, `caches.customProviders` and `caches.changeFeedPushActive`. Counters only — a cache
+`caches.appSettings`, `caches.customProviders`, `caches.userDirectory` (the
+account row every request is verified against — see **Authentication and
+accounts**) and `caches.changeFeedPushActive`. Counters only — a cache
 holding API keys must not become the way they leak. `pushActive: false` with a
 high hit rate is the shape worth alerting on: rotations are still arriving, but
 by counter comparison rather than by announcement.

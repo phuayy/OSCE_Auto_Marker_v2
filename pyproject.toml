@@ -31,6 +31,9 @@ dependencies = [
 
     # Authentication.
     "bcrypt==5.0.0",
+    # Invitation and password-reset emails (app/mail/smtp.py). Async end to
+    # end, so a slow relay stalls one request rather than the event loop.
+    "aiosmtplib==5.1.3",
     # AES-256-GCM for the provider API keys the settings screen stores.
     # Already present transitively; pinned directly because app/core/secret_box.py
     # imports it and a transitive dependency is free to drop it.

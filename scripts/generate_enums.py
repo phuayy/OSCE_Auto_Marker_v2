@@ -22,6 +22,7 @@ from app.domain.enums import (
 )
 from app.domain.jobs import JobStatus
 from app.domain.sessions import IN_FLIGHT_STATUSES, SessionStatus
+from app.domain.users import UserRole, UserStatus
 from app.llm.panel import MarkingMode, TieBreak
 
 
@@ -32,7 +33,7 @@ def render() -> str:
     for enum in (
         SessionStatus, PipelineStep, StepStatus, UploadStatus, ClipExportStatus, ClipExportScope,
         JobStatus, TaskType, Workflow, SegmentationMethod, ClipKind, UploadFileKind, OutputKey,
-        MarkingMode, TieBreak,
+        MarkingMode, TieBreak, UserRole, UserStatus,
     ):
         values = {item.name: item.value for item in enum}
         definitions.append(

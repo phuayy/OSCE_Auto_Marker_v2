@@ -283,6 +283,10 @@ npm run dev
 ```
 
 Open <http://localhost:5173>, log in with `admin` / your `DEFAULT_ADMIN_PASSWORD`.
+To let colleagues in, open **Users** and invite them by email: they choose their
+own password from the emailed link. With the default `EMAIL_BACKEND=console`
+nothing is actually sent — the link is printed in the API log and shown on the
+Users screen to copy; set `EMAIL_BACKEND=smtp` (see `.env.example`) to email it.
 
 > ⚠️ Run **only one** `npm run dev:api` at a time. Two instances contend for
 > port 8787 and long-lived SSE streams block graceful shutdown.
@@ -310,7 +314,9 @@ process (including a Hatchet worker), with no restart.
 
 | Key | Required? | Where to get it | Used by |
 | --- | --- | --- | --- |
-| `DEFAULT_ADMIN_PASSWORD` | **Yes (first boot)** | You choose it | Bootstraps `storage/auth/credentials.json` (bcrypt hash). Login = `admin` + this password |
+| `DEFAULT_ADMIN_PASSWORD` | **Yes (first boot)** | You choose it | Seeds the first administrator account (`admin` + this password) when the `users` table is empty; an existing `storage/auth/credentials.json` is migrated instead. Every other account is invited from **Users** by an administrator |
+| `APP_PUBLIC_URL` | **Yes** for a shared deployment | The https origin the app is served from | Every link in an invitation or password-reset email starts with it |
+| `EMAIL_BACKEND` + `SMTP_HOST` / `EMAIL_FROM` (…) | **Yes** to email invitations | Your institution's SMTP relay | `smtp` delivers invitations and reset links; `console` (default) writes them to the server log and the Users screen shows the link to copy |
 | `NVIDIA_API_KEY` | One provider key required | [build.nvidia.com](https://build.nvidia.com) → API key (`nvapi-...`) | Content + communication scoring. This is the default provider when nothing is selected |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` / `OPENROUTER_API_KEY` | Alternative to NVIDIA | Each vendor's own console | Selectable as the primary or fallback scoring model in Settings → Scoring model. A provider with no key shows as unavailable and is dropped from routing |
 | `<PROVIDER>_BASE_URL` | Optional | — | Per-provider endpoint override (proxy, gateway, regional endpoint) |
@@ -463,7 +469,9 @@ for the providers actually named.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /api/auth/login` · `/logout` · `GET /me` · `GET /stream-ticket` | Auth; stream tickets keep the bearer token out of SSE/media URLs |
+| `POST /api/auth/login` · `/logout` · `GET /me` · `GET /stream-ticket` · `POST /password` | Auth (username or email); stream tickets keep the bearer token out of SSE/media URLs; change your own password |
+| `GET /api/auth/invitations/{token}` · `POST .../accept` · `POST /api/auth/password-reset/request` · `GET /api/auth/password-reset/{token}` · `POST .../confirm` | The emailed-link flows, reachable without a session; single-use, expiring tokens, per-IP throttled |
+| `GET/POST /api/admin/users` · `PATCH/DELETE .../{id}` · `POST .../{id}/resend-invite` · `/disable` · `/enable` · `/send-password-reset` | Account administration — administrators only (403 for a marker) |
 | `POST /api/uploads/initiate` → `PUT .../parts/{n}` → `POST .../complete` | Chunked resumable upload (video + case study); `local` or `gcs` transport |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | Session list / detail (includes `pipeline.steps` for progress) |
 | `GET .../transcript` · `/scores` · `/communication-scores` · `/audio-professionalism` | Result payloads |
@@ -531,8 +539,10 @@ npm run db:up|down|logs|ps|check|reset   # PostgreSQL helpers
 - Architecture deep-dive for contributors/AI agents: [CLAUDE.md](CLAUDE.md).
 - Extended local setup notes: [LOCAL_SETUP.md](LOCAL_SETUP.md).
 - Multi-model marking design: [docs/multi-model-marking-plan.md](docs/multi-model-marking-plan.md).
+- Accounts, invitations and password recovery: [docs/user-administration.md](docs/user-administration.md).
 - Pipeline diagram, failure simulations, remaining risks: [docs/pipeline-audit.md](docs/pipeline-audit.md).
 
-*Academic FYP: current auth (single admin, in-process token revocation) suits
-local/internal use; production healthcare deployment would need RBAC, audit
-logging, and a hardened data-governance review.*
+*Academic FYP: accounts are two roles (administrator, marker) with emailed
+invitations and per-request revocation; every marker sees every session, and
+logout revocation stays in-process. A production healthcare deployment would
+still need audit logging and a hardened data-governance review.*

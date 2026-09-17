@@ -448,7 +448,7 @@ Important frontend dependencies from `package.json`:
 
 FastAPI creates these folders/files as needed:
 
-- `storage/auth/credentials.json`
+- `storage/auth/credentials.json` (legacy; read once, to migrate the admin into the `users` table)
 - `storage/auth/secret.key`
 - `storage/database/osce_marker.sqlite3`
 - `storage/uploads`
