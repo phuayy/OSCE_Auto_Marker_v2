@@ -146,6 +146,7 @@ def test_index_projection_matches_legacy_full_read_shape(tmp_path) -> None:
                 "clipExportCompleted",
                 "clipExportTotal",
                 "error",
+                "createdBy",
             }
         finally:
             await changes.stop()

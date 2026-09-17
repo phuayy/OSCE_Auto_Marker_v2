@@ -19,11 +19,13 @@ from app.api.routes import (
     notifications,
     sessions,
     settings as settings_routes,
+    users as users_routes,
     webhooks,
 )
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.services.container import create_container
+from tests.fixtures.mail import RecordingEmailSender
 
 
 def build_test_client(tmp_path: Path) -> TestClient:
@@ -39,10 +41,12 @@ def build_test_client(tmp_path: Path) -> TestClient:
         app_database_url="",
         database_url="",
     )
-    container = create_container(settings)
+    container = create_container(settings, mailer=RecordingEmailSender())
     asyncio.run(container.artifacts.ensure_storage_layout())
     asyncio.run(container.storage.ensure_layout())
     asyncio.run(container.auth.initialize())
+    # The bootstrap admin the tests sign in as; in the app this runs in startup().
+    asyncio.run(container.user_admin.ensure_bootstrap_admin())
 
     app = FastAPI()
     app.state.container = container
@@ -51,7 +55,7 @@ def build_test_client(tmp_path: Path) -> TestClient:
     # tests exercise the real media/SSE/token logic.
     @app.middleware("http")
     async def require_auth(request: Request, call_next):
-        allowed, payload = authorize_request(
+        allowed, payload = await authorize_request(
             request,
             container,
             protect_media=settings.protect_media_endpoints,
@@ -89,6 +93,7 @@ def build_test_client(tmp_path: Path) -> TestClient:
     app.include_router(events_routes.router, prefix="/api")
     app.include_router(webhooks.router, prefix="/api")
     app.include_router(settings_routes.router, prefix="/api")
+    app.include_router(users_routes.router, prefix="/api")
     return TestClient(app)
 
 

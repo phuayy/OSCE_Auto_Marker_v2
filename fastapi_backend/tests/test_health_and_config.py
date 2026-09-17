@@ -38,15 +38,36 @@ def test_wildcard_cors_produces_warning() -> None:
     assert any("CORS_ALLOW_ORIGINS" in warning for warning in warnings)
 
 
-def test_specific_cors_and_protected_media_has_no_warnings() -> None:
+def test_production_shaped_config_has_no_warnings() -> None:
     settings = Settings(
         ffmpeg_bin="ffmpeg",
         ffprobe_bin="ffprobe",
         scorer_python_bin="python",
         cors_allow_origins=("https://app.example.edu",),
         protect_media_endpoints=True,
+        email_backend="smtp",
+        smtp_host="smtp.example.edu",
+        email_from="OSCE AI Marker <no-reply@example.edu>",
+        app_public_url="https://app.example.edu",
     )
     assert settings.collect_runtime_warnings() == []
+
+
+def test_console_mail_backend_and_plain_public_url_produce_warnings() -> None:
+    """Invitations that go to a log, or links sent over http, are worth a line
+    at boot — not a refusal, because a laptop deployment is exactly that."""
+    settings = Settings(
+        ffmpeg_bin="ffmpeg",
+        ffprobe_bin="ffprobe",
+        scorer_python_bin="python",
+        cors_allow_origins=("https://app.example.edu",),
+        protect_media_endpoints=True,
+        email_backend="console",
+        app_public_url="http://osce.internal",
+    )
+    warnings = settings.collect_runtime_warnings()
+    assert any("EMAIL_BACKEND=console" in warning for warning in warnings)
+    assert any("APP_PUBLIC_URL" in warning for warning in warnings)
 
 
 def test_unprotected_media_produces_warning() -> None:

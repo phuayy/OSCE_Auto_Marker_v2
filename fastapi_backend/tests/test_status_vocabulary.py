@@ -5,7 +5,7 @@ is imported, never re-spelled as a bare string literal at a call site.
 
 This scans every module under ``app/`` (excluding ``app/domain/`` itself,
 which *is* the vocabulary) for a string literal that collides with one of the
-five status enums, used in a way that reads or writes a ``"status"`` field:
+six status enums, used in a way that reads or writes a ``"status"`` field:
 
   (a) assigned to a subscript whose slice is the constant ``"status"``
       (``x["status"] = "processing"``);
@@ -30,6 +30,7 @@ from pathlib import Path
 from app.domain.enums import ClipExportStatus, StepStatus, UploadStatus
 from app.domain.jobs import JobStatus
 from app.domain.sessions import SessionStatus
+from app.domain.users import UserStatus
 
 # fastapi_backend/app
 APP_ROOT = Path(__file__).resolve().parents[1] / "app"
@@ -38,7 +39,7 @@ DOMAIN_ROOT = APP_ROOT / "domain"
 
 FORBIDDEN_LITERALS: frozenset[str] = frozenset(
     str(member.value)
-    for enum_cls in (SessionStatus, JobStatus, StepStatus, UploadStatus, ClipExportStatus)
+    for enum_cls in (SessionStatus, JobStatus, StepStatus, UploadStatus, ClipExportStatus, UserStatus)
     for member in enum_cls
 )
 
@@ -145,6 +146,6 @@ def test_status_vocabulary_is_never_respelled() -> None:
 
     assert not failures, (
         "Bare status-string literal(s) found where an enum from app/domain "
-        "(SessionStatus, JobStatus, StepStatus, UploadStatus, ClipExportStatus) "
+        "(SessionStatus, JobStatus, StepStatus, UploadStatus, ClipExportStatus, UserStatus) "
         "must be imported and used instead:\n" + "\n".join(failures)
     )

@@ -12,7 +12,7 @@ from app.core.asyncio_compat import configure_windows_signal_compatibility
 from app.core.config import Settings, resolve_binary_from_candidates
 from app.core.process import CommandRunner
 from app.core.exceptions import AppError
-from app.core.security import build_auth_payload, sign_payload, verify_signed_token
+from app.core.security import TokenSubject, build_auth_payload, sign_payload, verify_signed_token
 from app.core.utils import sanitize_file_name
 from app.pipeline.media import MediaPipeline
 from app.pipeline.scoring import ScoringPipeline
@@ -47,9 +47,13 @@ def test_srt_to_vtt_conversion() -> None:
 
 
 def test_auth_token_sign_verify_and_expiry() -> None:
-    payload, _expires_at = build_auth_payload("admin", 60)
+    subject = TokenSubject(user_id="u-1", username="admin", role="admin", token_version=1)
+    payload, _expires_at = build_auth_payload(subject, 60)
     token = sign_payload(payload, "secret")
-    assert verify_signed_token(token, "secret")["username"] == "admin"
+    verified = verify_signed_token(token, "secret")
+    assert verified["username"] == "admin"
+    assert verified["sub"] == "u-1"
+    assert verified["tokenVersion"] == 1
     assert verify_signed_token(token, "wrong") is None
 
     expired = {"username": "admin", "issuedAt": 1, "expiresAt": 1, "tokenId": "x"}

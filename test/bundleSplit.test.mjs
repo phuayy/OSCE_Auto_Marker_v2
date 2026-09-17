@@ -30,6 +30,11 @@ const LAZY_ONLY = [
   ['src/AnalyticsPage.jsx', 'the Analytics nav button'],
   ['src/SettingsPage.jsx', 'the Settings nav button'],
   ['src/CommunicationRubricPanel.jsx', 'the Rubric nav button'],
+  ['src/UsersAdminPage.jsx', 'the Users nav button (administrators only)'],
+  ['src/AccountPage.jsx', 'the Account button'],
+  ['src/AcceptInviteScreen.jsx', 'an invitation link'],
+  ['src/ForgotPasswordScreen.jsx', 'the "Forgot your password?" link'],
+  ['src/ResetPasswordScreen.jsx', 'a password-reset link'],
   ['src/lib/demoSessions.js', 'a demo button'],
 ];
 

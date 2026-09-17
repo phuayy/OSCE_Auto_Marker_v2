@@ -34,13 +34,14 @@ def _build_client(tmp_path: Path) -> TestClient:
     asyncio.run(container.storage.ensure_layout())
     asyncio.run(container.auth.initialize())
     asyncio.run(container.orm_database.initialize())
+    asyncio.run(container.user_admin.ensure_bootstrap_admin())
 
     app = FastAPI()
     app.state.container = container
 
     @app.middleware("http")
     async def require_auth(request: Request, call_next):
-        allowed, payload = authorize_request(
+        allowed, payload = await authorize_request(
             request,
             container,
             protect_media=settings.protect_media_endpoints,

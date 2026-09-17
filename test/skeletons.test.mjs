@@ -45,6 +45,9 @@ const SETTINGS_CARDS = [
   ['WebhooksManager.jsx', 'WebhookRowsSkeleton'],
 ];
 const OTHER_SITES = [
+  ['UsersAdminPage.jsx', 'InviteFormSkeleton'],
+  ['UsersAdminPage.jsx', 'UserRowsSkeleton'],
+  ['AccountPage.jsx', 'AccountFormSkeleton'],
   ['AnalyticsPage.jsx', 'AnalyticsSkeletonBody'],
   ['CommunicationRubricPanel.jsx', 'RubricCriteriaSkeleton'],
   ['CommunicationRubricPanel.jsx', 'RubricSourceSkeleton'],
@@ -111,10 +114,21 @@ test('the settings route fallback composes the same card skeletons the cards sho
 
 test('each route falls back to its page skeleton, not the generic spinner', () => {
   const fallbacks = [...APP_SHELL.matchAll(/<LazyBoundary fallback=\{<(\w+)/g)].map((match) => match[1]);
-  assert.deepEqual(fallbacks, ['RubricSkeleton', 'AnalyticsSkeleton', 'SettingsSkeleton']);
+  assert.deepEqual(fallbacks, [
+    // The three pre-login screens an emailed link opens.
+    'AuthScreenSkeleton',
+    'AuthScreenSkeleton',
+    'AuthScreenSkeleton',
+    // The signed-in routes.
+    'RubricSkeleton',
+    'AnalyticsSkeleton',
+    'SettingsSkeleton',
+    'UsersSkeleton',
+    'AccountSkeleton',
+  ]);
   assert.equal(/RouteFallback/.test(APP_SHELL), false, 'AppShell should not reach for RouteFallback');
-  // Each fallback keeps the page's Back button working while the chunk loads.
-  assert.equal((APP_SHELL.match(/Skeleton onBack=\{/g) || []).length, 3);
+  // Each signed-in fallback keeps the page's Back button working while the chunk loads.
+  assert.equal((APP_SHELL.match(/Skeleton onBack=\{/g) || []).length, 5);
 });
 
 test('the analytics page and its route share one skeleton', () => {
@@ -141,6 +155,8 @@ test('page-frame skeletons carry the titles of the pages they stand in for', () 
     ['SettingsPage.jsx', ['Settings', 'Global options applied to every assessment run']],
     ['AnalyticsPage.jsx', ['Score Analytics', 'Assessment results stored in the database']],
     ['CommunicationRubricPanel.jsx', ['Communication Rubric', 'Editable']],
+    ['UsersAdminPage.jsx', ['Users', 'Who can sign in, and what they may do']],
+    ['AccountPage.jsx', ['Your account', 'Sign-in details and password']],
   ]) {
     const page = read(file);
     for (const text of strings) {

@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from app.api.routes.auth import _client_ip
+from app.api.dependencies import client_ip as _client_ip
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.process import CommandRunner
