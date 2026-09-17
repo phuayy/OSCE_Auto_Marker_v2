@@ -2,9 +2,19 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Base tokens */
+/* Base tokens. The colour tokens (--surface, --slate-*, --rose-* …) are not
+   written here: tailwind.palette.js declares them on `:root` / `.theme-fixed`
+   and re-maps them on `.dark`, so the two themes cannot drift apart from the
+   utilities that read them. */
 :root {
   --radius: 0.75rem;
+  color-scheme: light;
+}
+
+/* Native form controls, scrollbars and the default <select> menu follow the
+   theme too. Set on the class, not by media query: the user's choice wins. */
+.dark {
+  color-scheme: dark;
 }
 
 body {
@@ -12,17 +22,19 @@ body {
 }
 
 /* Scrollbar. Every page after login is white on slate-50, so the bar is a
-   quiet slate thumb rather than the purple gradient the login hero uses. */
+   quiet slate thumb rather than the purple gradient the login hero uses. The
+   thumb reads the tonal palette, so it is slate-300 by day and slate-600 in
+   the dark, like every other border. */
 ::-webkit-scrollbar { width: 12px; height: 12px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: rgb(var(--slate-300));
   border-radius: 6px;
   border: 3px solid transparent;
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+  background: rgb(var(--slate-400));
   background-clip: padding-box;
 }
 

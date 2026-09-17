@@ -156,7 +156,7 @@ test('page-frame skeletons carry the titles of the pages they stand in for', () 
     ['AnalyticsPage.jsx', ['Score Analytics', 'Assessment results stored in the database']],
     ['CommunicationRubricPanel.jsx', ['Communication Rubric', 'Editable']],
     ['UsersAdminPage.jsx', ['Users', 'Who can sign in, and what they may do']],
-    ['AccountPage.jsx', ['Your account', 'Sign-in details and password']],
+    ['AccountPage.jsx', ['Your account', 'Sign-in details, password and appearance']],
   ]) {
     const page = read(file);
     for (const text of strings) {

@@ -5,8 +5,27 @@
     <link rel="icon" type="image/png" href="/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OSCE AI Marker</title>
+    <script>
+      // The theme before the first paint. React applies it too (src/lib/theme.js),
+      // but React runs after the bundle loads, and a user who chose the dark theme
+      // would see a white flash first. This mirrors that module's storage key and
+      // resolution rule; test/theme.test.mjs evaluates it against the module so
+      // the two cannot disagree. Read-only, never throws: a blocked localStorage
+      // just means the system setting.
+      (function () {
+        try {
+          var stored = window.localStorage.getItem('osce-ai-marker:theme');
+          var dark =
+            stored === 'dark' ||
+            (stored !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          if (dark) document.documentElement.classList.add('dark');
+        } catch (error) {
+          /* system theme */
+        }
+      })();
+    </script>
   </head>
-  <body class="antialiased bg-white">
+  <body class="antialiased bg-slate-50">
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
   </body>

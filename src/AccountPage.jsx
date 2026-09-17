@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { CheckCircle2, KeyRound, ShieldCheck, UserCircle2 } from 'lucide-react';
+import { CheckCircle2, KeyRound, Monitor, Moon, ShieldCheck, Sun, SunMoon, UserCircle2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -7,12 +7,16 @@ import { PageHeader } from '@/components/PageHeader.jsx';
 import { AccountFormSkeleton, LoadingRegion } from '@/components/skeletons.jsx';
 import { changePasswordRequest, refreshIdentity } from '@/auth';
 import { identityLabel, roleLabel } from '@/lib/authz';
+import { THEME_PREFERENCES, ThemePreference, describeThemePreference } from '@/lib/theme';
+import { useTheme } from '@/lib/useTheme';
 import { PASSWORD_MIN_LENGTH, passwordProblems } from '@/lib/userAdmin';
 
 // The signed-in user's own account (#/account): who the server says they
-// are, and the one thing anyone may change about their own access — the
-// password. A change ends every other session on the account; the server
-// answers with a fresh token so this tab stays signed in.
+// are, the one thing anyone may change about their own access — the
+// password — and how the app looks on this device. A password change ends
+// every other session on the account; the server answers with a fresh token
+// so this tab stays signed in. The appearance choice is the browser's, not
+// the account's (see src/lib/theme.js), which the card says in as many words.
 
 const FIELD =
   'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/30 disabled:opacity-60';
@@ -89,7 +93,7 @@ export default function AccountPage({ identity: initialIdentity = null, onBack, 
       <PageHeader
         icon={<KeyRound className="h-5 w-5" />}
         title="Your account"
-        subtitle="Sign-in details and password"
+        subtitle="Sign-in details, password and appearance"
         onBack={onBack}
         backTitle="Back to dashboard"
       />
@@ -189,7 +193,62 @@ export default function AccountPage({ identity: initialIdentity = null, onBack, 
             </form>
           </CardContent>
         </Card>
+
+        <AppearanceCard />
       </main>
     </div>
+  );
+}
+
+const PREFERENCE_ICONS = {
+  [ThemePreference.SYSTEM]: Monitor,
+  [ThemePreference.LIGHT]: Sun,
+  [ThemePreference.DARK]: Moon,
+};
+
+// The three-way choice the header's one-click toggle stands in for. A
+// radio-card group like every other "choose one" in the app; it applies on
+// click and needs no save, because there is nothing to send anywhere.
+function AppearanceCard() {
+  const { preference, setPreference } = useTheme();
+  return (
+    <Card className="border-slate-200 bg-white shadow-sm">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-lg">
+          <SunMoon className="h-5 w-5 text-cyan-700" aria-hidden="true" />
+          Appearance
+        </CardTitle>
+        <CardDescription>
+          Light, dark, or whatever this device is set to. Remembered in this browser, not on your account.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div role="radiogroup" aria-label="Appearance" className="grid gap-2 sm:grid-cols-3">
+          {THEME_PREFERENCES.map((value) => {
+            const { label, description } = describeThemePreference(value);
+            const Icon = PREFERENCE_ICONS[value];
+            const selected = preference === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                onClick={() => setPreference(value)}
+                className={`flex items-start gap-3 rounded-xl border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 ${
+                  selected ? 'border-cyan-400 bg-cyan-50 ring-2 ring-cyan-200' : 'border-slate-200 bg-slate-50 hover:border-slate-300'
+                }`}
+              >
+                <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${selected ? 'text-cyan-700' : 'text-slate-500'}`} aria-hidden="true" />
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold text-slate-800">{label}</span>
+                  <span className="block text-[11px] text-slate-500">{description}</span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </CardContent>
+    </Card>
   );
 }

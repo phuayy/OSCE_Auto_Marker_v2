@@ -10,11 +10,14 @@ import { cn } from '@/lib/utils';
 // frame, so it lives here once — the login screen composes it like the rest.
 //
 // Everything below paints its own colours (`variant="plain"` on the button)
-// because the light design system's tokens are wrong on this ground.
+// because the light design system's tokens are wrong on this ground — and
+// the root carries `theme-fixed`, so the tonal palette (tailwind.palette.js)
+// does not re-map them when the document is in the dark theme: this surface
+// is dark by design, in both themes, and has no toggle.
 
 export function AuthShell({ title, subtitle, children, footer }) {
   return (
-    <div className="relative min-h-screen overflow-hidden bg-slate-950 text-slate-100">
+    <div className="theme-fixed relative min-h-screen overflow-hidden bg-slate-950 text-slate-100">
       <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden">
         <div className="absolute -top-32 -left-24 h-96 w-96 rounded-full bg-purple-500/40 blur-3xl animate-blob" />
         <div className="absolute top-20 -right-24 h-96 w-96 rounded-full bg-cyan-500/40 blur-3xl animate-blob animation-delay-2000" />

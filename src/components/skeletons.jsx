@@ -427,7 +427,7 @@ export function AccountSkeleton({ onBack }) {
       <PageHeader
         icon={<KeyRound className="h-5 w-5" />}
         title="Your account"
-        subtitle="Sign-in details and password"
+        subtitle="Sign-in details, password and appearance"
         onBack={onBack}
         backTitle="Back to dashboard"
       />
@@ -437,6 +437,13 @@ export function AccountSkeleton({ onBack }) {
         </SettingsCardSkeleton>
         <SettingsCardSkeleton descriptionLines={2}>
           <AccountFormSkeleton />
+        </SettingsCardSkeleton>
+        <SettingsCardSkeleton descriptionLines={1}>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {[0, 1, 2].map((index) => (
+              <Skeleton key={index} className="h-16 w-full rounded-xl" />
+            ))}
+          </div>
         </SettingsCardSkeleton>
       </LoadingRegion>
     </div>

@@ -617,7 +617,7 @@ export default function SessionWorkspace({
                     className={
                       showCropWorkflow
                         ? 'border-0 bg-violet-600 px-3 py-1 text-xs font-semibold text-white shadow-sm'
-                        : 'border-0 bg-slate-800 px-3 py-1 text-xs font-semibold text-white shadow-sm'
+                        : 'border-0 bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-50 shadow-sm'
                     }
                   >
                     {showCropWorkflow
@@ -665,7 +665,7 @@ export default function SessionWorkspace({
                               className={
                                 showCropWorkflow
                                   ? 'border-0 bg-violet-600 px-3 py-1 text-xs font-semibold text-white shadow-sm'
-                                  : 'border-0 bg-slate-800 px-3 py-1 text-xs font-semibold text-white shadow-sm'
+                                  : 'border-0 bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-50 shadow-sm'
                               }
                             >
                               {showCropWorkflow

@@ -73,7 +73,7 @@ function ChartFullscreenShell({ title, open, onClose, children }) {
       role="dialog"
       aria-modal="true"
       aria-label={title}
-      className="fixed inset-0 z-[230] flex flex-col bg-slate-950/[0.97] backdrop-blur-sm px-4 py-4 text-slate-900 sm:p-8"
+      className="fixed inset-0 z-[230] flex flex-col bg-black/90 backdrop-blur-sm px-4 py-4 text-slate-900 sm:p-8"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -150,7 +150,7 @@ function StudentScoreComparisonChart({ summaries }) {
                   x2={innerWidth}
                   y1={yPos}
                   y2={yPos}
-                  stroke="#e2e8f0"
+                  className="stroke-slate-200"
                   strokeDasharray="4 4"
                 />
                 <text x={-10} y={yPos + 4} textAnchor="end" className="fill-slate-500 text-[11px]">

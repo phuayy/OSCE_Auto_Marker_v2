@@ -1,6 +1,7 @@
 import React from 'react';
 import { ArrowLeft } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { ThemeToggle } from '@/components/ThemeToggle.jsx';
 import { cn } from '@/lib/utils';
 
 // The chrome every page shares: a sticky bar with the app mark, the page's
@@ -13,6 +14,10 @@ import { cn } from '@/lib/utils';
 //
 // The mark is always the primary gradient: it identifies the app, not the
 // page. The page is identified by its icon and title.
+//
+// The theme toggle is part of this chrome rather than a child each page
+// passes: a page cannot forget it, and the route skeletons — which render
+// this same header while a chunk loads — offer it too.
 export function PageHeader({ icon, title, subtitle, onBack, backLabel = 'Back', backDisabled = false, backTitle, children, className }) {
   return (
     <header className={cn('sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur', className)}>
@@ -35,7 +40,10 @@ export function PageHeader({ icon, title, subtitle, onBack, backLabel = 'Back', 
             {subtitle ? <p className="text-xs text-slate-500">{subtitle}</p> : null}
           </div>
         </div>
-        {children ? <div className="flex flex-wrap items-center gap-2">{children}</div> : null}
+        <div className="flex flex-wrap items-center gap-2">
+          {children}
+          <ThemeToggle />
+        </div>
       </div>
     </header>
   );

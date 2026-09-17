@@ -18,7 +18,7 @@ export default function RegionFocusPreview({ videoUrl, regionFocus }) {
 
   return (
     <figure className="m-0">
-      <div className="relative overflow-hidden rounded-lg border border-slate-200 bg-slate-900">
+      <div className="relative overflow-hidden rounded-lg border border-slate-200 bg-black">
         {videoUrl ? (
           <video
             src={videoUrl}
@@ -51,7 +51,7 @@ export default function RegionFocusPreview({ videoUrl, regionFocus }) {
           <div
             key={`${band.start}-${band.end}`}
             aria-hidden="true"
-            className="absolute inset-y-0 bg-slate-950/70"
+            className="absolute inset-y-0 bg-black/70"
             style={{ left: `${band.start}%`, width: `${band.end - band.start}%` }}
           />
         ))}

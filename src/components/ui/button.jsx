@@ -25,6 +25,8 @@ const sizes = {
   sm: 'h-8 px-3 text-xs',
   lg: 'h-11 px-6 text-base',
   icon: 'h-9 w-9',
+  // The header's icon-only controls sit beside `sm` text buttons (h-8).
+  'icon-sm': 'h-8 w-8',
 };
 
 export const Button = React.forwardRef(function Button({ variant = 'default', size = 'default', className, type = 'button', ...props }, ref) {

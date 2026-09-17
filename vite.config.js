@@ -3,14 +3,18 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { loadEnvFile } from './scripts/load-env.mjs';
+import { apiProxyTarget, devServerBind } from './scripts/dev-hosts.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 loadEnvFile(__dirname);
 
-const apiPort = Number(process.env.API_PORT || 8787);
-const apiTarget = `http://localhost:${apiPort}`;
+// Bind and proxy addresses come from the same .env the API reads
+// (API_HOST / API_PORT / DEV_SERVER_HOST / DEV_SERVER_PORT / PREVIEW_PORT);
+// the rules live in scripts/dev-hosts.mjs.
+const apiTarget = apiProxyTarget(process.env);
+const bind = devServerBind(process.env);
 
 function makeProxyOptions(target) {
   return {
@@ -31,10 +35,12 @@ function makeProxyOptions(target) {
 export default defineConfig({
   plugins: [react()],
   server: {
-    // Bind IPv4 loopback explicitly. Node 17+ otherwise binds ::1 only, which
-    // refuses clients that resolve localhost to 127.0.0.1.
-    host: '127.0.0.1',
-    // Fail loudly instead of silently sliding to 5174 when 5173 is taken.
+    // Loopback by default, and IPv4 explicitly: Node 17+ otherwise binds ::1
+    // only, which refuses clients that resolve localhost to 127.0.0.1.
+    // DEV_SERVER_HOST=0.0.0.0 opens the dev build to the local network.
+    host: bind.host,
+    port: bind.port,
+    // Fail loudly instead of silently sliding to the next port when taken.
     strictPort: true,
     watch: {
       // Vite's watcher ignores only .git, node_modules and the build output,
@@ -59,6 +65,14 @@ export default defineConfig({
       '/api': makeProxyOptions(apiTarget),
       '/media': makeProxyOptions(apiTarget),
     },
+  },
+  // `vite preview` serves dist/ the way a static host would, with the same
+  // proxy (preview.proxy defaults to server.proxy) — a quick check of a
+  // production build before SERVE_FRONTEND / a reverse proxy takes over.
+  preview: {
+    host: bind.host,
+    port: bind.previewPort,
+    strictPort: true,
   },
   resolve: {
     alias: {

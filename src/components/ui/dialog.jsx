@@ -77,7 +77,7 @@ export function Modal({
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className={cn('fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 px-4', backdropClassName)}
+      className={cn('fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4', backdropClassName)}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose?.();
       }}

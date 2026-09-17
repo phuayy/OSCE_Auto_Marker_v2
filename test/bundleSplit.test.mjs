@@ -89,6 +89,12 @@ test('the entry chunk holds the dashboard and nothing that needs a second click'
     reachable.has('src/components/skeletons.jsx'),
     'the route and workspace skeletons should be statically reachable from the entry',
   );
+  // The theme toggle sits in every page's header, the dashboard's included,
+  // and the store behind it must take over from index.html's boot script on
+  // the first render — so both belong to the first paint.
+  for (const path of ['src/components/ThemeToggle.jsx', 'src/lib/theme.js', 'src/lib/useTheme.js']) {
+    assert.ok(reachable.has(path), `${path} should be statically reachable from the entry`);
+  }
 
   for (const [path, trigger] of LAZY_ONLY) {
     assert.ok(
