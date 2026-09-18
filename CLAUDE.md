@@ -1433,6 +1433,9 @@ recording; its Student column the scored subject.
 | `PARALLEL_SCORING` | `true` | Run content branch parallel to communication branch |
 | `GPU_SLOTS` | `1` | Jobs that may hold the accelerator at once (transcription, person detection). 0 = unbounded. Per process |
 | `JOB_QUEUE_BACKEND` | `local` | `local` or `hatchet` |
+| `JOB_HEARTBEAT_INTERVAL_SECONDS` | `60` | How often a genuinely-running job refreshes `jobs.locked_at`, proving the worker executing it is still alive |
+| `JOB_STALE_RUNNING_TIMEOUT_SECONDS` | `900` | How long `running` with no heartbeat before the periodic reaper treats a job as orphaned and requeues it |
+| `JOB_REAPER_INTERVAL_SECONDS` | `300` | How often the reaper scans for stale-running jobs; `0` disables it (startup-only recovery, as before) |
 | `STORAGE_BACKEND` | `local` | `local` (parts through the API) or `gcs` (direct-to-bucket resumable uploads) |
 | `GCS_BUCKET` | — | Required when `STORAGE_BACKEND=gcs`; the factory refuses to start without it |
 | `GCS_UPLOAD_ORIGIN` | — | Origin allowed to PUT at the resumable session URI (browser CORS) |

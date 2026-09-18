@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import random
 import socket
@@ -607,7 +608,23 @@ class JobQueueService:
                         extra=log_context(job_id, "job_retry_backoff", attempt=current_attempt),
                     )
                     await asyncio.sleep(backoff_seconds)
-                result = await self.run_job(job_id)
+                try:
+                    result = await self.run_job(job_id)
+                except Exception:
+                    # _execute_job already turns every failure it recognises
+                    # into a JobRunResult; reaching here means something raised
+                    # from outside that path entirely (e.g. a DB error inside
+                    # claim_queued itself). Logged so this is not only visible
+                    # as asyncio's "Task exception was never retrieved" —
+                    # recovery still falls to the periodic stale-job reaper,
+                    # since a claimed-but-abandoned row's heartbeat has simply
+                    # stopped, the same signal a genuine worker death leaves.
+                    logger.exception(
+                        "Unhandled error running job %s; leaving it to the stale-job reaper.",
+                        job_id,
+                        extra=log_context(job_id, "job_run_unhandled_error"),
+                    )
+                    return
                 if not await self._arm_local_retry(result):
                     return
                 current_attempt += 1
@@ -735,6 +752,10 @@ class JobQueueService:
         session_id = str(job.get("sessionId"))
         task_type = str(job.get("taskType"))
         job_context = log_context(session_id, "job_execution", job_id=job_id, task_type=task_type)
+        # Refreshes jobs.locked_at while this job is genuinely still running,
+        # so the periodic reaper can tell "still working, just slow" apart
+        # from "the task that claimed this died" (see _heartbeat_loop).
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop(job_id, self._worker_id))
         try:
             if self.pipeline is None or self.clips is None:
                 raise RuntimeError("Job handlers are not bound.")
@@ -804,6 +825,116 @@ class JobQueueService:
             if raise_on_error:
                 raise
             return JobRunResult(job=failed, error=error)
+        finally:
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat_task
+
+    async def _heartbeat_loop(self, job_id: str, worker_id: str) -> None:
+        """Keep ``jobs.locked_at`` fresh for as long as this worker is
+        actually executing ``job_id``.
+
+        Cancelled from ``_execute_job``'s ``finally`` the moment the job
+        finishes, fails, or this task is itself cancelled — so a stale
+        ``locked_at`` can only mean the heartbeat stopped being renewed,
+        which happens only when nothing is running this job any more.
+        A DB hiccup here is not this loop's problem to solve: it is logged
+        and retried on the next tick, and the periodic reaper is the
+        backstop if the database stays unreachable long enough for the
+        heartbeat to actually go stale.
+        """
+        while True:
+            await asyncio.sleep(self.settings.job_heartbeat_interval_seconds)
+            try:
+                await self.repository.touch_heartbeat(job_id, worker_id)
+            except Exception:
+                logger.warning(
+                    "Heartbeat failed for job %s; the stale-job reaper will recover it if this "
+                    "persists.",
+                    job_id,
+                    exc_info=True,
+                )
+
+    async def reap_stale_jobs(self) -> list[str]:
+        """Requeue every ``running`` job whose heartbeat has gone stale.
+
+        A stale heartbeat (see :meth:`_heartbeat_loop`) is the signal that
+        whatever claimed this job is no longer executing it — an unhandled
+        exception outside the paths ``_execute_job`` recognises (a DB error
+        inside ``claim_queued`` itself, or inside ``mark_failed``), or the
+        process that claimed it is simply gone. Without this, such a job sits
+        at ``running`` forever: ``recover_interrupted_jobs`` only runs at API
+        startup on the ``local`` backend, and nothing today revisits a
+        Hatchet-backend job stuck this way at all.
+
+        Reuses ``requeue_interrupted_job`` — the same primitive startup
+        recovery and a cancelled task both already use — then, regardless of
+        backend, clears any stale Hatchet dispatch metadata and redispatches
+        immediately, the same pop-then-dispatch sequence :meth:`rerun` and
+        the stale-dispatch branch of :meth:`redispatch_stale_hatchet_jobs`
+        already perform. Dispatching immediately (rather than leaving that
+        loop to notice on its own schedule) matters because its own staleness
+        check measures time since *dispatch*, not since the heartbeat went
+        quiet, and could otherwise sit on an already-orphaned row for up to
+        ``hatchet_job_schedule_timeout_minutes``.
+        """
+        stale = await self.repository.list_stale_running(self.settings.job_stale_running_timeout_seconds)
+        reaped: list[str] = []
+        for job in stale:
+            job_id = str(job["id"])
+            session_id = str(job.get("sessionId"))
+            task_type = str(job.get("taskType"))
+            reason = (
+                f"No heartbeat for over {self.settings.job_stale_running_timeout_seconds}s; "
+                "assuming the worker that claimed this job is gone."
+            )
+            requeued = await self.repository.requeue_interrupted_job(job_id, reason)
+            if requeued.get("status") != JobStatus.QUEUED:
+                # Finished, cancelled, or reclaimed by a live worker between
+                # the scan and this requeue attempt — nothing to reap.
+                continue
+            payload = dict(requeued.get("payload") or {})
+            if payload.pop("hatchet", None) is not None:
+                requeued["payload"] = payload
+                await self.repository.write(requeued)
+            await self.repository.append_event(
+                job_id,
+                "reaped_stale",
+                reason,
+                {"sessionId": session_id},
+            )
+            await self._sync_session_job(requeued)
+            await self.events.publish(
+                session_id,
+                "status",
+                {"code": JobStatus.QUEUED, "message": f"{task_type} was orphaned and has been requeued."},
+            )
+            logger.warning(
+                "Reaped stale job %s (session %s): %s",
+                job_id,
+                session_id,
+                reason,
+                extra=log_context(session_id, "job_reaped_stale", job_id=job_id, task_type=task_type),
+            )
+            await self._dispatch(requeued)
+            reaped.append(job_id)
+        return reaped
+
+    async def stale_job_reaper_loop(self) -> None:
+        """Periodic companion to the startup-only recovery paths above.
+
+        Template: ``hatchet_worker._redispatch_loop`` — sleep first, catch
+        and log per iteration rather than let one bad scan end the loop,
+        no ``CancelledError`` handler so shutdown (``BackgroundTaskRegistry
+        .cancel_all()``) cancels it cleanly out of ``asyncio.sleep``.
+        """
+        interval = self.settings.job_reaper_interval_seconds
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.reap_stale_jobs()
+            except Exception:
+                logger.exception("Stale-job reaper scan failed; will retry on the next interval.")
 
     async def _fail_session(self, session_id: str, error: Exception, message: str) -> None:
         """Put a session into its terminal failed state for a failed job."""
