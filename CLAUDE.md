@@ -1401,6 +1401,7 @@ recording; its Student column the scored subject.
 | `DEV_SERVER_HOST` / `DEV_SERVER_PORT` / `PREVIEW_PORT` | `127.0.0.1` / `5173` / `4173` | Vite's own bind. The proxy target follows `API_HOST` / `API_PORT` (`scripts/dev-hosts.mjs` maps `0.0.0.0` to loopback) |
 | `CORS_ALLOW_ORIGINS` | `*` | Browser origins allowed to call `/api`. Moot when the frontend is served from the same origin; set it to that origin to clear the warning |
 | `TRUSTED_PROXY_COUNT` | `0` | Reverse proxies in front. Must match the hop count or the login rate limit keys on the proxy's address |
+| `TRUSTED_PROXY_IPS` | — (count-only) | The proxy's own address(es)/CIDRs, verified against the immediate TCP peer before `X-Forwarded-For` is trusted at all — hop-counting alone cannot tell a header the proxy added from one forged by a client reaching the API port directly, since both are the same length. Unset: warned at startup when `TRUSTED_PROXY_COUNT > 0` |
 | `TRANSCRIPTION_ENGINE` | `whisperx` | Fallback engine when Settings has no stored selection (`whisperx` \| `canary-qwen`) |
 | `CANARY_MODEL` | `nvidia/canary-qwen-2.5b` | NeMo SALM checkpoint for the Canary engine (`uv sync --group canary`) |
 | `TRANSCRIPTION_PREFETCH_MODELS` | `true` | Download the selected engine's weights in the background at startup; false = fetch on first run |

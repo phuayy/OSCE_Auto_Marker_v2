@@ -68,6 +68,7 @@ serves the built frontend.
    | request body limit ≥ `UPLOAD_PART_SIZE_MB` (`client_max_body_size 16m`) | nginx's default is 1 MB; every 8 MB part is refused before the API sees it |
    | no buffering and a long read timeout on `/api/events` | the change feed is an open SSE stream; buffering delays every event, the default 60 s timeout cuts it |
    | `TRUSTED_PROXY_COUNT=1` in `.env` | behind a proxy the socket peer is the proxy, so every login shares one rate-limit bucket until `X-Forwarded-For` is trusted to that depth |
+   | `TRUSTED_PROXY_IPS=127.0.0.1` in `.env` | hop-counting alone cannot tell a header nginx added from one a client forged by reaching the API port directly; this names nginx's own address so only *its* `X-Forwarded-For` is trusted |
 
    With a proxy in front, put the API back on `API_HOST=127.0.0.1` — nothing
    else needs to reach it — and set `APP_PUBLIC_URL` / `CORS_ALLOW_ORIGINS` to

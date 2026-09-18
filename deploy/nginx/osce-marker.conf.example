@@ -9,7 +9,12 @@
 # Copy to /etc/nginx/sites-available/osce-marker, edit the server_name and the
 # paths, symlink into sites-enabled, then: nginx -t && systemctl reload nginx.
 # Set TRUSTED_PROXY_COUNT=1 in the app's .env so the login rate limit keys on
-# the real client address, not on nginx's.
+# the real client address, not on nginx's. Also set TRUSTED_PROXY_IPS=127.0.0.1
+# (nginx's own address as the app sees it, here — co-located on one VM) so the
+# app only honours X-Forwarded-For from nginx itself; without it, a request
+# that reaches the API port directly (which happens if API_HOST is ever set to
+# 0.0.0.0 for direct multi-device uploads, see CLAUDE.md "Deploying on one VM")
+# can forge the same header nginx would have set.
 
 upstream osce_api {
     # Where uvicorn listens (API_HOST / API_PORT). With a proxy in front the
