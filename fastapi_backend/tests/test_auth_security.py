@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+from starlette.requests import Request
+
+from app.api.dependencies import authorize_request
+
 from tests.test_routes import build_test_client
 
 
@@ -38,6 +45,36 @@ def test_media_accepts_short_lived_stream_ticket_m2(tmp_path) -> None:
 
     # ...but a stream ticket must NOT be usable as a full API credential.
     assert client.get("/api/sessions", headers={"Authorization": f"Bearer {ticket}"}).status_code == 401
+
+
+@pytest.mark.parametrize("path", [
+    "/api/sessions", "/api/auth/me", "/api/auth/stream-ticket",
+    "/api/events", "/api/sessions/any/events", "/media/scores/x.json",
+])
+def test_query_bearer_is_never_accepted(tmp_path, path) -> None:
+    client = build_test_client(tmp_path)
+    token = _login(client)
+    assert client.get(path, params={"token": token}).status_code == 401
+
+
+def test_ticket_cannot_authorize_regular_api_or_mutations(tmp_path) -> None:
+    client = build_test_client(tmp_path)
+    token = _login(client)
+    ticket = client.get("/api/auth/stream-ticket", headers={"Authorization": f"Bearer {token}"}).json()["ticket"]
+    assert client.get("/api/sessions", params={"ticket": ticket}).status_code == 401
+    assert client.post("/api/sessions/s1/rerun", params={"ticket": ticket}).status_code == 401
+
+
+@pytest.mark.parametrize('path', ['/api/events', '/api/sessions/s1/events', '/media/scores/x.json'])
+def test_tickets_authorize_only_read_methods(tmp_path, path) -> None:
+    client = build_test_client(tmp_path)
+    token = _login(client)
+    ticket = client.get('/api/auth/stream-ticket', headers={'Authorization': f'Bearer {token}'}).json()['ticket']
+    for method in ('GET', 'HEAD', 'POST', 'DELETE'):
+        request = Request({'type': 'http', 'method': method, 'path': path,
+            'headers': [], 'query_string': f'ticket={ticket}'.encode()})
+        allowed, _ = asyncio.run(authorize_request(request, client.app.state.container, protect_media=True))
+        assert allowed is (method in {'GET', 'HEAD'})
 
 
 def test_stream_ticket_endpoint_requires_auth(tmp_path) -> None:

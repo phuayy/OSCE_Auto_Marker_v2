@@ -71,7 +71,7 @@ async def authorize_request(
         return True, None
 
     payload = await container.auth.verify_token(extract_bearer_token(request))
-    if payload is None and (is_media or is_stream_path(path)):
+    if payload is None and request.method in {"GET", "HEAD"} and (is_media or is_stream_path(path)):
         payload = await container.auth.verify_stream_ticket(extract_stream_ticket(request))
     if not payload:
         return False, None
@@ -82,8 +82,7 @@ def extract_bearer_token(request: Request) -> str:
     header_value = str(request.headers.get("authorization") or "").strip()
     if header_value.lower().startswith("bearer "):
         return header_value[7:].strip()
-    query_token = request.query_params.get("token")
-    return str(query_token or "").strip()
+    return ""
 
 
 def extract_stream_ticket(request: Request) -> str:

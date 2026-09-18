@@ -14,8 +14,8 @@
 // meaningless with no player mounted.
 import React, { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
-import { resolveMediaUrl } from '@/auth';
-import { apiJson } from '@/lib/apiFetch';
+import { ensureStreamTicket, resolveMediaUrl } from '@/auth';
+import { ApiError, ERROR_KIND, apiJson } from '@/lib/apiFetch';
 import { SessionStatus } from '@/lib/enums';
 import { CLIP_ASSESSMENTS_ANCHOR_ID } from '@/lib/anchors';
 import { describeProcessingStage, formatProcessingStageLabel } from '@/lib/processingStage';
@@ -195,7 +195,19 @@ export default function SessionWorkspace({
     sessionStatus: session?.status || null,
   });
 
-  const currentVideoUrl = resolveMediaUrl(session?.files?.video?.url) || localVideoUrl;
+  const [mediaState, setMediaState] = useState({ error: null });
+  const serverVideoUrl = session?.files?.video?.url;
+  useEffect(() => {
+    if (!serverVideoUrl?.startsWith('/media/')) return;
+    let active = true;
+    ensureStreamTicket().then(
+      () => { if (active) setMediaState({ error: null }); },
+      (error) => { if (active) setMediaState({ error }); },
+    );
+    return () => { active = false; };
+  }, [serverVideoUrl]);
+
+  const currentVideoUrl = resolveMediaUrl(serverVideoUrl) || localVideoUrl;
   const currentSubtitleUrl = resolveMediaUrl(session?.outputs?.subtitleTrack?.url) || null;
 
 
@@ -690,7 +702,13 @@ export default function SessionWorkspace({
                           ref={videoPlayerRef}
                           controls
                           preload="metadata"
-                          onLoadedMetadata={handleVideoLoadedMetadata}
+                          onLoadedMetadata={(event) => {
+                            setMediaState({ error: null });
+                            handleVideoLoadedMetadata(event);
+                          }}
+                          onError={() => setMediaState({
+                            error: new ApiError('Media unavailable. Reopen the session to try again.', { kind: ERROR_KIND.CLIENT }),
+                          })}
                           onTimeUpdate={handleVideoTimeUpdate}
                           className="aspect-video w-full rounded-2xl border border-slate-200/90 bg-black shadow-inner"
                           src={currentVideoUrl}
@@ -706,6 +724,9 @@ export default function SessionWorkspace({
                             />
                           ) : null}
                         </video>
+                        {mediaState.error ? (
+                          <p role="alert" className="text-sm text-rose-600">{mediaState.error.message}</p>
+                        ) : null}
 
                         {showCropWorkflow ? (
                           <Tabs
