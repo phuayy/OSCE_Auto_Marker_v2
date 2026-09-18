@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -343,6 +344,48 @@ class JobRepository:
             )
             return JobClaim("claimed", _to_job_dict(row))
 
+    async def touch_heartbeat(self, job_id: str, worker_id: str) -> bool:
+        """Refresh ``locked_at`` for a job this worker is still actively
+        running. Returns whether the row still matched — a job cancelled or
+        reclaimed out from under a stale heartbeat loop should stop quietly,
+        not keep touching a row it no longer owns.
+
+        The conditional UPDATE (status + locked_by) is the same shape
+        :meth:`claim_queued` uses to make its own write safe without a lock:
+        whoever's predicate matches is the only writer that mattered.
+        """
+        now = utc_now_iso()
+        async with self.database.transaction() as db:
+            result = await db.execute(
+                update(JobRecord)
+                .where(
+                    JobRecord.id == job_id,
+                    JobRecord.status == JobStatus.RUNNING,
+                    JobRecord.locked_by == worker_id,
+                )
+                .values(locked_at=now, updated_at=now)
+                .execution_options(synchronize_session=False)
+            )
+        return result.rowcount == 1
+
+    async def list_stale_running(self, older_than_seconds: int) -> list[dict[str, Any]]:
+        """Rows claimed as ``running`` whose heartbeat has gone quiet for
+        longer than ``older_than_seconds`` — evidence the worker that claimed
+        them is gone (crashed task, dead process), not merely that the step
+        is taking a while: a live worker refreshes ``locked_at`` continuously
+        while it runs (see ``JobQueueService._heartbeat_loop``), so a stale
+        timestamp here only happens once that stopped.
+        """
+        cutoff = _iso_seconds_ago(older_than_seconds)
+        async with self.database.session() as db:
+            rows = await db.scalars(
+                select(JobRecord).where(
+                    JobRecord.status == JobStatus.RUNNING,
+                    JobRecord.locked_at < cutoff,
+                )
+            )
+            return [_to_job_dict(row) for row in rows]
+
     async def rerun(self, job_id: str, *, reset_attempts: bool = True) -> dict[str, Any]:
         now = utc_now_iso()
         async with self.database.transaction() as db:
@@ -439,6 +482,14 @@ class JobRepository:
             .values(status=status, ended_at=ended_at, error=error)
             .execution_options(synchronize_session=False)
         )
+
+
+def _iso_seconds_ago(seconds: int) -> str:
+    """A UTC timestamp ``seconds`` in the past, formatted exactly like
+    :func:`utc_now_iso` — this table's timestamps are ISO-8601 UTC text,
+    compared and ordered as strings (see the module docstring), so a cutoff
+    for that comparison must share its precision and format."""
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
 
 
 def _queued_in_order():

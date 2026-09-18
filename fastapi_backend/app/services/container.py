@@ -219,6 +219,16 @@ class AppContainer:
                 self.transcription.prefetch_selected_engine(),
                 name="transcription-model-prefetch",
             )
+            # Recovers a job an unhandled exception left claimed but
+            # abandoned (see JobQueueService.reap_stale_jobs) — every
+            # process that could have claimed one runs this, not only the
+            # API: a Hatchet worker's own claimed jobs need it too, and
+            # startup-only recovery never covers that backend at all.
+            if self.settings.job_reaper_interval_seconds > 0:
+                self.background.spawn(
+                    self.jobs.stale_job_reaper_loop(),
+                    name="job-stale-reaper",
+                )
 
     async def shutdown(self) -> None:
         # Cancelled rather than drained: a half-finished weight download is

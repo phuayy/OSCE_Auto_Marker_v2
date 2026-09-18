@@ -419,6 +419,22 @@ class Settings:
     # safety net that makes queueing continuous even if the API process fails to
     # dispatch at enqueue time. 0 disables (startup-only recovery).
     hatchet_redispatch_interval_seconds: int = read_int_env("HATCHET_REDISPATCH_INTERVAL_SECONDS", 30)
+    # A job holding status='running' refreshes this often while it is
+    # genuinely still executing (JobQueueService._heartbeat_loop). Keep well
+    # under job_stale_running_timeout_seconds so a slow tick or two is never
+    # mistaken for a dead worker.
+    job_heartbeat_interval_seconds: int = read_int_env("JOB_HEARTBEAT_INTERVAL_SECONDS", 60)
+    # How long a 'running' job may go without a heartbeat before the reaper
+    # treats it as orphaned (the executing task died from an unhandled
+    # exception, or the process holding it is gone) rather than merely slow.
+    # Generous relative to the heartbeat interval on purpose: the longest
+    # legitimate steps (WhisperX, an LLM call under retry/backoff) must never
+    # be requeued out from under themselves.
+    job_stale_running_timeout_seconds: int = read_int_env("JOB_STALE_RUNNING_TIMEOUT_SECONDS", 900)
+    # How often the periodic reaper scans for stale-running jobs. 0 disables
+    # it (recovery then only happens at the next startup, as before this
+    # existed) — same convention as hatchet_redispatch_interval_seconds.
+    job_reaper_interval_seconds: int = read_int_env("JOB_REAPER_INTERVAL_SECONDS", 300)
 
     # Watchdog for external commands (ffmpeg, WhisperX, the scorers). Generous
     # by design: it exists to end a *hung* child, not to bound a slow one. A CPU

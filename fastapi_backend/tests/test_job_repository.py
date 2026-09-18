@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 from app.database.orm import OrmDatabase
 from app.repositories.job_repository import JobRepository
@@ -110,3 +111,80 @@ def test_job_repository_does_not_requeue_cancelled_interrupted_job(tmp_path) -> 
 
     assert requeued["status"] == "cancelled"
     assert requeued["error"] == "cancelled"
+
+
+# --- heartbeat / stale-job reaper (A7) --------------------------------------
+
+
+def _running_job(job_id: str = "job-1", *, locked_by: str = "worker-1", locked_at: str) -> dict:
+    return {
+        "id": job_id,
+        "sessionId": "session-1",
+        "taskType": "process_session",
+        "status": "running",
+        "attempts": 1,
+        "maxAttempts": 3,
+        "createdAt": "2026-01-01T00:00:00Z",
+        "queuedAt": "2026-01-01T00:00:01Z",
+        "startedAt": "2026-01-01T00:00:02Z",
+        "endedAt": None,
+        "error": None,
+        "lockedBy": locked_by,
+        "lockedAt": locked_at,
+        "payload": {"workflow": "standard"},
+    }
+
+
+def test_touch_heartbeat_refreshes_locked_at_for_the_matching_worker(tmp_path) -> None:
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
+    asyncio.run(repository.write(_running_job(locked_at="2026-01-01T00:00:02Z")))
+
+    touched = asyncio.run(repository.touch_heartbeat("job-1", "worker-1"))
+
+    assert touched is True
+    refreshed = asyncio.run(repository.read("job-1"))
+    assert refreshed["lockedAt"] > "2026-01-01T00:00:02Z"
+
+
+def test_touch_heartbeat_rejects_a_different_worker(tmp_path) -> None:
+    """A heartbeat from a worker that no longer owns the row (reclaimed,
+    reaped) must not resurrect its claim."""
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
+    asyncio.run(repository.write(_running_job(locked_by="worker-1", locked_at="2026-01-01T00:00:02Z")))
+
+    touched = asyncio.run(repository.touch_heartbeat("job-1", "worker-2"))
+
+    assert touched is False
+    unchanged = asyncio.run(repository.read("job-1"))
+    assert unchanged["lockedAt"] == "2026-01-01T00:00:02Z"
+
+
+def test_touch_heartbeat_rejects_a_non_running_job(tmp_path) -> None:
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
+    job = _running_job(locked_at="2026-01-01T00:00:02Z")
+    job["status"] = "succeeded"
+    asyncio.run(repository.write(job))
+
+    assert asyncio.run(repository.touch_heartbeat("job-1", "worker-1")) is False
+
+
+def test_list_stale_running_finds_only_rows_past_the_cutoff(tmp_path) -> None:
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
+    stale_at = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    fresh_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    asyncio.run(repository.write(_running_job("stale-job", locked_at=stale_at)))
+    asyncio.run(repository.write(_running_job("fresh-job", locked_at=fresh_at)))
+
+    stale = asyncio.run(repository.list_stale_running(older_than_seconds=60))
+
+    assert [job["id"] for job in stale] == ["stale-job"]
+
+
+def test_list_stale_running_ignores_non_running_rows(tmp_path) -> None:
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
+    stale_at = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    job = _running_job(locked_at=stale_at)
+    job["status"] = "failed"
+    asyncio.run(repository.write(job))
+
+    assert asyncio.run(repository.list_stale_running(older_than_seconds=60)) == []
