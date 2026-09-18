@@ -246,23 +246,37 @@ export function installFetchAuthShim() {
 
   const originalFetch = window.fetch.bind(window);
   window.fetch = async (input, init = {}) => {
-    const url = typeof input === 'string' ? input : input?.url || '';
-    const isApiCall = typeof url === 'string' && url.startsWith('/api/');
+    let target;
+    try {
+      target = new URL(input instanceof Request ? input.url : input, window.location.origin);
+    } catch {
+      return originalFetch(input, init);
+    }
+    const path = target.pathname.replace(/\/+$/, '');
+    const isProtectedApi = target.origin === window.location.origin && path.startsWith('/api/') &&
+      !['/api/health', '/api/health/ready', '/api/auth/login'].includes(path) &&
+      !path.startsWith('/api/auth/invitations/') && !path.startsWith('/api/auth/password-reset');
 
-    if (!isApiCall) {
+    if (!isProtectedApi) {
       return originalFetch(input, init);
     }
 
-    const headers = new Headers(init.headers || {});
+    const headers = new Headers(init.headers ?? (input instanceof Request ? input.headers : undefined));
     const stored = getStoredAuth();
     if (stored?.token && !headers.has('Authorization')) {
       headers.set('Authorization', `Bearer ${stored.token}`);
     }
+    const authorization = headers.get('Authorization');
 
     const response = await originalFetch(input, { ...init, headers });
     if (response.status === 401) {
-      clearStoredAuth();
-      window.dispatchEvent(new CustomEvent('osce:auth:expired'));
+      const current = getStoredAuth();
+      if (stored?.token && current?.token === stored.token && authorization === `Bearer ${stored.token}`) {
+        clearStoredAuth();
+        window.dispatchEvent(new CustomEvent('osce:auth:expired'));
+      } else if (!stored && !current && !authorization) {
+        window.dispatchEvent(new CustomEvent('osce:auth:required'));
+      }
     }
     return response;
   };
@@ -305,14 +319,13 @@ export async function refreshIdentity() {
   }
   try {
     const body = await apiJson('/api/auth/me', { reportConnection: false });
-    if (body?.username) {
+    if (body?.username && getStoredAuth()?.token === stored.token) {
       updateStoredIdentity(body);
-      return getStoredAuth();
     }
   } catch (_error) {
     /* offline or expired: the stored copy stands until the shim clears it */
   }
-  return stored;
+  return getStoredAuth();
 }
 
 /**

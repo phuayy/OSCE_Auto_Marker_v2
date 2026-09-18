@@ -67,7 +67,11 @@ export default function AppShell() {
       setAuthState(null);
     }
     window.addEventListener('osce:auth:expired', handleExpired);
-    return () => window.removeEventListener('osce:auth:expired', handleExpired);
+    window.addEventListener('osce:auth:required', handleExpired);
+    return () => {
+      window.removeEventListener('osce:auth:expired', handleExpired);
+      window.removeEventListener('osce:auth:required', handleExpired);
+    };
   }, []);
 
   // The role gates what the header offers, and an administrator can change it
