@@ -331,6 +331,8 @@ class Settings:
     # Per-IP fixed-window throttle for the login endpoint (brute-force defence).
     login_rate_limit_max_attempts: int = read_int_env("LOGIN_RATE_LIMIT_MAX_ATTEMPTS", 10)
     login_rate_limit_window_seconds: int = read_int_env("LOGIN_RATE_LIMIT_WINDOW_SECONDS", 60)
+    rate_limit_rerun_per_hour: int = read_int_env("RATE_LIMIT_RERUN_PER_HOUR", 10)
+    max_concurrent_uploads_per_user: int = read_int_env("MAX_CONCURRENT_UPLOADS_PER_USER", 3)
     cors_allow_origins: tuple[str, ...] = read_csv_env("CORS_ALLOW_ORIGINS", ("*",))
     # Number of reverse proxies in front of the app. 0 (the default) means the
     # socket address is the client. Behind a proxy the socket address is the

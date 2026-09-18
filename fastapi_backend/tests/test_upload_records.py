@@ -55,6 +55,48 @@ def test_upload_fk_optimistic_writes_and_cross_connection_locking(tmp_path):
     asyncio.run(run())
 
 
+def test_concurrent_completion_across_containers_starts_one_assembly(tmp_path, monkeypatch):
+    async def run():
+        first = create_container(_settings(tmp_path))
+        second = create_container(_settings(tmp_path))
+        await _init(first)
+        await _init(second)
+        await first.sessions.write({"id": "s1", "name": "Session", "status": "waiting_for_upload"})
+        await first.async_uploads.repository.write(upload_payload())
+        started = []
+
+        async def assemble(upload_id, should_process):
+            started.append(upload_id)
+        for container in (first, second):
+            monkeypatch.setattr(container.async_uploads, "_assemble_and_dispatch", assemble)
+        results = await asyncio.gather(*(
+            container.async_uploads.complete("u1", CompleteUploadRequest()) for container in (first, second)
+        ))
+        await asyncio.sleep(0)
+        assert started == ["u1"]
+        assert all(result["upload"]["status"] == "assembling" for result in results)
+        await second.shutdown()
+        await first.shutdown()
+    asyncio.run(run())
+
+
+def test_child_tasks_do_not_inherit_uncommitted_unit_of_work(tmp_path):
+    async def run():
+        database = OrmDatabase(tmp_path / "uploads.sqlite3")
+        await SessionRepository(database).write({"id": "s1", "name": "Session"})
+        repo = UploadRepository(database)
+        await repo.write(upload_payload())
+        async with database.unit_of_work():
+            payload = await repo.read("u1")
+            payload["status"] = "uploading"
+            await repo.write(payload)
+            assert (await repo.read("u1"))["status"] == "uploading"
+            assert (await asyncio.create_task(repo.read("u1")))["status"] == "initiated"
+        assert (await repo.read("u1"))["status"] == "uploading"
+        await database.shutdown()
+    asyncio.run(run())
+
+
 def test_legacy_import_is_restart_safe_and_preserves_bad_files(tmp_path):
     async def run():
         database = OrmDatabase(tmp_path / "uploads.sqlite3")
@@ -99,6 +141,36 @@ def test_assembly_start_rolls_back_and_does_not_spawn_on_session_failure(tmp_pat
             await container.async_uploads.complete("u1", CompleteUploadRequest())
         assert (await repo.read("u1"))["status"] == "initiated"
         assert container.async_uploads._background_tasks.active_count == 0
+        await container.shutdown()
+    asyncio.run(run())
+
+
+def test_expiry_failure_keeps_a_retryable_record_and_does_not_reclaim_assembly(tmp_path, monkeypatch):
+    async def run():
+        container = create_container(_settings(tmp_path))
+        await _init(container)
+        await container.sessions.write({"id": "s1", "name": "Session", "status": "waiting_for_upload"})
+        job = await container.jobs.create_waiting_job("s1", "process_session")
+        repo = container.async_uploads.repository
+        await repo.write({**upload_payload(), "expiresAt": "2000-01-01T00:00:00Z", "jobId": job["id"]})
+        original = container.sessions.update
+
+        async def fail(*args, **kwargs):
+            raise RuntimeError("injected failure")
+        monkeypatch.setattr(container.sessions, "update", fail)
+        await container.async_uploads.recover_expired_uploads()
+        assert (await repo.read("u1"))["status"] == "initiated"
+        assert (await container.jobs.repository.read(job["id"]))["status"] == "waiting_for_upload"
+        monkeypatch.setattr(container.sessions, "update", original)
+        payload = await repo.read("u1")
+        payload["status"] = "assembling"
+        await repo.write(payload)
+        assert await container.async_uploads._reclaim_expired_upload("u1") == 0
+        payload["status"] = "initiated"
+        await repo.write(payload)
+        await container.async_uploads.recover_expired_uploads()
+        with pytest.raises(FileNotFoundError):
+            await repo.read("u1")
         await container.shutdown()
     asyncio.run(run())
 

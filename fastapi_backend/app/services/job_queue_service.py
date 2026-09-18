@@ -185,7 +185,7 @@ class JobQueueService:
         task_type: str,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        async with self._enqueue_lock:
+        async with self.repository.database.unit_of_work(), self._enqueue_lock:
             existing = await self.repository.find_active(session_id, task_type)
             if existing:
                 return existing
@@ -215,7 +215,7 @@ class JobQueueService:
         *,
         auto_start: bool = True,
     ) -> dict[str, Any]:
-        async with self._enqueue_lock:
+        async with self.repository.database.unit_of_work(), self._enqueue_lock:
             existing = await self.repository.find_active(session_id, task_type)
             if existing and str(existing.get("status")) in IN_PROGRESS_JOB_STATUSES:
                 return existing

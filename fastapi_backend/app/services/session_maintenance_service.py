@@ -381,7 +381,11 @@ class SessionMaintenanceService:
     @staticmethod
     def _rmtree(path: Path) -> None:
         try:
-            if path.exists():
+            if any(parent.is_symlink() for parent in path.parents):
+                return
+            if path.is_symlink():
+                path.unlink(missing_ok=True)
+            elif path.exists():
                 shutil.rmtree(path, ignore_errors=True)
         except OSError:
             logger.debug("Could not delete artifact directory %s.", path, exc_info=True)

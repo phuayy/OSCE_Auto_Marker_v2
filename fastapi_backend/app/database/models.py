@@ -153,6 +153,7 @@ class UploadRecord(Base):
     __table_args__ = (
         Index("idx_uploads_session", "session_id"),
         Index("idx_uploads_expiry", "expires_at", "status"),
+        Index("idx_uploads_owner_status_expiry", "created_by", "status", "expires_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

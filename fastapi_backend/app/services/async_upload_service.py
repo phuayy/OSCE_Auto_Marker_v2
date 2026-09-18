@@ -73,6 +73,15 @@ class AsyncUploadService:
         self._background_tasks = BackgroundTaskRegistry()
 
     async def initiate(self, payload: InitiateUploadRequest, *, actor: Actor | None = None) -> dict[str, Any]:
+        if actor is not None:
+            async with self.repository.admission(actor.user_id) as active_uploads:
+                limit = max(1, self.settings.max_concurrent_uploads_per_user)
+                if active_uploads >= limit:
+                    raise AppError(
+                        f"You already have {limit} uploads in flight. Complete or abort an upload before starting another.",
+                        status_code=429,
+                    )
+                return await self._initiate(payload, actor=actor)
         async with self.repository.database.unit_of_work():
             return await self._initiate(payload, actor=actor)
 
@@ -701,19 +710,27 @@ class AsyncUploadService:
 
         reclaimed = 0
         for upload in all_uploads:
-            if upload.get("status") in {UploadStatus.COMMITTED, UploadStatus.ABORTED, UploadStatus.EXPIRED}:
-                try:
-                    await self.storage.abort_upload(upload)
-                    await self.repository.delete_expired(str(upload["id"]))
-                except Exception:
-                    logger.warning("Expired upload cleanup will be retried: %s", upload["id"], exc_info=True)
+            try:
+                reclaimed += await self._reclaim_expired_upload(str(upload["id"]))
+            except FileNotFoundError:
                 continue
-            if str(upload.get("status")) not in self._RECOVERABLE_UPLOAD_STATES:
-                continue
-            if not self._is_expired(upload):
-                continue
+            except Exception:
+                logger.warning("Expired upload cleanup will be retried: %s", upload["id"], exc_info=True)
+        if reclaimed:
+            logger.warning("Expired-upload sweep complete: %d abandoned upload(s) reclaimed.", reclaimed)
 
-            upload_id = str(upload.get("id", ""))
+    async def _reclaim_expired_upload(self, upload_id: str) -> int:
+        async with self.repository.locked(upload_id):
+            upload = await self.repository.read(upload_id)
+            expires = parse_iso(upload.get("expiresAt"))
+            if expires is None or expires >= datetime.now(timezone.utc):
+                return 0
+            if upload.get("status") in {UploadStatus.COMMITTED, UploadStatus.ABORTED, UploadStatus.EXPIRED}:
+                await self.storage.abort_upload(upload)
+                await self.repository.delete_expired(upload_id)
+                return 1
+            if str(upload.get("status")) not in self._RECOVERABLE_UPLOAD_STATES:
+                return 0
             session_id = str(upload.get("sessionId", ""))
 
             # 1. Delete raw part files first — reclaiming bytes is the primary goal
@@ -722,7 +739,7 @@ class AsyncUploadService:
                 await self.storage.abort_upload(upload)
             except Exception as exc:  # noqa: BLE001
                 logger.error("Expired-upload sweep: could not delete parts for %s — %s", upload_id, exc)
-                continue
+                raise
 
             # 2. Mark the upload record terminal so the sweep never revisits it.
             try:
@@ -731,7 +748,7 @@ class AsyncUploadService:
                 await self.repository.write(upload)
             except Exception as exc:  # noqa: BLE001
                 logger.error("Expired-upload sweep: could not mark upload %s expired — %s", upload_id, exc)
-                continue
+                raise
 
             # 3. Fail the session, but only while it is still in the upload phase.
             if session_id:
@@ -748,6 +765,7 @@ class AsyncUploadService:
                     pass
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Expired-upload sweep: could not fail session %s — %s", session_id, exc)
+                    raise
 
             # 4. Cancel the pending job (no-ops if already terminal).
             job_id = str(upload.get("jobId") or "")
@@ -756,18 +774,16 @@ class AsyncUploadService:
                     await self.jobs.cancel(job_id, "Upload expired before completion.")
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Expired-upload sweep: could not cancel job %s — %s", job_id, exc)
+                    raise
 
             await self.repository.delete_expired(upload_id)
             self._last_session_mirror.pop(upload_id, None)
-            reclaimed += 1
             logger.warning(
                 "Expired-upload sweep: reclaimed upload %s (session %s) — parts deleted, session failed.",
                 upload_id,
                 session_id,
             )
-
-        if reclaimed:
-            logger.warning("Expired-upload sweep complete: %d abandoned upload(s) reclaimed.", reclaimed)
+            return 1
 
     def public_upload(self, upload: dict[str, Any]) -> dict[str, Any]:
         files = []

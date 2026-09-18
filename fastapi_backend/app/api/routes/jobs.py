@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, status
 
-from app.api.dependencies import get_container, require_job_owner
+from app.api.dependencies import get_container, require_expensive_operation, require_job_owner
 from app.api.errors import http_error
 from app.services.container import AppContainer
 
@@ -28,7 +28,7 @@ async def get_job(job_id: str, container: AppContainer = Depends(get_container))
         raise http_error(error, fallback_message="Failed to load job.", not_found_message="Job not found.") from error
 
 
-@router.post("/{job_id}/rerun", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_job_owner)])
+@router.post("/{job_id}/rerun", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_job_owner), Depends(require_expensive_operation)])
 async def rerun_job(job_id: str, container: AppContainer = Depends(get_container)) -> dict[str, object]:
     try:
         job = await container.jobs.rerun(job_id)

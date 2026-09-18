@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Path, Query, Request, status
 
-from app.api.dependencies import current_actor, get_container, require_upload_owner
+from app.api.dependencies import current_actor, get_container, require_expensive_operation, require_upload_owner
 from app.api.errors import http_error
 from app.core.exceptions import AppError
 from app.schemas.uploads import CompleteUploadRequest, InitiateUploadRequest
@@ -12,7 +12,7 @@ from app.services.container import AppContainer
 router = APIRouter(prefix="/uploads", tags=["async uploads"])
 
 
-@router.post("/initiate", status_code=status.HTTP_201_CREATED)
+@router.post("/initiate", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_expensive_operation)])
 async def initiate_upload(
     payload: InitiateUploadRequest,
     request: Request,

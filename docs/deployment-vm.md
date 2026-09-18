@@ -73,6 +73,44 @@ serves the built frontend.
    else needs to reach it — and set `APP_PUBLIC_URL` / `CORS_ALLOW_ORIGINS` to
    the proxied origin.
 
+## Resource admission and URL credentials
+
+`RATE_LIMIT_RERUN_PER_HOUR=10` sets one shared hourly attempt budget per signed-in
+account for session rerun/process/auto-crop, clip assessment/export/recrop, job
+rerun, and upload initiation. Administrators have the same budget; changing IP,
+session, or endpoint does not reset it. Ownership is checked before charging
+session/job operations. Refused attempts return HTTP 429 through the normal API
+error path; mutating requests are not automatically retried by the browser.
+The unchanged in-memory limiter resets on API restart and requires the existing
+single-API-process deployment restriction. It is not a distributed billing quota.
+
+`MAX_CONCURRENT_UPLOADS_PER_USER=3` independently caps active uploads per account.
+Admission counts persisted `uploads.status` under the same transaction that
+creates the upload, session, and waiting job. PostgreSQL serializes admission on
+the account row; SQLite uses `BEGIN IMMEDIATE`. Unexpired `initiated`/`uploading`/
+`failed` records and all `assembling` records consume capacity. Failed uploads
+retain their reservation because their parts can be retried through `/complete`;
+abort them to release it immediately. Committed, aborted, and expired uploads
+release capacity. Expired transfers do not block a new transfer, but expired
+assembly still does until it finishes or recovery marks it failed. Values below one for
+either knob are clamped to one, not interpreted as disabling protection.
+
+These controls bound admission, not exact GPU time or money: jobs differ in cost,
+clip exports may contain multiple clips, and committed uploads release their
+transfer slots before processing finishes. Existing queue concurrency and file
+size limits still apply. Adjust the hourly budget for legitimate cohort marking.
+
+Bearer tokens are accepted only in the `Authorization` header, never through
+`?token=` (including media and SSE). The frontend never downgrades a failed
+stream-ticket request to a bearer URL; media reports unavailable and live updates
+use their normal reconnect path. Rebuild the frontend when deploying this change.
+
+Keep the nginx `log_format` unchanged. Application-generated query strings are
+**free of long-lived bearer tokens, not credential-free**: `/media/*` and SSE
+still use short-lived `?ticket=` credentials. Access logs containing those URLs
+remain sensitive until ticket expiry; restrict log access and retention. Emailed
+action-token API paths also remain sensitive. TLS is required on shared networks.
+
 ## Two things to know
 
 **Plain HTTP is fine for uploads, not for secrets.** The bearer token and the

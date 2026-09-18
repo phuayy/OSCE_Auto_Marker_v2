@@ -115,6 +115,7 @@ class AppContainer:
     videos: VideoRepository
     session_maintenance: SessionMaintenanceService
     login_rate_limiter: FixedWindowRateLimiter
+    expensive_operation_rate_limiter: FixedWindowRateLimiter
     # Accounts: the store, the per-request cached view AuthService verifies
     # against, the administration service, and the mail backend invitations
     # and resets go out through.
@@ -421,6 +422,9 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         videos=videos,
         session_maintenance=session_maintenance,
         login_rate_limiter=login_rate_limiter,
+        expensive_operation_rate_limiter=FixedWindowRateLimiter(
+            max_attempts=active_settings.rate_limit_rerun_per_hour, window_seconds=3600,
+        ),
         users=users,
         user_directory=user_directory,
         user_admin=user_admin,

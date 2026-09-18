@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 
 from app.core.exceptions import AppError
 from app.core.json_utils import read_json_file
 from app.core.utils import parse_iso
-from app.database.models import SessionRecord, UploadRecord, utc_now
+from app.database.models import SessionRecord, UploadRecord, UserRecord, utc_now
 from app.database.orm import OrmDatabase
 from app.domain.actors import provenance_user_id
+from app.domain.enums import UploadStatus
 
 logger = logging.getLogger(__name__)
 _VERSION = "_uploadVersion"
@@ -31,8 +33,30 @@ class UploadRepository:
         self.uploads_dir = uploads_dir
 
     @asynccontextmanager
+    async def admission(self, user_id: str) -> AsyncIterator[int]:
+        async with self.database.unit_of_work() as db:
+            user = await db.scalar(select(UserRecord.id).where(UserRecord.id == user_id).with_for_update())
+            if user is None:
+                raise AppError("Authentication required.", status_code=401)
+            count = await db.scalar(select(func.count()).select_from(UploadRecord).where(
+                UploadRecord.created_by == user_id,
+                or_(
+                    UploadRecord.status == UploadStatus.ASSEMBLING,
+                    and_(
+                        UploadRecord.status.in_([UploadStatus.INITIATED, UploadStatus.UPLOADING, UploadStatus.FAILED]),
+                        UploadRecord.expires_at > utc_now(),
+                    ),
+                ),
+            ))
+            yield int(count or 0)
+
+    @asynccontextmanager
     async def locked(self, upload_id: str):
         async with self.database.unit_of_work() as db:
+            session_id = await db.scalar(select(UploadRecord.session_id).where(UploadRecord.id == upload_id))
+            if session_id is None:
+                raise FileNotFoundError(f"Upload not found: {upload_id}")
+            await db.scalar(select(SessionRecord).where(SessionRecord.id == session_id).with_for_update())
             row = await db.scalar(select(UploadRecord).where(UploadRecord.id == upload_id).with_for_update())
             if row is None:
                 raise FileNotFoundError(f"Upload not found: {upload_id}")
@@ -100,6 +124,6 @@ class UploadRepository:
                         await self.write(payload)
                         imported += 1
                 await asyncio.to_thread(path.rename, path.with_suffix(".json.migrated"))
-            except (ValueError, OSError):
-                logger.warning("Legacy upload was not imported: %s", path.name, exc_info=True)
+            except (ValueError, TypeError, KeyError, OSError):
+                logger.warning("Legacy upload import or archival incomplete: %s", path.name, exc_info=True)
         return imported

@@ -107,6 +107,15 @@ def current_actor(request: Request) -> Actor | None:
     return Actor.from_auth_payload(get_auth_payload(request))
 
 
+def require_expensive_operation(
+    request: Request, container: AppContainer = Depends(get_container)
+) -> None:
+    actor = current_actor(request)
+    if actor is None:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    container.expensive_operation_rate_limiter.check(actor.user_id)
+
+
 def require_role(*roles: UserRole) -> Callable[[Request], dict[str, Any]]:
     """A dependency that admits only the given roles.
 
