@@ -155,9 +155,10 @@ require_admin = require_role(UserRole.ADMIN)
 # already parsed onto ``request.path_params`` (routing runs before
 # dependencies), loads the record, and raises through ``ensure_may_mutate``
 # (app.domain.access) — 403, or 404 via the same not-found translation the
-# routes already use for a missing id. Marked ``enforces_ownership`` so
-# tests/test_session_routes_are_guarded.py can recognise any of them by
-# identity, the way test_admin_routes_are_guarded.py recognises require_admin.
+# routes already use for a missing id.
+# tests/test_session_routes_are_guarded.py recognises these three by direct
+# identity against a tuple, the same way test_admin_routes_are_guarded.py
+# recognises require_admin — no marker attribute needed for that.
 
 
 async def require_session_owner(
@@ -170,9 +171,6 @@ async def require_session_owner(
         raise HTTPException(status_code=404, detail="Session not found.") from error
     ensure_may_mutate(session, current_actor(request), subject="session")
     return session
-
-
-require_session_owner.enforces_ownership = True  # type: ignore[attr-defined]
 
 
 async def require_job_owner(request: Request, container: AppContainer = Depends(get_container)) -> dict[str, Any]:
@@ -193,9 +191,6 @@ async def require_job_owner(request: Request, container: AppContainer = Depends(
     return job
 
 
-require_job_owner.enforces_ownership = True  # type: ignore[attr-defined]
-
-
 async def require_upload_owner(
     request: Request, container: AppContainer = Depends(get_container)
 ) -> dict[str, Any]:
@@ -206,9 +201,6 @@ async def require_upload_owner(
         raise HTTPException(status_code=404, detail="Upload not found.") from error
     ensure_may_mutate(upload, current_actor(request), subject="upload")
     return upload
-
-
-require_upload_owner.enforces_ownership = True  # type: ignore[attr-defined]
 
 
 def client_ip(request: Request, trusted_proxy_count: int = 0) -> str:
