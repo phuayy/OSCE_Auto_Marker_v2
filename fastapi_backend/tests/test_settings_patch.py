@@ -28,7 +28,7 @@ from tests.test_marking_plan import PANEL
 def test_a_patch_writes_only_the_keys_it_names(tmp_path: Path) -> None:
     client = build_client(tmp_path)
     client.put(
-        "/api/settings",
+        "/api/admin/settings",
         json={
             "llmTranscriptPreprocess": False,
             "transcriptionEngine": "canary-qwen",
@@ -36,7 +36,7 @@ def test_a_patch_writes_only_the_keys_it_names(tmp_path: Path) -> None:
         },
     )
 
-    patched = client.patch("/api/settings", json={"llmTranscriptPreprocess": True})
+    patched = client.patch("/api/admin/settings", json={"llmTranscriptPreprocess": True})
 
     assert patched.status_code == 200, patched.text
     settings = patched.json()["settings"]
@@ -55,10 +55,10 @@ def test_a_card_save_no_longer_reverts_another_cards_save(tmp_path: Path) -> Non
     preprocess toggle flipped, used to revert the mode back to "single"."""
     client = build_client(tmp_path)
 
-    saved_panel = client.patch("/api/settings", json={"llmMarkingMode": "panel", "llmPanel": PANEL})
+    saved_panel = client.patch("/api/admin/settings", json={"llmMarkingMode": "panel", "llmPanel": PANEL})
     assert saved_panel.status_code == 200, saved_panel.text
 
-    toggled = client.patch("/api/settings", json={"llmTranscriptPreprocess": True})
+    toggled = client.patch("/api/admin/settings", json={"llmTranscriptPreprocess": True})
     assert toggled.status_code == 200, toggled.text
 
     settings = client.get("/api/settings").json()["settings"]
@@ -73,7 +73,7 @@ def test_a_nested_value_in_a_patch_is_stored_whole(tmp_path: Path) -> None:
     omitted."""
     client = build_client(tmp_path)
 
-    saved = client.patch("/api/settings", json={"llmPanel": {"markers": [{"providerId": "nvidia"}]}})
+    saved = client.patch("/api/admin/settings", json={"llmPanel": {"markers": [{"providerId": "nvidia"}]}})
 
     assert saved.status_code == 200, saved.text
     panel = saved.json()["settings"]["llmPanel"]
@@ -86,7 +86,7 @@ def test_a_patch_with_an_unknown_key_is_refused(tmp_path: Path) -> None:
     client = build_client(tmp_path)
     before = client.get("/api/settings").json()["settings"]
 
-    rejected = client.patch("/api/settings", json={"bogus": 1})
+    rejected = client.patch("/api/admin/settings", json={"bogus": 1})
 
     assert rejected.status_code == 422
     assert client.get("/api/settings").json()["settings"] == before
@@ -95,7 +95,7 @@ def test_a_patch_with_an_unknown_key_is_refused(tmp_path: Path) -> None:
 def test_switching_to_panel_mode_is_checked_against_the_stored_panel(tmp_path: Path) -> None:
     client = build_client(tmp_path)
     client.put(
-        "/api/settings",
+        "/api/admin/settings",
         json={
             "llmTranscriptPreprocess": False,
             "llmMarkingMode": "single",
@@ -103,7 +103,7 @@ def test_switching_to_panel_mode_is_checked_against_the_stored_panel(tmp_path: P
         },
     )
 
-    rejected = client.patch("/api/settings", json={"llmMarkingMode": "panel"})
+    rejected = client.patch("/api/admin/settings", json={"llmMarkingMode": "panel"})
 
     assert rejected.status_code == 422
     assert "at least 2 markers" in rejected.json()["detail"]
@@ -113,15 +113,15 @@ def test_switching_to_panel_mode_is_checked_against_the_stored_panel(tmp_path: P
 def test_a_panel_patched_under_panel_mode_must_stay_coherent(tmp_path: Path) -> None:
     client = build_client(tmp_path)
     client.put(
-        "/api/settings",
+        "/api/admin/settings",
         json={"llmTranscriptPreprocess": False, "llmMarkingMode": "panel", "llmPanel": PANEL},
     )
 
-    broken = client.patch("/api/settings", json={"llmPanel": {**PANEL, "markers": PANEL["markers"][:1]}})
+    broken = client.patch("/api/admin/settings", json={"llmPanel": {**PANEL, "markers": PANEL["markers"][:1]}})
     assert broken.status_code == 422
     assert client.get("/api/settings").json()["settings"]["llmPanel"] == PANEL
 
-    coherent = client.patch("/api/settings", json={"llmPanel": {**PANEL, "tieBreak": "strict"}})
+    coherent = client.patch("/api/admin/settings", json={"llmPanel": {**PANEL, "tieBreak": "strict"}})
     assert coherent.status_code == 200, coherent.text
     assert coherent.json()["settings"]["llmPanel"]["tieBreak"] == "strict"
 
@@ -130,13 +130,13 @@ def test_a_patch_naming_an_unknown_provider_is_refused(tmp_path: Path) -> None:
     client = build_client(tmp_path)
 
     bad_primary = client.patch(
-        "/api/settings", json={"llmPrimary": {"providerId": "not-a-vendor", "model": "x"}}
+        "/api/admin/settings", json={"llmPrimary": {"providerId": "not-a-vendor", "model": "x"}}
     )
     assert bad_primary.status_code == 422
     assert "Unknown LLM provider 'not-a-vendor'" in bad_primary.json()["detail"]
 
     bad_adjudicator = client.patch(
-        "/api/settings",
+        "/api/admin/settings",
         json={"llmPanel": {**PANEL, "adjudicator": {"providerId": "acme", "model": "x"}}},
     )
     assert bad_adjudicator.status_code == 422
@@ -153,7 +153,7 @@ def test_an_empty_patch_answers_with_the_current_settings_and_writes_nothing(
 
     monkeypatch.setattr(client.app.state.container.app_settings, "set_values", _must_not_be_called)
 
-    empty = client.patch("/api/settings", json={})
+    empty = client.patch("/api/admin/settings", json={})
 
     assert empty.status_code == 200
     assert empty.json()["settings"] == before
@@ -169,10 +169,10 @@ def test_a_patch_tolerates_a_stored_key_this_release_does_not_know(tmp_path: Pat
 
     # extra="forbid" means a whole-document PUT of a row carrying a key this
     # release does not declare is refused outright.
-    full_replace = client.put("/api/settings", json=current)
+    full_replace = client.put("/api/admin/settings", json=current)
     assert full_replace.status_code == 422
 
-    patched = client.patch("/api/settings", json={"llmTranscriptPreprocess": True})
+    patched = client.patch("/api/admin/settings", json={"llmTranscriptPreprocess": True})
     assert patched.status_code == 200, patched.text
     assert patched.json()["settings"]["futureKey"] == 1
 

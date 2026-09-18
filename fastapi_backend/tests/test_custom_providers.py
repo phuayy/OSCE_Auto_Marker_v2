@@ -26,6 +26,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.api.dependencies import require_admin
 from app.api.routes import settings as settings_routes
 from app.core.config import Settings
 from app.database.orm import OrmDatabase
@@ -94,6 +95,9 @@ def build_client(tmp_path: Path) -> TestClient:
     app = FastAPI()
     app.state.container = container
     app.include_router(settings_routes.router, prefix="/api")
+    app.include_router(settings_routes.admin_router, prefix="/api")
+    # This module exercises the custom-provider feature, not authorization.
+    app.dependency_overrides[require_admin] = lambda: {"sub": "test-admin", "username": "admin", "role": "admin"}
     return TestClient(app)
 
 
@@ -446,7 +450,7 @@ def test_a_provider_added_through_the_api_appears_in_the_settings_description(
 ) -> None:
     client = build_client(tmp_path)
 
-    created = client.post("/api/settings/llm-providers", json=GATEWAY)
+    created = client.post("/api/admin/settings/llm-providers", json=GATEWAY)
     assert created.status_code == 201
 
     described = created.json()
@@ -464,7 +468,7 @@ def test_a_key_supplied_when_adding_a_provider_is_stored_but_never_returned(
     client = build_client(tmp_path)
 
     body = client.post(
-        "/api/settings/llm-providers", json={**GATEWAY, "apiKey": "sk-campus-secret-1234"}
+        "/api/admin/settings/llm-providers", json={**GATEWAY, "apiKey": "sk-campus-secret-1234"}
     ).json()
 
     assert "sk-campus-secret-1234" not in json.dumps(body)
@@ -480,10 +484,10 @@ def test_a_key_supplied_when_adding_a_provider_is_stored_but_never_returned(
 def test_the_routing_can_select_a_custom_provider(tmp_path: Path) -> None:
     """The point of the feature: a provider that did not ship can be the primary."""
     client = build_client(tmp_path)
-    client.post("/api/settings/llm-providers", json={**GATEWAY, "apiKey": "sk-campus-1234"})
+    client.post("/api/admin/settings/llm-providers", json={**GATEWAY, "apiKey": "sk-campus-1234"})
 
     saved = client.put(
-        "/api/settings",
+        "/api/admin/settings",
         json={
             "llmTranscriptPreprocess": False,
             "llmPrimary": {"providerId": "campus-gateway", "model": "llama-3.3-70b"},
@@ -503,7 +507,7 @@ def test_a_provider_id_that_exists_nowhere_is_still_rejected(tmp_path: Path) -> 
     client = build_client(tmp_path)
 
     rejected = client.put(
-        "/api/settings",
+        "/api/admin/settings",
         json={
             "llmTranscriptPreprocess": False,
             "llmPrimary": {"providerId": "not-a-vendor", "model": "x"},
@@ -517,7 +521,7 @@ def test_an_invalid_definition_is_reported_against_the_field_that_is_wrong(
 ) -> None:
     client = build_client(tmp_path)
 
-    rejected = client.post("/api/settings/llm-providers", json={**GATEWAY, "baseUrl": ""})
+    rejected = client.post("/api/admin/settings/llm-providers", json={**GATEWAY, "baseUrl": ""})
 
     assert rejected.status_code == 422
     assert "base URL" in rejected.json()["detail"]
@@ -526,7 +530,7 @@ def test_an_invalid_definition_is_reported_against_the_field_that_is_wrong(
 def test_the_api_refuses_to_let_a_definition_shadow_a_shipped_provider(tmp_path: Path) -> None:
     client = build_client(tmp_path)
 
-    rejected = client.post("/api/settings/llm-providers", json={**GATEWAY, "id": "openai"})
+    rejected = client.post("/api/admin/settings/llm-providers", json={**GATEWAY, "id": "openai"})
 
     assert rejected.status_code == 422
     assert "already ships" in rejected.json()["detail"]
@@ -536,10 +540,10 @@ def test_updating_uses_the_id_in_the_path_not_the_one_in_the_body(tmp_path: Path
     """Otherwise a save could rename a provider out from under the routing that
     points at it."""
     client = build_client(tmp_path)
-    client.post("/api/settings/llm-providers", json=GATEWAY)
+    client.post("/api/admin/settings/llm-providers", json=GATEWAY)
 
     updated = client.put(
-        "/api/settings/llm-providers/campus-gateway",
+        "/api/admin/settings/llm-providers/campus-gateway",
         json={**GATEWAY, "id": "something-else", "label": "Renamed"},
     )
 
@@ -553,13 +557,13 @@ def test_deleting_a_provider_takes_its_stored_key_with_it(tmp_path: Path) -> Non
     """An orphaned ciphertext row is a credential nothing can use and nothing
     will ever rotate — and would re-arm the provider if the id were reused."""
     client = build_client(tmp_path)
-    client.post("/api/settings/llm-providers", json={**GATEWAY, "apiKey": "sk-campus-1234"})
+    client.post("/api/admin/settings/llm-providers", json={**GATEWAY, "apiKey": "sk-campus-1234"})
 
-    removed = client.delete("/api/settings/llm-providers/campus-gateway")
+    removed = client.delete("/api/admin/settings/llm-providers/campus-gateway")
     assert removed.status_code == 200
     assert provider_in(removed.json(), "campus-gateway") is None
 
-    recreated = client.post("/api/settings/llm-providers", json=GATEWAY).json()
+    recreated = client.post("/api/admin/settings/llm-providers", json=GATEWAY).json()
     assert provider_in(recreated, "campus-gateway")["credential"]["configured"] is False
 
 
@@ -567,7 +571,7 @@ def test_a_shipped_provider_cannot_be_deleted(tmp_path: Path) -> None:
     """It is a property of the release, not of the deployment."""
     client = build_client(tmp_path)
 
-    refused = client.delete("/api/settings/llm-providers/openai")
+    refused = client.delete("/api/admin/settings/llm-providers/openai")
 
     assert refused.status_code == 404
     assert client.get("/api/settings/llm-providers").json()
@@ -579,17 +583,17 @@ def test_a_key_can_be_rotated_for_a_custom_provider_through_the_normal_endpoint(
 ) -> None:
     """Custom providers get rotation for free because they use the same store."""
     client = build_client(tmp_path)
-    client.post("/api/settings/llm-providers", json=GATEWAY)
+    client.post("/api/admin/settings/llm-providers", json=GATEWAY)
 
     rotated = client.put(
-        "/api/settings/llm-providers/campus-gateway/key", json={"apiKey": "sk-rotated-9876"}
+        "/api/admin/settings/llm-providers/campus-gateway/key", json={"apiKey": "sk-rotated-9876"}
     )
 
     assert rotated.status_code == 200
     assert "sk-rotated-9876" not in json.dumps(rotated.json())
     assert provider_in(rotated.json(), "campus-gateway")["credential"]["source"] == "app"
 
-    cleared = client.delete("/api/settings/llm-providers/campus-gateway/key")
+    cleared = client.delete("/api/admin/settings/llm-providers/campus-gateway/key")
     assert provider_in(cleared.json(), "campus-gateway")["credential"]["configured"] is False
 
 
@@ -600,7 +604,7 @@ def test_a_connection_test_names_the_unknown_provider_rather_than_erroring(
     client = build_client(tmp_path)
 
     body = client.post(
-        "/api/settings/llm-providers/test", json={"providerId": "ghost", "model": "x"}
+        "/api/admin/settings/llm-providers/test", json={"providerId": "ghost", "model": "x"}
     )
 
     assert body.status_code == 200
@@ -614,9 +618,9 @@ def test_the_subprocess_environment_carries_the_definition_and_only_its_key(
     """The end-to-end claim: what the settings screen decided is what a scorer
     runs, with no database and no restart."""
     client = build_client(tmp_path)
-    client.post("/api/settings/llm-providers", json={**GATEWAY, "apiKey": "sk-campus-1234"})
+    client.post("/api/admin/settings/llm-providers", json={**GATEWAY, "apiKey": "sk-campus-1234"})
     client.put(
-        "/api/settings",
+        "/api/admin/settings",
         json={
             "llmTranscriptPreprocess": False,
             "llmPrimary": {"providerId": "campus-gateway", "model": "llama-3.3-70b"},

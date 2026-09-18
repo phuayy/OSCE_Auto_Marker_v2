@@ -36,9 +36,9 @@ def _allow_private(client) -> None:
 
 def test_webhook_routes_require_authentication(tmp_path) -> None:
     client = build_test_client(tmp_path)
-    assert client.get("/api/webhooks").status_code == 401
-    assert client.post("/api/webhooks", json={"url": "https://example.com/h"}).status_code == 401
-    assert client.delete("/api/webhooks/anything").status_code == 401
+    assert client.get("/api/admin/webhooks").status_code == 401
+    assert client.post("/api/admin/webhooks", json={"url": "https://example.com/h"}).status_code == 401
+    assert client.delete("/api/admin/webhooks/anything").status_code == 401
 
 
 def test_create_returns_the_secret_once_then_masks_it(tmp_path) -> None:
@@ -49,7 +49,7 @@ def test_create_returns_the_secret_once_then_masks_it(tmp_path) -> None:
     headers = _authed(client)
 
     created = client.post(
-        "/api/webhooks",
+        "/api/admin/webhooks",
         json={"url": "https://hooks.example.com/a", "description": "Slack relay"},
         headers=headers,
     )
@@ -59,7 +59,7 @@ def test_create_returns_the_secret_once_then_masks_it(tmp_path) -> None:
     assert webhook["secretPreview"].startswith("...")
     assert webhook["secretPreview"].endswith(webhook["secret"][-4:])
 
-    listed = client.get("/api/webhooks", headers=headers).json()
+    listed = client.get("/api/admin/webhooks", headers=headers).json()
     assert len(listed["webhooks"]) == 1
     assert "secret" not in listed["webhooks"][0]
     assert listed["webhooks"][0]["secretPreview"] == webhook["secretPreview"]
@@ -72,7 +72,7 @@ def test_unsafe_url_is_rejected_with_400(tmp_path) -> None:
     headers = _authed(client)
 
     response = client.post(
-        "/api/webhooks", json={"url": "http://169.254.169.254/latest/meta-data/"}, headers=headers
+        "/api/admin/webhooks", json={"url": "http://169.254.169.254/latest/meta-data/"}, headers=headers
     )
     assert response.status_code == 400
     assert "private or loopback" in response.json()["error"]
@@ -82,7 +82,7 @@ def test_non_http_scheme_is_rejected(tmp_path) -> None:
     client = build_test_client(tmp_path)
     headers = _authed(client)
 
-    response = client.post("/api/webhooks", json={"url": "file:///etc/passwd"}, headers=headers)
+    response = client.post("/api/admin/webhooks", json={"url": "file:///etc/passwd"}, headers=headers)
     assert response.status_code == 400
 
 
@@ -93,7 +93,7 @@ def test_unknown_event_type_is_rejected(tmp_path) -> None:
     headers = _authed(client)
 
     response = client.post(
-        "/api/webhooks",
+        "/api/admin/webhooks",
         json={"url": "https://hooks.example.com/a", "eventTypes": ["not.a.real.event"]},
         headers=headers,
     )
@@ -107,7 +107,7 @@ def test_wildcard_collapses_the_event_filter(tmp_path) -> None:
     headers = _authed(client)
 
     created = client.post(
-        "/api/webhooks",
+        "/api/admin/webhooks",
         json={"url": "https://hooks.example.com/a", "eventTypes": ["*", "scoring.completed"]},
         headers=headers,
     )
@@ -120,11 +120,11 @@ def test_update_and_delete_lifecycle(tmp_path) -> None:
     headers = _authed(client)
 
     webhook_id = client.post(
-        "/api/webhooks", json={"url": "https://hooks.example.com/a"}, headers=headers
+        "/api/admin/webhooks", json={"url": "https://hooks.example.com/a"}, headers=headers
     ).json()["webhook"]["id"]
 
     updated = client.put(
-        f"/api/webhooks/{webhook_id}",
+        f"/api/admin/webhooks/{webhook_id}",
         json={
             "url": "https://hooks.example.com/b",
             "description": "moved",
@@ -138,8 +138,8 @@ def test_update_and_delete_lifecycle(tmp_path) -> None:
     assert updated.json()["webhook"]["eventTypes"] == ["clips.ready"]
     assert updated.json()["webhook"]["active"] is False
 
-    assert client.delete(f"/api/webhooks/{webhook_id}", headers=headers).status_code == 200
-    assert client.get("/api/webhooks", headers=headers).json()["webhooks"] == []
+    assert client.delete(f"/api/admin/webhooks/{webhook_id}", headers=headers).status_code == 200
+    assert client.get("/api/admin/webhooks", headers=headers).json()["webhooks"] == []
 
 
 def test_rotate_secret_issues_a_new_one(tmp_path) -> None:
@@ -148,10 +148,10 @@ def test_rotate_secret_issues_a_new_one(tmp_path) -> None:
     headers = _authed(client)
 
     created = client.post(
-        "/api/webhooks", json={"url": "https://hooks.example.com/a"}, headers=headers
+        "/api/admin/webhooks", json={"url": "https://hooks.example.com/a"}, headers=headers
     ).json()["webhook"]
 
-    rotated = client.post(f"/api/webhooks/{created['id']}/rotate-secret", headers=headers)
+    rotated = client.post(f"/api/admin/webhooks/{created['id']}/rotate-secret", headers=headers)
     assert rotated.status_code == 200
     assert rotated.json()["webhook"]["secret"] != created["secret"]
 
@@ -161,13 +161,13 @@ def test_missing_webhook_returns_404(tmp_path) -> None:
     headers = _authed(client)
 
     assert client.put(
-        "/api/webhooks/nope",
+        "/api/admin/webhooks/nope",
         json={"url": "https://hooks.example.com/a"},
         headers=headers,
     ).status_code in {400, 404}
-    assert client.delete("/api/webhooks/nope", headers=headers).status_code == 404
-    assert client.get("/api/webhooks/nope/deliveries", headers=headers).status_code == 404
-    assert client.post("/api/webhooks/nope/test", headers=headers).status_code == 404
+    assert client.delete("/api/admin/webhooks/nope", headers=headers).status_code == 404
+    assert client.get("/api/admin/webhooks/nope/deliveries", headers=headers).status_code == 404
+    assert client.post("/api/admin/webhooks/nope/test", headers=headers).status_code == 404
 
 
 def test_deliveries_are_listed_for_a_subscription(tmp_path) -> None:
@@ -176,10 +176,10 @@ def test_deliveries_are_listed_for_a_subscription(tmp_path) -> None:
     headers = _authed(client)
 
     webhook_id = client.post(
-        "/api/webhooks", json={"url": "https://hooks.example.com/a"}, headers=headers
+        "/api/admin/webhooks", json={"url": "https://hooks.example.com/a"}, headers=headers
     ).json()["webhook"]["id"]
 
-    response = client.get(f"/api/webhooks/{webhook_id}/deliveries", headers=headers)
+    response = client.get(f"/api/admin/webhooks/{webhook_id}/deliveries", headers=headers)
     assert response.status_code == 200
     assert response.json()["deliveries"] == []
 
@@ -206,16 +206,16 @@ def test_test_endpoint_records_a_delivery_attempt(tmp_path) -> None:
     )
 
     webhook_id = client.post(
-        "/api/webhooks",
+        "/api/admin/webhooks",
         json={"url": "http://127.0.0.1:9/hook"},
         headers=headers,
     ).json()["webhook"]["id"]
 
-    response = client.post(f"/api/webhooks/{webhook_id}/test", headers=headers)
+    response = client.post(f"/api/admin/webhooks/{webhook_id}/test", headers=headers)
     assert response.status_code == 200
     assert response.json()["delivered"] is False
 
-    deliveries = client.get(f"/api/webhooks/{webhook_id}/deliveries", headers=headers).json()
+    deliveries = client.get(f"/api/admin/webhooks/{webhook_id}/deliveries", headers=headers).json()
     assert len(deliveries["deliveries"]) == 1
     row = deliveries["deliveries"][0]
     assert row["eventType"] == "webhook.test"
@@ -225,5 +225,5 @@ def test_test_endpoint_records_a_delivery_attempt(tmp_path) -> None:
     assert "private or loopback" not in str(row["error"])
 
     # The failure is reflected on the subscription summary the UI renders.
-    listed = client.get("/api/webhooks", headers=headers).json()["webhooks"][0]
+    listed = client.get("/api/admin/webhooks", headers=headers).json()["webhooks"][0]
     assert listed["consecutiveFailures"] == 1

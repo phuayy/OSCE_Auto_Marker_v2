@@ -147,7 +147,7 @@ def test_an_incoherent_stored_panel_degrades_rather_than_failing(tmp_path: Path,
 def test_describe_reports_selected_and_effective_marking(tmp_path: Path, clean_env) -> None:
     clean_env.setenv("NVIDIA_API_KEY", "nvidia-key")
     client = build_client(tmp_path)
-    saved = client.put("/api/settings", json={
+    saved = client.put("/api/admin/settings", json={
         "llmTranscriptPreprocess": False,
         "llmMarkingMode": "panel",
         "llmPanel": PANEL,
@@ -174,7 +174,7 @@ def test_describe_reports_selected_and_effective_marking(tmp_path: Path, clean_e
 
 def _put(client, **overrides):
     body = {"llmTranscriptPreprocess": False, **overrides}
-    return client.put("/api/settings", json=body)
+    return client.put("/api/admin/settings", json=body)
 
 
 def test_saving_a_panel_round_trips(tmp_path: Path) -> None:

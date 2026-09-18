@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 
+from app.api.dependencies import require_admin
 from app.api.routes import settings as settings_routes
 from app.core.config import Settings
 from app.core.secret_box import SecretBox, derive_master_key, mask_secret, redact_secrets
@@ -78,6 +79,9 @@ def build_client(tmp_path: Path) -> TestClient:
     app = FastAPI()
     app.state.container = container
     app.include_router(settings_routes.router, prefix="/api")
+    app.include_router(settings_routes.admin_router, prefix="/api")
+    # This module exercises key storage/precedence, not authorization.
+    app.dependency_overrides[require_admin] = lambda: {"sub": "test-admin", "username": "admin", "role": "admin"}
     return TestClient(app)
 
 
@@ -242,7 +246,7 @@ def test_subprocess_env_carries_the_saved_key_for_routed_providers_only(tmp_path
 def test_saving_a_key_never_returns_it_and_marks_the_provider_available(tmp_path: Path) -> None:
     client = build_client(tmp_path)
 
-    response = client.put("/api/settings/llm-providers/openai/key", json={"apiKey": LIVE_KEY})
+    response = client.put("/api/admin/settings/llm-providers/openai/key", json={"apiKey": LIVE_KEY})
     assert response.status_code == 200
     body = response.json()
     assert LIVE_KEY not in response.text
@@ -259,23 +263,23 @@ def test_saving_a_key_never_returns_it_and_marks_the_provider_available(tmp_path
 def test_a_rejected_key_is_a_400_with_a_usable_message(tmp_path: Path) -> None:
     client = build_client(tmp_path)
 
-    assert client.put("/api/settings/llm-providers/openai/key", json={"apiKey": "  "}).status_code == 422
-    short = client.put("/api/settings/llm-providers/openai/key", json={"apiKey": "sk-1"})
+    assert client.put("/api/admin/settings/llm-providers/openai/key", json={"apiKey": "  "}).status_code == 422
+    short = client.put("/api/admin/settings/llm-providers/openai/key", json={"apiKey": "sk-1"})
     assert short.status_code == 400
     assert "truncated" in short.json()["detail"]
 
 
 def test_an_unknown_provider_is_a_404_rather_than_a_silent_write(tmp_path: Path) -> None:
     client = build_client(tmp_path)
-    response = client.put("/api/settings/llm-providers/not-a-vendor/key", json={"apiKey": LIVE_KEY})
+    response = client.put("/api/admin/settings/llm-providers/not-a-vendor/key", json={"apiKey": LIVE_KEY})
     assert response.status_code == 404
 
 
 def test_deleting_a_key_returns_the_provider_to_unconfigured(tmp_path: Path) -> None:
     client = build_client(tmp_path)
-    client.put("/api/settings/llm-providers/openai/key", json={"apiKey": LIVE_KEY})
+    client.put("/api/admin/settings/llm-providers/openai/key", json={"apiKey": LIVE_KEY})
 
-    body = client.delete("/api/settings/llm-providers/openai/key").json()
+    body = client.delete("/api/admin/settings/llm-providers/openai/key").json()
 
     openai = next(provider for provider in body["providers"] if provider["id"] == "openai")
     assert openai["credential"]["source"] == "none"

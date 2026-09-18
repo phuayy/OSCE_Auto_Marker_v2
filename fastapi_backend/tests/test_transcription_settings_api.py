@@ -13,6 +13,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.api.dependencies import require_admin
 from app.api.routes import settings as settings_routes
 from app.core.config import Settings
 from app.services.container import create_container
@@ -35,12 +36,15 @@ def build_client(tmp_path: Path, **setting_overrides) -> TestClient:
     app = FastAPI()
     app.state.container = container
     app.include_router(settings_routes.router, prefix="/api")
+    app.include_router(settings_routes.admin_router, prefix="/api")
+    # This module exercises the transcription-engine form, not authorization.
+    app.dependency_overrides[require_admin] = lambda: {"sub": "test-admin", "username": "admin", "role": "admin"}
     return TestClient(app)
 
 
 def save(client: TestClient, **overrides):
     payload = {"llmTranscriptPreprocess": False, **overrides}
-    return client.put("/api/settings", json=payload)
+    return client.put("/api/admin/settings", json=payload)
 
 
 def test_the_engine_list_describes_everything_the_form_renders(tmp_path: Path) -> None:

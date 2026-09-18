@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from app.api.dependencies import require_admin
 from app.api.routes import corpora
 from app.core.config import Settings
 from app.core.exceptions import AppError
@@ -41,6 +42,9 @@ def build_client(tmp_path: Path) -> TestClient:
         return JSONResponse(status_code=exc.status_code, content={"error": exc.message})
 
     app.include_router(corpora.router, prefix="/api")
+    app.include_router(corpora.admin_router, prefix="/api")
+    # This module exercises corpus CRUD, not authorization.
+    app.dependency_overrides[require_admin] = lambda: {"sub": "test-admin", "username": "admin", "role": "admin"}
     return TestClient(app)
 
 
@@ -83,7 +87,7 @@ def test_corpora_routes_crud_and_conflicts(tmp_path: Path) -> None:
     assert "Common Cold (URTI)" in seed_names
 
     created = client.post(
-        "/api/corpora",
+        "/api/admin/corpora",
         json={"name": "  Diabetes  ", "terms": ["metformin", " metformin ", "", "insulin", "Metformin"]},
     )
     assert created.status_code == 200
@@ -92,16 +96,16 @@ def test_corpora_routes_crud_and_conflicts(tmp_path: Path) -> None:
     # Trimmed, empties dropped, deduped case-insensitively, order preserved.
     assert corpus["terms"] == ["metformin", "insulin"]
 
-    duplicate = client.post("/api/corpora", json={"name": "Diabetes", "terms": []})
+    duplicate = client.post("/api/admin/corpora", json={"name": "Diabetes", "terms": []})
     assert duplicate.status_code == 409
 
-    updated = client.put(f"/api/corpora/{corpus['id']}", json={"name": "Diabetes", "terms": ["insulin"]})
+    updated = client.put(f"/api/admin/corpora/{corpus['id']}", json={"name": "Diabetes", "terms": ["insulin"]})
     assert updated.status_code == 200
     assert updated.json()["corpus"]["terms"] == ["insulin"]
 
-    assert client.put("/api/corpora/missing", json={"name": "X", "terms": []}).status_code == 404
-    assert client.delete(f"/api/corpora/{corpus['id']}").status_code == 200
-    assert client.delete(f"/api/corpora/{corpus['id']}").status_code == 404
+    assert client.put("/api/admin/corpora/missing", json={"name": "X", "terms": []}).status_code == 404
+    assert client.delete(f"/api/admin/corpora/{corpus['id']}").status_code == 200
+    assert client.delete(f"/api/admin/corpora/{corpus['id']}").status_code == 404
 
 
 def test_normalize_corpus_terms_handles_non_lists() -> None:
