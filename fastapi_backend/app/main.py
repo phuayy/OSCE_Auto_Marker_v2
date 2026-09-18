@@ -139,6 +139,7 @@ app.include_router(events_routes.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(users_routes.router, prefix="/api")
 app.include_router(rubrics.router, prefix="/api")
+app.include_router(rubrics.admin_router, prefix="/api")
 app.include_router(async_uploads.router, prefix="/api")
 app.include_router(jobs.router, prefix="/api")
 app.include_router(sessions.router, prefix="/api")
@@ -146,7 +147,9 @@ app.include_router(analytics.router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(webhooks.router, prefix="/api")
 app.include_router(corpora.router, prefix="/api")
+app.include_router(corpora.admin_router, prefix="/api")
 app.include_router(settings_routes.router, prefix="/api")
+app.include_router(settings_routes.admin_router, prefix="/api")
 
 # Last on purpose: a catch-all for the built frontend can only serve what the
 # routers and media mounts above did not claim.

@@ -7,9 +7,10 @@ username is lowercased the same way on write and on lookup, and a password is
 judged by one policy whether it arrives through an invitation, a reset or a
 change-my-password form.
 
-Two roles only, by design: ``admin`` is ``marker`` plus user management. There
-is no per-session ownership — every marker sees every session — so nothing
-below needs a permission matrix, just the one gate.
+Two roles only, by design: ``admin`` is ``marker`` plus user management and
+deployment configuration. Every marker still *sees* every session — there is
+no read-side permission matrix — but a session may only be *changed* by its
+creator or an admin; see ``app.domain.access``.
 """
 
 from __future__ import annotations

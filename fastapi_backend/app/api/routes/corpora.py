@@ -3,12 +3,17 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from sqlalchemy.exc import IntegrityError
 
-from app.api.dependencies import get_container
+from app.api.dependencies import get_container, require_admin
 from app.core.exceptions import AppError
 from app.schemas.corpora import CorpusPayload
 from app.services.container import AppContainer
 
+# The corpus a transcript is corrected against is deployment-wide config, not
+# a marker's own preference (see CLAUDE.md "Two-tier settings"), so only the
+# read stays on the public router — every marker needs the list to choose one
+# at upload time. Writing one is admin_router, below.
 router = APIRouter(prefix="/corpora", tags=["corpora"])
+admin_router = APIRouter(prefix="/admin/corpora", tags=["corpora"], dependencies=[Depends(require_admin)])
 
 
 @router.get("")
@@ -16,7 +21,7 @@ async def list_corpora(container: AppContainer = Depends(get_container)) -> dict
     return {"corpora": await container.corpora.list_rows()}
 
 
-@router.post("")
+@admin_router.post("")
 async def create_corpus(
     payload: CorpusPayload,
     container: AppContainer = Depends(get_container),
@@ -28,7 +33,7 @@ async def create_corpus(
     return {"corpus": corpus}
 
 
-@router.put("/{corpus_id}")
+@admin_router.put("/{corpus_id}")
 async def update_corpus(
     corpus_id: str,
     payload: CorpusPayload,
@@ -43,7 +48,7 @@ async def update_corpus(
     return {"corpus": corpus}
 
 
-@router.delete("/{corpus_id}")
+@admin_router.delete("/{corpus_id}")
 async def delete_corpus(
     corpus_id: str,
     container: AppContainer = Depends(get_container),

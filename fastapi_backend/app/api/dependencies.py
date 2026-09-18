@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from fastapi import HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
 
+from app.domain.access import ensure_may_mutate
 from app.domain.actors import Actor
 from app.domain.users import UserRole
 from app.services.container import AppContainer
@@ -137,6 +138,69 @@ def require_role(*roles: UserRole) -> Callable[[Request], dict[str, Any]]:
 
 
 require_admin = require_role(UserRole.ADMIN)
+
+
+# --- ownership gates ---------------------------------------------------------
+#
+# A sibling of require_admin for the other half of authorization: not "which
+# role", but "did YOU create this". Each reads the path parameter FastAPI has
+# already parsed onto ``request.path_params`` (routing runs before
+# dependencies), loads the record, and raises through ``ensure_may_mutate``
+# (app.domain.access) — 403, or 404 via the same not-found translation the
+# routes already use for a missing id. Marked ``enforces_ownership`` so
+# tests/test_session_routes_are_guarded.py can recognise any of them by
+# identity, the way test_admin_routes_are_guarded.py recognises require_admin.
+
+
+async def require_session_owner(
+    request: Request, container: AppContainer = Depends(get_container)
+) -> dict[str, Any]:
+    session_id = str(request.path_params.get("session_id") or "")
+    try:
+        session = await container.sessions.read(session_id)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Session not found.") from error
+    ensure_may_mutate(session, current_actor(request), subject="session")
+    return session
+
+
+require_session_owner.enforces_ownership = True  # type: ignore[attr-defined]
+
+
+async def require_job_owner(request: Request, container: AppContainer = Depends(get_container)) -> dict[str, Any]:
+    job_id = str(request.path_params.get("job_id") or "")
+    try:
+        job = await container.jobs.repository.read(job_id)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Job not found.") from error
+    session_id = str(job.get("sessionId") or "")
+    session: dict[str, Any] | None = None
+    if session_id:
+        try:
+            session = await container.sessions.read(session_id)
+        except FileNotFoundError:
+            session = None
+    if session is not None:
+        ensure_may_mutate(session, current_actor(request), subject="session")
+    return job
+
+
+require_job_owner.enforces_ownership = True  # type: ignore[attr-defined]
+
+
+async def require_upload_owner(
+    request: Request, container: AppContainer = Depends(get_container)
+) -> dict[str, Any]:
+    upload_id = str(request.path_params.get("upload_id") or "")
+    try:
+        upload = await container.async_uploads.repository.read(upload_id)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Upload not found.") from error
+    ensure_may_mutate(upload, current_actor(request), subject="upload")
+    return upload
+
+
+require_upload_owner.enforces_ownership = True  # type: ignore[attr-defined]
 
 
 def client_ip(request: Request, trusted_proxy_count: int = 0) -> str:

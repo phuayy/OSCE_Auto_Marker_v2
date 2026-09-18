@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Path, Query, Request, status
 
-from app.api.dependencies import current_actor, get_container
+from app.api.dependencies import current_actor, get_container, require_upload_owner
 from app.api.errors import http_error
 from app.core.exceptions import AppError
 from app.schemas.uploads import CompleteUploadRequest, InitiateUploadRequest
@@ -26,7 +26,7 @@ async def initiate_upload(
         raise http_error(error, fallback_message="Upload initiation failed.", not_found_message="Upload not found.") from error
 
 
-@router.put("/{upload_id}/parts/{part_number}")
+@router.put("/{upload_id}/parts/{part_number}", dependencies=[Depends(require_upload_owner)])
 async def put_upload_part(
     upload_id: str,
     request: Request,
@@ -73,7 +73,7 @@ async def get_upload_status(upload_id: str, container: AppContainer = Depends(ge
         raise http_error(error, fallback_message="Failed to load upload status.", not_found_message="Upload not found.") from error
 
 
-@router.post("/{upload_id}/complete", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/{upload_id}/complete", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_upload_owner)])
 async def complete_upload(
     upload_id: str,
     payload: CompleteUploadRequest | None = None,
@@ -85,7 +85,7 @@ async def complete_upload(
         raise http_error(error, fallback_message="Upload finalization failed.", not_found_message="Upload not found.") from error
 
 
-@router.delete("/{upload_id}")
+@router.delete("/{upload_id}", dependencies=[Depends(require_upload_owner)])
 async def abort_upload(upload_id: str, container: AppContainer = Depends(get_container)) -> dict[str, object]:
     try:
         return await container.async_uploads.abort(upload_id)

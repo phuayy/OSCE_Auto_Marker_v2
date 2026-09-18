@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from app.api.dependencies import current_actor, get_container
+from app.api.dependencies import current_actor, get_container, require_session_owner
 from app.api.errors import http_error
 from app.schemas.sessions import (
     ManualClipsRequest,
@@ -21,7 +21,7 @@ async def list_sessions(container: AppContainer = Depends(get_container)) -> dic
     return {"sessions": await container.sessions.list_sessions()}
 
 
-@router.patch("/{session_id}/name")
+@router.patch("/{session_id}/name", dependencies=[Depends(require_session_owner)])
 async def rename_session(
     session_id: str,
     payload: RenameSessionRequest,
@@ -56,7 +56,7 @@ async def get_session(session_id: str, container: AppContainer = Depends(get_con
         raise http_error(error, fallback_message="Failed to load session.", not_found_message="Session not found.") from error
 
 
-@router.delete("/{session_id}")
+@router.delete("/{session_id}", dependencies=[Depends(require_session_owner)])
 async def delete_session(session_id: str, container: AppContainer = Depends(get_container)) -> dict[str, object]:
     try:
         return await container.session_maintenance.delete_session(session_id)
@@ -66,7 +66,7 @@ async def delete_session(session_id: str, container: AppContainer = Depends(get_
         raise http_error(error, fallback_message="Failed to delete session.", not_found_message="Session not found.") from error
 
 
-@router.post("/{session_id}/rerun")
+@router.post("/{session_id}/rerun", dependencies=[Depends(require_session_owner)])
 async def rerun_session(session_id: str, container: AppContainer = Depends(get_container)) -> dict[str, object]:
     try:
         return await container.session_maintenance.rerun_session(session_id)
@@ -159,7 +159,7 @@ async def session_events(session_id: str, container: AppContainer = Depends(get_
 # ``processing`` with no job row for startup recovery to find.
 
 
-@router.post("/{session_id}/auto-crop", status_code=202)
+@router.post("/{session_id}/auto-crop", status_code=202, dependencies=[Depends(require_session_owner)])
 async def auto_crop_session(session_id: str, container: AppContainer = Depends(get_container)) -> dict[str, object]:
     try:
         return await container.session_maintenance.start_auto_crop(session_id)
@@ -167,7 +167,7 @@ async def auto_crop_session(session_id: str, container: AppContainer = Depends(g
         raise http_error(error, fallback_message="Auto-crop could not be queued.", not_found_message="Session not found.") from error
 
 
-@router.post("/{session_id}/process", status_code=202)
+@router.post("/{session_id}/process", status_code=202, dependencies=[Depends(require_session_owner)])
 async def process_session(session_id: str, container: AppContainer = Depends(get_container)) -> dict[str, object]:
     try:
         return await container.session_maintenance.start_processing(session_id)
@@ -175,7 +175,7 @@ async def process_session(session_id: str, container: AppContainer = Depends(get
         raise http_error(error, fallback_message="Processing could not be queued.", not_found_message="Session not found.") from error
 
 
-@router.post("/{session_id}/clips/manual", status_code=202)
+@router.post("/{session_id}/clips/manual", status_code=202, dependencies=[Depends(require_session_owner)])
 async def create_manual_clips(
     session_id: str,
     payload: ManualClipsRequest,
@@ -196,7 +196,7 @@ async def create_manual_clips(
         raise http_error(error, fallback_message="Manual clip split failed.", not_found_message="Session not found.") from error
 
 
-@router.post("/{session_id}/clips/{clip_id}/recrop", status_code=202)
+@router.post("/{session_id}/clips/{clip_id}/recrop", status_code=202, dependencies=[Depends(require_session_owner)])
 async def recrop_clip(
     session_id: str,
     clip_id: str,
@@ -217,7 +217,7 @@ async def recrop_clip(
         raise http_error(error, fallback_message="Recrop failed.", not_found_message="Session not found.") from error
 
 
-@router.post("/{session_id}/clips/{clip_id}/assess", status_code=202)
+@router.post("/{session_id}/clips/{clip_id}/assess", status_code=202, dependencies=[Depends(require_session_owner)])
 async def assess_clip(
     session_id: str,
     clip_id: str,
@@ -236,7 +236,7 @@ async def assess_clip(
         raise http_error(error, fallback_message="Clip assessment could not be queued.", not_found_message="Session not found.") from error
 
 
-@router.patch("/{session_id}/clips/{clip_id}")
+@router.patch("/{session_id}/clips/{clip_id}", dependencies=[Depends(require_session_owner)])
 async def rename_clip(
     session_id: str,
     clip_id: str,

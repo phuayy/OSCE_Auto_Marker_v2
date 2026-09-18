@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from app.api.dependencies import current_actor, get_container
+from app.api.dependencies import current_actor, get_container, require_admin
 from app.llm import custom as custom_providers
 from app.llm.panel import MarkingMode, PanelConfig, parse_marking_mode
 from app.llm.routing import LLMTarget
@@ -27,6 +27,12 @@ from app.services.container import AppContainer
 from app.services.provider_credential_service import CredentialError
 
 router = APIRouter(prefix="/settings", tags=["settings"])
+# Registering a scoring provider, rotating its key, or changing the deployment
+# defaults reaches every marker's next run (see CLAUDE.md "Two-tier
+# settings") — admin-only, same as corpora/rubrics/webhooks. The read side
+# above stays open: a marker needs the provider catalogue to pick their own
+# model, and needs to see today's deployment defaults.
+admin_router = APIRouter(prefix="/admin/settings", tags=["settings"], dependencies=[Depends(require_admin)])
 
 
 @router.get("")
@@ -86,7 +92,7 @@ async def get_llm_providers(container: AppContainer = Depends(get_container)) ->
     return await container.llm_settings.describe()
 
 
-@router.post("/llm-providers/test")
+@admin_router.post("/llm-providers/test")
 async def test_llm_provider(
     payload: TestLLMTargetRequest,
     container: AppContainer = Depends(get_container),
@@ -130,7 +136,7 @@ def _actor(request: Request) -> str:
     return actor.username if actor is not None else ""
 
 
-@router.post("/llm-providers", status_code=status.HTTP_201_CREATED)
+@admin_router.post("/llm-providers", status_code=status.HTTP_201_CREATED)
 async def create_llm_provider(
     payload: CustomProviderRequest,
     request: Request,
@@ -154,7 +160,7 @@ async def create_llm_provider(
     return await _write_custom_provider(container, request, payload, allow_create=True)
 
 
-@router.put("/llm-providers/{provider_id}")
+@admin_router.put("/llm-providers/{provider_id}")
 async def update_llm_provider(
     provider_id: str,
     payload: CustomProviderRequest,
@@ -219,7 +225,7 @@ async def _write_custom_provider(
     return await container.llm_settings.describe()
 
 
-@router.delete("/llm-providers/{provider_id}")
+@admin_router.delete("/llm-providers/{provider_id}")
 async def delete_llm_provider(
     provider_id: str,
     request: Request,
@@ -257,7 +263,7 @@ async def delete_llm_provider(
     return await container.llm_settings.describe()
 
 
-@router.put("/llm-providers/{provider_id}/key")
+@admin_router.put("/llm-providers/{provider_id}/key")
 async def set_llm_provider_key(
     provider_id: str,
     payload: SetProviderKeyRequest,
@@ -281,7 +287,7 @@ async def set_llm_provider_key(
     return await container.llm_settings.describe()
 
 
-@router.delete("/llm-providers/{provider_id}/key")
+@admin_router.delete("/llm-providers/{provider_id}/key")
 async def clear_llm_provider_key(
     provider_id: str,
     request: Request,
@@ -342,7 +348,7 @@ async def _check_settings_document(container: AppContainer, document: dict[str, 
             )
 
 
-@router.put("")
+@admin_router.put("")
 async def update_settings(
     payload: UpdateSettingsRequest,
     container: AppContainer = Depends(get_container),
@@ -358,7 +364,7 @@ async def update_settings(
     return {"settings": await container.app_settings.set_values(document)}
 
 
-@router.patch("")
+@admin_router.patch("")
 async def patch_settings(
     payload: PatchSettingsRequest,
     container: AppContainer = Depends(get_container),

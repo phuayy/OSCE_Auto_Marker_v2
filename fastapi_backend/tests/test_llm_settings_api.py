@@ -15,6 +15,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.api.dependencies import require_admin
 from app.api.routes import settings as settings_routes
 from app.core.config import Settings
 from app.database.orm import OrmDatabase
@@ -46,6 +47,12 @@ def build_client(tmp_path: Path) -> TestClient:
     app = FastAPI()
     app.state.container = container
     app.include_router(settings_routes.router, prefix="/api")
+    app.include_router(settings_routes.admin_router, prefix="/api")
+    # This module exercises the settings *business logic*, not authorization —
+    # that is test_admin_routes_are_guarded.py and test_session_ownership.py.
+    # No auth middleware runs in this standalone app, so require_admin is
+    # overridden rather than left to 401 every call.
+    app.dependency_overrides[require_admin] = lambda: {"sub": "test-admin", "username": "admin", "role": "admin"}
     return TestClient(app)
 
 
@@ -67,7 +74,7 @@ def test_saving_a_primary_and_fallback_round_trips(tmp_path: Path) -> None:
     client = build_client(tmp_path)
 
     saved = client.put(
-        "/api/settings",
+        "/api/admin/settings",
         json={
             "llmTranscriptPreprocess": False,
             "llmPrimary": {"providerId": "deepseek", "model": "deepseek-chat"},
@@ -88,7 +95,7 @@ def test_blank_fallback_rows_are_dropped(tmp_path: Path) -> None:
     client = build_client(tmp_path)
 
     saved = client.put(
-        "/api/settings",
+        "/api/admin/settings",
         json={
             "llmTranscriptPreprocess": False,
             "llmPrimary": {"providerId": "nvidia", "model": ""},
@@ -103,7 +110,7 @@ def test_unknown_provider_is_rejected_at_the_api_boundary(tmp_path: Path) -> Non
     client = build_client(tmp_path)
 
     rejected = client.put(
-        "/api/settings",
+        "/api/admin/settings",
         json={
             "llmTranscriptPreprocess": False,
             "llmPrimary": {"providerId": "not-a-vendor", "model": "x"},
@@ -118,7 +125,7 @@ def test_connection_test_reports_a_missing_key_without_raising(tmp_path: Path, m
     client = build_client(tmp_path)
 
     body = client.post(
-        "/api/settings/llm-providers/test",
+        "/api/admin/settings/llm-providers/test",
         json={"providerId": "openai", "model": "gpt-4.1"},
     ).json()
 

@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from app.domain.users import UserRole, UserVocabularyError, parse_role
+
 # The key under which a session (and anything else that records a creator)
 # carries its provenance snapshot: {"userId", "username", "displayName"}.
 PROVENANCE_KEY = "createdBy"
@@ -27,6 +29,10 @@ class Actor:
     user_id: str
     username: str
     display_name: str = ""
+    # The account's role *right now*, for authorization — never written into a
+    # provenance snapshot (see to_provenance): a snapshot is what the account
+    # looked like when it acted, and a role can change afterwards.
+    role: UserRole = UserRole.MARKER
 
     @classmethod
     def from_auth_payload(cls, payload: Any) -> "Actor | None":
@@ -38,15 +44,32 @@ class Actor:
         username = str(payload.get("username") or "").strip()
         if not user_id or not username:
             return None
-        return cls(user_id=user_id, username=username, display_name=str(payload.get("displayName") or "").strip())
+        try:
+            role = parse_role(payload.get("role"), default=UserRole.MARKER)
+        except UserVocabularyError:
+            # A malformed or pre-role token reads as the least-privileged role
+            # rather than failing the request — the role gate downstream is
+            # what actually protects an admin route.
+            role = UserRole.MARKER
+        return cls(
+            user_id=user_id,
+            username=username,
+            display_name=str(payload.get("displayName") or "").strip(),
+            role=role,
+        )
 
     @property
     def label(self) -> str:
         """How the person is shown: their name, else their login handle."""
         return self.display_name or self.username
 
+    @property
+    def is_admin(self) -> bool:
+        return self.role is UserRole.ADMIN
+
     def to_provenance(self) -> dict[str, str]:
-        """The snapshot a created record keeps."""
+        """The snapshot a created record keeps. Deliberately just these three
+        keys — see the ``role`` field's docstring."""
         return {"userId": self.user_id, "username": self.username, "displayName": self.display_name}
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, status
 
-from app.api.dependencies import get_container
+from app.api.dependencies import get_container, require_admin
 from app.core.exceptions import AppError
 from app.core.webhook_url import WebhookUrlError, validate_webhook_url
 from app.domain.notifications import SUBSCRIBABLE_EVENT_TYPES, NotificationType
@@ -10,7 +10,11 @@ from app.schemas.webhooks import WebhookPayload
 from app.services.container import AppContainer
 
 
-router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+# Webhook subscriptions carry signing secrets and arbitrary destination URLs —
+# deployment-wide config (see CLAUDE.md "Two-tier settings"), not something a
+# marker registers. The whole router is admin-only, reads included: unlike
+# corpora or the rubric, nothing here is a marker's input to a run.
+router = APIRouter(prefix="/admin/webhooks", tags=["webhooks"], dependencies=[Depends(require_admin)])
 
 
 def _validated_url(payload: WebhookPayload, container: AppContainer) -> str:

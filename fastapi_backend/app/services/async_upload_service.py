@@ -170,6 +170,11 @@ class AsyncUploadService:
         upload = {
             "id": upload_id,
             "sessionId": session_id,
+            # Same snapshot as the session's (see PROVENANCE_KEY above), stamped
+            # here too so the per-chunk ownership guard on PUT /parts/{n} reads
+            # it off the upload record it already loads, rather than paying a
+            # second lookup (the session) on every chunk of a large transfer.
+            PROVENANCE_KEY: actor.to_provenance() if actor is not None else None,
             "workflow": payload.workflow,
             "autoProcess": payload.autoProcess,
             "status": UploadStatus.INITIATED,
