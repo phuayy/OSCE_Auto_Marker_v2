@@ -17,7 +17,7 @@ from app.core.utils import sanitize_file_name
 from app.pipeline.media import MediaPipeline
 from app.pipeline.scoring import ScoringPipeline
 from app.services.job_queue_service import JobQueueService
-from app.services.storage_service import LocalObjectStorageService
+from app.storage import LocalObjectStorageService
 from tests.fixtures.session_store import SessionUpdateMixin
 from tests.fixtures.events import RecordingEvents as CapturingEvents
 

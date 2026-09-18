@@ -19,7 +19,7 @@ from app.core.exceptions import AppError
 from app.core.process import CommandRunner
 from app.database.orm import OrmDatabase
 from sqlalchemy import text as sa_text
-from app.services.storage_service import LocalObjectStorageService
+from app.storage import LocalObjectStorageService
 
 
 def _settings(tmp_path, **overrides) -> Settings:
