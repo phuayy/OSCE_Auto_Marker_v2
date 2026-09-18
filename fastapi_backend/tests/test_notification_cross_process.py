@@ -21,7 +21,9 @@ from app.database.change_tracking import TRACKED_TABLES, install_change_tracking
 from app.database.migrations import apply_additive_migrations
 from app.database.orm import OrmDatabase
 from app.domain.notifications import NotificationType
+from app.domain.users import UserRole, UserStatus
 from app.repositories.notification_repository import NotificationRepository
+from app.repositories.user_repository import UserRepository
 from app.services.change_feed_service import ChangeFeedService
 from app.services.notification_service import NOTIFICATION_EVENT, NotificationService
 
@@ -33,6 +35,19 @@ async def _prepared_database(tmp_path) -> OrmDatabase:
     await apply_additive_migrations(database.engine)
     await install_change_tracking(database.engine)
     return database
+
+
+async def _account(database: OrmDatabase, username: str = "viewer") -> str:
+    """notification_reads.user_id is a real foreign key to users.id."""
+    record = await UserRepository(database).create(
+        username=username,
+        email=f"{username}@example.edu",
+        display_name="",
+        role=UserRole.MARKER,
+        status=UserStatus.ACTIVE,
+        password_hash=None,
+    )
+    return record.id
 
 
 async def _counter(database: OrmDatabase, table: str) -> int:
@@ -164,7 +179,8 @@ def test_single_process_still_gets_the_immediate_push(tmp_path) -> None:
         assert event["type"] == NOTIFICATION_EVENT
         assert event["notification"]["title"] == "Processing failed"
         assert event["notification"]["sessionId"] == "s-2"
-        assert event["unreadCount"] == 1
+        # No badge count on the broadcast — see NotificationService._publish.
+        assert "unreadCount" not in event
 
         await database.shutdown()
 
@@ -172,17 +188,19 @@ def test_single_process_still_gets_the_immediate_push(tmp_path) -> None:
 
 
 def test_marking_read_also_announces_a_change(tmp_path) -> None:
-    """The unread badge is per-row state; another tab (or process) marking one
-    read must not leave this browser's badge stale."""
+    """Read state now lives in ``notification_reads``, not on the shared
+    ``notifications`` row; another tab (or process) marking one read must
+    still not leave this browser's badge stale, via that table's own trigger."""
 
     async def scenario() -> None:
         database = await _prepared_database(tmp_path)
         repository = NotificationRepository(database)
+        viewer = await _account(database)
         stored = await repository.create("Clips ready", "3 clips.", event_type="clips.ready")
 
-        before = await _counter(database, "notifications")
-        assert await repository.mark_read(stored["id"]) is True
-        after = await _counter(database, "notifications")
+        before = await _counter(database, "notification_reads")
+        assert await repository.mark_read(stored["id"], viewer_id=viewer) is True
+        after = await _counter(database, "notification_reads")
 
         assert after > before
         await database.shutdown()
@@ -191,20 +209,28 @@ def test_marking_read_also_announces_a_change(tmp_path) -> None:
 
 
 def test_marking_all_read_also_announces_a_change(tmp_path) -> None:
-    """Dismiss-all is one UPDATE; the counter must still move so every other
-    tab's badge (and every other process's cached feed) learns about it."""
+    """Dismiss-all is one INSERT...SELECT; the counter must still move so
+    every other tab's badge (and every other process's cached feed) learns
+    about it."""
 
     async def scenario() -> None:
         database = await _prepared_database(tmp_path)
         repository = NotificationRepository(database)
+        viewer = await _account(database)
         await repository.create("A", "a", event_type="clips.ready")
         await repository.create("B", "b", event_type="clips.ready")
 
-        before = await _counter(database, "notifications")
-        assert await repository.mark_all_read() == 2
-        after = await _counter(database, "notifications")
+        before = await _counter(database, "notification_reads")
+        assert await repository.mark_all_read(viewer_id=viewer) == 2
+        after = await _counter(database, "notification_reads")
 
         assert after > before
         await database.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_notification_reads_table_is_change_tracked() -> None:
+    """Companion guard to test_notifications_table_is_change_tracked: without
+    this, a mark-read in one process never evicts another's cached feed."""
+    assert "notification_reads" in TRACKED_TABLES

@@ -18,8 +18,23 @@ from app.database.change_tracking import install_change_tracking
 from app.database.migrations import apply_additive_migrations
 from app.database.orm import OrmDatabase
 from app.domain.notifications import NotificationType
+from app.domain.users import UserRole, UserStatus
+from app.repositories.user_repository import UserRepository
 from app.services.change_feed_service import ChangeFeedService
 from app.services.container import create_container
+
+
+async def _account(database: OrmDatabase, username: str = "viewer") -> str:
+    """notification_reads.user_id is a real foreign key to users.id."""
+    record = await UserRepository(database).create(
+        username=username,
+        email=f"{username}@example.edu",
+        display_name="",
+        role=UserRole.MARKER,
+        status=UserStatus.ACTIVE,
+        password_hash=None,
+    )
+    return record.id
 
 
 def _settings(tmp_path, **overrides) -> Settings:
@@ -163,13 +178,14 @@ def test_notification_feed_is_served_from_cache(tmp_path) -> None:
         await container.orm_database.initialize()
         await apply_additive_migrations(container.orm_database.engine)
         service = container.notifications
+        viewer = await _account(container.orm_database)
 
         await service.emit(NotificationType.SCORING_COMPLETED, "Scoring complete", "Ready.")
 
-        first = await service.feed()
+        first = await service.feed(viewer_id=viewer)
         misses_after_first = container.read_cache.misses
-        second = await service.feed()
-        third = await service.feed()
+        second = await service.feed(viewer_id=viewer)
+        third = await service.feed(viewer_id=viewer)
 
         assert first == second == third
         assert first["unreadCount"] == 1
@@ -196,11 +212,12 @@ def test_new_notification_invalidates_the_cached_feed(tmp_path) -> None:
         container.changes.database = database
 
         service = container.notifications
+        viewer = await _account(database)
         await service.emit(NotificationType.SCORING_COMPLETED, "First", "one")
-        assert len(( await service.feed())["notifications"]) == 1
+        assert len((await service.feed(viewer_id=viewer))["notifications"]) == 1
 
         await service.emit(NotificationType.CLIPS_READY, "Second", "two")
-        refreshed = await service.feed()
+        refreshed = await service.feed(viewer_id=viewer)
 
         assert len(refreshed["notifications"]) == 2
         assert refreshed["unreadCount"] == 2
@@ -220,12 +237,13 @@ def test_marking_read_is_reflected_in_the_next_feed_read(tmp_path) -> None:
         container.webhooks.database = database
         container.changes.database = database
         service = container.notifications
+        viewer = await _account(database)
 
         stored = await service.emit(NotificationType.CLIPS_READY, "Clips ready", "3 clips.")
-        assert (await service.feed())["unreadCount"] == 1
+        assert (await service.feed(viewer_id=viewer))["unreadCount"] == 1
 
-        assert await service.mark_read(stored["id"]) is True
-        after = await service.feed()
+        assert await service.mark_read(stored["id"], viewer_id=viewer) is True
+        after = await service.feed(viewer_id=viewer)
 
         assert after["unreadCount"] == 0
         assert after["notifications"][0]["read"] is True
@@ -244,13 +262,14 @@ def test_marking_all_read_is_reflected_in_the_next_feed_read(tmp_path) -> None:
         container.webhooks.database = database
         container.changes.database = database
         service = container.notifications
+        viewer = await _account(database)
 
         await service.emit(NotificationType.CLIPS_READY, "Clips ready", "3 clips.")
         await service.emit(NotificationType.SCORING_COMPLETED, "Scoring complete", "Ready.")
-        assert (await service.feed())["unreadCount"] == 2
+        assert (await service.feed(viewer_id=viewer))["unreadCount"] == 2
 
-        assert await service.mark_all_read() == 2
-        after = await service.feed()
+        assert await service.mark_all_read(viewer_id=viewer) == 2
+        after = await service.feed(viewer_id=viewer)
 
         assert after["unreadCount"] == 0
         assert all(row["read"] is True for row in after["notifications"])
@@ -273,9 +292,10 @@ def test_feed_falls_back_to_the_database_without_a_cache(tmp_path) -> None:
         await database.initialize()
         await apply_additive_migrations(database.engine)
         service = NotificationService(NotificationRepository(database))
+        viewer = await _account(database)
 
         await service.emit(NotificationType.SESSION_FAILED, "Failed", "whisperx died")
-        feed = await service.feed()
+        feed = await service.feed(viewer_id=viewer)
 
         assert feed["unreadCount"] == 1
         assert feed["notifications"][0]["title"] == "Failed"

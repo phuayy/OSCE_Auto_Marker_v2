@@ -139,16 +139,22 @@ export function useNotifications(enabled) {
     if (event.type !== 'notification' || !event.notification) return;
     const incoming = event.notification;
 
-    setItems((previous) =>
-      previous.some((item) => item.id === incoming.id)
-        ? previous
-        : [incoming, ...previous],
-    );
-    if (typeof event.unreadCount === 'number') {
-      setUnreadCount(event.unreadCount);
-    } else {
-      setUnreadCount((count) => count + 1);
-    }
+    // Notifications are unread for every viewer at creation (read state is
+    // per-account — see app/repositories/notification_repository.py), so a
+    // freshly pushed one is a safe local +1 for any browser watching. The
+    // backend does not send a badge count on this event: a single broadcast
+    // has no one count that is correct for every connected viewer, so each
+    // browser tracks its own rather than trusting a shared number. Guarded by
+    // the same de-dup check as the list below, so a duplicate delivery (e.g.
+    // a reconnect racing this push) cannot double-count the badge.
+    let isNew = false;
+    setItems((previous) => {
+      if (previous.some((item) => item.id === incoming.id)) return previous;
+      isNew = true;
+      return [incoming, ...previous];
+    });
+    if (isNew) setUnreadCount((count) => count + 1);
+
     // Before the first seed, history has not been established yet, so a push
     // cannot be told apart from backlog — record it without popping a toast.
     if (knownIdsRef.current === null) return;

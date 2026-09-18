@@ -74,6 +74,11 @@ TRACKED_TABLES: tuple[str, ...] = (
     # llm_providers, cached the same way and for the same reason: a change
     # saved in one process must apply to that user's next run everywhere.
     "user_settings",
+    # Per-viewer notification read state. The feed's cache key is per-user
+    # (see NotificationService), and a mark-read in one process — or the
+    # Hatchet worker, for a notification it itself raised — must evict that
+    # viewer's cached feed everywhere, the same story as ``notifications``.
+    "notification_reads",
 )
 
 
