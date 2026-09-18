@@ -93,7 +93,10 @@ OSCE-AI-FYP/
 │   │       ├── 0007_jobs_tables_in_orm_metadata.py  # jobs/job_attempts/job_events become ORM models
 │   │       ├── 0008_users_and_action_tokens.py  # accounts + emailed action tokens (+ tracking on users)
 │   │       ├── 0009_sessions_created_by.py      # sessions.created_by mirrors the createdBy snapshot
-│   │       └── 0010_sqlite_wal_and_fk_pragmas.py # SQLite policy + complete migration-owned tracking
+│   │       ├── 0010_sqlite_wal_and_fk_pragmas.py # SQLite policy + complete migration-owned tracking
+│   │       ├── 0011_user_settings.py            # per-account overrides of the seven user-scoped keys (see Two-tier settings)
+│   │       ├── 0012_upload_records.py           # UploadRecord table (see Session storage lifecycle contracts)
+│   │       └── 0013_upload_admission_index.py   # index behind require_expensive_operation's admission query
 │   └── app/
 │       ├── main.py             # FastAPI app, middleware, startup/shutdown
 │       ├── core/
@@ -105,6 +108,7 @@ OSCE-AI-FYP/
 │       │   ├── snapshot_cache.py # One cached value, evicted by the database's own change feed
 │       │   ├── tasks.py        # BackgroundTaskRegistry (strong-ref fire-and-forget)
 │       │   ├── token_revocation.py
+│       │   ├── webhook_url.py   # SSRF guard: blocks private/loopback/link-local destinations unless overridden
 │       │   └── logging_utils.py # log_context() structured logging helper
 │       ├── database/
 │       │   ├── orm.py          # OrmDatabase — the one SQLAlchemy async engine
@@ -113,7 +117,10 @@ OSCE-AI-FYP/
 │       │   └── migration_runner.py  # Runs "alembic upgrade head" at startup
 │       ├── domain/
 │       │   ├── users.py        # UserRole / UserStatus / ActionTokenPurpose, normalisers, password policy
-│       │   └── actors.py       # Actor (who a request acts as) + the createdBy provenance snapshot
+│       │   ├── actors.py       # Actor (who a request acts as) + the createdBy provenance snapshot
+│       │   ├── access.py       # may_mutate / ensure_may_mutate — creator-or-admin gate on a provenance-bearing record
+│       │   ├── settings_scope.py  # USER_SCOPED_KEYS — which settings keys are per-account vs. deployment-wide
+│       │   └── clip_summaries.py  # Pure cohort-summary rows for a long recording's Analytics view
 │       ├── mail/               # Outbound email: one contract, one backend per deployment
 │       │   ├── base.py             # EmailMessage, EmailSender Protocol, EmailDeliveryError
 │       │   ├── smtp.py             # SmtpEmailSender (aiosmtplib)
@@ -130,13 +137,18 @@ OSCE-AI-FYP/
 │       │   ├── assessment_repository.py
 │       │   ├── rubric_asset_repository.py
 │       │   ├── upload_repository.py     # JSON files on disk (uploads_dir)
-│       │   └── video_repository.py
+│       │   ├── video_repository.py
+│       │   ├── user_settings_repository.py  # Per-account overrides of the seven user-scoped keys (see Two-tier settings)
+│       │   ├── corpus_repository.py     # Named term lists for WhisperX hotwords + transcript correction
+│       │   └── webhook_repository.py    # Subscriptions + the bounded per-subscription delivery log
 │       ├── services/
 │       │   ├── container.py             # AppContainer + create_container() — DI root
 │       │   ├── transcription_router.py  # Picks + runs the selected engine per run
 │       │   ├── llm_settings_service.py  # Resolves the primary/fallback model choice; subprocess env
 │       │   ├── provider_credential_service.py  # Set/rotate/revoke provider API keys, encrypted
 │       │   ├── custom_provider_service.py      # CRUD + cached catalogue for operator-defined providers
+│       │   ├── preferences_service.py   # Merges deployment defaults with an account's overrides (see Two-tier settings)
+│       │   ├── webhook_dispatcher.py    # Signed HMAC delivery to registered endpoints, retried with the job queue's backoff
 │       │   ├── session_service.py
 │       │   ├── pipeline_service.py      # Orchestrates full assessment pipeline
 │       │   ├── clip_service.py          # Auto-crop, clip export planning/execution, clip assessment
@@ -150,8 +162,7 @@ OSCE-AI-FYP/
 │       │   ├── rubric_service.py        # Communication rubric parse/upload
 │       │   ├── rubric_asset_service.py
 │       │   ├── assessment_service.py
-│       │   ├── artifact_service.py      # Storage layout init, PDF validation
-│       │   └── storage_service.py       # Compatibility re-exports of app/storage/
+│       │   └── artifact_service.py      # Storage layout init, PDF validation
 │       ├── storage/            # Object storage: one contract, one backend per deployment
 │       │   ├── base.py             # ObjectStorage Protocol, PreparedUploadFile, storage-ref helpers
 │       │   ├── local.py            # LocalObjectStorageService (parts relayed through this API)
@@ -197,8 +208,10 @@ OSCE-AI-FYP/
 │       │       ├── jobs.py              # /api/jobs/**
 │       │       ├── rubrics.py           # /api/rubrics/**
 │       │       ├── media.py             # /media/** static file serving (auth-gated)
-│       │       └── notifications.py     # /api/notifications (list, mark one read, mark all read)
-│       ├── schemas/             # Pydantic request/response models
+│       │       ├── notifications.py     # /api/notifications (list, mark one read, mark all read)
+│       │       ├── corpora.py           # /api/corpora (read, every marker) + /api/admin/corpora (write)
+│       │       └── webhooks.py          # /api/admin/webhooks/** — admin-only, reads included (see Webhooks)
+│       ├── schemas/             # Pydantic request/response models, incl. corpora.py + webhooks.py
 │       └── queue/
 │           ├── hatchet_worker.py    # Hatchet worker lifespan + redispatch loop
 │           └── hatchet_tasks.py     # @hatchet.task definitions
@@ -354,6 +367,17 @@ Key files:
 - [pipeline/media.py](fastapi_backend/app/pipeline/media.py) — ffmpeg, WhisperX, bell detection, clip operations
 - [pipeline/scoring.py](fastapi_backend/app/pipeline/scoring.py) — scorer subprocess wrappers
 - [scripts/nvidia_osce_assessor.py](scripts/nvidia_osce_assessor.py) — content scorer with checkpoint/repair logic
+
+**The corpus step 3 corrects against is DB-backed, not a fixed word list.**
+`corpora` (`CorpusRecord`) holds named term lists an admin manages via
+`POST/PUT/DELETE /api/admin/corpora`; every marker reads `GET /api/corpora` to
+choose one at upload time (`payload.corpusId`), and
+`AsyncUploadService._resolve_corpus_snapshot` copies that corpus's terms into
+the session payload at upload — not a live reference — so editing or deleting
+a corpus later never changes what an already-uploaded session corrects
+against. The same term list also biases WhisperX's own decoding
+(`--hotwords`) before `transcript_correction.py`'s orthographic/phonetic
+passes run over the result.
 
 ---
 
@@ -612,6 +636,10 @@ Defined in [models.py](fastapi_backend/app/database/models.py):
 | `users` | `UserRecord` | Accounts: `username` / `email` (lowercased, unique), `display_name`, `role` (`admin` \| `marker`), `status` (`invited` \| `active` \| `disabled`), bcrypt `password_hash` (null while invited), `token_version` — bumped by activation, a password change/reset and suspension, so every bearer token the account holds dies on its next request |
 | `user_action_tokens` | `UserActionTokenRecord` | The emailed capabilities: `purpose` (`invite` \| `password_reset`), SHA-256 `token_hash` (the token itself is never stored), `expires_at`, `used_at` (set by an atomic conditional update — single use, and a resend voids the earlier link) |
 | `app_settings` | `AppSettingRecord` | Global key/value settings — model routing, marking mode + panel, transcription engine, preprocess toggle — written by `PUT /api/settings` (replace) or `PATCH /api/settings` (merge only the keys sent; what the settings cards use, so no card can revert another's save) |
+| `user_settings` | `UserSettingRecord` | One row per account: its overrides of the seven user-scoped keys, as one JSON document — see **Two-tier settings** |
+| `corpora` | `CorpusRecord` | Named term lists (`terms: list[str]`) that bias WhisperX `--hotwords` and drive deterministic transcript correction; picked per session at upload time and snapshotted into the session payload, so editing or deleting a corpus never affects a session that already used it |
+| `webhook_subscriptions` | `WebhookSubscriptionRecord` | Outbound HTTP endpoints registered for notification events — URL, HMAC secret (plaintext; it is the shared signing key, not a credential *for* this system), subscribed event types, and a denormalised summary of the most recent delivery for the management UI |
+| `webhook_deliveries` | `WebhookDeliveryRecord` | One row per delivery attempt, pruned to a bounded number per subscription — a debugging log, not an audit trail — see **Webhooks** |
 
 The queue's tables (`jobs`, `job_attempts`, `job_events`) are models like the
 rest, reached through `JobRepository` on the same engine. They used to be a
@@ -819,6 +847,58 @@ own publish calls, which `publish` no-ops anyway.
 
 ---
 
+## Webhooks
+
+The per-session SSE stream and the change feed are for *this deployment's own*
+browser tabs. A third party that wants to know when a session finishes —
+a departmental system, a script — cannot poll `/api/sessions` forever or hold
+a stream open, so `POST /api/admin/webhooks` registers an outbound HTTP
+endpoint instead: [webhook_dispatcher.py](fastapi_backend/app/services/webhook_dispatcher.py)
+POSTs a signed JSON body to it whenever `NotificationService` records one of
+`SUBSCRIBABLE_EVENT_TYPES` (`scoring.completed`, `clips.ready`,
+`session.failed` — [domain/notifications.py](fastapi_backend/app/domain/notifications.py)).
+The whole `/api/admin/webhooks` router is admin-only, reads included — unlike
+corpora or the rubric, nothing here is a marker's input to a run, and a
+subscription's URL and secret are only the operator's to see.
+
+**The signature is over the timestamp and the body, not the body alone.**
+`build_signature` / `verify_signature` in
+[webhook_dispatcher.py](fastapi_backend/app/services/webhook_dispatcher.py)
+sign `"{timestamp}.{body}"` with HMAC-SHA256 (`X-OSCE-Signature: t=...,v1=...`), so
+a receiver can reject anything older than its tolerance and a captured
+delivery cannot be replayed forever the way signing the body alone would allow.
+`verify_signature` is shipped so the documented algorithm and the one that
+actually runs cannot drift apart — the unit tests exercise real deliveries
+with it. Retries reuse `job_queue_service.compute_retry_backoff_seconds`
+rather than a fourth backoff implementation (see **Three backoff
+implementations** in the LLM Provider Layer section) — one equal-jitter curve,
+one place a redeployed schedule is tuned.
+
+**The secret is stored in plaintext, deliberately.** It is not a credential
+*for* this system — it is the shared key the subscriber uses to verify our
+signature, and every delivery must be re-signed with it, so it cannot be a
+one-way hash the way a password is. It is never returned by the API after
+creation; only a masked preview is.
+
+**A registered URL is a request-forgery surface, guarded once.**
+[core/webhook_url.py](fastapi_backend/app/core/webhook_url.py) resolves the
+host and refuses anything outside the public unicast range — loopback,
+link-local, the cloud metadata address — before a subscription is accepted
+and again before each delivery (DNS can change between the two), because the
+server making that POST holds this deployment's own trust. An operator who
+needs to reach an internal endpoint on purpose sets
+`WEBHOOK_ALLOW_PRIVATE_URLS=true`.
+
+**Deliveries are logged, not audited.** `webhook_deliveries` is pruned to a
+bounded number of rows per subscription — the log exists so an operator can
+answer "did my endpoint get it, and what did it say", not to be a permanent
+record. `webhook_subscriptions` keeps a denormalised summary of the latest
+delivery (`last_delivery_at`, `last_status_code`, `last_error`,
+`consecutive_failures`) so the management screen shows endpoint health without
+joining the log.
+
+---
+
 ## Authentication and accounts
 
 Design and the reasoning behind it: [docs/user-administration.md](docs/user-administration.md).
@@ -828,7 +908,22 @@ account management; a marker can do everything else — and three statuses
 (`invited`, `active`, `disabled`). The vocabulary is
 [domain/users.py](fastapi_backend/app/domain/users.py) and is guarded by
 `test_status_vocabulary.py` like every other status word. There is no
-per-session ownership: every marker sees every session.
+per-session **read** ownership: every marker still sees every session — but a
+session, and the job or upload row a run of it produces, may only be
+**changed** by whoever created it or by an admin. That one gate
+([domain/access.py](fastapi_backend/app/domain/access.py):
+`may_mutate` / `ensure_may_mutate`) is generic over anything carrying a
+`createdBy` provenance snapshot rather than written once for sessions and
+again for uploads, and is applied as a route dependency —
+`require_session_owner`, `require_job_owner`, `require_upload_owner` in
+[api/dependencies.py](fastapi_backend/app/api/dependencies.py) — on every
+mutating route under `/api/sessions`, `/api/jobs` and `/api/uploads`, which
+`tests/test_session_routes_are_guarded.py` enforces by walking the real
+app's routes the way `test_admin_routes_are_guarded.py` does for
+`require_admin`. A record with no provenance snapshot (written before
+accounts existed, or by the job queue's own internal writes) has no owner to
+defer to and stays mutable by anyone, deliberately — a migrated deployment's
+old data must never lock everyone out.
 
 **The first administrator is seeded at startup, API role only**
 (`UserAdminService.ensure_bootstrap_admin`). An empty table is filled from the
@@ -914,6 +1009,41 @@ takes a `mailer=` override, which is how `tests/fixtures/mail.py`'s
 
 ---
 
+## Two-tier settings
+
+`app_settings` (`AppSettingRecord`) stays the one deployment-wide document —
+the provider catalogue and its keys, the corpus, the rubric, and the admin's
+own defaults for everything else. Seven of its keys may additionally be
+personalised per account: which transcription engine a marker's own runs use,
+how they mark content (single model or panel, and which), and whether the
+transcript preprocessing pass runs before scoring
+(`app.domain.settings_scope.USER_SCOPED_KEYS`). `user_settings`
+(`UserSettingRecord`) holds each account's overrides of exactly those seven,
+one JSON document per user, mirroring how `app_settings` itself is stored.
+
+[services/preferences_service.py](fastapi_backend/app/services/preferences_service.py)
+is where the two meet. Every accessor the pipeline reads
+(`transcription_selection`, `llm_routing_selection`, `marking_selection`,
+`llm_preprocess_enabled`) takes the *session owner's* user id — `None` for the
+deployment default alone, the prefetch task's and any other system caller's
+case — and answers with the deployment document, that account's user-scoped
+overrides layered on top. A stray deployment-scoped key in the overrides
+table (the write path rejects one before it can be stored) is ignored again
+here, so a bug on the write side still cannot let a marker's row reach past
+what they are allowed to change. `is_user_scoped` is fail-safe the other
+direction too: a setting added later and not named in `USER_SCOPED_KEYS` is
+deployment-scoped by default, an admin's to set, rather than silently
+becoming everyone's to personalise.
+
+Reading is live, the same contract `AppSettingsRepository` already holds for
+the deployment document: a preference saved in the settings screen applies to
+that account's next run in every process, with no restart, because both
+repositories are cached `SnapshotCache` snapshots kept fresh by the change
+feed (see **Caching the scoring hot path**) — the merge itself costs nothing
+beyond what resolving the deployment document already cost.
+
+---
+
 ## Frontend Architecture
 
 Two components, split along what a first paint needs.
@@ -975,6 +1105,14 @@ the player, the crop timeline, the four result tabs, the clip-assessment list,
 ([lib/demoSessions.js](src/lib/demoSessions.js)) went the same way behind
 `await import(...)`, because a demo button is a click too. Entry chunk: 186 kB
 -> 105 kB (53.6 -> 32.1 kB gzipped); the dashboard file, 5,872 -> 3,160 lines.
+**That split is a load-time win, not a maintainability one** — line count and
+cyclomatic complexity are different axes, and only one moved: the component
+function itself still measures cyclomatic complexity 101
+(`OSCEAiMarkerMockup.jsx`), `SessionWorkspace.jsx` 94. Splitting either
+further is a real, separately-scoped refactor (extracting hooks and
+sub-components without changing the upload/session-state behaviour they
+share), not something to fold into an unrelated change — flagged here so it
+is a deliberate choice, not a forgotten one.
 
 Three things make the seam honest rather than cosmetic:
 
@@ -1555,6 +1693,18 @@ instead of burning nine attempts proving the key is still bad. A provider that
 fails `LLM_CIRCUIT_FAILURE_THRESHOLD` times in a row is skipped for a cooldown —
 but never when it is the only target left, so a stale breaker cannot be the
 reason an assessment dies.
+
+**Three backoff implementations exist; know all three before writing a
+fourth.** `llm/retry.py::backoff_delay` is this router's own equal-jitter
+curve. `job_queue_service.compute_retry_backoff_seconds` is a second,
+separately-tuned equal-jitter curve for job retries — the webhook dispatcher
+(see **Webhooks**) deliberately calls that one rather than adding its own,
+since both are "retry a network call a bounded number of times" with the same
+jitter reasoning. `core/utils.py`'s Windows file-rename retry is different in
+kind, not just a third copy: a synchronous `time.sleep` loop with no jitter,
+retrying an OS-level sharing violation on an atomic rename rather than
+backing off a remote call, so it is not a candidate to merge with the other
+two.
 
 **Selection applies to the next run everywhere, with no restart.**
 `LLMSettingsService.routing()` resolves `llmPrimary` / `llmFallbacks` before
