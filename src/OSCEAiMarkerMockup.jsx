@@ -688,7 +688,7 @@ export default function OSCEAiMarkerMockup({
     refreshSegmentationPresets();
     // Warm a stream ticket on mount so media tags use the short-lived ticket
     // rather than the long-lived bearer token in their URLs.
-    ensureStreamTicket();
+    ensureStreamTicket().catch((error) => setSessionIndexError(error.message));
   }, []);
 
   // --- Keep the address bar in sync with the open session -------------------
@@ -754,6 +754,10 @@ export default function OSCEAiMarkerMockup({
     () => coalesceAsync(() => refreshSessionIndexRef.current({ silent: true })),
     [],
   );
+
+  useEffect(() => {
+    if (showWorkspace && session?.id && !isDemoFallback) refreshSessionIndexInBackground();
+  }, [showWorkspace, session?.id, isDemoFallback, refreshSessionIndexInBackground]);
 
   useChangeStream(() => {
     refreshSessionIndexInBackground();
@@ -897,16 +901,18 @@ export default function OSCEAiMarkerMockup({
     // roll the cards back to a stage the run has already left.
     const requestSeq = (sessionIndexRequestSeqRef.current += 1);
     try {
-      const body = await fetchSessionPages(
-        (url) => apiJson(url, { fallbackMessage: 'Failed to load sessions.' }),
-        sessionPageCountRef.current,
-        () => requestSeq === sessionIndexRequestSeqRef.current,
-      );
-      if (!body || requestSeq !== sessionIndexRequestSeqRef.current) {
+      const fetchPage = (url) => apiJson(url, { fallbackMessage: 'Failed to load sessions.' });
+      const isCurrent = () => requestSeq === sessionIndexRequestSeqRef.current;
+      const parentId = showWorkspace && !isDemoFallback && videoClips.length ? session?.id : null;
+      const [body, children] = await Promise.all([
+        fetchSessionPages(fetchPage, sessionPageCountRef.current, isCurrent),
+        parentId ? fetchSessionPages(fetchPage, Infinity, isCurrent, parentId) : null,
+      ]);
+      if (!body || !isCurrent()) {
         return null;
       }
 
-      const sessions = body.sessions;
+      const sessions = [...body.sessions, ...(children?.sessions || [])];
       sessionPageCountRef.current = body.pages;
       setHasMoreSessions(body.hasMore);
       setSessionIndex(sessions);

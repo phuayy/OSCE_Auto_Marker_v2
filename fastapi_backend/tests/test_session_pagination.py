@@ -26,6 +26,12 @@ def test_pages_have_stable_ties_and_survive_boundary_deletion(tmp_path):
         assert [row["id"] for row in last["sessions"]] == ["a"]
         assert last["nextCursor"] is None
         assert len(await service.list_sessions()) == 5
+        await repo.write({"id": "child", "name": "Child", "parentSessionId": "a"})
+        roots = await service.list_page(roots_only=True)
+        children = await service.list_page(parent_session_id="a", limit=1)
+        assert len(roots["sessions"]) == 5
+        assert [row["id"] for row in children["sessions"]] == ["child"]
+        assert children["nextCursor"] is None
         await database.shutdown()
     asyncio.run(run())
 

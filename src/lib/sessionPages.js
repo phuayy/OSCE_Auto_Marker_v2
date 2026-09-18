@@ -1,10 +1,12 @@
-export async function fetchSessionPages(fetchJson, pageCount, isCurrent = () => true) {
+export async function fetchSessionPages(fetchJson, pageCount, isCurrent = () => true, parentSessionId = null) {
   const sessions = new Map();
   const cursors = new Set();
   let cursor = null;
   let pages = 0;
   do {
     const query = new URLSearchParams({ limit: '50' });
+    if (parentSessionId) query.set('parentSessionId', parentSessionId);
+    else query.set('rootsOnly', 'true');
     if (cursor) query.set('cursor', cursor);
     const body = await fetchJson(`/api/sessions?${query}`);
     if (!isCurrent()) return null;
