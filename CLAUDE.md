@@ -1456,6 +1456,7 @@ recording; its Student column the scored subject.
 | `LLM_TEMPERATURE` / `LLM_TOP_P` / `LLM_MAX_TOKENS` / `LLM_REQUEST_TIMEOUT_SECONDS` | `0.2` / `0.9` / `24576` / `360` | Sampling, shared by all providers. The `NVIDIA_*` spellings still work |
 | `WHISPERX_HF_TOKEN` | — | HuggingFace token for pyannote diarisation |
 | `PROTECT_MEDIA_ENDPOINTS` | `true` | Auth-gate `/media/*` |
+| `API_DOCS_ENABLED` | `false` | Serve `/docs`, `/redoc`, `/openapi.json` — the whole API surface, admin routes included, with no auth of their own. Local-dev convenience only |
 | `SESSION_SSE_ENABLED` | `false` | Per-session event stream (`GET /api/sessions/{id}/events`). Off: the browser drives live state from the change feed, and the per-session stream only carries what the *API process* published — a Hatchet worker's output never reaches it. When off, producers install no per-line log callback at all (`EventService.log_sink` returns `None`) and the WhisperX heartbeat is not started |
 | `SSE_CLIENT_QUEUE_MAXSIZE` / `SSE_MAX_TRACKED_SESSIONS` / `SESSION_EVENT_HISTORY_LIMIT` | `1000` / `1000` / `500` | Bounds for that stream when it is on |
 | `LOG_LEVEL` | `INFO` | App logger level |

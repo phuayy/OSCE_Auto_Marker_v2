@@ -324,6 +324,12 @@ class Settings:
     # When True, /media/* static artifacts require a valid bearer token or a
     # short-lived stream ticket. Disable only for fully trusted local setups.
     protect_media_endpoints: bool = read_bool_env("PROTECT_MEDIA_ENDPOINTS", True)
+    # /docs, /redoc and /openapi.json map this deployment's entire API surface
+    # — every admin route included — and carry no authentication of their
+    # own (the middleware's open-path list never covered them; anything
+    # outside /api and /media was simply let through). Off by default, like
+    # PROTECT_MEDIA_ENDPOINTS; a developer who wants Swagger locally sets it.
+    api_docs_enabled: bool = read_bool_env("API_DOCS_ENABLED", False)
     # Short-lived ticket used by EventSource (SSE) and <video>/<img> media tags,
     # which cannot send an Authorization header. Keeps the long-lived bearer
     # token out of URLs/access logs.
@@ -781,6 +787,12 @@ class Settings:
             warnings.append(
                 "PROTECT_MEDIA_ENDPOINTS is disabled; /media artifacts (videos, "
                 "PDFs, scores) are served without authentication."
+            )
+        if self.api_docs_enabled:
+            warnings.append(
+                "API_DOCS_ENABLED is on; /docs, /redoc and /openapi.json expose the "
+                "full API surface, admin routes included, with no authentication. "
+                "Set API_DOCS_ENABLED=false in production."
             )
         if self.trusted_proxy_count > 0 and not self.trusted_proxy_ips:
             warnings.append(

@@ -69,88 +69,122 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         await container.shutdown()
 
 
-app = FastAPI(title="OSCE AI Marker API", version="0.1.0", lifespan=lifespan)
+def build_app(app_settings: Settings) -> FastAPI:
+    """Construct the FastAPI app for one ``Settings`` instance.
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=list(settings.cors_allow_origins),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.middleware("http")
-async def require_auth(request: Request, call_next):
-    container: AppContainer = request.app.state.container
-    allowed, payload = await authorize_request(
-        request,
-        container,
-        protect_media=settings.protect_media_endpoints,
+    A function rather than module-level statements so a test can build the
+    app against a settings value it controls (``api_docs_enabled`` in
+    particular) without re-executing this module under a patched
+    environment. The module-level ``app`` below is just ``build_app(settings)``
+    — ``uvicorn app.main:app`` is unchanged.
+    """
+    application = FastAPI(
+        title="OSCE AI Marker API",
+        version="0.1.0",
+        lifespan=lifespan,
+        # /docs, /redoc and /openapi.json map this deployment's entire API —
+        # every admin route included — with no authentication of their own;
+        # authorize_request's open-path list only ever exempted /api/health
+        # and /api/auth/*, never these. Off by default, like
+        # PROTECT_MEDIA_ENDPOINTS; collect_runtime_warnings() flags it when on.
+        docs_url="/docs" if app_settings.api_docs_enabled else None,
+        redoc_url="/redoc" if app_settings.api_docs_enabled else None,
+        openapi_url="/openapi.json" if app_settings.api_docs_enabled else None,
     )
-    if not allowed:
-        return JSONResponse(status_code=401, content={"error": "Authentication required."})
-    if payload is not None:
-        request.state.auth_user = payload
-    return await call_next(request)
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(app_settings.cors_allow_origins),
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @application.middleware("http")
+    async def require_auth(request: Request, call_next):
+        container: AppContainer = request.app.state.container
+        allowed, payload = await authorize_request(
+            request,
+            container,
+            protect_media=app_settings.protect_media_endpoints,
+        )
+        if not allowed:
+            return JSONResponse(status_code=401, content={"error": "Authentication required."})
+        if payload is not None:
+            request.state.auth_user = payload
+        return await call_next(request)
+
+    @application.exception_handler(HTTPException)
+    async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
+        detail = exc.detail if isinstance(exc.detail, str) else "Request failed."
+        return JSONResponse(status_code=exc.status_code, content={"error": detail})
+
+    @application.exception_handler(AppError)
+    async def app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
+        return JSONResponse(status_code=exc.status_code, content={"error": exc.message})
+
+    @application.exception_handler(RequestValidationError)
+    async def validation_exception_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        first_error = exc.errors()[0] if exc.errors() else {}
+        message = str(first_error.get("msg") or "Invalid request payload.")
+        return JSONResponse(status_code=400, content={"error": message})
+
+    application.mount(
+        "/media/videos", StaticFiles(directory=str(app_settings.paths.input_videos_dir), check_dir=False), name="media-videos"
+    )
+    application.mount(
+        "/media/audio", StaticFiles(directory=str(app_settings.paths.output_audio_dir), check_dir=False), name="media-audio"
+    )
+    application.mount(
+        "/media/audio-professionalism",
+        StaticFiles(directory=str(app_settings.paths.output_audio_professionalism_dir), check_dir=False),
+        name="media-audio-professionalism",
+    )
+    application.mount(
+        "/media/whisperx",
+        StaticFiles(directory=str(app_settings.paths.output_whisperx_dir), check_dir=False),
+        name="media-whisperx",
+    )
+    application.mount(
+        "/media/transcripts",
+        StaticFiles(directory=str(app_settings.paths.output_transcripts_dir), check_dir=False),
+        name="media-transcripts",
+    )
+    application.mount(
+        "/media/scores", StaticFiles(directory=str(app_settings.paths.output_scores_dir), check_dir=False), name="media-scores"
+    )
+    application.mount(
+        "/media/communication-scores",
+        StaticFiles(directory=str(app_settings.paths.output_communication_scores_dir), check_dir=False),
+        name="media-communication-scores",
+    )
+    application.mount(
+        "/media/clips", StaticFiles(directory=str(app_settings.paths.output_clips_dir), check_dir=False), name="media-clips"
+    )
+    application.mount(
+        "/media/source", StaticFiles(directory=str(app_settings.object_storage_root), check_dir=False), name="media-source"
+    )
+
+    application.include_router(health.router, prefix="/api")
+    application.include_router(events_routes.router, prefix="/api")
+    application.include_router(auth.router, prefix="/api")
+    application.include_router(users_routes.router, prefix="/api")
+    application.include_router(rubrics.router, prefix="/api")
+    application.include_router(rubrics.admin_router, prefix="/api")
+    application.include_router(async_uploads.router, prefix="/api")
+    application.include_router(jobs.router, prefix="/api")
+    application.include_router(sessions.router, prefix="/api")
+    application.include_router(analytics.router, prefix="/api")
+    application.include_router(notifications.router, prefix="/api")
+    application.include_router(webhooks.router, prefix="/api")
+    application.include_router(corpora.router, prefix="/api")
+    application.include_router(corpora.admin_router, prefix="/api")
+    application.include_router(settings_routes.router, prefix="/api")
+    application.include_router(settings_routes.admin_router, prefix="/api")
+
+    # Last on purpose: a catch-all for the built frontend can only serve what
+    # the routers and media mounts above did not claim.
+    mount_frontend(application, app_settings)
+    return application
 
 
-@app.exception_handler(HTTPException)
-async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
-    detail = exc.detail if isinstance(exc.detail, str) else "Request failed."
-    return JSONResponse(status_code=exc.status_code, content={"error": detail})
-
-
-@app.exception_handler(AppError)
-async def app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
-    return JSONResponse(status_code=exc.status_code, content={"error": exc.message})
-
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
-    first_error = exc.errors()[0] if exc.errors() else {}
-    message = str(first_error.get("msg") or "Invalid request payload.")
-    return JSONResponse(status_code=400, content={"error": message})
-
-
-app.mount("/media/videos", StaticFiles(directory=str(settings.paths.input_videos_dir), check_dir=False), name="media-videos")
-app.mount("/media/audio", StaticFiles(directory=str(settings.paths.output_audio_dir), check_dir=False), name="media-audio")
-app.mount(
-    "/media/audio-professionalism",
-    StaticFiles(directory=str(settings.paths.output_audio_professionalism_dir), check_dir=False),
-    name="media-audio-professionalism",
-)
-app.mount("/media/whisperx", StaticFiles(directory=str(settings.paths.output_whisperx_dir), check_dir=False), name="media-whisperx")
-app.mount(
-    "/media/transcripts",
-    StaticFiles(directory=str(settings.paths.output_transcripts_dir), check_dir=False),
-    name="media-transcripts",
-)
-app.mount("/media/scores", StaticFiles(directory=str(settings.paths.output_scores_dir), check_dir=False), name="media-scores")
-app.mount(
-    "/media/communication-scores",
-    StaticFiles(directory=str(settings.paths.output_communication_scores_dir), check_dir=False),
-    name="media-communication-scores",
-)
-app.mount("/media/clips", StaticFiles(directory=str(settings.paths.output_clips_dir), check_dir=False), name="media-clips")
-app.mount("/media/source", StaticFiles(directory=str(settings.object_storage_root), check_dir=False), name="media-source")
-
-app.include_router(health.router, prefix="/api")
-app.include_router(events_routes.router, prefix="/api")
-app.include_router(auth.router, prefix="/api")
-app.include_router(users_routes.router, prefix="/api")
-app.include_router(rubrics.router, prefix="/api")
-app.include_router(rubrics.admin_router, prefix="/api")
-app.include_router(async_uploads.router, prefix="/api")
-app.include_router(jobs.router, prefix="/api")
-app.include_router(sessions.router, prefix="/api")
-app.include_router(analytics.router, prefix="/api")
-app.include_router(notifications.router, prefix="/api")
-app.include_router(webhooks.router, prefix="/api")
-app.include_router(corpora.router, prefix="/api")
-app.include_router(corpora.admin_router, prefix="/api")
-app.include_router(settings_routes.router, prefix="/api")
-app.include_router(settings_routes.admin_router, prefix="/api")
-
-# Last on purpose: a catch-all for the built frontend can only serve what the
-# routers and media mounts above did not claim.
-mount_frontend(app, settings)
+app = build_app(settings)
