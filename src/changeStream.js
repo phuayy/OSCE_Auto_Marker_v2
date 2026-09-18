@@ -241,9 +241,8 @@ export function resetChangeStream() {
 if (typeof window !== 'undefined') {
   // Logout or an expired token: the stream's ticket is void, so drop it. Any
   // live subscribers stay registered and reconnect on the next login.
-  window.addEventListener('osce:auth:expired', () => {
-    resetChangeStream();
-  });
+  window.addEventListener('osce:auth:expired', resetChangeStream);
+  window.addEventListener('osce:auth:required', resetChangeStream);
   window.addEventListener('osce:auth:login', () => {
     connect();
   });
