@@ -11,8 +11,52 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
 from app.core.exceptions import AppError
 from app.domain.enums import OutputKey
+
+
+SESSION_PAYLOAD_SCHEMA_VERSION = 1
+
+
+class SessionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
+
+    schemaVersion: int = Field(
+        default=SESSION_PAYLOAD_SCHEMA_VERSION,
+        ge=SESSION_PAYLOAD_SCHEMA_VERSION,
+        le=SESSION_PAYLOAD_SCHEMA_VERSION,
+    )
+    id: str
+    name: str | None = None
+    status: str | None = None
+    createdAt: str | None = None
+    parentSessionId: str | None = None
+    clipSource: dict[str, Any] | None = None
+    loaded_version: str | None = Field(default=None, alias="_loadedUpdatedAt")
+    createdBy: dict[str, Any] | None = None
+    workflow: str | None = None
+    error: str | None = None
+    segmentation: str | None = None
+    segmentationOptions: dict[str, Any] | None = None
+    regionFocusOptions: dict[str, Any] | None = None
+    corpus: dict[str, Any] | None = None
+    upload: dict[str, Any] | None = None
+    job: dict[str, Any] | None = None
+    pipeline: dict[str, Any] | None = None
+    files: dict[str, Any] | None = None
+    outputs: dict[str, Any] | None = None
+    clipExport: dict[str, Any] | None = None
+    transcription: dict[str, Any] | None = None
+    communicationRubricAssetId: str | None = None
+
+
+def validate_session_payload(session: dict[str, Any]) -> None:
+    try:
+        SessionPayload.model_validate(session)
+    except ValidationError as error:
+        raise AppError("Invalid session payload.", status_code=500, retryable=False) from error
 
 
 class SessionStatus(StrEnum):
@@ -85,10 +129,13 @@ __all__ = [
     "IN_FLIGHT_STATUSES",
     "JOB_DRIVEN_STATUSES",
     "OUTPUT_KEYS",
+    "SESSION_PAYLOAD_SCHEMA_VERSION",
+    "SessionPayload",
     "SessionStatus",
     "TERMINAL_STATUSES",
     "empty_outputs",
     "find_clip",
     "session_clips",
     "session_video_path",
+    "validate_session_payload",
 ]

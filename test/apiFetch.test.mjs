@@ -74,6 +74,19 @@ test('readErrorMessage prefers the API contract, then FastAPI, then a fallback',
   assert.equal(readErrorMessage({ error: '   ' }, 'fallback'), 'fallback');
 });
 
+test('session contention displays the 409 message without replaying the mutation', async () => {
+  const message = 'Session is being updated; try again.';
+  const fetchImpl = scriptedFetch([jsonResponse(409, { detail: message })]);
+  await assert.rejects(
+    apiJson('/api/sessions/x/clips', {
+      method: 'POST', json: {}, retries: 2, fetchImpl, sleep: instantSleep,
+    }),
+    (error) => error instanceof ApiError && error.status === 409 && error.message === message,
+  );
+  assert.equal(fetchImpl.calls.length, 1);
+  assert.equal(getConnectionSnapshot().status, CONNECTION_STATUS.ONLINE);
+});
+
 test('backoff grows exponentially and never drops below half the window', () => {
   const opts = { initialDelayMs: 300, maxDelayMs: 3000, random: () => 0 };
   assert.equal(backoffDelayMs(1, opts), 150);

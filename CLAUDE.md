@@ -643,6 +643,14 @@ rendered the current sheet, with nothing saying they disagreed.
 
 ### Session write contract
 
+`SessionPayload` in `app/domain/sessions.py` validates whole session documents at the service boundary and again in the repository for direct callers. Unknown top-level keys and wrong field types are rejected before persistence; nested workflow documents remain flexible. New writes persist `schemaVersion: 1`. Unversioned documents remain readable and gain the version on their next successful whole-document write; unsupported explicit versions are rejected, not downgraded. Validation does not inject absent optional fields. Schema validation failures are non-retryable internal errors with a safe public message.
+
+Keep the JSON payload rather than denormalizing each workflow. Promote a key only when a concrete filtering/indexing query needs a column; `workflow` and `error` remain JSON projections today. A mirrored column such as `created_by` is derived exclusively from the document in the shared insert/update values in `SessionRepository.write`, never mutated independently. Remove redundant storage when the query no longer needs it. `_record_to_dict` overlays column-owned fields; it does not treat the creator mirror as an independent source of truth.
+
+The update retry cap remains eight. Exhaustion raises a retryable HTTP 409 with `Session is being updated; try again.` and preserves the last concurrency error as its cause. No failed mutation is persisted. The browser displays this conflict without automatically replaying a mutation.
+
+`MediaPipeline` requires an explicit `ResourceLease` at construction, including in tests (`ResourceLease.unbounded()`); `None` is rejected. Production receives the shared container lease, with no class-level fallback.
+
 A session is one JSON document, and while a run is in progress it has several
 writers: the pipeline (in this process or a Hatchet worker), the job queue
 mirroring job state, the export job, and the user renaming things in the
@@ -650,7 +658,7 @@ browser. The store therefore enforces a contract rather than trusting callers:
 
 | Write | Outcome |
 |---|---|
-| Row does not exist | Created from any dict — how uploads and clip children are born |
+| Row does not exist | Created from a validated session document — how uploads and clip children are born |
 | Row exists, dict carries the `_loadedUpdatedAt` it was `read` with, row unchanged since | Replaced |
 | Row exists, dict carries a stamp, row **changed** since | `StaleSessionError` (409) — the other writer's change is not overwritten |
 | Row exists, dict carries **no stamp** | `SessionWriteContractError` — a projection or hand-built dict can never replace a payload |

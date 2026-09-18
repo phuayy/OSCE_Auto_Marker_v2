@@ -16,7 +16,7 @@ import asyncio
 import pytest
 
 from app.core.config import Settings
-from app.core.exceptions import SessionWriteContractError, StaleSessionError
+from app.core.exceptions import AppError, SessionWriteContractError, StaleSessionError
 from app.database.orm import OrmDatabase
 from app.repositories.session_repository import LOADED_VERSION_KEY, SessionRepository
 from app.services.session_service import SessionService
@@ -181,5 +181,125 @@ def test_update_retries_when_the_row_moves_under_it(tmp_path, monkeypatch) -> No
         fresh = await service.update("s1", lambda s: s.__setitem__("status", "queued"))
         assert fresh["status"] == "queued"
         assert fresh["name"] == "Renamed meanwhile"
+
+    asyncio.run(scenario())
+
+
+def test_update_exhaustion_is_a_retryable_conflict_without_partial_write(tmp_path, monkeypatch) -> None:
+    from app.api.errors import http_error
+    from app.services.session_service import UPDATE_MAX_ATTEMPTS
+
+    service = _make_service(tmp_path)
+    attempts = []
+
+    async def conflict(session):
+        attempts.append(session)
+        raise StaleSessionError("s1", loaded_version="old", current_version="new")
+
+    async def scenario():
+        await service.write(_seed())
+        before = await service.read("s1")
+        monkeypatch.setattr(service.repository, "write", conflict)
+        with pytest.raises(AppError, match="Session is being updated; try again") as raised:
+            await service.update("s1", lambda s: s.__setitem__("status", "completed"))
+        assert raised.value.retryable
+        assert isinstance(raised.value.__cause__, StaleSessionError)
+        response = http_error(raised.value)
+        assert response.status_code == 409
+        assert response.detail == "Session is being updated; try again."
+        assert len(attempts) == UPDATE_MAX_ATTEMPTS == 8
+        assert await service.read("s1") == before
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("patch", [
+    {"workflwo": "long"}, {"pipeline": []}, {"error": {}},
+    {"schemaVersion": 2}, {"schemaVersion": "1"}, {"schemaVersion": True},
+])
+def test_invalid_payload_is_rejected_without_changing_the_row(tmp_path, patch) -> None:
+    from app.api.errors import http_error
+
+    service = _make_service(tmp_path)
+
+    async def scenario():
+        await service.write(_seed())
+        before = await service.read("s1")
+        with pytest.raises(AppError) as raised:
+            await service.update("s1", lambda session: session.update(patch))
+        assert not raised.value.retryable
+        assert http_error(raised.value).detail == "Invalid session payload."
+        assert await service.read("s1") == before
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("entry_point", ["write", "create_named", "repository"])
+def test_creation_validates_before_persisting_or_stamping(tmp_path, entry_point) -> None:
+    service = _make_service(tmp_path)
+    write = service.repository.write if entry_point == "repository" else getattr(service, entry_point)
+
+    async def scenario():
+        invalid = {**_seed(), "workflwo": "private-value"}
+        before = dict(invalid)
+        with pytest.raises(AppError, match="Invalid session payload") as raised:
+            await write(invalid)
+        assert "private-value" not in str(raised.value)
+        assert invalid == before
+        with pytest.raises(FileNotFoundError):
+            await service.read("s1")
+        valid = _seed()
+        await write(valid)
+        assert valid["schemaVersion"] == 1
+        assert (await service.read("s1"))["schemaVersion"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_creator_column_is_derived_from_payload_on_every_write(tmp_path) -> None:
+    from app.database.models import SessionRecord
+
+    repo = _make_repo(tmp_path)
+
+    async def scenario():
+        document = {**_seed(), "createdBy": {"userId": "first", "username": "marker"}}
+        for creator in (document["createdBy"], {"userId": "second", "username": "marker"}, None):
+            document["createdBy"] = creator
+            await repo.write(document)
+            async with repo.database.session() as db:
+                record = await db.get(SessionRecord, "s1")
+                assert record.created_by == (creator["userId"] if creator else None)
+                assert record.payload["createdBy"] == creator
+            document = await repo.read("s1")
+        document.pop("createdBy")
+        await repo.write(document)
+        async with repo.database.session() as db:
+            record = await db.get(SessionRecord, "s1")
+            assert record.created_by is None
+            assert "createdBy" not in record.payload
+
+    asyncio.run(scenario())
+
+
+def test_legacy_payload_is_versioned_on_write_and_preserves_nested_data(tmp_path) -> None:
+    from app.database.models import SessionRecord
+
+    service = _make_service(tmp_path)
+    nested = {"scores": {"payload": {"workflowSpecific": [1, {"custom": True}]}}}
+
+    async def scenario():
+        async with service.repository.database.transaction() as db:
+            db.add(SessionRecord(id="s1", status="uploaded", payload={"outputs": nested}))
+        legacy = await service.read("s1")
+        assert "schemaVersion" not in legacy
+        await service.update("s1", lambda session: session.__setitem__("error", None))
+        stored = await service.read("s1")
+        assert stored["schemaVersion"] == 1
+        assert stored["outputs"] == nested
+        assert "workflow" not in stored
+        async with service.repository.database.session() as db:
+            record = await db.get(SessionRecord, "s1")
+            assert record.payload["schemaVersion"] == 1
+            assert LOADED_VERSION_KEY not in record.payload
 
     asyncio.run(scenario())

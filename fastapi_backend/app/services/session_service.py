@@ -8,12 +8,13 @@ from typing import Any, Callable
 
 from app.core.artifacts import read_artifact_payload
 from app.core.config import Settings
-from app.core.exceptions import StaleSessionError
+from app.core.exceptions import AppError, StaleSessionError
 from app.core.utils import normalize_session_name, parse_iso, session_name_key
 from app.core.versioned_cache import VersionedCache
 from app.core.session_cursor import decode_cursor, encode_cursor
 from app.domain.actors import PROVENANCE_KEY, provenance_of
 from app.domain.constants import SESSION_NAME_ADJECTIVES, SESSION_NAME_NOUNS
+from app.domain.sessions import validate_session_payload
 from app.repositories.session_repository import SessionEntry, SessionRepository
 from app.services.change_feed_service import ChangeFeedService
 
@@ -59,6 +60,7 @@ class SessionService:
         """Persist a document that was either just created or ``read`` by this
         caller and not touched by anyone else since. For every other write —
         anything long-lived, anything racing a job — use :meth:`update`."""
+        validate_session_payload(session)
         await self.repository.write(session)
 
     async def update(self, session_id: str, mutate: SessionMutator) -> dict[str, Any]:
@@ -79,7 +81,7 @@ class SessionService:
             if mutate(session) is False:
                 return session
             try:
-                await self.repository.write(session)
+                await self.write(session)
                 return session
             except StaleSessionError as error:
                 last_error = error
@@ -93,7 +95,7 @@ class SessionService:
                 # before we re-read; a hot loop here would just lose again.
                 await asyncio.sleep(0)
         assert last_error is not None  # the loop only exits via return or here
-        raise last_error
+        raise AppError("Session is being updated; try again.", status_code=409, retryable=True) from last_error
 
     async def read_all_entries(self) -> list[SessionEntry]:
         return await self.repository.read_all()
@@ -103,6 +105,7 @@ class SessionService:
         return await self.repository.list_child_ids(parent_session_id)
 
     async def create_named(self, session: dict) -> None:
+        validate_session_payload(session)
         preferred_name = str(session.get("name") or "")
         await self.repository.write(
             session, allocate_name=lambda used: self.reserve_unique_session_name(used, preferred_name),

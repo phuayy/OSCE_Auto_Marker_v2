@@ -17,6 +17,7 @@ from app.core.utils import parse_iso, session_name_key
 from app.database.models import SessionRecord, utc_now
 from app.database.orm import OrmDatabase
 from app.domain.actors import PROVENANCE_KEY, provenance_of, provenance_user_id
+from app.domain.sessions import SESSION_PAYLOAD_SCHEMA_VERSION, SessionStatus, validate_session_payload
 
 logger = logging.getLogger(__name__)
 
@@ -166,32 +167,25 @@ class SessionRepository:
                         loaded_version=str(loaded_version),
                         current_version=current_version,
                     )
+            validate_session_payload(session)
+            payload["schemaVersion"] = SESSION_PAYLOAD_SCHEMA_VERSION
+            values = dict(
+                name=session.get("name"),
+                status=str(session.get("status") or (existing.status if existing is not None else SessionStatus.UPLOADED)),
+                parent_session_id=session.get("parentSessionId"),
+                clip_source=session.get("clipSource"),
+                created_by=provenance_user_id(session),
+                payload=payload,
+                updated_at=now,
+            )
             if existing is None:
-                record = SessionRecord(
-                    id=session_id,
-                    name=session.get("name"),
-                    status=str(session.get("status") or "uploaded"),
-                    parent_session_id=session.get("parentSessionId"),
-                    clip_source=session.get("clipSource"),
-                    created_by=provenance_user_id(session),
-                    payload=payload,
-                    created_at=_parse_created_at(session),
-                    updated_at=now,
-                )
+                record = SessionRecord(id=session_id, created_at=_parse_created_at(session), **values)
                 db_session.add(record)
             else:
                 result = await db_session.execute(
                     update(SessionRecord)
                     .where(SessionRecord.id == session_id, SessionRecord.updated_at == existing.updated_at)
-                    .values(
-                        name=session.get("name"),
-                        status=str(session.get("status") or existing.status),
-                        parent_session_id=session.get("parentSessionId"),
-                        clip_source=session.get("clipSource"),
-                        created_by=provenance_user_id(session),
-                        payload=payload,
-                        updated_at=now,
-                    )
+                    .values(**values)
                     .execution_options(synchronize_session=False)
                 )
                 if result.rowcount != 1:
@@ -203,6 +197,7 @@ class SessionRepository:
         # read-once-write-many pattern (one caller marking several steps on one
         # object, with no other writer in between) keeps passing the check. A
         # genuinely stale writer holds a different dict whose stamp won't match.
+        session["schemaVersion"] = SESSION_PAYLOAD_SCHEMA_VERSION
         session[LOADED_VERSION_KEY] = _version_token(now)
 
     async def read_all(self) -> list[SessionEntry]:
