@@ -383,7 +383,9 @@ def test_media_reuses_existing_whisperx_json_before_cli(tmp_path) -> None:
     class Auth:
         runtime = type("Runtime", (), {"whisperx_hf_token": "token"})()
 
-    media = MediaPipeline(settings, NoRunRunner(), events, Auth())
+    from app.core.resources import ResourceLease
+
+    media = MediaPipeline(settings, NoRunRunner(), events, Auth(), gpu=ResourceLease.unbounded())
 
     result = asyncio.run(
         media.run_whisperx_transcription(

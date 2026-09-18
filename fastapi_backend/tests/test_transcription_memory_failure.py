@@ -616,7 +616,9 @@ def build_with_failure(tmp_path: Path, failure: str):
     runner = ExplodingRunner(settings, None, None, [], failure=failure)
     events = FakeEvents()
     auth = SimpleNamespace(runtime=SimpleNamespace(whisperx_hf_token="hf-token"))
-    media = MediaPipeline(settings, runner, events, auth)
+    from app.core.resources import ResourceLease
+
+    media = MediaPipeline(settings, runner, events, auth, gpu=ResourceLease.unbounded())
     diarizer = PyannoteDiarizer(settings, runner, events, auth)
     return CanaryQwenEngine(settings, runner, events, media, diarizer), runner, events
 

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from app.core.config import Settings
+from app.core.resources import ResourceLease
 from app.core.process import CommandResult
 from app.pipeline.media import MediaPipeline
 from tests.fixtures.events import RecordingEvents as CapturingEvents
@@ -90,7 +91,7 @@ def make_media(
     )
     runner = FakeRunner(settings, whisperx_stdout=whisperx_stdout)
     auth = SimpleNamespace(runtime=SimpleNamespace(whisperx_hf_token="hf-token"))
-    media = MediaPipeline(settings, runner=runner, events=CapturingEvents(), auth=auth)
+    media = MediaPipeline(settings, runner=runner, events=CapturingEvents(), auth=auth, gpu=ResourceLease.unbounded())
     return media, runner
 
 

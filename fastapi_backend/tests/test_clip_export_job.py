@@ -16,6 +16,7 @@ from typing import Any
 
 from app.core.config import Settings
 from app.core.exceptions import AppError
+from app.core.resources import ResourceLease
 from app.pipeline.media import MediaPipeline
 from app.services.clip_service import ClipService
 from app.services.job_tasks import get_task_spec, queue_owns_session_status
@@ -78,7 +79,7 @@ class RecordingMedia(MediaPipeline):
     """Real clip planning and file-reuse logic; ffmpeg replaced by a stub cut."""
 
     def __init__(self, settings: Settings, *, fail_on_index: int | None = None) -> None:
-        self.settings = settings
+        super().__init__(settings, None, None, None, gpu=ResourceLease.unbounded())
         self.crops: list[Path] = []
         self.fail_on_index = fail_on_index
 

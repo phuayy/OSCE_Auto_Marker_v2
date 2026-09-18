@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings
+from app.core.resources import ResourceLease
 from app.services.clip_service import ClipService
 
 from .test_routes import build_test_client
@@ -497,7 +498,7 @@ def test_manual_clip_ranges_keep_segment_index_after_sliver_drop(tmp_path) -> No
     records the pre-filter position."""
     from app.pipeline.media import MediaPipeline
 
-    media = MediaPipeline(build_settings(tmp_path), None, None, None)
+    media = MediaPipeline(build_settings(tmp_path), None, None, None, gpu=ResourceLease.unbounded())
     # Segments: [0-30], [30-30.3] (sliver, dropped), [30.3-60], [60-120].
     ranges = media.build_manual_clip_ranges(120.0, [30.0, 30.3, 60.0])
     assert [(r["start"], r["end"], r["segmentIndex"]) for r in ranges] == [
@@ -589,6 +590,7 @@ def test_detector_argv_carries_the_resolved_occupancy_rule(tmp_path) -> None:
         runner=ArgvRunner(),
         events=FakeEvents(),
         auth=SimpleNamespace(runtime=SimpleNamespace(whisperx_hf_token="")),
+        gpu=ResourceLease.unbounded(),
     )
 
     result = asyncio.run(
@@ -659,6 +661,7 @@ def test_detector_argv_carries_the_resolved_region_focus(tmp_path) -> None:
         runner=ArgvRunner(),
         events=FakeEvents(),
         auth=SimpleNamespace(runtime=SimpleNamespace(whisperx_hf_token="")),
+        gpu=ResourceLease.unbounded(),
     )
 
     result = asyncio.run(

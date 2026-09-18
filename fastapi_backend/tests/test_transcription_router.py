@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings
+from app.core.resources import ResourceLease
 from app.pipeline.media import MediaPipeline
 from app.pipeline.transcription import registry
 from app.pipeline.transcription.base import (
@@ -106,7 +107,7 @@ def build_router(
 
     runner = NullRunner()
     auth = type("Auth", (), {"runtime": type("Runtime", (), {"whisperx_hf_token": "hf"})()})()
-    media = MediaPipeline(settings, runner, events, auth)
+    media = MediaPipeline(settings, runner, events, auth, gpu=ResourceLease.unbounded())
     dependencies = registry.EngineDependencies(settings, runner, events, auth, media)
     return TranscriptionRouter(settings, events, dependencies, preferences=app_settings), events
 

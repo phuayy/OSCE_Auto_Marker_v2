@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from app.core.config import Settings
+from app.core.resources import ResourceLease
 from app.core.exceptions import EmptyTranscriptError
 from app.core.process import CommandResult
 from app.pipeline.media import MediaPipeline
@@ -117,7 +118,7 @@ def build(
     )
     events = FakeEvents()
     auth = SimpleNamespace(runtime=SimpleNamespace(whisperx_hf_token="hf-token"))
-    media = MediaPipeline(settings, runner, events, auth)
+    media = MediaPipeline(settings, runner, events, auth, gpu=ResourceLease.unbounded())
     diarizer = PyannoteDiarizer(settings, runner, events, auth)
     return CanaryQwenEngine(settings, runner, events, media, diarizer), runner, events
 
@@ -228,7 +229,7 @@ def test_subtitles_are_rendered_for_the_player(tmp_path: Path) -> None:
 
 def test_the_raw_json_is_readable_by_the_pipeline_normalizer(tmp_path: Path) -> None:
     engine, runner, _ = build(tmp_path)
-    media = MediaPipeline(runner.settings, runner, FakeEvents(), SimpleNamespace(runtime=None))
+    media = MediaPipeline(runner.settings, runner, FakeEvents(), SimpleNamespace(runtime=None), gpu=ResourceLease.unbounded())
 
     result = transcribe(engine, tmp_path)
     normalized = media.normalize_whisperx_transcript(
@@ -245,7 +246,7 @@ def test_the_artifact_is_marked_so_whisperx_never_resumes_from_it(tmp_path: Path
 
     result = transcribe(engine, tmp_path)
     payload = json.loads(result.json_path.read_text(encoding="utf-8"))
-    media = MediaPipeline(runner.settings, runner, FakeEvents(), SimpleNamespace(runtime=None))
+    media = MediaPipeline(runner.settings, runner, FakeEvents(), SimpleNamespace(runtime=None), gpu=ResourceLease.unbounded())
 
     assert payload["engine"] == "canary-qwen"
     # The WhisperX cache probe must reject another engine's artifact.

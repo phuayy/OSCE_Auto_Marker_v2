@@ -141,7 +141,9 @@ def test_job_sync_clears_session_error_when_requeued(tmp_path) -> None:
 def test_whisperx_cuda_request_falls_back_to_cpu_when_cuda_unavailable(tmp_path, monkeypatch) -> None:
     settings = Settings(root_dir=tmp_path, backend_root=tmp_path, whisperx_device="cuda")
     events = CapturingEvents()
-    media = MediaPipeline(settings, runner=object(), events=events, auth=object())
+    from app.core.resources import ResourceLease
+
+    media = MediaPipeline(settings, runner=object(), events=events, auth=object(), gpu=ResourceLease.unbounded())
     monkeypatch.setattr(MediaPipeline, "_cuda_available", staticmethod(lambda: False))
 
     device = asyncio.run(media._resolve_whisperx_device("session-1"))

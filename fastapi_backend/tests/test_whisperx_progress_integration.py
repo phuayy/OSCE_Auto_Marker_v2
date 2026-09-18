@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from app.core.config import Settings
+from app.core.resources import ResourceLease
 from app.core.process import CommandResult
 from app.pipeline.media import MediaPipeline
 from app.services.pipeline_service import TRANSCRIPTION_STEP, PipelineService
@@ -83,7 +84,7 @@ def build(tmp_path: Path) -> tuple[PipelineService, FakeSessions, StreamingRunne
     settings.paths.ensure_layout()
     runner = StreamingRunner(settings)
     auth = SimpleNamespace(runtime=SimpleNamespace(whisperx_hf_token="hf-token"))
-    media = MediaPipeline(settings, runner, FakeEvents(), auth)
+    media = MediaPipeline(settings, runner, FakeEvents(), auth, gpu=ResourceLease.unbounded())
 
     video_path = tmp_path / "video.mp4"
     video_path.write_bytes(b"fake-video")

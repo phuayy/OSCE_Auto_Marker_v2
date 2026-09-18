@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.core.config import Settings
+from app.core.resources import ResourceLease
 from app.pipeline.media import MediaPipeline
 from app.pipeline.transcription import registry
 from app.pipeline.transcription.base import TranscriptionEngine, validate_options
@@ -28,7 +29,7 @@ def build_dependencies(tmp_path: Path, **overrides) -> registry.EngineDependenci
     runner = SimpleNamespace(run=None)
     events = SimpleNamespace(publish=None)
     auth = SimpleNamespace(runtime=SimpleNamespace(whisperx_hf_token="hf-token"))
-    media = MediaPipeline(settings, runner, events, auth)
+    media = MediaPipeline(settings, runner, events, auth, gpu=ResourceLease.unbounded())
     return registry.EngineDependencies(settings, runner, events, auth, media)
 
 

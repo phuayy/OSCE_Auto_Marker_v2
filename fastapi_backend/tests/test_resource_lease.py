@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from app.core.config import Settings
 from app.core.resources import ResourceLease
 from app.pipeline.media import MediaPipeline
@@ -77,16 +79,17 @@ def test_gpu_slots_zero_or_negative_means_unbounded() -> None:
     assert ResourceLease(2, "gpu").slots == 2
 
 
-def test_media_pipeline_has_a_lease_even_when_constructed_without_one(tmp_path: Path) -> None:
-    """Test doubles subclass MediaPipeline without calling __init__; production
-    passes the shared lease. Both must be able to ``hold``."""
+def test_media_pipeline_requires_an_explicit_lease(tmp_path: Path) -> None:
+    settings = Settings(root_dir=tmp_path, backend_root=tmp_path)
+    with pytest.raises(TypeError, match="gpu"):
+        MediaPipeline(settings, None, None, None)
+    with pytest.raises(TypeError, match="gpu must be a ResourceLease"):
+        MediaPipeline(settings, None, None, None, gpu=None)
+    assert "gpu" not in MediaPipeline.__dict__
 
-    class Double(MediaPipeline):
-        def __init__(self) -> None:  # noqa: D401 - deliberately skips the parent
-            pass
 
-    assert isinstance(Double().gpu, ResourceLease)
-    shared = ResourceLease(1, "gpu")
+@pytest.mark.parametrize("shared", [ResourceLease(1, "gpu"), ResourceLease.unbounded()])
+def test_media_pipeline_keeps_the_supplied_lease(tmp_path: Path, shared: ResourceLease) -> None:
     settings = Settings(root_dir=tmp_path, backend_root=tmp_path, ffmpeg_bin="f", ffprobe_bin="f", scorer_python_bin="p")
     media = MediaPipeline(settings, runner=None, events=None, auth=None, gpu=shared)  # type: ignore[arg-type]
     assert media.gpu is shared

@@ -33,25 +33,21 @@ ENGINE_MARKER_WHISPERX = "whisperx"
 
 
 class MediaPipeline:
-    # The accelerator lease. Class-level default so a test double that skips
-    # ``__init__`` still has one; the container replaces it with the shared,
-    # bounded lease every GPU step in the process contends on.
-    gpu: ResourceLease = ResourceLease.unbounded("gpu")
-
     def __init__(
         self,
         settings: Settings,
         runner: CommandRunner,
         events: EventService,
         auth: AuthService,
-        gpu: ResourceLease | None = None,
+        gpu: ResourceLease,
     ) -> None:
         self.settings = settings
         self.runner = runner
         self.events = events
         self.auth = auth
-        if gpu is not None:
-            self.gpu = gpu
+        if not isinstance(gpu, ResourceLease):
+            raise TypeError("gpu must be a ResourceLease")
+        self.gpu = gpu
 
     @staticmethod
     def count_usable_segments(payload: Any) -> int:

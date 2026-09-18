@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from app.core.config import Settings
+from app.core.resources import ResourceLease
 from app.core.process import CommandResult
 from app.pipeline.media import MediaPipeline
 from app.pipeline.transcription import registry
@@ -119,7 +120,7 @@ def run_pipeline(tmp_path: Path, engine_id: str) -> tuple[FakeSessions, Scripted
     runner = ScriptedRunner(settings)
     events = FakeEvents()
     auth = SimpleNamespace(runtime=SimpleNamespace(whisperx_hf_token="hf-token"))
-    media = MediaPipeline(settings, runner, events, auth)
+    media = MediaPipeline(settings, runner, events, auth, gpu=ResourceLease.unbounded())
     preferences = StubAppSettings(engine_id)
     router = TranscriptionRouter(
         settings,

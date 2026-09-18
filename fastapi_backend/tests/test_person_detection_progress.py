@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from app.core.config import Settings
+from app.core.resources import ResourceLease
 from app.core.process import CommandResult
 from app.pipeline.media import MediaPipeline
 
@@ -75,7 +76,7 @@ def make_media(tmp_path: Path, stderr_lines: list[str]) -> MediaPipeline:
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text("# stand-in for the detector script", encoding="utf-8")
     auth = SimpleNamespace(runtime=SimpleNamespace(whisperx_hf_token="hf-token"))
-    return MediaPipeline(settings, runner=DetectorRunner(stderr_lines), events=CapturingEvents(), auth=auth)
+    return MediaPipeline(settings, runner=DetectorRunner(stderr_lines), events=CapturingEvents(), auth=auth, gpu=ResourceLease.unbounded())
 
 
 def run_detection(media: MediaPipeline, tmp_path: Path, **kwargs: Any) -> dict[str, Any]:

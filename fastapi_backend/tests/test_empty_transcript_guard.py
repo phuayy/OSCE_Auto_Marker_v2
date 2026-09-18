@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from app.core.config import Settings
+from app.core.resources import ResourceLease
 from app.core.exceptions import EmptyTranscriptError
 from app.core.process import CommandResult
 from app.pipeline.media import MediaPipeline
@@ -66,7 +67,7 @@ def make_media(tmp_path: Path, payload: dict[str, Any] | None) -> tuple[MediaPip
     settings.paths.ensure_layout()
     runner = WhisperxRunner(settings, payload)
     auth = SimpleNamespace(runtime=SimpleNamespace(whisperx_hf_token="hf-token"))
-    return MediaPipeline(settings, runner, CapturingEvents(), auth), runner
+    return MediaPipeline(settings, runner, CapturingEvents(), auth, gpu=ResourceLease.unbounded()), runner
 
 
 def run_transcription(media: MediaPipeline) -> dict[str, Any]:
