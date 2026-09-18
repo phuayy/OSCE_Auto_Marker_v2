@@ -12,6 +12,7 @@ from app.core.exceptions import AppError
 from app.core.locks import KeyedLocks
 from app.core.logging_utils import log_context
 from app.domain.actors import PROVENANCE_KEY, Actor, provenance_of
+from app.domain.clip_summaries import aggregate_clip_summaries, build_clip_summary_row
 from app.domain.enums import (
     ClipExportScope,
     ClipExportStatus,
@@ -1261,83 +1262,21 @@ class ClipService:
         child_sessions = [entry.session for entry in entries]
         clips = session_clips(parent_session)
         clips_by_id = {str(clip.get("id")): clip for clip in clips if isinstance(clip, dict) and clip.get("id")}
-        summaries: list[dict[str, Any]] = []
-        for child in child_sessions:
-            child_id = str(child.get("id") or "")
-            clip_source = child.get("clipSource") if isinstance(child.get("clipSource"), dict) else {}
-            current_clip_id = str(clip_source.get("clipId") or "")
-            clip = clips_by_id.get(current_clip_id)
-            clip_label = str(clip_source.get("label") or "").strip() or (clip or {}).get("label") or child.get("name") or f"Clip {child_id[:8]}"
-            child_outputs = child.get("outputs") or {}
-            content_scores = await self._read_json_if_exists((child_outputs.get("scores") or {}).get("absolutePath"))
-            communication_scores = await self._read_json_if_exists(
-                (child_outputs.get("communicationScores") or {}).get("absolutePath")
+        rows = [
+            build_clip_summary_row(
+                child,
+                clips=clips,
+                clips_by_id=clips_by_id,
+                content_scores=await self._read_json_if_exists(
+                    ((child.get("outputs") or {}).get("scores") or {}).get("absolutePath")
+                ),
+                communication_scores=await self._read_json_if_exists(
+                    ((child.get("outputs") or {}).get("communicationScores") or {}).get("absolutePath")
+                ),
             )
-            content_summary = content_scores.get("scoring_summary") if isinstance(content_scores, dict) else None
-            communication_summary = communication_scores.get("scoring_summary") if isinstance(communication_scores, dict) else None
-            content_criteria = content_scores.get("criteria") if isinstance(content_scores, dict) else []
-            communication_criteria = communication_scores.get("criteria") if isinstance(communication_scores, dict) else []
-            if not isinstance(content_criteria, list):
-                content_criteria = []
-            if not isinstance(communication_criteria, list):
-                communication_criteria = []
-            content_total = len(content_criteria) if content_criteria else int((content_summary or {}).get("total_criteria") or 0)
-            content_yes = int((content_summary or {}).get("yes_count") or 0)
-            content_percent = round((content_yes / content_total) * 1000) / 10 if content_total > 0 else 0
-            summaries.append(
-                {
-                    "sessionId": child_id,
-                    "sessionName": child.get("name") or None,
-                    "clipId": current_clip_id,
-                    "clipLabel": clip_label,
-                    "clipOrder": self._clip_order(clips, current_clip_id),
-                    "status": str(child.get("status") or "").lower(),
-                    "content": {
-                        "totalCriteria": content_total,
-                        "yesCount": content_yes,
-                        "noCount": int((content_summary or {}).get("no_count") or 0),
-                        "criticalYes": int((content_summary or {}).get("critical_yes") or 0),
-                        "criticalNo": int((content_summary or {}).get("critical_no") or 0),
-                        "passFail": str((content_summary or {}).get("pass_fail") or ""),
-                        "percentYes": content_percent,
-                    }
-                    if content_scores
-                    else None,
-                    "communication": {
-                        "totalCriteria": int((communication_summary or {}).get("total_criteria") or len(communication_criteria)),
-                        "totalScore": float((communication_summary or {}).get("total_score") or 0),
-                        "maxScore": float((communication_summary or {}).get("max_score") or len(communication_criteria) * 3),
-                        "passThreshold": float((communication_summary or {}).get("pass_threshold") or 0),
-                        "passFail": str((communication_summary or {}).get("pass_fail") or ""),
-                        "labelCounts": (communication_summary or {}).get("label_counts") or {},
-                        "perCriterionPoints": [
-                            {
-                                "id": criterion.get("id", index + 1) if isinstance(criterion, dict) else index + 1,
-                                "label": str((criterion or {}).get("label") or f"Criterion {index + 1}")
-                                if isinstance(criterion, dict)
-                                else f"Criterion {index + 1}",
-                                "section": (criterion or {}).get("section") if isinstance(criterion, dict) else None,
-                                "scoreLabel": str((criterion or {}).get("score_label") or "None")
-                                if isinstance(criterion, dict)
-                                else "None",
-                                "points": float((criterion or {}).get("points") or 0) if isinstance(criterion, dict) else 0,
-                            }
-                            for index, criterion in enumerate(communication_criteria)
-                        ],
-                    }
-                    if communication_scores
-                    else None,
-                }
-            )
-        summaries.sort(key=lambda item: (item["clipOrder"] if item["clipOrder"] >= 0 else 10**9, str(item["sessionId"])))
-        assessed_count = len([item for item in summaries if item["content"] and item["communication"]])
-        return {
-            "parentSessionId": parent_id,
-            "clipsCount": len(clips),
-            "totalChildSessions": len(child_sessions),
-            "assessedCount": assessed_count,
-            "summaries": summaries,
-        }
+            for child in child_sessions
+        ]
+        return aggregate_clip_summaries(parent_id=parent_id, clips=clips, rows=rows, child_count=len(child_sessions))
 
     @staticmethod
     def empty_outputs() -> dict[str, Any]:
@@ -1385,10 +1324,3 @@ class ClipService:
                 extra=log_context("", "clip_summary_read", path=str(path)),
             )
             return None
-
-    @staticmethod
-    def _clip_order(clips: list[dict[str, Any]], clip_id: str) -> int:
-        for index, clip in enumerate(clips):
-            if str(clip.get("id")) == str(clip_id):
-                return index
-        return -1
