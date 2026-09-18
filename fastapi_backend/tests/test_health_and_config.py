@@ -18,6 +18,16 @@ def test_readiness_reports_database_and_storage(tmp_path) -> None:
     # Binary availability is reported (informational, not required).
     for key in ("ffmpeg", "ffprobe", "whisperx"):
         assert key in body["checks"]
+    # Counters only, for every cache the scoring/auth hot path keeps warm.
+    for key in (
+        "providerCredentials",
+        "appSettings",
+        "userSettings",
+        "customProviders",
+        "userDirectory",
+        "tokenRevocations",
+    ):
+        assert key in body["caches"]
 
 
 def test_readiness_fails_when_counter_table_disappears(tmp_path) -> None:

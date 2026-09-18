@@ -79,6 +79,11 @@ TRACKED_TABLES: tuple[str, ...] = (
     # Hatchet worker, for a notification it itself raised — must evict that
     # viewer's cached feed everywhere, the same story as ``notifications``.
     "notification_reads",
+    # Logged-out token ids. ``AuthService`` caches the active set in memory
+    # (``UserDirectory``'s pattern); without this trigger a revocation made in
+    # one process would never reach another, which is the exact bug this
+    # table exists to close.
+    "revoked_tokens",
 )
 
 

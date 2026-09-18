@@ -90,6 +90,13 @@ request.
 Tokens issued before this change carry no `sub` and are refused; everyone
 signs in once after the upgrade.
 
+An explicit logout (`POST /api/auth/logout`) is a narrower case than a
+version bump: it revokes one token, not every token the account holds, so it
+cannot ride `token_version`. `revoked_tokens` records that one token's id the
+same way — a `SnapshotCache` over a change-tracked table — so a logout in one
+process is honoured by every other process (and survives a restart) rather
+than only the process that handled the request remembering it.
+
 ### Two guards, in a deliberate order
 
 * **The last active administrator cannot be demoted, disabled or deleted** —
@@ -150,12 +157,6 @@ invitation token is consumed, so a weak first attempt does not burn the link.
   session does record its creator (`createdBy`, a snapshot of the account at
   upload time, mirrored into the indexed `sessions.created_by`) — attribution
   for the card and the workspace, not a permission.
-* **Per-user notification read state.** `notifications.read_at` is one global
-  flag; with several markers, one person's "mark all read" clears it for all.
-* **Multi-process revocation of logged-out tokens.** `TokenRevocationRegistry`
-  stays in-process, as before; `token_version` covers every case that matters
-  for access control (disable, delete, password change), and logout revocation
-  is a courtesy on top.
 * **Self-registration.** There is no sign-up form. Accounts exist because an
   administrator created them.
 

@@ -253,7 +253,7 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
     # "disable" reaches every API process on the marker's next request.
     users = UserRepository(orm_database)
     user_directory = UserDirectory(users, changes=changes)
-    auth = AuthService(active_settings, users=users, directory=user_directory)
+    auth = AuthService(active_settings, users=users, directory=user_directory, changes=changes)
     read_cache = VersionedCache(enabled=active_settings.cache_enabled)
     # The database announces a committed write; this hook turns that
     # announcement into an eviction, so the cache is corrected by the write

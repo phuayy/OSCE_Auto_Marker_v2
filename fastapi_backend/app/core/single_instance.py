@@ -1,13 +1,15 @@
 """One API process per storage root.
 
-Token revocation (``core/token_revocation.py``), the login and token-endpoint
-rate limiters (``core/rate_limit.py``) and the per-upload part lock
-(``AsyncUploadService``'s ``KeyedLocks``) are all in-process state — nothing
-shares them across two API instances pointed at the same storage. A second
-instance would not honour a token the first just revoked, would give an
-attacker double the login attempts before either limiter notices, and could
-interleave two chunks of the same upload past the lock that exists precisely
-to serialise them (see CLAUDE.md "Parts are serialised per upload").
+The login and token-endpoint rate limiters (``core/rate_limit.py``) and the
+per-upload part lock (``AsyncUploadService``'s ``KeyedLocks``) are in-process
+state — nothing shares them across two API instances pointed at the same
+storage. A second instance would give an attacker double the login attempts
+before either limiter notices, and could interleave two chunks of the same
+upload past the lock that exists precisely to serialise them (see CLAUDE.md
+"Parts are serialised per upload"). Token revocation used to be a third
+reason (an in-process registry, blind to a second process); it is now a
+database fact (``revoked_tokens``, see ``AuthService``) that every process
+already shares, so it no longer motivates this lock.
 
 A Hatchet worker is a different, and unaffected, process by design: it never
 verifies a token, serves no login, and never writes an upload part — the
@@ -66,11 +68,11 @@ class SingleInstanceLock:
             handle.close()
             raise SingleInstanceError(
                 f"Another process already holds the API lock at {self.path}. "
-                "Token revocation, the login/token rate limiters and the "
-                "per-upload part lock are in-process state that only one API "
-                "instance can enforce for this storage root. If this is a "
-                "leftover lock from a process that no longer exists, check for "
-                "a stuck osce-ai-marker process before doing anything else; set "
+                "The login/token rate limiters and the per-upload part lock "
+                "are in-process state that only one API instance can enforce "
+                "for this storage root. If this is a leftover lock from a "
+                "process that no longer exists, check for a stuck "
+                "osce-ai-marker process before doing anything else; set "
                 "ALLOW_MULTIPLE_API_INSTANCES=true only once you have verified "
                 "this deployment does not depend on any of that."
             ) from error

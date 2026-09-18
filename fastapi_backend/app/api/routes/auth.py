@@ -72,7 +72,7 @@ async def stream_ticket(request: Request, container: AppContainer = Depends(get_
 @router.post("/logout", response_model=LogoutResponse)
 async def logout(request: Request, container: AppContainer = Depends(get_container)) -> dict[str, object]:
     """Server-side logout: revoke the presented token so it cannot be reused."""
-    revoked = container.auth.revoke_token(extract_bearer_token(request))
+    revoked = await container.auth.revoke_token(extract_bearer_token(request))
     return {"revoked": revoked}
 
 

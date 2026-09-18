@@ -61,6 +61,7 @@ async def readiness(response: Response, container: AppContainer = Depends(get_co
             "userSettings": container.user_settings.cache_stats(),
             "customProviders": container.llm_settings.custom_provider_cache_stats(),
             "userDirectory": container.user_directory.cache_stats(),
+            "tokenRevocations": container.auth.cache_stats(),
             "changeFeedPushActive": container.changes.push_active,
         },
         # The accelerator lease: how many GPU steps run now and how many wait.

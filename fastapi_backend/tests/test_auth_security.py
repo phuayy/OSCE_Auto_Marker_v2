@@ -6,6 +6,13 @@ import pytest
 from starlette.requests import Request
 
 from app.api.dependencies import authorize_request
+from app.core.config import Settings
+from app.database.orm import OrmDatabase
+from app.domain.users import UserRole, UserStatus
+from app.repositories.user_repository import UserRepository
+from app.services.auth_service import AuthService
+from app.services.change_feed_service import ChangeFeedService
+from app.services.user_directory import UserDirectory, UserSnapshot
 
 from tests.test_routes import build_test_client
 
@@ -101,6 +108,64 @@ def test_logout_revokes_token_m3(tmp_path) -> None:
 
     # The revoked token can no longer authenticate.
     assert client.get("/api/sessions", headers=headers).status_code == 401
+
+
+def test_logout_revocation_reaches_a_second_process(tmp_path) -> None:
+    """The actual bug A3 closes: a process-local revocation registry never
+    reached a second process. Two AuthService instances over one database and
+    one auth-secret file stand in for two API processes (a Hatchet worker
+    aside, which never verifies tokens) sharing one storage root."""
+
+    async def scenario() -> None:
+        settings = Settings(
+            root_dir=tmp_path,
+            backend_root=tmp_path,
+            auth_bcrypt_rounds=4,
+            ffmpeg_bin="ffmpeg",
+            ffprobe_bin="ffprobe",
+            scorer_python_bin="python",
+            app_database_url="",
+            database_url="",
+        )
+        database = OrmDatabase(tmp_path / "app.sqlite3")
+
+        def _build_process() -> AuthService:
+            users = UserRepository(database)
+            changes = ChangeFeedService(database)
+            directory = UserDirectory(users, changes=changes)
+            return AuthService(settings, users=users, directory=directory, changes=changes)
+
+        process_a = _build_process()
+        process_b = _build_process()
+        await process_a.initialize()
+        await process_b.initialize()
+
+        record = await UserRepository(database).create(
+            username="marker",
+            email="marker@example.edu",
+            display_name="",
+            role=UserRole.MARKER,
+            status=UserStatus.ACTIVE,
+            password_hash=None,
+        )
+        snapshot = UserSnapshot(
+            id=record.id, username=record.username, role=UserRole.MARKER,
+            status=UserStatus.ACTIVE, token_version=record.token_version,
+        )
+        token = process_a.issue_session_token(snapshot)["token"]
+
+        # Valid from either process before any revocation.
+        assert await process_a.verify_token(token) is not None
+        assert await process_b.verify_token(token) is not None
+
+        # Logout happens to land on process A.
+        assert await process_a.revoke_token(token) is True
+
+        # The bug: a purely in-process registry would leave process B unaware.
+        assert await process_a.verify_token(token) is None
+        assert await process_b.verify_token(token) is None
+
+    asyncio.run(scenario())
 
 
 def test_login_is_rate_limited_m1(tmp_path) -> None:
