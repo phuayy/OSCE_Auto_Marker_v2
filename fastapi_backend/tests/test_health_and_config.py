@@ -20,6 +20,40 @@ def test_readiness_reports_database_and_storage(tmp_path) -> None:
         assert key in body["checks"]
 
 
+def test_readiness_fails_when_counter_table_disappears(tmp_path) -> None:
+    import asyncio
+
+    client = build_test_client(tmp_path)
+    database = client.app.state.container.orm_database
+
+    async def break_tracking() -> None:
+        async with database.engine.begin() as connection:
+            await connection.exec_driver_sql("DROP TABLE table_versions")
+
+    asyncio.run(break_tracking())
+    response = client.get("/api/health/ready")
+    assert response.status_code == 503
+    assert response.json()["checks"]["database"] is True
+    assert response.json()["checks"]["changeTracking"] is False
+    assert client.get("/api/health").status_code == 200
+
+
+def test_readiness_fails_when_a_trigger_disappears(tmp_path) -> None:
+    import asyncio
+
+    client = build_test_client(tmp_path)
+    database = client.app.state.container.orm_database
+
+    async def break_tracking() -> None:
+        async with database.engine.begin() as connection:
+            await connection.exec_driver_sql("DROP TRIGGER trg_users_change_update")
+
+    asyncio.run(break_tracking())
+    response = client.get("/api/health/ready")
+    assert response.status_code == 503
+    assert response.json()["checks"]["changeTracking"] is False
+
+
 def test_liveness_still_open(tmp_path) -> None:
     client = build_test_client(tmp_path)
     assert client.get("/api/health").json()["ok"] is True

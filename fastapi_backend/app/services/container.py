@@ -11,9 +11,8 @@ from app.core.rate_limit import FixedWindowRateLimiter
 from app.core.resources import ResourceLease
 from app.core.tasks import BackgroundTaskRegistry
 from app.core.versioned_cache import VersionedCache
-from app.database.change_tracking import install_change_tracking
+from app.database.change_tracking import verify_change_tracking
 from app.database.migration_runner import run_database_migrations
-from app.database.migrations import apply_additive_migrations
 from app.database.orm import OrmDatabase
 from app.mail import EmailSender, create_email_sender
 from app.pipeline.llm_preprocess import TranscriptPreprocessor
@@ -164,20 +163,12 @@ class AppContainer:
         await self.artifacts.ensure_storage_layout()
         await self.storage.ensure_layout()
         # Alembic owns the schema: it creates it, upgrades it, and adopts a
-        # database built by the older create_all path. Everything below is then
-        # a no-op on a migrated database, and kept because it is what still
-        # builds the schema when DB_AUTO_MIGRATE is off or Alembic is absent.
+        # database built by the older create_all path.
         # One process migrates; a worker booting alongside must not race it.
         if api and self.settings.db_auto_migrate:
-            await run_database_migrations(self.settings.resolved_database_source)
-        await self.orm_database.initialize()
-        # create_all adds missing tables but never alters an existing one, so
-        # columns introduced after a database was created need this pass.
-        await apply_additive_migrations(self.orm_database.engine)
-        # Triggers span both schema layers (sessions/assessment_results from the
-        # ORM metadata, jobs from the raw-SQL schema), so they can only be
-        # attached once both initialisers have run.
-        push_enabled = await install_change_tracking(self.orm_database.engine)
+            await run_database_migrations(self.orm_database.engine)
+        await self.orm_database.initialize(migrate=False)
+        push_enabled = await verify_change_tracking(self.orm_database.engine)
         await self.changes.start(push_enabled=push_enabled)
         await self.auth.initialize()
         if api:
@@ -224,7 +215,7 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
     """Wire every service. ``mailer`` overrides the backend ``EMAIL_BACKEND``
     would build — how the tests capture the links an invitation carries."""
     active_settings = settings or Settings.load()
-    orm_database = OrmDatabase(active_settings.resolved_database_source)
+    orm_database = OrmDatabase(active_settings.resolved_database_source, auto_migrate=active_settings.db_auto_migrate)
     runner = CommandRunner(
         active_settings.root_dir,
         default_timeout_seconds=active_settings.subprocess_timeout_seconds,

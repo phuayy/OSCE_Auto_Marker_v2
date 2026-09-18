@@ -213,8 +213,8 @@ class AssessmentRepository:
         """Wipe every assessment row tied to a session: the criteria, the
         results, and the assessment_session itself. Deletes children before
         parents explicitly rather than leaning on ORM cascade (a bulk ``delete``
-        statement bypasses relationship cascades and SQLite FK enforcement is
-        off), so no orphaned criteria/result rows are ever left behind."""
+        statement bypasses relationship cascades), satisfying foreign-key
+        enforcement on both SQLite and PostgreSQL without orphaned rows."""
         async with self.database.transaction() as db_session:
             assessment = await db_session.get(AssessmentSessionRecord, session_id)
             if assessment is None:

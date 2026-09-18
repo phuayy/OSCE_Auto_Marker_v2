@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import logging
 from typing import Iterable
 
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-
-logger = logging.getLogger(__name__)
+from app.database.models import TableVersionRecord
 
 
 # Postgres NOTIFY channel carrying committed-change announcements. One channel
@@ -71,153 +70,51 @@ TRACKED_TABLES: tuple[str, ...] = (
     "users",
 )
 
-_VERSION_TABLE = "table_versions"
 
-# ---------------------------------------------------------------------------
-# PostgreSQL
-#
-# One statement-level trigger per table (NOT row-level): a run that inserts 40
-# assessment_criteria rows should announce one change, not forty. The function
-# bumps the counter and fires pg_notify in the same statement; Postgres holds
-# the notification until COMMIT, so a listener never observes a change before
-# the data backing it is visible.
-# ---------------------------------------------------------------------------
+async def verify_change_tracking(
+    engine: AsyncEngine,
+    tables: Iterable[str] = TRACKED_TABLES,
+) -> bool:
+    """Validate migration-owned counters and triggers without issuing DDL.
 
-_PG_FUNCTION = f"""
-CREATE OR REPLACE FUNCTION osce_bump_table_version() RETURNS trigger AS $osce$
-DECLARE
-    next_version BIGINT;
-BEGIN
-    INSERT INTO {_VERSION_TABLE} (table_name, version, updated_at)
-    VALUES (TG_TABLE_NAME, 1, now())
-    ON CONFLICT (table_name)
-    DO UPDATE SET version = {_VERSION_TABLE}.version + 1, updated_at = now()
-    RETURNING version INTO next_version;
-
-    PERFORM pg_notify(
-        '{CHANGE_CHANNEL}',
-        json_build_object('table', TG_TABLE_NAME, 'version', next_version, 'op', TG_OP)::text
-    );
-    RETURN NULL;
-END;
-$osce$ LANGUAGE plpgsql;
-"""
-
-
-def _pg_trigger_statements(table: str) -> list[str]:
-    trigger = f"trg_{table}_change"
-    return [
-        f"DROP TRIGGER IF EXISTS {trigger} ON {table}",
-        (
-            f"CREATE TRIGGER {trigger} "
-            f"AFTER INSERT OR UPDATE OR DELETE ON {table} "
-            f"FOR EACH STATEMENT EXECUTE FUNCTION osce_bump_table_version()"
-        ),
-    ]
-
-
-# ---------------------------------------------------------------------------
-# SQLite (tests + the no-Postgres fallback)
-#
-# SQLite has no statement-level triggers and no NOTIFY, so this degrades to
-# row-level counter bumps. Consumers then learn about changes by reading the
-# counter instead of being pushed to — same correctness, poll-bound latency.
-# ---------------------------------------------------------------------------
-
-_SQLITE_BUMP = f"""
-    INSERT INTO {_VERSION_TABLE} (table_name, version, updated_at)
-    VALUES ('{{table}}', 1, CURRENT_TIMESTAMP)
-    ON CONFLICT(table_name)
-    DO UPDATE SET version = {_VERSION_TABLE}.version + 1, updated_at = CURRENT_TIMESTAMP;
-"""
-
-
-def _sqlite_trigger_statements(table: str) -> list[str]:
-    statements: list[str] = []
-    for operation in ("INSERT", "UPDATE", "DELETE"):
-        trigger = f"trg_{table}_change_{operation.lower()}"
-        statements.append(f"DROP TRIGGER IF EXISTS {trigger}")
-        statements.append(
-            f"CREATE TRIGGER {trigger} AFTER {operation} ON {table} "
-            f"BEGIN {_SQLITE_BUMP.format(table=table)} END"
-        )
-    return statements
+    Missing counters/triggers are fatal: polling an unchanged counter cannot
+    invalidate a cache. PostgreSQL must have enabled statement-level triggers
+    invoking the expected function. SQLite needs all three row-level triggers.
+    Return whether PostgreSQL LISTEN/NOTIFY is supported, not overall health.
+    """
+    table_list = tuple(tables)
+    async with engine.connect() as connection:
+        await connection.execute(select(TableVersionRecord).limit(0))
+        if engine.dialect.name == "postgresql":
+            rows = await connection.execute(text(
+                "SELECT c.relname, t.tgname FROM pg_catalog.pg_trigger t "
+                "JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid "
+                "JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid "
+                "WHERE NOT t.tgisinternal AND t.tgenabled IN ('O', 'A') "
+                "AND t.tgtype = 28 AND p.proname = 'osce_bump_table_version' "
+                "AND pg_catalog.pg_table_is_visible(c.oid)"
+            ))
+            expected = {(table, f"trg_{table}_change") for table in table_list}
+        elif engine.dialect.name == "sqlite":
+            rows = await connection.execute(text(
+                "SELECT tbl_name, name FROM sqlite_master WHERE type = 'trigger'"
+            ))
+            expected = {
+                (table, f"trg_{table}_change_{operation}")
+                for table in table_list for operation in ("insert", "update", "delete")
+            }
+        else:
+            raise RuntimeError(f"Unsupported change-tracking dialect: {engine.dialect.name}")
+        missing = expected - set(rows.all())
+        if missing:
+            names = ", ".join(sorted(name for _, name in missing))
+            raise RuntimeError(f"Change tracking is incomplete: {names}. Restore the migration-owned triggers before startup.")
+    return engine.dialect.name == "postgresql" and bool(table_list)
 
 
 async def install_change_tracking(
     engine: AsyncEngine,
     tables: Iterable[str] = TRACKED_TABLES,
 ) -> bool:
-    """Create (or refresh) the change-tracking triggers on ``tables``.
-
-    Must run *after* both schema initialisers, because it attaches triggers to
-    tables owned by two different layers: ``sessions``/``assessment_results``/
-    ``notifications`` come from the SQLAlchemy metadata, ``jobs`` from the
-    raw-SQL jobs schema.
-
-    Idempotent — safe to run on every boot. Returns True when the Postgres path
-    (counter + LISTEN/NOTIFY) is active, False for the SQLite counter-only path.
-
-    Each table is installed in its **own** transaction. Batching them was a trap:
-    one absent table (``jobs``, when the raw-SQL initialiser has not run) aborted
-    the single enclosing transaction and rolled back the triggers for every other
-    table too — so change tracking silently switched off wholesale, leaving one
-    log line as the only evidence and the browser back on polling. Isolating them
-    means a partial schema costs only the tables actually missing.
-
-    Failure is never fatal: an untracked table's consumers fall back to polling,
-    which is the behaviour that predates this module.
-    """
-    is_postgres = engine.dialect.name == "postgresql"
-    table_list = list(tables)
-
-    if is_postgres:
-        # The shared trigger function must exist before any trigger references
-        # it; without it nothing can be installed, so this failure is terminal.
-        try:
-            async with engine.begin() as connection:
-                # exec_driver_sql bypasses SQLAlchemy's bind-parameter parsing,
-                # which would otherwise choke on plpgsql's dollar-quoting.
-                await connection.exec_driver_sql(_PG_FUNCTION)
-        except Exception:
-            logger.exception(
-                "Could not create the change-tracking trigger function; "
-                "falling back to polled change detection."
-            )
-            return False
-
-    installed: list[str] = []
-    failed: list[str] = []
-    for table in table_list:
-        statements = (
-            _pg_trigger_statements(table) if is_postgres else _sqlite_trigger_statements(table)
-        )
-        try:
-            async with engine.begin() as connection:
-                for statement in statements:
-                    await connection.exec_driver_sql(statement)
-            installed.append(table)
-        except Exception as error:
-            failed.append(table)
-            logger.warning(
-                "Could not install change tracking on '%s' (%s); consumers of that "
-                "table fall back to polling.",
-                table,
-                error,
-            )
-
-    if failed:
-        logger.warning(
-            "Change tracking is partial: active on %s; missing on %s.",
-            ", ".join(installed) or "nothing",
-            ", ".join(failed),
-        )
-    elif installed:
-        logger.info(
-            "Change tracking installed on %s (%s).",
-            ", ".join(installed),
-            "postgres LISTEN/NOTIFY" if is_postgres else "sqlite counters",
-        )
-
-    # Push is only meaningful when at least one table can actually announce.
-    return is_postgres and bool(installed)
+    """Compatibility entry point; only Alembic may install tracking now."""
+    return await verify_change_tracking(engine, tables)

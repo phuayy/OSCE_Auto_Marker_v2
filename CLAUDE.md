@@ -92,7 +92,8 @@ OSCE-AI-FYP/
 │   │       ├── 0006_custom_llm_providers.py     # operator-defined scoring providers (+ tracking)
 │   │       ├── 0007_jobs_tables_in_orm_metadata.py  # jobs/job_attempts/job_events become ORM models
 │   │       ├── 0008_users_and_action_tokens.py  # accounts + emailed action tokens (+ tracking on users)
-│   │       └── 0009_sessions_created_by.py      # sessions.created_by mirrors the createdBy snapshot
+│   │       ├── 0009_sessions_created_by.py      # sessions.created_by mirrors the createdBy snapshot
+│   │       └── 0010_sqlite_wal_and_fk_pragmas.py # SQLite policy + complete migration-owned tracking
 │   └── app/
 │       ├── main.py             # FastAPI app, middleware, startup/shutdown
 │       ├── core/
@@ -262,7 +263,7 @@ AppContainer
  └── token_rate_limiter FixedWindowRateLimiter (accept-invite / password-reset endpoints)
 ```
 
-`startup(role=ContainerRole.API)` runs: config warnings -> storage layout -> **alembic upgrade head** -> DB init -> ORM init -> additive migrations -> change-tracking triggers -> auth init -> **bootstrap admin** (`user_admin.startup()`: seed the first account when the table is empty, sweep spent tokens) -> legacy session migration -> rubric parse -> stale upload recovery -> job queue startup (recover + dispatch) -> background transcription-model prefetch.
+`startup(role=ContainerRole.API)` runs: config warnings -> storage layout -> **alembic upgrade head** -> revision validation -> change-tracking validation -> auth init -> **bootstrap admin** (`user_admin.startup()`: seed the first account when the table is empty, sweep spent tokens) -> legacy session migration -> rubric parse -> stale upload recovery -> job queue startup (recover + dispatch) -> background transcription-model prefetch.
 
 The same container boots in two processes with different duties, so
 `startup` takes a `ContainerRole`. **API** does everything above. **WORKER**
@@ -279,7 +280,9 @@ backend.
 
 The prefetch is the one startup step that is spawned rather than awaited: it downloads the selected engine's weights (Canary-Qwen's checkpoint is ~5 GB) so the first assessment does not pay for the fetch, and the API must serve requests while it runs. It is cancelled, not drained, on shutdown — the HuggingFace cache resumes a partial download on the next boot.
 
-Alembic owns the schema. It runs first, so `create_all` / `CREATE TABLE IF NOT EXISTS` / `apply_additive_migrations()` / `install_change_tracking()` all find nothing to do on a migrated database — they stay as the fallback for `DB_AUTO_MIGRATE=false` or an install without Alembic. A database built by the old `create_all` path is stamped at revision `0001` and then upgraded, never stamped straight at head (that would skip every later revision). See [alembic/README.md](fastapi_backend/alembic/README.md).
+Alembic is the only schema writer. `OrmDatabase.initialize()` migrates through Alembic; `apply_additive_migrations()` is only its legacy-adoption wrapper. `DB_AUTO_MIGRATE=false` and worker startup validate head without DDL; Alembic is required and there is no `create_all` fallback. A pre-Alembic database is stamped at `0001` and then upgraded, never stamped straight at head. Runtime validates migration-owned change tracking and fails startup on missing counters/triggers; readiness repeats that check (`checks.changeTracking`). Revision `0010` repairs triggers lost to the jobs rebuild in `0007`. SQLite connections use WAL/NORMAL/FK enforcement; migrations temporarily disable FK enforcement around transactional batch rebuilds and check integrity before/after. See [alembic/README.md](fastapi_backend/alembic/README.md).
+
+Database verification: `cd fastapi_backend && uv run --no-sync pytest tests/test_alembic_migrations.py tests/test_migrations.py tests/test_change_tracking.py tests/test_health_and_config.py tests/test_container_roles.py`. Set `OSCE_TEST_POSTGRES_URL` only to a disposable PostgreSQL database to include the `pg_catalog` schema-parity and disabled-trigger checks; the test creates unique schemas without touching existing ones.
 
 ---
 

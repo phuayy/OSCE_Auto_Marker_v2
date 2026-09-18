@@ -29,7 +29,7 @@ from typing import Any
 import pytest
 
 from app.core.artifacts import artifact_metadata
-from app.database.models import AssessmentSessionRecord
+from app.database.models import AssessmentSessionRecord, RubricAsset
 from app.database.orm import OrmDatabase
 from app.repositories.assessment_repository import AssessmentRepository
 from app.repositories.session_repository import SessionRepository
@@ -57,6 +57,20 @@ COMMUNICATION_PAYLOAD = {
     ],
     "scoring_summary": {"total_score": 5, "max_score": 6, "pass_threshold": 4},
 }
+
+
+async def _seed_rubric(database: OrmDatabase, asset_id: str, path: Path) -> None:
+    async with database.transaction() as session:
+        session.add(RubricAsset(
+            id=asset_id,
+            rubric_type="communication",
+            original_name=path.name,
+            normalized_name=path.name.lower(),
+            file_name=path.name,
+            content_sha256="0" * 64,
+            size_bytes=0,
+            absolute_path=str(path),
+        ))
 
 
 class CommunicationScoringDouble:
@@ -93,6 +107,7 @@ def test_communication_rubric_id_survives_the_commit_that_stores_the_output(tmp_
         Path(session["outputs"]["transcript"]["absolutePath"]).write_text(TRANSCRIPT_JSON, encoding="utf-8")
 
         try:
+            await _seed_rubric(database, "rubric-asset-1", tmp_path / "rubric.pdf")
             await sessions.write(session)
             result = await pipeline.process_session_by_id(session["id"])
             assert result["session"]["status"] == "completed"
@@ -130,6 +145,7 @@ def test_assessment_repository_reads_the_rubric_id_from_the_communication_output
             },
         }
         try:
+            await _seed_rubric(database, "rubric-asset-42", tmp_path / "rubric.pdf")
             await assessments.record_session_results(session)
             async with database.transaction() as db_session:
                 record = await db_session.get(AssessmentSessionRecord, session["id"])
@@ -156,6 +172,7 @@ def test_legacy_top_level_communication_rubric_id_still_populates_the_column(tmp
             },
         }
         try:
+            await _seed_rubric(database, "legacy-rubric-7", tmp_path / "rubric.pdf")
             await assessments.record_session_results(session)
             async with database.transaction() as db_session:
                 record = await db_session.get(AssessmentSessionRecord, session["id"])

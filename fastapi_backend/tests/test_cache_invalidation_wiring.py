@@ -179,7 +179,7 @@ def test_notification_feed_is_served_from_cache(tmp_path) -> None:
         )
         assert container.read_cache.hits >= 2
 
-        await container.orm_database.shutdown()
+        await container.shutdown()
 
     asyncio.run(scenario())
 
@@ -192,6 +192,7 @@ def test_new_notification_invalidates_the_cached_feed(tmp_path) -> None:
         container = create_container(_settings(tmp_path))
         # Share the prepared database (triggers installed) with the container.
         container.notifications.repository.database = database
+        container.webhooks.database = database
         container.changes.database = database
 
         service = container.notifications
@@ -205,6 +206,7 @@ def test_new_notification_invalidates_the_cached_feed(tmp_path) -> None:
         assert refreshed["unreadCount"] == 2
         assert refreshed["notifications"][0]["title"] == "Second"
 
+        await container.shutdown()
         await database.shutdown()
 
     asyncio.run(scenario())
@@ -215,6 +217,7 @@ def test_marking_read_is_reflected_in_the_next_feed_read(tmp_path) -> None:
         database = await _prepared_database(tmp_path)
         container = create_container(_settings(tmp_path))
         container.notifications.repository.database = database
+        container.webhooks.database = database
         container.changes.database = database
         service = container.notifications
 
@@ -227,6 +230,7 @@ def test_marking_read_is_reflected_in_the_next_feed_read(tmp_path) -> None:
         assert after["unreadCount"] == 0
         assert after["notifications"][0]["read"] is True
 
+        await container.shutdown()
         await database.shutdown()
 
     asyncio.run(scenario())
@@ -237,6 +241,7 @@ def test_marking_all_read_is_reflected_in_the_next_feed_read(tmp_path) -> None:
         database = await _prepared_database(tmp_path)
         container = create_container(_settings(tmp_path))
         container.notifications.repository.database = database
+        container.webhooks.database = database
         container.changes.database = database
         service = container.notifications
 
@@ -250,6 +255,7 @@ def test_marking_all_read_is_reflected_in_the_next_feed_read(tmp_path) -> None:
         assert after["unreadCount"] == 0
         assert all(row["read"] is True for row in after["notifications"])
 
+        await container.shutdown()
         await database.shutdown()
 
     asyncio.run(scenario())

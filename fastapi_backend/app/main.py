@@ -62,8 +62,8 @@ settings = Settings.load()
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     container: AppContainer = create_container()
     application.state.container = container
-    await container.startup()
     try:
+        await container.startup()
         yield
     finally:
         await container.shutdown()

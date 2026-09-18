@@ -1,16 +1,10 @@
-"""Trigger installation must degrade per table, not wholesale.
-
-The triggers span two schema layers — ``sessions``/``assessment_results``/
-``notifications`` come from the SQLAlchemy metadata, ``jobs`` from the raw-SQL
-jobs schema — so a caller that has initialised only one layer is a real state,
-not a hypothetical. Installing every table in one transaction meant that state
-rolled back *all* the triggers, silently disabling push everywhere.
-"""
+"""Alembic owns tracking; runtime validation must fail on incomplete tracking."""
 
 from __future__ import annotations
 
 import asyncio
 
+import pytest
 from sqlalchemy import text
 
 from app.database.change_tracking import TRACKED_TABLES, install_change_tracking
@@ -36,20 +30,19 @@ async def _insert_notification(database: OrmDatabase, notification_id: str) -> N
         )
 
 
-def test_a_missing_table_does_not_disable_tracking_for_the_others(tmp_path) -> None:
-    """The regression. Only the ORM layer is initialised here, so ``jobs`` does
-    not exist — exactly the shape that previously wiped out every trigger."""
+def test_validation_preserves_existing_tracking(tmp_path) -> None:
+    """Read-only validation must leave every migrated trigger operational."""
 
     async def scenario() -> None:
         database = OrmDatabase(tmp_path / "app.sqlite3")
-        await database.initialize()  # ORM tables only; no raw-SQL "jobs" table
+        await database.initialize()
 
         await install_change_tracking(database.engine)
 
         before = await _counter(database, "notifications")
         await _insert_notification(database, "n-1")
         assert await _counter(database, "notifications") > before, (
-            "notifications tracking must survive the absence of an unrelated table"
+            "validation must leave the notification trigger operational"
         )
         await database.shutdown()
 
@@ -70,11 +63,9 @@ def test_every_tracked_table_present_in_the_schema_gets_a_trigger(tmp_path) -> N
         async with database.engine.connect() as connection:
             triggers = await connection.run_sync(lambda sync: _read(sync))
 
-        # "jobs" belongs to the other schema layer and is absent here.
         for table in TRACKED_TABLES:
-            if table == "jobs":
-                continue
-            assert any(table in name for name in triggers), f"no trigger for {table}"
+            for operation in ("insert", "update", "delete"):
+                assert f"trg_{table}_change_{operation}" in triggers
         await database.shutdown()
 
     asyncio.run(scenario())
@@ -114,15 +105,15 @@ def test_sqlite_reports_no_push_even_when_triggers_install(tmp_path) -> None:
     asyncio.run(scenario())
 
 
-def test_no_tracked_tables_reports_no_push(tmp_path) -> None:
-    """Nothing installed means nothing can announce; the caller must not be told
-    push is available."""
+def test_missing_tracked_table_is_fatal(tmp_path) -> None:
+    """An incomplete schema must not be mistaken for a healthy polling backend."""
 
     async def scenario() -> None:
         database = OrmDatabase(tmp_path / "app.sqlite3")
         await database.initialize()
 
-        assert await install_change_tracking(database.engine, tables=("table_does_not_exist",)) is False
+        with pytest.raises(RuntimeError, match="table_does_not_exist"):
+            await install_change_tracking(database.engine, tables=("table_does_not_exist",))
         await database.shutdown()
 
     asyncio.run(scenario())

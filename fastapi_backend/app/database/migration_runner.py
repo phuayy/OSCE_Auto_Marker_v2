@@ -30,8 +30,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from threading import Lock
 
 from sqlalchemy import create_engine, inspect
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+
+_MIGRATION_LOCK = Lock()
 
 
 logger = logging.getLogger(__name__)
@@ -70,7 +75,7 @@ def _build_config(sync_url: str):
     # Absolute, because the app's working directory is the repository root while
     # alembic.ini's relative script_location is written for fastapi_backend/.
     config.set_main_option("script_location", str(ALEMBIC_SCRIPTS))
-    config.set_main_option("sqlalchemy.url", sync_url)
+    config.set_main_option("sqlalchemy.url", sync_url.replace("%", "%%"))
     # Keep env.py's fileConfig() out of the way. It reconfigures the root logger
     # from alembic.ini, which would undo the levels and handlers the app has
     # already installed — and, with logging's default, switch off every logger
@@ -79,19 +84,15 @@ def _build_config(sync_url: str):
     return config
 
 
-def _upgrade_sync(sync_url: str) -> str:
+def _upgrade_connection(connection) -> str:
     from alembic import command
 
-    config = _build_config(sync_url)
-
-    engine = create_engine(sync_url, future=True)
-    try:
-        with engine.connect() as connection:
-            inspector = inspect(connection)
-            has_version_table = inspector.has_table(_VERSION_TABLE)
-            has_application_tables = inspector.has_table(_SENTINEL_TABLE)
-    finally:
-        engine.dispose()
+    config = _build_config(connection.engine.url.render_as_string(hide_password=False))
+    config.attributes["connection"] = connection
+    inspector = inspect(connection)
+    has_version_table = inspector.has_table(_VERSION_TABLE)
+    has_application_tables = inspector.has_table(_SENTINEL_TABLE)
+    connection.commit()
 
     if not has_version_table and has_application_tables:
         logger.info(
@@ -109,7 +110,50 @@ def _upgrade_sync(sync_url: str) -> str:
     return action
 
 
-async def run_database_migrations(database_source: Path | str) -> str | None:
+def _upgrade_sync(sync_url: str) -> str:
+    from app.database.orm import OrmDatabase, configure_sqlite_connection
+    from sqlalchemy import event
+
+    engine = create_engine(sync_url, connect_args=OrmDatabase._connect_args(sync_url))
+    if engine.dialect.name == "sqlite":
+        event.listen(engine, "connect", configure_sqlite_connection)
+    try:
+        with _MIGRATION_LOCK, engine.connect() as connection:
+            return _upgrade_connection(connection)
+    finally:
+        engine.dispose()
+
+
+async def migrate_engine(engine: AsyncEngine) -> str:
+    """Reuse the engine's connection, serializing Alembic's process-global context.
+
+    Nonblocking acquisition keeps async migrations and thread-based callers from
+    blocking each other's event loops. The connection also preserves :memory: DBs.
+    """
+    while not _MIGRATION_LOCK.acquire(blocking=False):
+        await asyncio.sleep(0.01)
+    try:
+        async with engine.connect() as connection:
+            return await connection.run_sync(_upgrade_connection)
+    finally:
+        _MIGRATION_LOCK.release()
+
+
+async def verify_database_revision(engine: AsyncEngine) -> None:
+    from alembic.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+
+    def verify(connection) -> None:
+        expected = set(ScriptDirectory(str(ALEMBIC_SCRIPTS)).get_heads())
+        actual = set(MigrationContext.configure(connection).get_current_heads())
+        if actual != expected:
+            raise RuntimeError("Database schema is not at Alembic head; run 'alembic upgrade head' before startup.")
+
+    async with engine.connect() as connection:
+        await connection.run_sync(verify)
+
+
+async def run_database_migrations(database_source: Path | str | AsyncEngine) -> str:
     """Bring ``database_source`` up to the head revision.
 
     ``database_source`` is whatever ``Settings.resolved_database_source`` gives:
@@ -117,27 +161,17 @@ async def run_database_migrations(database_source: Path | str) -> str | None:
     so the migration and the application can never disagree about which database
     they mean.
 
-    Returns the action taken (``"created"`` / ``"adopted"`` / ``"upgraded"``), or
-    ``None`` when Alembic is not installed.
-
-    A migration failure is re-raised. Unlike change tracking -- where the
-    fallback is merely slower -- an unmigrated schema makes requests fail at
-    run time, and the one moment an operator is watching is boot.
+    Returns the action taken (``"created"`` / ``"adopted"`` / ``"upgraded"``).
+    Missing Alembic or a migration failure is fatal; there is no second schema
+    writer to fall back to. Passing an engine preserves in-memory databases.
     """
-    try:
-        import alembic  # noqa: F401
-    except ImportError:
-        logger.warning(
-            "Alembic is not installed, so migrations were skipped; the schema will "
-            "fall back to create_all plus the additive-migration pass. Install it "
-            "with 'uv sync' to manage the schema properly."
-        )
-        return None
-
     from app.database.orm import OrmDatabase
 
-    sync_url = to_sync_url(OrmDatabase._normalize_url(database_source))
-    action = await asyncio.to_thread(_upgrade_sync, sync_url)
+    if isinstance(database_source, AsyncEngine):
+        action = await migrate_engine(database_source)
+    else:
+        sync_url = to_sync_url(OrmDatabase._normalize_url(database_source))
+        action = await asyncio.to_thread(_upgrade_sync, sync_url)
     logger.info("Database schema %s via Alembic (head revision applied).", action)
     return action
 
@@ -146,6 +180,8 @@ __all__ = [
     "ALEMBIC_INI",
     "ALEMBIC_SCRIPTS",
     "BASELINE_REVISION",
+    "migrate_engine",
     "run_database_migrations",
     "to_sync_url",
+    "verify_database_revision",
 ]

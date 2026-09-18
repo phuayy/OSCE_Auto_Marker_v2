@@ -23,7 +23,7 @@ from logging.config import fileConfig
 from pathlib import Path
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, event, pool
 
 
 # fastapi_backend/ — the directory that makes "app" importable. prepend_sys_path
@@ -113,17 +113,23 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-def run_migrations_online() -> None:
-    section = config.get_section(config.config_ini_section, {})
-    section["sqlalchemy.url"] = _sync_url()
+def _check_sqlite_integrity(connection) -> None:
+    violation = connection.exec_driver_sql("PRAGMA foreign_key_check").first()
+    if violation is not None:
+        raise RuntimeError(
+            f"SQLite foreign-key violation in {violation[0]}; repair existing orphan rows before migrating."
+        )
 
-    connectable = engine_from_config(
-        section,
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
 
-    with connectable.connect() as connection:
+def _run_on_connection(connection) -> None:
+    sqlite = connection.dialect.name == "sqlite"
+    try:
+        if sqlite:
+            _check_sqlite_integrity(connection)
+            connection.commit()
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            connection.commit()
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
@@ -133,8 +139,39 @@ def run_migrations_online() -> None:
         )
         with context.begin_transaction():
             context.run_migrations()
+            if sqlite:
+                _check_sqlite_integrity(connection)
+        connection.commit()
+    finally:
+        connection.rollback()
+        if sqlite:
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+            connection.commit()
 
-    connectable.dispose()
+
+def run_migrations_online() -> None:
+    supplied_connection = config.attributes.get("connection")
+    if supplied_connection is not None:
+        _run_on_connection(supplied_connection)
+        return
+
+    from app.database.orm import OrmDatabase, configure_sqlite_connection
+
+    section = config.get_section(config.config_ini_section, {})
+    section["sqlalchemy.url"] = _sync_url()
+    connectable = engine_from_config(
+        section,
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+        connect_args=OrmDatabase._connect_args(section["sqlalchemy.url"]),
+    )
+    if connectable.dialect.name == "sqlite":
+        event.listen(connectable, "connect", configure_sqlite_connection)
+    try:
+        with connectable.connect() as connection:
+            _run_on_connection(connection)
+    finally:
+        connectable.dispose()
 
 
 if context.is_offline_mode():

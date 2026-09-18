@@ -57,11 +57,11 @@ async def _worker_lifespan() -> AsyncGenerator[None, None]:
     # no startup job recovery — Hatchet owns dispatch. Bound once so every job
     # this process runs shares these connections, caches and the GPU lease.
     container = create_container(settings)
-    await container.startup(role=ContainerRole.WORKER)
-    bind_worker_container(container)
-    logger.info("Hatchet worker runtime initialized.")
     redispatch_task: asyncio.Task[None] | None = None
     try:
+        await container.startup(role=ContainerRole.WORKER)
+        bind_worker_container(container)
+        logger.info("Hatchet worker runtime initialized.")
         # Re-dispatch any jobs whose Hatchet schedule window may have expired
         # while the worker was down (e.g., server restart, crash).
         await container.jobs.redispatch_stale_hatchet_jobs()

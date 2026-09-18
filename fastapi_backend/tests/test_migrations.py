@@ -4,7 +4,8 @@ import asyncio
 
 from sqlalchemy import inspect, text
 
-from app.database.migrations import ADDITIVE_MIGRATIONS, apply_additive_migrations
+from app.database.migrations import apply_additive_migrations
+from app.database.models import Base
 from app.database.orm import OrmDatabase
 
 
@@ -25,15 +26,14 @@ def test_missing_column_is_added_to_an_existing_database(tmp_path) -> None:
 
     async def scenario() -> None:
         database = OrmDatabase(tmp_path / "app.sqlite3")
-        await database.initialize()
-
         async with database.engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
             await connection.exec_driver_sql("ALTER TABLE notifications DROP COLUMN event_type")
         assert "event_type" not in await _columns(database, "notifications")
 
         applied = await apply_additive_migrations(database.engine)
 
-        assert "notifications.event_type" in applied
+        assert applied == "adopted"
         assert "event_type" in await _columns(database, "notifications")
         await database.shutdown()
 
@@ -47,9 +47,8 @@ def test_migration_is_idempotent(tmp_path) -> None:
         database = OrmDatabase(tmp_path / "app.sqlite3")
         await database.initialize()
 
-        # create_all already produced the column, so nothing is pending.
-        assert await apply_additive_migrations(database.engine) == []
-        assert await apply_additive_migrations(database.engine) == []
+        assert await apply_additive_migrations(database.engine) == "upgraded"
+        assert await apply_additive_migrations(database.engine) == "upgraded"
         await database.shutdown()
 
     asyncio.run(scenario())
@@ -61,9 +60,8 @@ def test_backfill_labels_rows_that_predate_the_column(tmp_path) -> None:
 
     async def scenario() -> None:
         database = OrmDatabase(tmp_path / "app.sqlite3")
-        await database.initialize()
-
         async with database.engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
             await connection.exec_driver_sql("ALTER TABLE notifications DROP COLUMN event_type")
             await connection.exec_driver_sql(
                 "INSERT INTO notifications (id, session_id, title, body, created_at) "
@@ -82,9 +80,16 @@ def test_backfill_labels_rows_that_predate_the_column(tmp_path) -> None:
     asyncio.run(scenario())
 
 
-def test_migrations_are_only_nullable_or_defaulted() -> None:
-    """SQLite refuses ADD COLUMN NOT NULL without a default on a populated table,
-    so an entry violating that would break every existing install."""
-    for migration in ADDITIVE_MIGRATIONS:
-        definition = migration.definition.upper()
-        assert "NOT NULL" not in definition or "DEFAULT" in definition, migration
+def test_adoption_adds_the_created_by_index_even_if_the_column_exists(tmp_path) -> None:
+    async def scenario() -> None:
+        database = OrmDatabase(tmp_path / "legacy.sqlite3")
+        async with database.engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+            await connection.exec_driver_sql("DROP INDEX idx_sessions_created_by")
+        assert await apply_additive_migrations(database.engine) == "adopted"
+        async with database.engine.connect() as connection:
+            indexes = await connection.run_sync(lambda sync: inspect(sync).get_indexes("sessions"))
+            assert any(index["name"] == "idx_sessions_created_by" for index in indexes)
+        await database.shutdown()
+
+    asyncio.run(scenario())

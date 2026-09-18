@@ -173,9 +173,9 @@ class JobRepository:
     async def delete_for_session(self, session_id: str) -> int:
         """Delete every job for a session plus its attempt/event rows.
 
-        Children are removed explicitly rather than by ``ON DELETE CASCADE``:
-        SQLite enforces foreign keys only with ``PRAGMA foreign_keys = ON``, so
-        relying on the cascade would leave orphans on the default backend.
+        Keep the explicit child-first deletion on both backends. Runtime SQLite
+        connections now enforce foreign keys as PostgreSQL does; cascades also
+        protect writes that bypass this repository.
         """
         async with self.database.transaction() as db:
             job_ids = list(

@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Response
 from sqlalchemy import text
 
 from app.api.dependencies import get_container
+from app.database.change_tracking import verify_change_tracking
 from app.schemas.common import HealthResponse
 from app.services.container import AppContainer
 
@@ -31,6 +32,7 @@ async def readiness(response: Response, container: AppContainer = Depends(get_co
     absence is reported but does not fail readiness.
     """
     database_ok = await _check_database(container)
+    tracking_ok = await _check_change_tracking(container) if database_ok else False
     storage_ok = await asyncio.to_thread(_check_storage_writable, container.settings.paths.storage_root)
     settings = container.settings
     binaries = {
@@ -43,12 +45,12 @@ async def readiness(response: Response, container: AppContainer = Depends(get_co
         "humanDetector": await asyncio.to_thread(_human_detector_available, settings),
     }
 
-    ready = database_ok and storage_ok
+    ready = database_ok and tracking_ok and storage_ok
     if not ready:
         response.status_code = 503
     return {
         "ready": ready,
-        "checks": {"database": database_ok, "storage": storage_ok, **binaries},
+        "checks": {"database": database_ok, "changeTracking": tracking_ok, "storage": storage_ok, **binaries},
         # Informational. The credential cache is only correct while the change
         # feed can tell it a key rotated, so "pushActive: false with a high hit
         # rate" is the shape worth alerting on — it means rotations are reaching
@@ -69,8 +71,16 @@ async def readiness(response: Response, container: AppContainer = Depends(get_co
 
 async def _check_database(container: AppContainer) -> bool:
     try:
-        async with container.orm_database.session() as db:
-            await db.execute(text("SELECT 1"))
+        async with container.orm_database.engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+        return True
+    except Exception:
+        return False
+
+
+async def _check_change_tracking(container: AppContainer) -> bool:
+    try:
+        await verify_change_tracking(container.orm_database.engine)
         return True
     except Exception:
         return False
