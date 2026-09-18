@@ -50,6 +50,22 @@ TARGET_SAMPLE_RATE = 16000
 DEFAULT_LOAD_DTYPE = "bfloat16"
 LOAD_DTYPE_CHOICES = ("auto", "bfloat16", "float16", "float32")
 
+# generate() defaults to a bare GenerationConfig (bos/eos/pad only) — greedy,
+# with no repetition guard. On real speech-level audio (verified: RMS/peak
+# consistent with speech in every window, not silence) that still collapsed
+# into thousands of characters of one repeated CJK token, in every window of
+# an affected clip. Whisper's CLI ships logprob/no-speech/compression decode
+# guards for exactly this failure mode; SALM's generate has none, so they are
+# supplied here instead of relying on greedy decoding to stay coherent.
+DEFAULT_REPETITION_PENALTY = 1.3
+DEFAULT_NO_REPEAT_NGRAM_SIZE = 4
+# 512 was enough runway for a stuck decode to fill a whole window with
+# repeated characters. A 40s-trained model transcribing a <=30s window needs a
+# small fraction of that — roughly 150 tokens for continuous speech at a
+# natural rate — so this bounds the damage of any repetition that still gets
+# through rather than relying on repetition_penalty alone.
+MAX_NEW_TOKENS_PER_WINDOW = 256
+
 # Committable memory the load needs, as a multiple of the checkpoint's size on
 # disk: one copy for the module tree the weights are streamed into, plus the
 # interpreter, the CUDA context and the transient spikes of building a few
@@ -630,19 +646,33 @@ def free_memory() -> None:
         pass
 
 
-def transcribe_window(model: Any, audio_path: Path, prompt: str) -> str:
-    """One SALM generation call for one window of audio."""
+def transcribe_batch(
+    model: Any, audio_paths: list[Path], prompt: str, generation_config: Any = None
+) -> list[str]:
+    """One SALM generation call for a batch of windows, in window order.
+
+    Purely a throughput grouping: each window is still its own independent
+    forward pass (no cross-window state), so batching windows together changes
+    how many share one generate() call and nothing about any one window's
+    output. ``ids_to_text`` strips padding/eos tokens per row by default, so a
+    shorter answer sharing a batch with a longer one decodes clean.
+    """
     answer_ids = model.generate(
-        prompts=[[{"role": "user", "content": f"{prompt} {model.audio_locator_tag}", "audio": [str(audio_path)]}]],
-        max_new_tokens=512,
+        prompts=[
+            [{"role": "user", "content": f"{prompt} {model.audio_locator_tag}", "audio": [str(path)]}]
+            for path in audio_paths
+        ],
+        max_new_tokens=MAX_NEW_TOKENS_PER_WINDOW,
+        generation_config=generation_config,
     )
-    return str(model.tokenizer.ids_to_text(answer_ids[0].cpu())).strip()
+    return [str(model.tokenizer.ids_to_text(row.cpu())).strip() for row in answer_ids]
 
 
 def run(args: argparse.Namespace) -> int:
     import tempfile
 
     import soundfile
+    from transformers import GenerationConfig
 
     from nemo.collections.speechlm2.models import SALM
 
@@ -668,18 +698,33 @@ def run(args: argparse.Namespace) -> int:
     if hasattr(model, "eval"):
         model.eval()
 
+    generation_config = GenerationConfig(
+        bos_token_id=model.text_bos_id,
+        eos_token_id=model.text_eos_id,
+        pad_token_id=model.text_pad_id,
+        repetition_penalty=DEFAULT_REPETITION_PENALTY,
+        no_repeat_ngram_size=DEFAULT_NO_REPEAT_NGRAM_SIZE,
+    )
+
+    batch_size = max(int(getattr(args, "batch_size", 1) or 1), 1)
     segments: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="canary-") as temp_dir:
-        for index, (start, end) in enumerate(windows):
-            window_path = Path(temp_dir) / f"window-{index:04d}.wav"
-            first = int(start * sample_rate)
-            last = int(end * sample_rate)
-            soundfile.write(str(window_path), samples[first:last], sample_rate)
-            text = transcribe_window(model, window_path, args.prompt)
-            if text:
-                segments.append({"start": round(start, 3), "end": round(end, 3), "text": text})
+        for batch_start in range(0, len(windows), batch_size):
+            batch = windows[batch_start : batch_start + batch_size]
+            window_paths = []
+            for offset, (start, end) in enumerate(batch):
+                window_path = Path(temp_dir) / f"window-{batch_start + offset:04d}.wav"
+                first = int(start * sample_rate)
+                last = int(end * sample_rate)
+                soundfile.write(str(window_path), samples[first:last], sample_rate)
+                window_paths.append(window_path)
+            texts = transcribe_batch(model, window_paths, args.prompt, generation_config)
+            for (start, end), text in zip(batch, texts):
+                if text:
+                    segments.append({"start": round(start, 3), "end": round(end, 3), "text": text})
             # Parsed by the engine's output handler into live step progress.
-            print(f"Progress: {((index + 1) / len(windows)) * 100:.2f}%...", flush=True)
+            done = min(batch_start + batch_size, len(windows))
+            print(f"Progress: {(done / len(windows)) * 100:.2f}%...", flush=True)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
