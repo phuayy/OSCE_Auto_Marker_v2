@@ -11,6 +11,7 @@ from app.core.config import Settings
 from app.core.exceptions import StaleSessionError
 from app.core.utils import normalize_session_name, parse_iso, session_name_key
 from app.core.versioned_cache import VersionedCache
+from app.core.session_cursor import decode_cursor, encode_cursor
 from app.domain.actors import PROVENANCE_KEY, provenance_of
 from app.domain.constants import SESSION_NAME_ADJECTIVES, SESSION_NAME_NOUNS
 from app.repositories.session_repository import SessionEntry, SessionRepository
@@ -161,6 +162,33 @@ class SessionService:
             return session
         await self.ensure_names_for_index(await self.repository.read_name_entries())
         return await self.read(session_id)
+
+    async def list_page(
+        self, *, limit: int = 200, cursor: str | None = None,
+        parent_session_id: str | None = None, roots_only: bool = False,
+    ) -> dict[str, Any]:
+        if not 1 <= limit <= 200:
+            raise ValueError("Session limit must be between 1 and 200.")
+        after = decode_cursor(cursor)
+        if roots_only and parent_session_id is not None:
+            raise ValueError("Root and child session filters cannot be combined.")
+        query = dict(limit=limit + 1, after=after, parent_session_id=parent_session_id, roots_only=roots_only)
+
+        async def build() -> dict[str, Any]:
+            rows = await self.repository.read_index_projection(**query)
+            if self._needs_name_backfill(rows):
+                await self.ensure_names_for_index(await self.repository.read_name_entries())
+                rows = await self.repository.read_index_projection(**query)
+            has_more = len(rows) > limit
+            page = rows[:limit]
+            return {"sessions": page, "nextCursor": encode_cursor(page[-1]) if has_more else None}
+
+        if self.cache is None or self.changes is None:
+            return await build()
+        token = await self.changes.token(("sessions",))
+        return await self.cache.get_or_build(
+            f"{SESSION_INDEX_CACHE_KEY}:{limit}:{after}:{parent_session_id}:{roots_only}", token, build, tables=("sessions",),
+        )
 
     async def list_sessions(self) -> list[dict[str, Any]]:
         """The session-list projection, served from cache while nothing changed.

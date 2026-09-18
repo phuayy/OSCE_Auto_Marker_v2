@@ -188,9 +188,12 @@ def test_a_saved_key_overrides_the_environment_for_the_same_provider(tmp_path: P
     asyncio.run(store.set_key("nvidia", LIVE_KEY))
 
     from app.repositories.app_settings_repository import AppSettingsRepository
+    from app.repositories.user_settings_repository import UserSettingsRepository
+    from app.services.preferences_service import PreferencesService
 
+    database = OrmDatabase(tmp_path / "settings.sqlite3")
     service = LLMSettingsService(
-        AppSettingsRepository(OrmDatabase(tmp_path / "settings.sqlite3")),
+        PreferencesService(AppSettingsRepository(database), UserSettingsRepository(database)),
         key_overrides=lambda: {"nvidia": "stale-key-from-the-environment"},
         credential_store=store,
     )
@@ -206,9 +209,12 @@ def test_removing_a_saved_key_hands_the_provider_back_to_the_environment(tmp_pat
     asyncio.run(store.clear_key("nvidia"))
 
     from app.repositories.app_settings_repository import AppSettingsRepository
+    from app.repositories.user_settings_repository import UserSettingsRepository
+    from app.services.preferences_service import PreferencesService
 
+    database = OrmDatabase(tmp_path / "settings.sqlite3")
     service = LLMSettingsService(
-        AppSettingsRepository(OrmDatabase(tmp_path / "settings.sqlite3")),
+        PreferencesService(AppSettingsRepository(database), UserSettingsRepository(database)),
         key_overrides=lambda: {"nvidia": "environment-key-value"},
         credential_store=store,
     )
@@ -219,18 +225,22 @@ def test_removing_a_saved_key_hands_the_provider_back_to_the_environment(tmp_pat
 
 def test_subprocess_env_carries_the_saved_key_for_routed_providers_only(tmp_path: Path) -> None:
     from app.repositories.app_settings_repository import AppSettingsRepository
+    from app.repositories.user_settings_repository import UserSettingsRepository
+    from app.services.preferences_service import PreferencesService
 
     store = build_store(tmp_path)
     asyncio.run(store.set_key("deepseek", LIVE_KEY))
     asyncio.run(store.set_key("openai", "sk-unrouted-provider-key"))
 
-    app_settings = AppSettingsRepository(OrmDatabase(tmp_path / "settings.sqlite3"))
+    database = OrmDatabase(tmp_path / "settings.sqlite3")
+    app_settings = AppSettingsRepository(database)
     asyncio.run(
         app_settings.set_values(
             {"llmPrimary": {"providerId": "deepseek", "model": "deepseek-chat"}, "llmFallbacks": []}
         )
     )
-    service = LLMSettingsService(app_settings, credential_store=store)
+    preferences = PreferencesService(app_settings, UserSettingsRepository(database))
+    service = LLMSettingsService(preferences, credential_store=store)
 
     env = asyncio.run(service.subprocess_env())
 

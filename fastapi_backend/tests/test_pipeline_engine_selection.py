@@ -95,10 +95,10 @@ class StubAppSettings:
         self.engine_id = engine_id
         self.options = options or {}
 
-    async def transcription_selection(self) -> tuple[str, dict[str, Any]]:
+    async def transcription_selection(self, user_id: str | None = None) -> tuple[str, dict[str, Any]]:
         return self.engine_id, self.options
 
-    async def llm_preprocess_enabled(self) -> bool:
+    async def llm_preprocess_enabled(self, user_id: str | None = None) -> bool:
         return False
 
 
@@ -120,12 +120,12 @@ def run_pipeline(tmp_path: Path, engine_id: str) -> tuple[FakeSessions, Scripted
     events = FakeEvents()
     auth = SimpleNamespace(runtime=SimpleNamespace(whisperx_hf_token="hf-token"))
     media = MediaPipeline(settings, runner, events, auth)
-    app_settings = StubAppSettings(engine_id)
+    preferences = StubAppSettings(engine_id)
     router = TranscriptionRouter(
         settings,
         events,
         registry.EngineDependencies(settings, runner, events, auth, media),
-        app_settings=app_settings,
+        preferences=preferences,
     )
 
     video_path = tmp_path / "video.mp4"
@@ -146,7 +146,7 @@ def run_pipeline(tmp_path: Path, engine_id: str) -> tuple[FakeSessions, Scripted
         events=events,
         media=media,
         scoring=object(),
-        app_settings=app_settings,
+        preferences=preferences,
         transcription=router,
     )
     asyncio.run(service.process_session_by_id("session-1"))

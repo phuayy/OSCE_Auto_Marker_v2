@@ -86,7 +86,7 @@ class _FakeAppSettings:
     def __init__(self, enabled: bool) -> None:
         self._enabled = enabled
 
-    async def llm_preprocess_enabled(self) -> bool:
+    async def llm_preprocess_enabled(self, user_id: str | None = None) -> bool:
         return self._enabled
 
 
@@ -104,14 +104,14 @@ class _FakePreprocessor:
 
 
 def build_service(preprocessor: Any, enabled: bool | None, session: dict[str, Any] | None = None) -> PipelineService:
-    app_settings = _FakeAppSettings(enabled) if enabled is not None else None
+    preferences = _FakeAppSettings(enabled) if enabled is not None else None
     return PipelineService(
         _FakeSessions(session),
         events=_FakeEvents(),
         media=None,
         scoring=None,
         preprocessor=preprocessor,
-        app_settings=app_settings,
+        preferences=preferences,
     )
 
 

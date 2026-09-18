@@ -15,6 +15,7 @@ from app.repositories.video_repository import VideoRepository
 from app.services.assessment_service import AssessmentService
 from app.services.job_queue_service import JobQueueService
 from app.services.session_service import SessionService
+from app.services.session_artifacts import SessionArtifacts
 
 logger = logging.getLogger(__name__)
 
@@ -297,6 +298,15 @@ class SessionMaintenanceService:
         Never touches the case study PDF (shared, ref-counted rubric asset)."""
         outputs = session.get("outputs") if isinstance(session.get("outputs"), dict) else {}
         session_id = str(session.get("id") or "")
+        if not SessionArtifacts.valid_id(session_id):
+            return
+        for path in SessionArtifacts(self.settings).owned_paths(
+            session, keep_clips=keep_clips, keep_upload=keep_owned_video,
+        ):
+            if path.is_symlink() or not path.is_dir():
+                self._unlink(path)
+            else:
+                self._rmtree(path)
         for key in _OUTPUT_ARTIFACT_KEYS:
             item = outputs.get(key)
             if isinstance(item, dict):

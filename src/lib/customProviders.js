@@ -405,9 +405,9 @@ export function routingUsage(description, providerId) {
 }
 
 export function createEndpoint() {
-  return '/api/settings/llm-providers';
+  return '/api/admin/settings/llm-providers';
 }
 
 export function providerEndpoint(providerId) {
-  return `/api/settings/llm-providers/${encodeURIComponent(String(providerId || ''))}`;
+  return `/api/admin/settings/llm-providers/${encodeURIComponent(String(providerId || ''))}`;
 }

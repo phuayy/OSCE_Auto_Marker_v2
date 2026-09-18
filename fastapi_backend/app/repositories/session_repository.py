@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select, text, update
+from sqlalchemy import and_, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import SessionWriteContractError, StaleSessionError
@@ -222,7 +222,9 @@ class SessionRepository:
 
     async def _lock_names(self, db_session: AsyncSession) -> None:
         if self.database.engine.dialect.name == "sqlite":
-            await db_session.execute(text("BEGIN IMMEDIATE"))
+            if not db_session.info.get("write_locked"):
+                await db_session.execute(text("BEGIN IMMEDIATE"))
+                db_session.info["write_locked"] = True
         else:
             await db_session.execute(text("SELECT pg_advisory_xact_lock(7482673901)"))
 
@@ -288,7 +290,10 @@ class SessionRepository:
                 for row in rows
             ]
 
-    async def read_index_projection(self) -> list[dict[str, Any]]:
+    async def read_index_projection(
+        self, *, limit: int | None = None, after: tuple[datetime, str] | None = None,
+        parent_session_id: str | None = None, roots_only: bool = False,
+    ) -> list[dict[str, Any]]:
         """Read only the fields the session-list cards render.
 
         ``read_all`` pulls every row's whole ``payload`` document — which embeds
@@ -320,7 +325,19 @@ class SessionRepository:
             payload["clipExport", "total"].as_float().label("clip_export_total"),
             payload["error"].as_string().label("error"),
             payload[PROVENANCE_KEY].as_json().label("created_by"),
-        ).order_by(SessionRecord.created_at.desc())
+        ).order_by(SessionRecord.created_at.desc(), SessionRecord.id.desc())
+        if roots_only:
+            statement = statement.where(SessionRecord.parent_session_id.is_(None))
+        elif parent_session_id is not None:
+            statement = statement.where(SessionRecord.parent_session_id == parent_session_id)
+        if after is not None:
+            created_at, session_id = after
+            statement = statement.where(or_(
+                SessionRecord.created_at < created_at,
+                and_(SessionRecord.created_at == created_at, SessionRecord.id < session_id),
+            ))
+        if limit is not None:
+            statement = statement.limit(limit)
 
         async with self.database.session() as db_session:
             rows = (await db_session.execute(statement)).all()

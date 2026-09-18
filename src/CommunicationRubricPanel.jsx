@@ -89,7 +89,7 @@ export default function CommunicationRubricPanel({ onBack }) {
 
       // No Content-Type: the browser has to set the multipart boundary, which
       // is why this passes `body` rather than `json`.
-      const body = await apiJson('/api/communication-rubric', {
+      const body = await apiJson('/api/admin/communication-rubric', {
         method: 'POST',
         body: formData,
         fallbackMessage: 'Rubric upload failed.',
@@ -113,7 +113,7 @@ export default function CommunicationRubricPanel({ onBack }) {
     setError('');
     setNotice('');
     try {
-      const body = await apiJson('/api/communication-rubric/reset', {
+      const body = await apiJson('/api/admin/communication-rubric/reset', {
         method: 'POST',
         fallbackMessage: 'Reset failed.',
       });

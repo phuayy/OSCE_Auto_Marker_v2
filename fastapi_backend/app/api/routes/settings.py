@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.api.dependencies import current_actor, get_container, require_admin
+from app.domain.settings_scope import USER_SCOPED_KEYS, is_user_scoped
 from app.llm import custom as custom_providers
 from app.llm.panel import MarkingMode, PanelConfig, parse_marking_mode
 from app.llm.routing import LLMTarget
@@ -35,22 +36,46 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 admin_router = APIRouter(prefix="/admin/settings", tags=["settings"], dependencies=[Depends(require_admin)])
 
 
+def _owner_id(request: Request) -> str | None:
+    """The requesting account's id, for a per-user preference read/write. None
+    only when the middleware's own guarantee is somehow absent — every other
+    ``/api/*`` route already requires a verified token."""
+    actor = current_actor(request)
+    return actor.user_id if actor is not None else None
+
+
 @router.get("")
-async def get_settings(container: AppContainer = Depends(get_container)) -> dict[str, object]:
-    return {"settings": await container.app_settings.get_all()}
+async def get_settings(request: Request, container: AppContainer = Depends(get_container)) -> dict[str, object]:
+    """This account's effective settings: the deployment defaults with
+    whatever they have personalised layered on top.
+
+    ``defaults``, ``overrides`` and ``userScopedKeys`` ride alongside
+    ``settings`` so the screen can say, per field, "your own" vs "the
+    deployment default" without a second request — see CLAUDE.md "Two-tier
+    settings".
+    """
+    user_id = _owner_id(request)
+    return {
+        "settings": await container.preferences.effective_for(user_id),
+        "defaults": await container.preferences.defaults(),
+        "overrides": await container.preferences.overrides_for(user_id),
+        "userScopedKeys": sorted(USER_SCOPED_KEYS),
+    }
 
 
 @router.get("/transcription-engines")
 async def get_transcription_engines(
+    request: Request,
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
     """Engines this build ships, their option schemas, this deployment's
-    defaults for each, and whether each one can actually run here.
+    defaults for each, whether each one can actually run here, and this
+    account's own selection.
 
     The settings screen renders its controls from this response, so shipping a
     new engine needs no frontend change.
     """
-    return await container.transcription.describe()
+    return await container.transcription.describe(_owner_id(request))
 
 
 @router.get("/segmentation-presets")
@@ -80,8 +105,13 @@ async def get_segmentation_presets() -> dict[str, object]:
 
 
 @router.get("/llm-providers")
-async def get_llm_providers(container: AppContainer = Depends(get_container)) -> dict[str, object]:
-    """Scoring providers this build ships, their models, and the current routing.
+async def get_llm_providers(
+    request: Request,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Scoring providers this build ships, their models, and this account's
+    current routing (the deployment default for whatever it has not chosen
+    itself).
 
     Same contract as the transcription-engines endpoint: the settings screen
     renders its dropdowns from this response, so a provider added to the
@@ -89,7 +119,7 @@ async def get_llm_providers(container: AppContainer = Depends(get_container)) ->
     reflects whether a key is configured *on this machine* — the response never
     contains a key itself.
     """
-    return await container.llm_settings.describe()
+    return await container.llm_settings.describe(_owner_id(request))
 
 
 @admin_router.post("/llm-providers/test")
@@ -348,12 +378,19 @@ async def _check_settings_document(container: AppContainer, document: dict[str, 
             )
 
 
+@admin_router.get("")
+async def get_deployment_settings(container: AppContainer = Depends(get_container)) -> dict[str, object]:
+    """The deployment's own defaults, unmixed with any admin's personal
+    overrides of them — the document the cards below edit."""
+    return {"settings": await container.preferences.defaults()}
+
+
 @admin_router.put("")
 async def update_settings(
     payload: UpdateSettingsRequest,
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
-    """Replace the global settings wholesale.
+    """Replace the deployment defaults wholesale.
 
     Kept for API compatibility; the settings screen's cards use PATCH so one
     card cannot carry another card's stale values back. The cross-field rules
@@ -369,7 +406,7 @@ async def patch_settings(
     payload: PatchSettingsRequest,
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
-    """Change some settings and leave the rest exactly as stored.
+    """Change some deployment defaults and leave the rest exactly as stored.
 
     The screen is a set of independent cards, each owning a few keys. With
     only a whole-document PUT, every card read the document and sent it all
@@ -389,3 +426,80 @@ async def patch_settings(
         return {"settings": stored}
     await _check_settings_document(container, {**stored, **changes})
     return {"settings": await container.app_settings.set_values(changes)}
+
+
+# --- a marker's own preferences ----------------------------------------------
+#
+# Same shape, same cross-field rules, same wire contract as the admin routes
+# above — the difference is entirely *where the write lands*: an account's
+# row in user_settings, layered over the deployment defaults, rather than the
+# defaults themselves. Every field SettingsPayload declares is user-scoped
+# today (see app.domain.settings_scope); _reject_deployment_scoped is there so
+# a deployment-scoped key added to the schema later fails loudly here instead
+# of silently becoming every marker's to change.
+
+
+def _reject_deployment_scoped(changes: dict[str, Any]) -> None:
+    stray = next((key for key in changes if not is_user_scoped(key)), None)
+    if stray is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"'{stray}' is a deployment setting; ask an administrator to change it in Settings.",
+        )
+
+
+@router.put("")
+async def update_my_settings(
+    payload: UpdateSettingsRequest,
+    request: Request,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Replace every one of this account's overrides wholesale. See
+    ``update_settings`` (the admin equivalent) for why PUT is kept at all."""
+    user_id = _owner_id(request)
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+    document = payload.model_dump()
+    _reject_deployment_scoped(document)
+    await _check_settings_document(container, {**(await container.preferences.defaults()), **document})
+    await container.preferences.set_overrides(user_id, document)
+    return {"settings": await container.preferences.effective_for(user_id)}
+
+
+@router.patch("")
+async def patch_my_settings(
+    payload: PatchSettingsRequest,
+    request: Request,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Change some of this account's own settings, leaving the rest — its own
+    other overrides, and the deployment defaults for everything it has not
+    personalised — exactly as they were. See ``patch_settings`` (the admin
+    equivalent) for why this exists instead of only PUT."""
+    user_id = _owner_id(request)
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+    changes = payload.changes()
+    if not changes:
+        return {"settings": await container.preferences.effective_for(user_id)}
+    _reject_deployment_scoped(changes)
+    effective = await container.preferences.effective_for(user_id)
+    await _check_settings_document(container, {**effective, **changes})
+    await container.preferences.set_overrides(user_id, changes)
+    return {"settings": await container.preferences.effective_for(user_id)}
+
+
+@router.delete("/{key}")
+async def clear_my_setting(
+    key: str,
+    request: Request,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Revert one of this account's settings to the deployment default."""
+    user_id = _owner_id(request)
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+    if not is_user_scoped(key):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"'{key}' is not a personal setting.")
+    await container.preferences.clear_override(user_id, key)
+    return {"settings": await container.preferences.effective_for(user_id)}

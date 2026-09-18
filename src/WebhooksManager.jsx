@@ -115,7 +115,7 @@ export default function WebhooksManager() {
   async function refresh() {
     setError('');
     try {
-      const body = await apiJson('/api/webhooks', { fallbackMessage: 'Failed to load webhooks.' });
+      const body = await apiJson('/api/admin/webhooks', { fallbackMessage: 'Failed to load webhooks.' });
       setWebhooks(Array.isArray(body.webhooks) ? body.webhooks : []);
       setEventTypes(Array.isArray(body.eventTypes) ? body.eventTypes : []);
     } catch (loadError) {
@@ -175,7 +175,7 @@ export default function WebhooksManager() {
     setSaving(true);
     setError('');
     try {
-      const body = await apiJson(editor.id ? `/api/webhooks/${editor.id}` : '/api/webhooks', {
+      const body = await apiJson(editor.id ? `/api/admin/webhooks/${editor.id}` : '/api/admin/webhooks', {
         method: editor.id ? 'PUT' : 'POST',
         json: {
           url,
@@ -205,7 +205,7 @@ export default function WebhooksManager() {
     }
     setError('');
     try {
-      await apiJson(`/api/webhooks/${webhook.id}`, {
+      await apiJson(`/api/admin/webhooks/${webhook.id}`, {
         method: 'DELETE',
         fallbackMessage: 'Failed to delete webhook.',
       });
@@ -225,7 +225,7 @@ export default function WebhooksManager() {
     }
     setError('');
     try {
-      const body = await apiJson(`/api/webhooks/${webhook.id}/rotate-secret`, {
+      const body = await apiJson(`/api/admin/webhooks/${webhook.id}/rotate-secret`, {
         method: 'POST',
         fallbackMessage: 'Failed to rotate secret.',
       });
@@ -241,7 +241,7 @@ export default function WebhooksManager() {
     setTestResult(null);
     setError('');
     try {
-      const body = await apiJson(`/api/webhooks/${webhook.id}/test`, {
+      const body = await apiJson(`/api/admin/webhooks/${webhook.id}/test`, {
         method: 'POST',
         fallbackMessage: 'Test delivery failed.',
       });
@@ -258,7 +258,7 @@ export default function WebhooksManager() {
 
   async function loadDeliveries(webhookId) {
     try {
-      const body = await apiJson(`/api/webhooks/${webhookId}/deliveries?limit=10`);
+      const body = await apiJson(`/api/admin/webhooks/${webhookId}/deliveries?limit=10`);
       setDeliveries((current) => ({ ...current, [webhookId]: body.deliveries || [] }));
     } catch {
       // Non-fatal: the log is a debugging aid, not required for operation.

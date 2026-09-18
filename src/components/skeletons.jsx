@@ -283,24 +283,45 @@ export function WebhookRowsSkeleton({ rows = 2 }) {
   );
 }
 
+/** A section's static title + subtitle, above its cards — bone-free, since
+ * both are fixed strings rather than data the chunk will fill in. */
+function SettingsSectionHeading({ title, subtitle }) {
+  return (
+    <div>
+      <h2 className="text-lg font-semibold text-slate-800">{title}</h2>
+      <p className="text-sm text-slate-500">{subtitle}</p>
+    </div>
+  );
+}
+
 /**
  * The Settings route while its chunk loads: the real page header (static, so
- * the user can still leave) over the eight cards in the order the page renders
+ * the user can still leave) over the cards in the order the page renders
  * them, each with the body skeleton that card itself shows until its data
  * arrives. The chunk mounting on top of this changes nothing but the text.
+ *
+ * Two tiers, like the real page (see CLAUDE.md "Two-tier settings"): "Your
+ * preferences" always renders; "Deployment" only for an admin — `isAdmin` is
+ * known synchronously from the already-loaded identity, unlike the settings
+ * data itself, so the outline for a marker never shows four cards that are
+ * about to disappear the moment the chunk mounts.
  */
-export function SettingsSkeleton({ onBack }) {
+export function SettingsSkeleton({ onBack, isAdmin = false }) {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <PageHeader
         icon={<SettingsIcon className="h-5 w-5" />}
         title="Settings"
-        subtitle="Global options applied to every assessment run"
+        subtitle={isAdmin ? 'Your preferences, and deployment configuration shared by every marker' : 'Applied to every assessment you run'}
         onBack={onBack}
         backTitle="Back to dashboard"
       />
 
       <LoadingRegion label="Loading settings" className="mx-auto flex max-w-3xl flex-col gap-6 px-6 py-8">
+        <SettingsSectionHeading
+          title="Your preferences"
+          subtitle="Yours alone — only assessments you start use these. Every other marker keeps their own."
+        />
         <SettingsCardSkeleton>
           <EngineSettingsSkeleton />
         </SettingsCardSkeleton>
@@ -310,24 +331,33 @@ export function SettingsSkeleton({ onBack }) {
         <SettingsCardSkeleton descriptionLines={4}>
           <MarkingModeSkeleton />
         </SettingsCardSkeleton>
-        <SettingsCardSkeleton>
-          <ProviderKeysSkeleton />
-        </SettingsCardSkeleton>
-        <SettingsCardSkeleton descriptionLines={4}>
-          <CustomProvidersSkeleton />
-        </SettingsCardSkeleton>
         <SettingsCardSkeleton descriptionLines={4}>
           <ToggleRowSkeleton />
         </SettingsCardSkeleton>
-        <SettingsCardSkeleton descriptionLines={2}>
-          <ListRowsSkeleton rows={2} />
-        </SettingsCardSkeleton>
-        <SettingsCardSkeleton descriptionLines={4}>
-          <div className="flex flex-col gap-4">
-            <Skeleton className="h-8 w-32 rounded-lg" />
-            <WebhookRowsSkeleton />
-          </div>
-        </SettingsCardSkeleton>
+
+        {isAdmin ? (
+          <>
+            <SettingsSectionHeading
+              title="Deployment"
+              subtitle="Shared by every marker — provider keys, custom providers, the transcription corpus and webhooks. Visible only to administrators."
+            />
+            <SettingsCardSkeleton>
+              <ProviderKeysSkeleton />
+            </SettingsCardSkeleton>
+            <SettingsCardSkeleton descriptionLines={4}>
+              <CustomProvidersSkeleton />
+            </SettingsCardSkeleton>
+            <SettingsCardSkeleton descriptionLines={2}>
+              <ListRowsSkeleton rows={2} />
+            </SettingsCardSkeleton>
+            <SettingsCardSkeleton descriptionLines={4}>
+              <div className="flex flex-col gap-4">
+                <Skeleton className="h-8 w-32 rounded-lg" />
+                <WebhookRowsSkeleton />
+              </div>
+            </SettingsCardSkeleton>
+          </>
+        ) : null}
       </LoadingRegion>
     </div>
   );

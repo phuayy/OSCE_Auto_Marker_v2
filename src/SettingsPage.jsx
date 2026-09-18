@@ -13,10 +13,14 @@ import TranscriptionEngineSettings from '@/TranscriptionEngineSettings.jsx';
 import WebhooksManager from '@/WebhooksManager.jsx';
 import { apiJson } from '@/lib/apiFetch';
 
-// Global application settings page (#/settings). Settings live in the backend
-// DB, so a toggle here applies immediately to every subsequent run — including
-// per-student clip runs and the Hatchet worker — without a restart.
-export default function SettingsPage({ onBack }) {
+// Settings page (#/settings), in two tiers (see CLAUDE.md "Two-tier
+// settings"): "Your preferences" — transcription engine, scoring model,
+// marking mode, preprocess toggle — are this account's own and apply only to
+// the runs it starts; "Deployment" — provider keys, custom providers, the
+// transcription corpus, webhooks — is shared by every marker and is an
+// admin's to change, so it renders only for one. A marker who is not an
+// admin never sees a control the server would 403 on.
+export default function SettingsPage({ onBack, isAdmin = false }) {
   const [settings, setSettings] = useState(null); // null = never loaded
   const [loadError, setLoadError] = useState('');
   const [saveError, setSaveError] = useState('');
@@ -83,7 +87,7 @@ export default function SettingsPage({ onBack }) {
       <PageHeader
         icon={<SettingsIcon className="h-5 w-5" />}
         title="Settings"
-        subtitle="Global options applied to every assessment run"
+        subtitle={isAdmin ? 'Your preferences, and deployment configuration shared by every marker' : 'Applied to every assessment you run'}
         onBack={onBack}
         backTitle="Back to dashboard"
       />
@@ -98,90 +102,111 @@ export default function SettingsPage({ onBack }) {
           </div>
         ) : null}
 
-        <TranscriptionEngineSettings onSettingsChanged={adoptSettings} />
+        <section className="flex flex-col gap-6">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-800">Your preferences</h2>
+            <p className="text-sm text-slate-500">
+              Yours alone — only assessments you start use these. Every other marker keeps their own.
+            </p>
+          </div>
 
-        <LlmRoutingSettings
-          version={providersVersion}
-          onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
-          onSettingsChanged={adoptSettings}
-        />
+          <TranscriptionEngineSettings onSettingsChanged={adoptSettings} />
 
-        <MarkingModeSettings
-          version={providersVersion}
-          onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
-          onSettingsChanged={adoptSettings}
-        />
+          <LlmRoutingSettings
+            version={providersVersion}
+            onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
+            onSettingsChanged={adoptSettings}
+          />
 
-        <ProviderKeysSettings
-          version={providersVersion}
-          onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
-        />
+          <MarkingModeSettings
+            version={providersVersion}
+            onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
+            onSettingsChanged={adoptSettings}
+          />
 
-        <CustomProvidersSettings
-          version={providersVersion}
-          onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
-        />
-
-        <Card className="border-slate-200 bg-white shadow-sm">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-lg">
-              <Wand2 className="h-5 w-5 text-cyan-700" aria-hidden="true" />
-              Transcript clean-up by the scoring model
-            </CardTitle>
-            <CardDescription>
-              After transcription and before scoring, an extra pass by the model selected above
-              corrects obvious transcription errors (misheard words, garbled medical terms) using
-              the clinical context of the dialogue. Timestamps, speaker labels, and segmentation
-              are never altered. Applies to every future run, including each student clip.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {settings === null && !loadError ? (
-              <LoadingRegion label="Loading transcription preprocess setting">
-                <ToggleRowSkeleton />
-              </LoadingRegion>
-            ) : (
-              <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-                <div>
-                  <div className="text-sm font-semibold text-slate-800">
-                    {llmPreprocessOn ? 'Enabled' : 'Disabled'}
+          <Card className="border-slate-200 bg-white shadow-sm">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-lg">
+                <Wand2 className="h-5 w-5 text-cyan-700" aria-hidden="true" />
+                Transcript clean-up by the scoring model
+              </CardTitle>
+              <CardDescription>
+                After transcription and before scoring, an extra pass by the model selected above
+                corrects obvious transcription errors (misheard words, garbled medical terms) using
+                the clinical context of the dialogue. Timestamps, speaker labels, and segmentation
+                are never altered. Applies to every future run you start, including each student clip.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {settings === null && !loadError ? (
+                <LoadingRegion label="Loading transcription preprocess setting">
+                  <ToggleRowSkeleton />
+                </LoadingRegion>
+              ) : (
+                <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-800">
+                      {llmPreprocessOn ? 'Enabled' : 'Disabled'}
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      {llmPreprocessOn
+                        ? 'The llm_preprocess pipeline step runs on every new assessment.'
+                        : 'The llm_preprocess pipeline step is skipped.'}
+                    </div>
                   </div>
-                  <div className="text-xs text-slate-500">
-                    {llmPreprocessOn
-                      ? 'The llm_preprocess pipeline step runs on every new assessment.'
-                      : 'The llm_preprocess pipeline step is skipped.'}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={llmPreprocessOn}
-                  aria-label="Toggle LLM transcription preprocess"
-                  disabled={saving || settings === null}
-                  onClick={() => updateSetting('llmTranscriptPreprocess', !llmPreprocessOn)}
-                  className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-60 ${
-                    llmPreprocessOn ? 'bg-cyan-600' : 'bg-slate-300'
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
-                      llmPreprocessOn ? 'translate-x-[22px]' : 'translate-x-0.5'
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={llmPreprocessOn}
+                    aria-label="Toggle LLM transcription preprocess"
+                    disabled={saving || settings === null}
+                    onClick={() => updateSetting('llmTranscriptPreprocess', !llmPreprocessOn)}
+                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-60 ${
+                      llmPreprocessOn ? 'bg-cyan-600' : 'bg-slate-300'
                     }`}
-                  />
-                </button>
-              </div>
-            )}
-            {saveError && (
-              <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
-                {saveError}
-              </div>
-            )}
-          </CardContent>
-        </Card>
+                  >
+                    <span
+                      className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                        llmPreprocessOn ? 'translate-x-[22px]' : 'translate-x-0.5'
+                      }`}
+                    />
+                  </button>
+                </div>
+              )}
+              {saveError && (
+                <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  {saveError}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </section>
 
-        <CorporaManager />
+        {isAdmin ? (
+          <section className="flex flex-col gap-6 border-t border-slate-200 pt-6">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-800">Deployment</h2>
+              <p className="text-sm text-slate-500">
+                Shared by every marker — provider keys, custom providers, the transcription corpus and
+                webhooks. Visible only to administrators.
+              </p>
+            </div>
 
-        <WebhooksManager />
+            <ProviderKeysSettings
+              version={providersVersion}
+              onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
+            />
+
+            <CustomProvidersSettings
+              version={providersVersion}
+              onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
+            />
+
+            <CorporaManager />
+
+            <WebhooksManager />
+          </section>
+        ) : null}
       </main>
     </div>
   );

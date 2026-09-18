@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -13,10 +15,12 @@ from app.api.dependencies import authorize_request
 from app.api.routes import (
     async_uploads,
     auth,
+    corpora,
     events as events_routes,
     health,
     jobs,
     notifications,
+    rubrics,
     sessions,
     settings as settings_routes,
     users as users_routes,
@@ -93,6 +97,11 @@ def build_test_client(tmp_path: Path) -> TestClient:
     app.include_router(events_routes.router, prefix="/api")
     app.include_router(webhooks.router, prefix="/api")
     app.include_router(settings_routes.router, prefix="/api")
+    app.include_router(settings_routes.admin_router, prefix="/api")
+    app.include_router(corpora.router, prefix="/api")
+    app.include_router(corpora.admin_router, prefix="/api")
+    app.include_router(rubrics.router, prefix="/api")
+    app.include_router(rubrics.admin_router, prefix="/api")
     app.include_router(users_routes.router, prefix="/api")
     return TestClient(app)
 
@@ -619,9 +628,8 @@ def test_recover_expired_uploads_reclaims_abandoned_and_spares_fresh(tmp_path) -
     asyncio.run(service.recover_expired_uploads())
 
     # Expired upload fully reclaimed.
-    reclaimed = asyncio.run(service.repository.read(expired_id))
-    assert reclaimed["status"] == "expired"
-    assert "expiredAt" in reclaimed
+    with pytest.raises(FileNotFoundError):
+        asyncio.run(service.repository.read(expired_id))
     assert not parts_dir.exists()  # 500 MB-equivalent leak freed
 
     expired_session = asyncio.run(container.sessions.read(str(expired_upload["sessionId"])))

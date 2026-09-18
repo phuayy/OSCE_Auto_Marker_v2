@@ -460,7 +460,10 @@ class CanaryQwenEngine(TranscriptionEngine):
                 self.settings.scorer_python_bin,
                 args,
                 "Canary-Qwen transcription",
-                env=self.settings.subprocess_env(),
+                # Same env prefetch/availability use: the checkpoint is gated
+                # on HuggingFace, so a transcription run needs the token too,
+                # not just the download that primes the cache.
+                env=self.diarizer.python_env(),
                 on_output=self._build_output_handler(request),
             )
         except Exception as error:

@@ -100,7 +100,7 @@ export function validateKeyInput(value) {
 }
 
 export function keyEndpoint(providerId) {
-  return `/api/settings/llm-providers/${encodeURIComponent(String(providerId || ''))}/key`;
+  return `/api/admin/settings/llm-providers/${encodeURIComponent(String(providerId || ''))}/key`;
 }
 
 // The last connection test recorded against the stored key, so a reload does not

@@ -203,8 +203,8 @@ export default function AppShell() {
           exit={{ opacity: 0 }}
           transition={{ duration: 0.25 }}
         >
-          <LazyBoundary fallback={<SettingsSkeleton onBack={() => navigate({ view: 'dashboard' })} />}>
-            <SettingsPage onBack={() => navigate({ view: 'dashboard' })} />
+          <LazyBoundary fallback={<SettingsSkeleton onBack={() => navigate({ view: 'dashboard' })} isAdmin={isAdmin} />}>
+            <SettingsPage onBack={() => navigate({ view: 'dashboard' })} isAdmin={isAdmin} />
           </LazyBoundary>
         </motion.div>
       ) : view === 'users' ? (

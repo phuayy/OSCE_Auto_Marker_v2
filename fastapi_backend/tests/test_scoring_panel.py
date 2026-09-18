@@ -184,7 +184,7 @@ class _PlanSettings:
     def __init__(self, plan: MarkingPlan) -> None:
         self.plan = plan
 
-    async def marking_plan(self) -> MarkingPlan:
+    async def marking_plan(self, owner_id: str | None = None) -> MarkingPlan:
         return self.plan
 
 

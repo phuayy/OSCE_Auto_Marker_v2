@@ -82,8 +82,8 @@ test('obvious paste errors are rejected before a round trip', () => {
 });
 
 test('the key endpoint escapes the provider id', () => {
-  assert.equal(keyEndpoint('openai'), '/api/settings/llm-providers/openai/key');
-  assert.equal(keyEndpoint('a/b'), '/api/settings/llm-providers/a%2Fb/key');
+  assert.equal(keyEndpoint('openai'), '/api/admin/settings/llm-providers/openai/key');
+  assert.equal(keyEndpoint('a/b'), '/api/admin/settings/llm-providers/a%2Fb/key');
 });
 
 test('a provider test uses the model already selected for it, else its default', () => {

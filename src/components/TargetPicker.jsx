@@ -205,7 +205,7 @@ export default function TargetPicker({
 // failed probe is a result to show, not an error to recover from.
 export async function testTarget(target) {
   try {
-    return await apiJson('/api/settings/llm-providers/test', {
+    return await apiJson('/api/admin/settings/llm-providers/test', {
       method: 'POST',
       json: { providerId: target.providerId, model: target.model || '' },
       fallbackMessage: 'The connection test could not be run.',

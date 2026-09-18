@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import current_actor, get_container, require_session_owner
@@ -17,8 +17,19 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
 @router.get("")
-async def list_sessions(container: AppContainer = Depends(get_container)) -> dict[str, object]:
-    return {"sessions": await container.sessions.list_sessions()}
+async def list_sessions(
+    limit: int = Query(200, ge=1, le=200),
+    cursor: str | None = Query(None, max_length=512),
+    parent_session_id: str | None = Query(None, alias="parentSessionId", max_length=36),
+    roots_only: bool = Query(False, alias="rootsOnly"),
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    try:
+        return await container.sessions.list_page(
+            limit=limit, cursor=cursor, parent_session_id=parent_session_id, roots_only=roots_only,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @router.patch("/{session_id}/name", dependencies=[Depends(require_session_owner)])

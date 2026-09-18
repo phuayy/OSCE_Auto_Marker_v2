@@ -31,8 +31,10 @@ from app.database.change_tracking import TRACKED_TABLES, install_change_tracking
 from app.database.orm import OrmDatabase
 from app.repositories.app_settings_repository import AppSettingsRepository
 from app.repositories.provider_credential_repository import ProviderCredentialRepository
+from app.repositories.user_settings_repository import UserSettingsRepository
 from app.services.change_feed_service import ChangeFeedService
 from app.services.llm_settings_service import LLMSettingsService
+from app.services.preferences_service import PreferencesService
 from app.services.provider_credential_service import ProviderCredentialService
 
 
@@ -71,7 +73,9 @@ class Harness:
             changes=changes,
         )
         self.app_settings = AppSettingsRepository(database, changes=changes)
-        self.service = LLMSettingsService(self.app_settings, credential_store=self.store)
+        self.user_settings = UserSettingsRepository(database, changes=changes)
+        self.preferences = PreferencesService(self.app_settings, self.user_settings)
+        self.service = LLMSettingsService(self.preferences, credential_store=self.store)
         self.selects: list[str] = []
         self._recording = False
 

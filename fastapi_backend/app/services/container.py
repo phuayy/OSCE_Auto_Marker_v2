@@ -9,6 +9,7 @@ from app.core.logging_utils import log_context
 from app.core.process import CommandRunner
 from app.core.rate_limit import FixedWindowRateLimiter
 from app.core.resources import ResourceLease
+from app.core.single_instance import SingleInstanceLock
 from app.core.tasks import BackgroundTaskRegistry
 from app.core.versioned_cache import VersionedCache
 from app.database.change_tracking import verify_change_tracking
@@ -20,8 +21,10 @@ from app.pipeline.media import MediaPipeline
 from app.pipeline.transcription.registry import EngineDependencies
 from app.pipeline.scoring import ScoringPipeline
 from app.repositories.app_settings_repository import AppSettingsRepository
+from app.repositories.user_settings_repository import UserSettingsRepository
 from app.services.custom_provider_service import CustomProviderService
 from app.services.llm_settings_service import LLMSettingsService
+from app.services.preferences_service import PreferencesService
 from app.services.provider_credential_service import ProviderCredentialService
 from app.repositories.assessment_repository import AssessmentRepository
 from app.repositories.corpus_repository import CorpusRepository
@@ -100,6 +103,12 @@ class AppContainer:
     webhook_dispatcher: WebhookDispatcher
     corpora: CorpusRepository
     app_settings: AppSettingsRepository
+    # A marker's own overrides of the user-scoped settings keys, and the
+    # service that merges them with `app_settings` for a given account. Kept
+    # as two container fields (rather than folding `app_settings` away) because
+    # the admin routes still read/write the deployment document directly.
+    user_settings: UserSettingsRepository
+    preferences: PreferencesService
     llm_settings: LLMSettingsService
     provider_credentials: ProviderCredentialService
     custom_providers: CustomProviderService
@@ -124,6 +133,10 @@ class AppContainer:
     # Startup work that must not hold the boot: currently the transcription
     # weight prefetch, which can run for minutes on a cold machine.
     background: BackgroundTaskRegistry = field(default_factory=BackgroundTaskRegistry)
+    # Held for the process lifetime by the API role only — see
+    # core/single_instance.py for why token revocation, the rate limiters and
+    # the upload-part lock make a second API instance unsafe.
+    _instance_lock: SingleInstanceLock | None = field(default=None, repr=False)
 
     def runs_jobs(self, role: ContainerRole) -> bool:
         """Whether this process executes job handlers (and so needs model weights)."""
@@ -160,6 +173,13 @@ class AppContainer:
             )
         for warning in self.settings.collect_runtime_warnings():
             logger.warning("Configuration warning: %s", warning, extra=log_context("startup", "config_validation"))
+        if api and not self.settings.allow_multiple_api_instances:
+            # First, and fatal on failure: every other startup step assumes
+            # this is the only API process touching this storage root's
+            # in-process state (see core/single_instance.py).
+            lock = SingleInstanceLock(self.settings.paths.api_lock_path)
+            lock.acquire()
+            self._instance_lock = lock
         await self.artifacts.ensure_storage_layout()
         await self.storage.ensure_layout()
         # Alembic owns the schema: it creates it, upgrades it, and adopts a
@@ -177,6 +197,7 @@ class AppContainer:
             # process seeds, and a worker never verifies a token.
             await self.user_admin.startup()
             await self.sessions.migrate_legacy_sessions()
+            await self.async_uploads.repository.migrate_legacy()
             await self.corpora.seed_defaults()
             await self.rubrics.ensure_parsed()
             # Resume uploads whose assembly a restart cut short, and fail the
@@ -209,6 +230,9 @@ class AppContainer:
         await self.notifications.drain()
         await self.changes.stop()
         await self.orm_database.shutdown()
+        if self._instance_lock is not None:
+            self._instance_lock.release()
+            self._instance_lock = None
 
 
 def create_container(settings: Settings | None = None, *, mailer: EmailSender | None = None) -> AppContainer:
@@ -263,6 +287,10 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
     # re-querying them: a settings write anywhere fires the table's trigger, and
     # the announcement evicts every process's copy.
     app_settings = AppSettingsRepository(orm_database, changes=changes)
+    # Same freshness contract, keyed on the account: a preference saved by one
+    # process reaches every other one on the change feed's announcement.
+    user_settings = UserSettingsRepository(orm_database, changes=changes)
+    preferences = PreferencesService(app_settings, user_settings)
     # The NVIDIA key can arrive from the platform secrets file rather than
     # os.environ, and AuthService only reads it during startup() — after this
     # container is built. Passing a callable defers the lookup to call time.
@@ -289,7 +317,7 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         changes=changes,
     )
     llm_settings = LLMSettingsService(
-        app_settings,
+        preferences,
         key_overrides=lambda: {"nvidia": auth.runtime.nvidia_api_key},
         credential_store=provider_credentials,
         custom_providers=custom_providers,
@@ -309,7 +337,7 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         active_settings,
         events,
         EngineDependencies(active_settings, runner, events, auth, media),
-        app_settings=app_settings,
+        preferences=preferences,
         gpu=gpu,
     )
     pipeline = PipelineService(
@@ -320,7 +348,7 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         assessments,
         notifications,
         preprocessor=preprocessor,
-        app_settings=app_settings,
+        preferences=preferences,
         transcription=transcription,
     )
     videos = VideoRepository(orm_database)
@@ -351,7 +379,7 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
     user_admin = UserAdminService(active_settings, users, user_directory, auth, active_mailer)
     async_uploads = AsyncUploadService(
         active_settings,
-        UploadRepository(active_settings.paths.uploads_dir),
+        UploadRepository(orm_database, active_settings.paths.uploads_dir),
         sessions,
         storage,
         jobs,
@@ -385,6 +413,8 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         webhook_dispatcher=webhook_dispatcher,
         corpora=corpora,
         app_settings=app_settings,
+        user_settings=user_settings,
+        preferences=preferences,
         llm_settings=llm_settings,
         provider_credentials=provider_credentials,
         custom_providers=custom_providers,

@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.core.subprocess_env import inherited_env
+
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +77,10 @@ class CommandRunner:
     ) -> CommandResult:
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
-        process_env = {**os.environ, **(env or {})}
+        # Curated, not inherited in full — see core/subprocess_env.py. A
+        # secret this process holds (DATABASE_URL, AUTH_SECRET, a provider API
+        # key) reaches a subprocess only if the caller put it in `env`.
+        process_env = {**inherited_env(), **(env or {})}
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         loop = asyncio.get_running_loop()
         started_at = time.monotonic()

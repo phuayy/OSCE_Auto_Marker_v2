@@ -10,6 +10,7 @@ import { DEFAULT_PART_CONCURRENCY, recordedPartNumbers, uploadParts } from '@/li
 import { CONNECTION_STATUS, useConnectionStatus } from '@/lib/connectionStatus';
 import { CLIP_ASSESSMENTS_ANCHOR_ID } from '@/lib/anchors';
 import { coalesceAsync } from '@/lib/coalesce';
+import { fetchSessionPages } from '@/lib/sessionPages';
 import { clampNumber, formatRuntime } from '@/lib/format';
 import { LazyBoundary, lazyComponent, preloadComponent } from '@/lib/lazyRoute';
 import { LoadingRegion, SessionRowsSkeleton, WorkspaceSkeleton } from '@/components/skeletons.jsx';
@@ -56,6 +57,7 @@ import CorporaManager from './CorporaManager.jsx';
 import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
 import { describeClipExportOutcome } from '@/lib/clipExportOutcome';
 import { creatorName } from '@/lib/provenance';
+import { canMutateSession } from '@/lib/authz';
 import { indexClipAssessments } from '@/lib/clipAssessments';
 import { describeRerunAction } from '@/lib/rerunAction';
 import { describeStartAction } from '@/lib/sessionStartAction';
@@ -192,6 +194,8 @@ export default function OSCEAiMarkerMockup({
 
   const [sessionIndex, setSessionIndex] = useState([]);
   const [sessionIndexLoading, setSessionIndexLoading] = useState(false);
+  const [hasMoreSessions, setHasMoreSessions] = useState(false);
+  const sessionPageCountRef = useRef(1);
   // False until the index has answered once. `sessionIndex` starts empty, and
   // "no sessions yet" and "not asked yet" must not look the same: the first
   // fetch draws rows in outline, and the empty state waits for a real answer.
@@ -882,7 +886,8 @@ export default function OSCEAiMarkerMockup({
   // `silent` refreshes are driven by the change stream or the in-flight
   // heartbeat rather than by the user, so they must neither flash the list's
   // loading state on every backend write nor claim its error slot.
-  async function refreshSessionIndex({ silent = false } = {}) {
+  async function refreshSessionIndex({ silent = false, loadMore = false } = {}) {
+    if (loadMore) sessionPageCountRef.current += 1;
     if (!silent) {
       setSessionIndexLoading(true);
     }
@@ -892,14 +897,18 @@ export default function OSCEAiMarkerMockup({
     // roll the cards back to a stage the run has already left.
     const requestSeq = (sessionIndexRequestSeqRef.current += 1);
     try {
-      const body = await apiJson('/api/sessions', {
-        fallbackMessage: 'Failed to load sessions.',
-      });
-      if (requestSeq !== sessionIndexRequestSeqRef.current) {
+      const body = await fetchSessionPages(
+        (url) => apiJson(url, { fallbackMessage: 'Failed to load sessions.' }),
+        sessionPageCountRef.current,
+        () => requestSeq === sessionIndexRequestSeqRef.current,
+      );
+      if (!body || requestSeq !== sessionIndexRequestSeqRef.current) {
         return null;
       }
 
-      const sessions = Array.isArray(body.sessions) ? body.sessions : [];
+      const sessions = body.sessions;
+      sessionPageCountRef.current = body.pages;
+      setHasMoreSessions(body.hasMore);
       setSessionIndex(sessions);
       setHasLoadedSessionIndex(true);
       setSessionNameDrafts((previous) => {
@@ -1074,6 +1083,12 @@ export default function OSCEAiMarkerMockup({
     // autoProcess off). The only thing to do with such a session is start it,
     // so the card offers exactly that — the endpoint behind this button had no
     // caller in the browser at all, which is what made `uploaded` a dead end.
+    // The server enforces this regardless (owner or admin only); disabling
+    // here just keeps the click from happening in the first place, with the
+    // same reason a 403 would have given.
+    const mayMutate = canMutateSession(authUser, sessionEntry);
+    const notOwnerTitle = 'Only this session’s creator or an administrator may do this.';
+
     const start = describeStartAction(sessionEntry);
     if (start) {
       return (
@@ -1081,9 +1096,9 @@ export default function OSCEAiMarkerMockup({
           <Button
             size="sm"
             onClick={() => startSession(sessionEntry)}
-            disabled={startingSessionId === sessionEntry.id}
+            disabled={startingSessionId === sessionEntry.id || !mayMutate}
             className="gap-1"
-            title={start.title}
+            title={mayMutate ? start.title : notOwnerTitle}
           >
             {startingSessionId === sessionEntry.id ? (
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -1110,9 +1125,9 @@ export default function OSCEAiMarkerMockup({
             size="sm"
             variant="outline"
             onClick={() => rerunSession(sessionEntry)}
-            disabled={rerunningSessionId === sessionEntry.id}
+            disabled={rerunningSessionId === sessionEntry.id || !mayMutate}
             className="gap-1"
-            title={rerun.title}
+            title={mayMutate ? rerun.title : notOwnerTitle}
           >
             {rerunningSessionId === sessionEntry.id ? (
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -2970,9 +2985,13 @@ export default function OSCEAiMarkerMockup({
                               size="sm"
                               variant="ghost"
                               onClick={() => deleteSession(sessionEntry.id)}
-                              disabled={deletingSessionId === sessionEntry.id}
+                              disabled={deletingSessionId === sessionEntry.id || !canMutateSession(authUser, sessionEntry)}
                               aria-label={`Delete session ${sessionEntry.name || sessionEntry.id}`}
-                              title="Delete this session and all student assessments under it"
+                              title={
+                                canMutateSession(authUser, sessionEntry)
+                                  ? 'Delete this session and all student assessments under it'
+                                  : 'Only this session’s creator or an administrator may delete it.'
+                              }
                               className="text-rose-600 hover:bg-rose-50 hover:text-rose-700 focus-visible:ring-rose-500"
                             >
                               {deletingSessionId === sessionEntry.id ? (
@@ -2986,6 +3005,16 @@ export default function OSCEAiMarkerMockup({
                       </li>
                     ))}
                   </ul>
+                  {hasMoreSessions && (
+                    <Button
+                      variant="outline"
+                      className="mt-4 w-full"
+                      disabled={sessionIndexLoading}
+                      onClick={() => refreshSessionIndex({ loadMore: true })}
+                    >
+                      {sessionIndexLoading ? 'Loading sessions…' : 'Load more sessions'}
+                    </Button>
+                  )}
                 </CardContent>
               </Card>
 

@@ -64,7 +64,7 @@ export default function CorporaManager({ onClose = null, onCreated = null, onCha
     setSaving(true);
     setError('');
     try {
-      const body = await apiJson(editor.id ? `/api/corpora/${editor.id}` : '/api/corpora', {
+      const body = await apiJson(editor.id ? `/api/admin/corpora/${editor.id}` : '/api/admin/corpora', {
         method: editor.id ? 'PUT' : 'POST',
         json: { name, terms },
         fallbackMessage: 'Failed to save corpus.',
@@ -87,7 +87,7 @@ export default function CorporaManager({ onClose = null, onCreated = null, onCha
     }
     setError('');
     try {
-      await apiJson(`/api/corpora/${corpus.id}`, {
+      await apiJson(`/api/admin/corpora/${corpus.id}`, {
         method: 'DELETE',
         fallbackMessage: 'Failed to delete corpus.',
       });

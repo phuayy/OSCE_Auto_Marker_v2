@@ -68,6 +68,12 @@ TRACKED_TABLES: tuple[str, ...] = (
     # for the same reason too — an admin disabling a marker has to reach every
     # API process on the marker's next request, not at their next restart.
     "users",
+    # A marker's own preference overrides (transcription engine, scoring
+    # model, marking mode, preprocess toggle) — the fourth value on the
+    # scoring hot path alongside app_settings, provider_credentials and
+    # llm_providers, cached the same way and for the same reason: a change
+    # saved in one process must apply to that user's next run everywhere.
+    "user_settings",
 )
 
 

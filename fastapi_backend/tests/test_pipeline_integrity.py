@@ -110,7 +110,7 @@ def test_assembling_recovery_keeps_the_session_document(tmp_path) -> None:
     uploads_dir.mkdir()
     service = AsyncUploadService(
         settings,
-        UploadRepository(uploads_dir),
+        UploadRepository(repo.database, uploads_dir),
         sessions,
         storage=LocalObjectStorageService(settings),
         jobs=None,  # type: ignore[arg-type]
@@ -152,14 +152,15 @@ def test_assembling_recovery_resumes_an_upload_whose_parts_are_complete(tmp_path
     settings = Settings(root_dir=tmp_path, backend_root=tmp_path)
     uploads_dir = tmp_path / "uploads"
     uploads_dir.mkdir()
-    upload_repo = UploadRepository(uploads_dir)
+    database = OrmDatabase(tmp_path / "s.sqlite3")
+    upload_repo = UploadRepository(database, uploads_dir)
     resumed: list[tuple[str, bool]] = []
 
     class ResumeProbe(AsyncUploadService):
         async def _assemble_and_dispatch(self, upload_id: str, should_process: bool) -> None:  # type: ignore[override]
             resumed.append((upload_id, should_process))
 
-    repo = SessionRepository(OrmDatabase(tmp_path / "s.sqlite3"))
+    repo = SessionRepository(database)
     service = ResumeProbe(
         settings,
         upload_repo,
@@ -173,16 +174,17 @@ def test_assembling_recovery_resumes_an_upload_whose_parts_are_complete(tmp_path
     )
 
     async def scenario() -> None:
+        await repo.write({"id": "s1", "name": "Case", "status": "assembling", "createdAt": "2026-01-01T00:00:00Z"})
         await upload_repo.write(
             {
                 "id": "u1",
                 "sessionId": "s1",
                 "status": "assembling",
+                "expiresAt": "2099-01-01T00:00:00Z",
                 "autoProcess": True,
                 "files": [{"fileId": "f1", "kind": "video", "sizeBytes": 20, "parts": [{"partNumber": 1, "sizeBytes": 20}]}],
             }
         )
-        await repo.write({"id": "s1", "name": "Case", "status": "assembling", "createdAt": "2026-01-01T00:00:00Z"})
         await service.recover_stale_assembling_uploads()
         await asyncio.sleep(0)
 
@@ -285,8 +287,9 @@ def test_parallel_parts_are_all_recorded(tmp_path) -> None:
     settings = Settings(root_dir=tmp_path, backend_root=tmp_path)
     uploads_dir = tmp_path / "uploads"
     uploads_dir.mkdir()
-    upload_repo = UploadRepository(uploads_dir)
-    repo = SessionRepository(OrmDatabase(tmp_path / "s.sqlite3"))
+    database = OrmDatabase(tmp_path / "s.sqlite3")
+    upload_repo = UploadRepository(database, uploads_dir)
+    repo = SessionRepository(database)
     sessions = SessionService(settings, repo)
     service = AsyncUploadService(
         settings,

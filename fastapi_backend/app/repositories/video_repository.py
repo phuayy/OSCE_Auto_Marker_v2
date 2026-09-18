@@ -22,7 +22,7 @@ class VideoRepository:
         original_name: str,
         safe_name: str,
     ) -> dict[str, Any]:
-        async with self.db.session() as s:
+        async with self.db.transaction() as s:
             result = await s.execute(
                 select(VideoRecord).where(VideoRecord.session_id == session_id)
             )
@@ -39,7 +39,7 @@ class VideoRepository:
             rec.absolute_path = storage_ref.get("localPath")
             rec.public_url = storage_ref.get("publicUrl")
             rec.storage_ref_json = dict(storage_ref)
-            await s.commit()
+            await s.flush()
             await s.refresh(rec)
         return self._to_dict(rec)
 

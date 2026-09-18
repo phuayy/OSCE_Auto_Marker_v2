@@ -13,6 +13,7 @@ from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.json_utils import extract_json_object
 from app.core.process import CommandRunner
+from app.domain.actors import provenance_user_id
 from app.llm.panel import MarkingMode
 from app.pipeline.marking.base import ContentMarkerRunner, MarkingPlan, ProgressCallback
 from app.pipeline.marking.panel import PanelAdjudicatorRunner, PanelMarking
@@ -151,10 +152,13 @@ class ScoringPipeline:
     def python_env(self, extra_env: dict[str, str] | None = None) -> dict[str, str]:
         return self.marker.python_env(extra_env)
 
-    async def scoring_env(self, extra_env: dict[str, str] | None = None) -> dict[str, str]:
-        """``python_env`` plus the resolved LLM routing for this run.
+    async def scoring_env(
+        self, owner_id: str | None = None, extra_env: dict[str, str] | None = None
+    ) -> dict[str, str]:
+        """``python_env`` plus the resolved LLM routing for this run — the
+        session owner's own choice, falling back to the deployment default.
 
-        Read per run, not per process: the operator can change the primary model
+        Read per run, not per process: the account can change its primary model
         while a long job queue is draining, and the next scorer to start must
         pick it up. A failure to resolve routing is logged and skipped rather
         than raised — the subprocess then falls back to its own environment
@@ -164,13 +168,13 @@ class ScoringPipeline:
         if self.llm_settings is None:
             return env
         try:
-            env.update(await self.llm_settings.subprocess_env())
+            env.update(await self.llm_settings.subprocess_env(owner_id))
         except Exception:
             logger.exception("Failed to resolve LLM routing; the scorer will use its environment defaults.")
         return env
 
-    async def content_marking_plan(self) -> MarkingPlan:
-        """The marking plan for this run, resolved once.
+    async def content_marking_plan(self, owner_id: str | None = None) -> MarkingPlan:
+        """The marking plan for this run, resolved once for the session owner.
 
         Same contract as ``scoring_env``: read per run, never per process, and
         a failure to resolve is logged and replaced by a plan that lets the
@@ -180,25 +184,28 @@ class ScoringPipeline:
         if self.llm_settings is None:
             return MarkingPlan.single_only()
         try:
-            return await self.llm_settings.marking_plan()
+            return await self.llm_settings.marking_plan(owner_id)
         except Exception:
             logger.exception("Failed to resolve the marking plan; the scorer will use its environment defaults.")
             return MarkingPlan.single_only()
 
     async def prepare_content_marking(self, session: dict[str, Any]) -> ContentMarkingRun:
-        """Resolve the plan for this session's content marking, once.
+        """Resolve the plan for this session's content marking, once, for
+        whoever created the session.
 
         The pipeline service calls this before it looks at the cached sheet, so
         the same plan decides both whether that sheet still counts and what
         runs if it does not.
         """
-        return ContentMarkingRun(session=session, plan=await self.content_marking_plan(), pipeline=self)
+        plan = await self.content_marking_plan(provenance_user_id(session))
+        return ContentMarkingRun(session=session, plan=plan, pipeline=self)
 
     async def run_content_scoring(self, session: dict[str, Any]) -> dict[str, Any]:
-        """Mark content under whatever the operator selected, resolving the
-        plan here. The one-call form; the pipeline service prefers
+        """Mark content under whatever the session's owner selected, resolving
+        the plan here. The one-call form; the pipeline service prefers
         :meth:`prepare_content_marking` so the cache check sees the plan too."""
-        return await self.run_content_marking(session, await self.content_marking_plan())
+        plan = await self.content_marking_plan(provenance_user_id(session))
+        return await self.run_content_marking(session, plan)
 
     async def run_content_marking(
         self,
@@ -342,7 +349,7 @@ class ScoringPipeline:
             self.settings.scorer_python_bin,
             args,
             "Communication scoring",
-            env=await self.scoring_env(),
+            env=await self.scoring_env(provenance_user_id(session)),
             on_output=self.events.log_sink(str(session["id"]), "communication-scorer"),
         )
         if not output_path.exists():

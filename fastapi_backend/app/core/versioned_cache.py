@@ -93,6 +93,8 @@ class VersionedCache:
 
             self.misses += 1
             value = await builder()
+            if len(self._entries) >= 256 and key not in self._entries:
+                self._entries.pop(next(iter(self._entries)))
             self._entries[key] = _Entry(
                 token=token,
                 value=value,
@@ -101,6 +103,7 @@ class VersionedCache:
             return value
 
     async def _lock_for(self, key: str) -> asyncio.Lock:
+        key = str(hash(key) % 64)
         async with self._guard:
             lock = self._locks.get(key)
             if lock is None:

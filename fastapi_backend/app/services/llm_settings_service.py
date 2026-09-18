@@ -36,8 +36,8 @@ from app.llm.router import LLMRouter
 from app.llm.routing import LLMTarget, RoutingConfig
 from app.llm.runtime import retry_policy_from_env
 from app.pipeline.marking.base import MarkerAssignment, MarkingPlan
-from app.repositories.app_settings_repository import AppSettingsRepository
 from app.services.custom_provider_service import CustomProviderService
+from app.services.preferences_service import PreferencesService
 from app.services.provider_credential_service import CredentialSnapshot, ProviderCredentialService
 
 logger = logging.getLogger(__name__)
@@ -90,13 +90,13 @@ TEST_MAX_TOKENS = 64
 class LLMSettingsService:
     def __init__(
         self,
-        app_settings: AppSettingsRepository,
+        preferences: PreferencesService,
         *,
         key_overrides: KeyOverrideSource | None = None,
         credential_store: ProviderCredentialService | None = None,
         custom_providers: CustomProviderService | None = None,
     ) -> None:
-        self.app_settings = app_settings
+        self.preferences = preferences
         # Keys the API holds in memory but that are not in os.environ — the
         # NVIDIA key loaded from the platform secrets file is the existing case.
         # Resolved through a callable rather than captured at construction: the
@@ -247,10 +247,11 @@ class LLMSettingsService:
             retry=retry_policy_from_env({}),
         )
 
-    async def stored_routing(self) -> RoutingConfig:
-        """The operator's raw selection, before any usability filtering."""
+    async def stored_routing(self, user_id: str | None = None) -> RoutingConfig:
+        """The account's raw selection (deployment default when ``user_id`` is
+        None or has none of its own), before any usability filtering."""
         try:
-            primary_raw, fallbacks_raw = await self.app_settings.llm_routing_selection()
+            primary_raw, fallbacks_raw = await self.preferences.llm_routing_selection(user_id)
         except Exception:
             # A settings lookup must never be the thing that fails a run.
             logger.exception("Failed to read the LLM routing settings; using the deployment default.")
@@ -261,7 +262,7 @@ class LLMSettingsService:
         )
         return config.with_retry(retry_policy_from_env())
 
-    async def routing(self) -> RoutingConfig:
+    async def routing(self, user_id: str | None = None) -> RoutingConfig:
         """The selection, filtered down to targets that can actually run here.
 
         Two filters, both of which would otherwise cost a run:
@@ -275,7 +276,7 @@ class LLMSettingsService:
         instead, so the failure surfaces as a clear provider error from the
         router rather than as "no target configured".
         """
-        return self.filter_routing(await self.stored_routing(), await self.resolve())
+        return self.filter_routing(await self.stored_routing(user_id), await self.resolve())
 
     def filter_routing(self, stored: RoutingConfig, resolved: ResolvedProviders) -> RoutingConfig:
         """``routing()``'s filtering, against an already-resolved provider set.
@@ -327,7 +328,7 @@ class LLMSettingsService:
         )
         return env
 
-    async def subprocess_env(self) -> dict[str, str]:
+    async def subprocess_env(self, user_id: str | None = None) -> dict[str, str]:
         """The single-mode handoff: the filtered routing and its credentials.
 
         One credential read for the whole handoff. The resolved set decides both
@@ -336,14 +337,16 @@ class LLMSettingsService:
         for a target chosen against the other snapshot.
         """
         resolved = await self.resolve()
-        return self.subprocess_env_for(self.filter_routing(await self.stored_routing(), resolved), resolved)
+        return self.subprocess_env_for(self.filter_routing(await self.stored_routing(user_id), resolved), resolved)
 
     # --- marking mode ------------------------------------------------------
 
-    async def stored_marking(self) -> tuple[MarkingMode, PanelConfig]:
-        """The operator's raw marking selection, before any usability filtering."""
+    async def stored_marking(self, user_id: str | None = None) -> tuple[MarkingMode, PanelConfig]:
+        """The account's raw marking selection (deployment default when
+        ``user_id`` is None or has none of its own), before any usability
+        filtering."""
         try:
-            mode_raw, panel_raw = await self.app_settings.marking_selection()
+            mode_raw, panel_raw = await self.preferences.marking_selection(user_id)
         except Exception:
             # A settings lookup must never be the thing that fails a run.
             logger.exception("Failed to read the marking-mode settings; using single-model marking.")
@@ -426,8 +429,9 @@ class LLMSettingsService:
             warnings=tuple(reasons),
         )
 
-    async def marking_plan(self) -> MarkingPlan:
-        """What this run should do to mark content, resolved once.
+    async def marking_plan(self, user_id: str | None = None) -> MarkingPlan:
+        """What this run should do to mark content, resolved once for the
+        session owner (``user_id``; the deployment default when None).
 
         Read live like ``routing()`` — a mode switched in the settings screen
         applies to the next assessment in every process — and built from one
@@ -435,15 +439,16 @@ class LLMSettingsService:
         credential snapshot.
         """
         resolved = await self.resolve()
-        routing = self.filter_routing(await self.stored_routing(), resolved)
-        selected_mode, panel = await self.stored_marking()
+        routing = self.filter_routing(await self.stored_routing(user_id), resolved)
+        selected_mode, panel = await self.stored_marking(user_id)
         return self.build_marking_plan(selected_mode, panel, routing, resolved)
 
     # --- settings screen ---------------------------------------------------
 
-    async def describe(self) -> dict[str, Any]:
+    async def describe(self, user_id: str | None = None) -> dict[str, Any]:
         """Every provider, its models, its availability, its credential state,
-        and the current choice.
+        and the current choice — the requesting account's own, falling back to
+        the deployment default for whatever it has not personalised.
 
         The credential block is metadata only - where the key came from, its last
         four characters, when it was set, how the last test went. The key itself
@@ -452,9 +457,9 @@ class LLMSettingsService:
         read one back.
         """
         resolved = await self.resolve()
-        stored = await self.stored_routing()
+        stored = await self.stored_routing(user_id)
         effective = self.filter_routing(stored, resolved)
-        selected_mode, panel = await self.stored_marking()
+        selected_mode, panel = await self.stored_marking(user_id)
         plan = self.build_marking_plan(selected_mode, panel, effective, resolved)
         sources = resolved.sources
         statuses = resolved.statuses

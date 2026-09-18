@@ -18,7 +18,9 @@ from app.llm import registry
 from app.llm.panel import MarkingMode, TieBreak
 from app.llm.routing import ROUTING_ENV_VAR, LLMTarget, RoutingConfig
 from app.repositories.app_settings_repository import AppSettingsRepository
+from app.repositories.user_settings_repository import UserSettingsRepository
 from app.services.llm_settings_service import LLMSettingsService
+from app.services.preferences_service import PreferencesService
 
 from tests.test_llm_settings_api import build_client
 
@@ -45,8 +47,9 @@ def clean_env(monkeypatch):
 
 
 def build_service(tmp_path: Path, **keys: str) -> LLMSettingsService:
-    repository = AppSettingsRepository(OrmDatabase(tmp_path / "settings.sqlite3"))
-    return LLMSettingsService(repository, key_overrides=lambda: dict(keys))
+    database = OrmDatabase(tmp_path / "settings.sqlite3")
+    preferences = PreferencesService(AppSettingsRepository(database), UserSettingsRepository(database))
+    return LLMSettingsService(preferences, key_overrides=lambda: dict(keys))
 
 
 def _routing_of(env: dict[str, str]) -> RoutingConfig:
@@ -69,7 +72,7 @@ def test_default_plan_is_single_mode_against_the_ordinary_routing(tmp_path: Path
 
 def test_a_fully_keyed_panel_gets_one_isolated_env_per_target(tmp_path: Path, clean_env) -> None:
     service = build_service(tmp_path, nvidia="nvidia-key", gemini="gemini-key", deepseek="deepseek-key")
-    asyncio.run(service.app_settings.set_values({"llmMarkingMode": "panel", "llmPanel": PANEL}))
+    asyncio.run(service.preferences.app_settings.set_values({"llmMarkingMode": "panel", "llmPanel": PANEL}))
 
     plan = asyncio.run(service.marking_plan())
 
@@ -99,7 +102,7 @@ def test_a_marker_with_no_key_here_degrades_the_panel_to_single_with_a_reason(
 ) -> None:
     # Gemini was configured on the operator's laptop; this box has no key for it.
     service = build_service(tmp_path, nvidia="nvidia-key", deepseek="deepseek-key")
-    asyncio.run(service.app_settings.set_values({"llmMarkingMode": "panel", "llmPanel": PANEL}))
+    asyncio.run(service.preferences.app_settings.set_values({"llmMarkingMode": "panel", "llmPanel": PANEL}))
 
     plan = asyncio.run(service.marking_plan())
 
@@ -115,7 +118,7 @@ def test_a_marker_with_no_key_here_degrades_the_panel_to_single_with_a_reason(
 
 def test_an_adjudicator_with_no_key_runs_the_panel_with_tie_break_only(tmp_path: Path, clean_env) -> None:
     service = build_service(tmp_path, nvidia="nvidia-key", gemini="gemini-key")
-    asyncio.run(service.app_settings.set_values(
+    asyncio.run(service.preferences.app_settings.set_values(
         {"llmMarkingMode": "panel", "llmPanel": {**PANEL, "tieBreak": "strict"}}
     ))
 
@@ -133,7 +136,7 @@ def test_an_incoherent_stored_panel_degrades_rather_than_failing(tmp_path: Path,
     """A row written by a later or earlier release may not validate; the run
     still marks."""
     service = build_service(tmp_path, nvidia="nvidia-key")
-    asyncio.run(service.app_settings.set_values(
+    asyncio.run(service.preferences.app_settings.set_values(
         {"llmMarkingMode": "panel", "llmPanel": {"markers": PANEL["markers"][:1]}}
     ))
 

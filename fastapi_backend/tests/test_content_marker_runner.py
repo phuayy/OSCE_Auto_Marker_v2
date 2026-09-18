@@ -50,7 +50,7 @@ class _PlanSettings:
         self.error = error
         self.calls = 0
 
-    async def marking_plan(self) -> MarkingPlan:
+    async def marking_plan(self, owner_id: str | None = None) -> MarkingPlan:
         self.calls += 1
         if self.error is not None:
             raise self.error

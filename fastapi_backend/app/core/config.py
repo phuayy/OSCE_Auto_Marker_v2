@@ -189,6 +189,16 @@ class StoragePaths:
         return self.storage_root / "database"
 
     @property
+    def run_dir(self) -> Path:
+        return self.storage_root / "run"
+
+    @property
+    def api_lock_path(self) -> Path:
+        """Advisory lock a second API process would contend on — see
+        app/core/single_instance.py."""
+        return self.run_dir / "api.lock"
+
+    @property
     def database_path(self) -> Path:
         return self.database_dir / "osce_marker.sqlite3"
 
@@ -240,6 +250,7 @@ class StoragePaths:
             self.uploads_dir,
             self.jobs_dir,
             self.database_dir,
+            self.run_dir,
         ]:
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -360,6 +371,12 @@ class Settings:
     job_queue_backend: str = os.getenv("JOB_QUEUE_BACKEND", "local").strip().lower() or "local"
     local_job_auto_start: bool = read_bool_env("LOCAL_JOB_AUTO_START", True)
     job_worker_concurrency: int = read_int_env("JOB_WORKER_CONCURRENCY", 2)
+    # Token revocation, the login/token rate limiters and the per-upload part
+    # lock are all in-process state (see app/core/single_instance.py) — a
+    # second API instance sharing this storage root would silently not share
+    # them. Escape hatch for a deployment that has verified it does not rely
+    # on any of that (a single-user demo, a read-mostly mirror).
+    allow_multiple_api_instances: bool = read_bool_env("ALLOW_MULTIPLE_API_INSTANCES", False)
     # How many jobs may hold the accelerator at once. Concurrency above bounds
     # jobs, which are mostly network-bound and cheap to overlap; this bounds the
     # one step that is not. Transcription and person detection each load a

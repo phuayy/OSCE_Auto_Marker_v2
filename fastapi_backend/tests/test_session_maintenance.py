@@ -42,6 +42,31 @@ def _score_payload() -> dict:
     }
 
 
+def test_unrecorded_artifacts_are_owned_by_convention(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    paths = settings.paths
+    owned = [
+        paths.output_whisperx_dir / "session-1" / "unrecorded.json",
+        paths.output_audio_dir / "session-1.mp3",
+        paths.output_scores_dir / ".session-1.json.checkpoint.json",
+        paths.output_scores_panel_dir / "session-1" / "marker.json",
+        paths.storage_root / "output" / "future" / "session-1" / "result.bin",
+        settings.object_storage_root / ".uploads" / "upload-1" / "part",
+    ]
+    spared = [
+        paths.output_audio_dir / "session-10.mp3",
+        paths.output_clips_dir / "parent" / "clip.mp4",
+        paths.output_case_study_rubrics_dir / "session-1.json",
+    ]
+    for path in owned + spared:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x")
+    service = SessionMaintenanceService(settings, None, None, None, None, None)
+    service._delete_artifacts({"id": "session-1", "parentSessionId": "parent", "upload": {"id": "upload-1"}})
+    assert not any(path.exists() for path in owned)
+    assert all(path.exists() for path in spared)
+
+
 def test_delete_session_cascades_children_and_wipes_data(tmp_path) -> None:
     async def _run() -> None:
         container = create_container(_settings(tmp_path))

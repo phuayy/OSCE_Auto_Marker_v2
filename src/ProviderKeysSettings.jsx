@@ -133,7 +133,7 @@ export default function ProviderKeysSettings({ version = 0, onProvidersChanged }
     setProviderBusy(providerId, 'testing');
     setResults((current) => ({ ...current, [providerId]: null }));
     try {
-      const body = await apiJson('/api/settings/llm-providers/test', {
+      const body = await apiJson('/api/admin/settings/llm-providers/test', {
         method: 'POST',
         json: {
           providerId,

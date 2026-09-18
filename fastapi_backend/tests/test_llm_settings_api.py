@@ -22,13 +22,16 @@ from app.database.orm import OrmDatabase
 from app.llm import registry
 from app.llm.routing import ROUTING_ENV_VAR, LLMTarget, RetryPolicy, RoutingConfig
 from app.repositories.app_settings_repository import AppSettingsRepository
+from app.repositories.user_settings_repository import UserSettingsRepository
 from app.services.container import create_container
 from app.services.llm_settings_service import LLMSettingsService
+from app.services.preferences_service import PreferencesService
 
 
 def build_service(tmp_path: Path, **keys: str) -> LLMSettingsService:
-    repository = AppSettingsRepository(OrmDatabase(tmp_path / "settings.sqlite3"))
-    return LLMSettingsService(repository, key_overrides=lambda: dict(keys))
+    database = OrmDatabase(tmp_path / "settings.sqlite3")
+    preferences = PreferencesService(AppSettingsRepository(database), UserSettingsRepository(database))
+    return LLMSettingsService(preferences, key_overrides=lambda: dict(keys))
 
 
 def build_client(tmp_path: Path) -> TestClient:
@@ -139,7 +142,7 @@ def test_routing_drops_a_provider_with_no_key_and_promotes_the_fallback(
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     service = build_service(tmp_path, deepseek="deepseek-key")
     asyncio.run(
-        service.app_settings.set_values(
+        service.preferences.app_settings.set_values(
             {
                 "llmPrimary": {"providerId": "openai", "model": "gpt-4.1"},
                 "llmFallbacks": [{"providerId": "deepseek", "model": "deepseek-chat"}],
@@ -162,7 +165,7 @@ def test_routing_keeps_an_unusable_selection_when_nothing_else_is_configured(
         monkeypatch.delenv(name, raising=False)
     service = build_service(tmp_path)
     asyncio.run(
-        service.app_settings.set_values({"llmPrimary": {"providerId": "openai", "model": "gpt-4.1"}})
+        service.preferences.app_settings.set_values({"llmPrimary": {"providerId": "openai", "model": "gpt-4.1"}})
     )
 
     routing = asyncio.run(service.routing())
@@ -177,7 +180,7 @@ def test_subprocess_env_carries_routing_and_only_the_keys_it_needs(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
     service = build_service(tmp_path)
     asyncio.run(
-        service.app_settings.set_values(
+        service.preferences.app_settings.set_values(
             {
                 "llmPrimary": {"providerId": "openai", "model": "gpt-4.1"},
                 "llmFallbacks": [],
@@ -200,7 +203,7 @@ def test_serialised_routing_never_contains_a_credential(tmp_path: Path, monkeypa
     monkeypatch.setenv("OPENAI_API_KEY", "super-secret-value")
     service = build_service(tmp_path)
     asyncio.run(
-        service.app_settings.set_values({"llmPrimary": {"providerId": "openai", "model": "gpt-4.1"}})
+        service.preferences.app_settings.set_values({"llmPrimary": {"providerId": "openai", "model": "gpt-4.1"}})
     )
 
     blob = asyncio.run(service.routing()).to_json()

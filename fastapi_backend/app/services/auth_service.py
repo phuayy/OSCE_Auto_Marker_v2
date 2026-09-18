@@ -9,6 +9,7 @@ from typing import Any
 
 from app.core.config import Settings
 from app.core.json_utils import read_json_file
+from app.core.secure_files import SECRET_DIR_MODE, harden, write_secret_text
 from app.core.security import (
     STREAM_TICKET_SCOPE,
     TokenSubject,
@@ -74,6 +75,9 @@ class AuthService:
     def _initialize_sync(self) -> None:
         paths = self.settings.paths
         paths.auth_dir.mkdir(parents=True, exist_ok=True)
+        # A directory created before this hardening existed is narrowed the
+        # same way an existing secret file is, below.
+        harden(paths.auth_dir, mode=SECRET_DIR_MODE)
         self._dummy_hash = hash_password(new_secret_hex(16), self.settings.auth_bcrypt_rounds)
         auth_secret = self._ensure_auth_secret(paths.auth_secret_path)
         secrets_payload = self._ensure_secrets_file(paths.secrets_path)
@@ -91,16 +95,20 @@ class AuthService:
             return env_secret
 
         if path.exists():
+            # Narrowed here too: a file from before this module existed is
+            # exactly as exposed as a brand new one until something does this.
+            harden(path)
             value = path.read_text(encoding="utf-8").strip()
             if value:
                 return value
         value = new_secret_hex(64)
-        path.write_text(value, encoding="utf-8")
+        write_secret_text(path, value)
         return value
 
     def _ensure_secrets_file(self, path: Path) -> dict[str, Any]:
         existing = read_json_file(path)
         if existing is not None:
+            harden(path)
             return existing
         payload = {
             "nvidiaApiKey": "",
@@ -111,7 +119,7 @@ class AuthService:
                 "NVIDIA_API_KEY / WHISPERX_HF_TOKEN env vars."
             ),
         }
-        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        write_secret_text(path, json.dumps(payload, indent=2) + "\n")
         return payload
 
     # --- login ---------------------------------------------------------------

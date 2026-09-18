@@ -39,8 +39,9 @@ from app.pipeline.transcription.base import (
     TranscriptionRequest,
     TranscriptionResult,
 )
-from app.repositories.app_settings_repository import AppSettingsRepository
+from app.domain.actors import provenance_user_id
 from app.services.event_service import EventService
+from app.services.preferences_service import PreferencesService
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +52,12 @@ class TranscriptionRouter:
         settings: Settings,
         events: EventService,
         dependencies: registry.EngineDependencies,
-        app_settings: AppSettingsRepository | None = None,
+        preferences: PreferencesService | None = None,
         gpu: ResourceLease | None = None,
     ) -> None:
         self.settings = settings
         self.events = events
-        self.app_settings = app_settings
+        self.preferences = preferences
         self.engines: dict[str, TranscriptionEngine] = registry.build_all(dependencies)
         # Every engine loads a model into the accelerator (WhisperX, Canary,
         # and the pyannote pass behind either), so the lease is taken here,
@@ -87,8 +88,11 @@ class TranscriptionRouter:
     def engine(self, engine_id: str) -> TranscriptionEngine:
         return self.engines[self.resolve_engine_id(engine_id)]
 
-    async def selection(self) -> tuple[str, dict[str, Any]]:
-        """The engine that will run, and its option bag, live from the database.
+    async def selection(self, user_id: str | None = None) -> tuple[str, dict[str, Any]]:
+        """The engine that will run, and its option bag, live from the database
+        — this account's own choice, falling back to the deployment default
+        for whatever it has not personalised (``user_id=None`` reads the
+        deployment default alone).
 
         Options are keyed per engine and picked *after* the id is resolved. That
         ordering matters: a stored id that is empty (meaning "use the deployment
@@ -96,10 +100,10 @@ class TranscriptionRouter:
         engine, and that engine's saved tuning must come with it. Reading the bag
         against the unresolved id silently ran the default engine on defaults.
         """
-        if self.app_settings is None:
+        if self.preferences is None:
             return self.default_engine_id(), {}
         try:
-            stored_id, options_by_engine = await self.app_settings.transcription_selection()
+            stored_id, options_by_engine = await self.preferences.transcription_selection(user_id)
         except Exception:
             logger.exception("Failed to read the transcription engine setting; using the default engine.")
             return self.default_engine_id(), {}
@@ -110,16 +114,16 @@ class TranscriptionRouter:
         options = options_by_engine.get(engine_id)
         return engine_id, options if isinstance(options, dict) else {}
 
-    async def stored_options(self, engine_id: str) -> dict[str, Any]:
+    async def stored_options(self, engine_id: str, user_id: str | None = None) -> dict[str, Any]:
         """The saved option bag for one engine, whether or not it is selected.
 
         The fallback path needs this: an engine standing in for a failed one
-        should still run with the tuning the operator saved for it.
+        should still run with the tuning this account saved for it.
         """
-        if self.app_settings is None:
+        if self.preferences is None:
             return {}
         try:
-            _, options_by_engine = await self.app_settings.transcription_selection()
+            _, options_by_engine = await self.preferences.transcription_selection(user_id)
         except Exception:
             logger.exception("Failed to read stored options for engine '%s'; using its defaults.", engine_id)
             return {}
@@ -144,9 +148,10 @@ class TranscriptionRouter:
 
     # --- description (settings screen) -------------------------------------
 
-    async def describe(self) -> dict[str, Any]:
-        """Every engine, its schema, its defaults here, and whether it can run."""
-        selected_id, stored_options = await self.selection()
+    async def describe(self, user_id: str | None = None) -> dict[str, Any]:
+        """Every engine, its schema, its defaults here, and whether it can run
+        — ``selected`` is the requesting account's own choice."""
+        selected_id, stored_options = await self.selection(user_id)
         engines: list[dict[str, Any]] = []
         for engine in self.engines.values():
             availability = await engine.availability()
@@ -196,7 +201,8 @@ class TranscriptionRouter:
         on_progress: ProgressCallback | None = None,
     ) -> TranscriptionResult:
         session_id = str(session["id"])
-        engine_id, stored_options = await self.selection()
+        owner_id = provenance_user_id(session)
+        engine_id, stored_options = await self.selection(owner_id)
         engine = self.engines[engine_id]
         options = self.safe_options(engine, stored_options)
 
@@ -230,12 +236,12 @@ class TranscriptionRouter:
         # two would let another job slip in and OOM both.
         async with self.gpu.hold("Transcription", session_id):
             if unavailable is not None:
-                result = await self._transcribe_with_fallback_engine(engine_id, request, unavailable)
+                result = await self._transcribe_with_fallback_engine(engine_id, request, unavailable, owner_id)
             else:
                 try:
                     result = await engine.transcribe(request)
                 except HOST_CANNOT_RUN_ENGINE_ERRORS as error:
-                    result = await self._transcribe_with_fallback_engine(engine_id, request, error)
+                    result = await self._transcribe_with_fallback_engine(engine_id, request, error, owner_id)
         if not result.diarized:
             # Loud, because unlabelled dialogue changes what the scorers can
             # conclude — not a silent quality regression.
@@ -271,6 +277,7 @@ class TranscriptionRouter:
         failed_engine_id: str,
         request: TranscriptionRequest,
         error: AppError,
+        user_id: str | None = None,
     ) -> TranscriptionResult:
         """Run the default engine when the selected one cannot run on this host.
 
@@ -328,7 +335,7 @@ class TranscriptionRouter:
             },
         )
         fallback_request = replace(
-            request, options=self.safe_options(fallback, await self.stored_options(fallback_id))
+            request, options=self.safe_options(fallback, await self.stored_options(fallback_id, user_id))
         )
         result = await fallback.transcribe(fallback_request)
         result.metadata = {

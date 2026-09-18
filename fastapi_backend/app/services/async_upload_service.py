@@ -73,6 +73,10 @@ class AsyncUploadService:
         self._background_tasks = BackgroundTaskRegistry()
 
     async def initiate(self, payload: InitiateUploadRequest, *, actor: Actor | None = None) -> dict[str, Any]:
+        async with self.repository.database.unit_of_work():
+            return await self._initiate(payload, actor=actor)
+
+    async def _initiate(self, payload: InitiateUploadRequest, *, actor: Actor | None = None) -> dict[str, Any]:
         """Reserve a session and its job for a chunked upload.
 
         ``actor`` is the account making the request; the session records it as
@@ -185,8 +189,8 @@ class AsyncUploadService:
             "files": upload_files,
             "jobId": job["id"],
         }
-        await self.repository.write(upload)
         await self.sessions.create_named(session)
+        await self.repository.write(upload)
         await self.events.publish(session_id, "status", {"code": UploadStatus.UPLOADING, "message": "Upload session created."})
         return {
             "session": self.sessions.public_session(session),
@@ -218,7 +222,7 @@ class AsyncUploadService:
         parts' bytes sit on disk unrecorded until ``complete`` rejects the whole
         upload as incomplete.
         """
-        async with self._upload_locks.hold(upload_id):
+        async with self._upload_locks.hold(upload_id), self.repository.locked(upload_id):
             upload = await self.repository.read(upload_id)
             self._assert_not_expired(upload)
             resolved_file_id = file_id or self._first_file_id(upload)
@@ -239,16 +243,22 @@ class AsyncUploadService:
 
     async def status(self, upload_id: str) -> dict[str, Any]:
         upload = await self.repository.read(upload_id)
-        if self._is_expired(upload):
+        if self._is_expired(upload) and upload.get("status") in self._RECOVERABLE_UPLOAD_STATES:
             upload["status"] = UploadStatus.EXPIRED
-            await self.repository.write(upload)
         return {"upload": self.public_upload(upload)}
 
     async def complete(self, upload_id: str, payload: CompleteUploadRequest) -> dict[str, Any]:
         # Same lock as ``put_part``: a straggling part cannot land between the
         # completeness check and the flip to "assembling".
-        async with self._upload_locks.hold(upload_id):
-            return await self._complete_locked(upload_id, payload)
+        async with self._upload_locks.hold(upload_id), self.repository.locked(upload_id):
+            previous = await self.repository.read(upload_id)
+            result = await self._complete_locked(upload_id, payload)
+        if previous.get("status") not in {UploadStatus.ASSEMBLING, UploadStatus.COMMITTED}:
+            self._background_tasks.spawn(
+                self._assemble_and_dispatch(upload_id, bool(payload.autoProcess if payload.autoProcess is not None else previous.get("autoProcess"))),
+                name=f"assemble-upload:{upload_id}",
+            )
+        return result
 
     async def _complete_locked(self, upload_id: str, payload: CompleteUploadRequest) -> dict[str, Any]:
         upload = await self.repository.read(upload_id)
@@ -274,6 +284,8 @@ class AsyncUploadService:
             }
 
         self._assert_not_expired(upload)
+        if upload.get("status") not in {UploadStatus.INITIATED, UploadStatus.UPLOADING, UploadStatus.FAILED}:
+            raise AppError("Upload cannot be completed in its current state.", status_code=409)
 
         # Lightweight completeness check: verify all declared bytes are present before
         # committing.  The heavy SHA-256 + file-assembly work happens in the background.
@@ -327,11 +339,6 @@ class AsyncUploadService:
         # is tracked in a registry to keep a strong reference (a bare
         # asyncio.create_task can be garbage-collected mid-run) and to surface
         # any unhandled exception.
-        self._background_tasks.spawn(
-            self._assemble_and_dispatch(upload_id, bool(should_process)),
-            name=f"assemble-upload:{upload_id}",
-        )
-
         job = await self.jobs.repository.read(str(upload["jobId"])) if upload.get("jobId") else None
         return {
             "session": self.sessions.public_session(session),
@@ -364,7 +371,6 @@ class AsyncUploadService:
             await self._validate_committed_video(video_ref)
             await self._validate_committed_case_study(case_study_ref)
 
-            video_file_record = self._file_by_kind(upload.get("files") or [], "video")
             case_study_record = self._file_by_kind(upload.get("files") or [], "caseStudy")
             public_url = self.storage.public_url_for_key(str(case_study_ref.get("key") or ""))
             (
@@ -378,9 +384,38 @@ class AsyncUploadService:
                 public_url=public_url,
             )
             case_study_record["storageRef"] = case_study_ref
+            job = await self._commit_assembled(
+                upload, should_process, video_ref, case_study_ref, case_study_asset, case_study_deduplicated,
+            )
+
+            # Part files are only deleted once both records are durable.
+            try:
+                await self.storage.abort_upload(upload)
+            except OSError:
+                logger.warning("Committed upload parts need cleanup: %s", upload_id, exc_info=True)
+            await self.events.publish(session_id, "status", {"code": "upload_committed", "message": "Upload committed."})
+            if job:
+                await self.jobs.start_job(job)
+
+        except Exception as error:
+            await self._assembly_failed(upload_id, session_id, error)
+
+    async def _commit_assembled(
+        self, upload: dict[str, Any], should_process: bool,
+        video_ref: dict[str, Any], case_study_ref: dict[str, Any],
+        case_study_asset: dict[str, Any] | None, case_study_deduplicated: bool,
+    ) -> dict[str, Any] | None:
+        upload_id = str(upload["id"])
+        session_id = str(upload["sessionId"])
+        async with self.repository.locked(upload_id):
+            current = await self.repository.read(upload_id)
+            if current.get("status") != UploadStatus.ASSEMBLING:
+                raise AppError("Upload is no longer assembling.", status_code=409)
+            current["files"] = upload["files"]
+            upload = current
+            video_file_record = self._file_by_kind(upload.get("files") or [], "video")
             await self.videos.save(
-                session_id,
-                video_ref,
+                session_id, video_ref,
                 original_name=str(video_file_record.get("originalName") or ""),
                 safe_name=str(video_file_record.get("safeName") or ""),
             )
@@ -434,17 +469,15 @@ class AsyncUploadService:
             await self.sessions.update(session_id, commit_session)
 
             # Part files are only deleted once both records are durable.
-            await self.storage.abort_upload(upload)
+            return job
 
-            await self.events.publish(
-                session_id,
-                "status",
-                {"code": "upload_committed", "message": "Upload committed."},
-            )
-            if job:
-                await self.jobs.start_job(job)
-
-        except Exception as error:
+    async def _assembly_failed(self, upload_id: str, session_id: str | None, error: Exception) -> None:
+        logger.error("Upload assembly failed: %s", upload_id, exc_info=error)
+        async with self.repository.locked(upload_id):
+            current = await self.repository.read(upload_id)
+            if current.get("status") != UploadStatus.ASSEMBLING:
+                logger.warning("Post-assembly operation failed for %s", upload_id, exc_info=error)
+                return
             # Mark the upload itself failed — leaving it on "assembling" would
             # make every retry of /complete hit the idempotency branch and
             # return "assembling" forever, with no way to recover client-side.
@@ -459,6 +492,7 @@ class AsyncUploadService:
                 await self.repository.write(failed_upload)
             except Exception:
                 logger.exception("Failed to persist failed upload state for upload %s.", upload_id)
+                raise
             if session_id:
                 try:
                     await self.sessions.update(session_id, self._fail_session_mutator(str(error)))
@@ -469,10 +503,15 @@ class AsyncUploadService:
                     )
                 except Exception:
                     logger.exception("Failed to persist failed session state for upload %s.", upload_id)
+                    raise
 
     async def abort(self, upload_id: str) -> dict[str, Any]:
+        async with self._upload_locks.hold(upload_id), self.repository.locked(upload_id):
+            return await self._abort_locked(upload_id)
+
+    async def _abort_locked(self, upload_id: str) -> dict[str, Any]:
         upload = await self.repository.read(upload_id)
-        if upload.get("status") == UploadStatus.COMMITTED:
+        if upload.get("status") in {UploadStatus.COMMITTED, UploadStatus.ASSEMBLING}:
             raise AppError("Committed source uploads cannot be aborted.", status_code=409)
         await self.storage.abort_upload(upload)
         upload["status"] = UploadStatus.ABORTED
@@ -655,13 +694,20 @@ class AsyncUploadService:
         a later explicit abort cannot double-act or corrupt state.
         """
         try:
-            all_uploads = await self.repository.read_all()
+            all_uploads = await self.repository.read_all(expired=True)
         except Exception as exc:  # noqa: BLE001
             logger.error("Expired-upload sweep: could not read upload records — %s", exc)
             return
 
         reclaimed = 0
         for upload in all_uploads:
+            if upload.get("status") in {UploadStatus.COMMITTED, UploadStatus.ABORTED, UploadStatus.EXPIRED}:
+                try:
+                    await self.storage.abort_upload(upload)
+                    await self.repository.delete_expired(str(upload["id"]))
+                except Exception:
+                    logger.warning("Expired upload cleanup will be retried: %s", upload["id"], exc_info=True)
+                continue
             if str(upload.get("status")) not in self._RECOVERABLE_UPLOAD_STATES:
                 continue
             if not self._is_expired(upload):
@@ -676,6 +722,7 @@ class AsyncUploadService:
                 await self.storage.abort_upload(upload)
             except Exception as exc:  # noqa: BLE001
                 logger.error("Expired-upload sweep: could not delete parts for %s — %s", upload_id, exc)
+                continue
 
             # 2. Mark the upload record terminal so the sweep never revisits it.
             try:
@@ -710,6 +757,8 @@ class AsyncUploadService:
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Expired-upload sweep: could not cancel job %s — %s", job_id, exc)
 
+            await self.repository.delete_expired(upload_id)
+            self._last_session_mirror.pop(upload_id, None)
             reclaimed += 1
             logger.warning(
                 "Expired-upload sweep: reclaimed upload %s (session %s) — parts deleted, session failed.",

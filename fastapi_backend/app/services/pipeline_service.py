@@ -12,6 +12,7 @@ from app.core.exceptions import AppError, EmptyTranscriptError
 from app.core.json_utils import extract_json_object, write_json_file
 from app.core.logging_utils import log_context
 from app.core.utils import exception_message, runtime_seconds, utc_now_iso
+from app.domain.actors import provenance_user_id
 from app.domain.enums import OutputKey, PipelineStep, StepStatus
 from app.domain.notifications import NotificationType
 from app.domain.outputs import OUTPUT_SPECS, OutputSpec
@@ -32,9 +33,9 @@ from app.pipeline.transcript_correction import (
 )
 from app.pipeline.transcription.base import TranscriptionResult
 from app.pipeline.transcription.registry import EngineDependencies
-from app.repositories.app_settings_repository import AppSettingsRepository
 from app.services.assessment_service import AssessmentService
 from app.services.event_service import EventService
+from app.services.preferences_service import PreferencesService
 from app.services.session_service import SessionMutator, SessionService
 from app.services.transcription_router import TranscriptionRouter
 
@@ -85,7 +86,7 @@ class PipelineService:
         assessments: AssessmentService | None = None,
         notifications: "NotificationService | None" = None,
         preprocessor: TranscriptPreprocessor | None = None,
-        app_settings: AppSettingsRepository | None = None,
+        preferences: PreferencesService | None = None,
         transcription: TranscriptionRouter | None = None,
     ) -> None:
         self.sessions = sessions
@@ -95,14 +96,14 @@ class PipelineService:
         self.assessments = assessments
         self.notifications = notifications
         self.preprocessor = preprocessor
-        self.app_settings = app_settings
-        self.transcription = transcription or self._default_transcription_router(events, media, app_settings)
+        self.preferences = preferences
+        self.transcription = transcription or self._default_transcription_router(events, media, preferences)
 
     @staticmethod
     def _default_transcription_router(
         events: EventService,
         media: MediaPipeline,
-        app_settings: AppSettingsRepository | None,
+        preferences: PreferencesService | None,
     ) -> TranscriptionRouter | None:
         """Assemble a router from the media pipeline when the caller supplied none.
 
@@ -120,7 +121,7 @@ class PipelineService:
             settings,
             events,
             EngineDependencies(settings, runner, events, auth, media),
-            app_settings=app_settings,
+            preferences=preferences,
         )
 
     def _describe_transcription(self, result: TranscriptionResult) -> dict[str, Any]:
@@ -408,8 +409,8 @@ class PipelineService:
         step = PipelineStep.LLM_PREPROCESS
         enabled = (
             self.preprocessor is not None
-            and self.app_settings is not None
-            and await self.app_settings.llm_preprocess_enabled()
+            and self.preferences is not None
+            and await self.preferences.llm_preprocess_enabled(provenance_user_id(session))
         )
         if not enabled:
             await self._mark_pipeline_step(session, step, StepStatus.SKIPPED)

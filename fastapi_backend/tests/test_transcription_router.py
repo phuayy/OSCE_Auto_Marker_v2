@@ -74,7 +74,7 @@ class StubAppSettings:
         self.options = options or {}
         self.error = error
 
-    async def transcription_selection(self) -> tuple[str, dict[str, Any]]:
+    async def transcription_selection(self, user_id: str | None = None) -> tuple[str, dict[str, Any]]:
         """Mirrors AppSettingsRepository: the stored id plus the options map
         keyed by engine id. The map is deliberately not pre-resolved — picking
         the bag is the router's job, because only it knows which engine an empty
@@ -108,7 +108,7 @@ def build_router(
     auth = type("Auth", (), {"runtime": type("Runtime", (), {"whisperx_hf_token": "hf"})()})()
     media = MediaPipeline(settings, runner, events, auth)
     dependencies = registry.EngineDependencies(settings, runner, events, auth, media)
-    return TranscriptionRouter(settings, events, dependencies, app_settings=app_settings), events
+    return TranscriptionRouter(settings, events, dependencies, preferences=app_settings), events
 
 
 def run_with_recording_engine(

@@ -38,9 +38,9 @@ const SETTINGS_CARDS = [
   ['TranscriptionEngineSettings.jsx', 'EngineSettingsSkeleton'],
   ['LlmRoutingSettings.jsx', 'ScoringModelSkeleton'],
   ['MarkingModeSettings.jsx', 'MarkingModeSkeleton'],
+  ['SettingsPage.jsx', 'ToggleRowSkeleton'],
   ['ProviderKeysSettings.jsx', 'ProviderKeysSkeleton'],
   ['CustomProvidersSettings.jsx', 'CustomProvidersSkeleton'],
-  ['SettingsPage.jsx', 'ToggleRowSkeleton'],
   ['CorporaManager.jsx', 'ListRowsSkeleton'],
   ['WebhooksManager.jsx', 'WebhookRowsSkeleton'],
 ];
@@ -152,7 +152,7 @@ test('page-frame skeletons carry the titles of the pages they stand in for', () 
   // The frames copy the pages' headers so nothing moves when the chunk mounts.
   // The copy is deliberate; this keeps it honest.
   for (const [file, strings] of [
-    ['SettingsPage.jsx', ['Settings', 'Global options applied to every assessment run']],
+    ['SettingsPage.jsx', ['Settings', 'Applied to every assessment you run']],
     ['AnalyticsPage.jsx', ['Score Analytics', 'Assessment results stored in the database']],
     ['CommunicationRubricPanel.jsx', ['Communication Rubric', 'Editable']],
     ['UsersAdminPage.jsx', ['Users', 'Who can sign in, and what they may do']],

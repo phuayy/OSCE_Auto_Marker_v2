@@ -17,6 +17,7 @@ from typing import Any
 from app.core.config import Settings
 from app.core.json_utils import extract_json_object
 from app.core.process import CommandRunner
+from app.domain.actors import provenance_user_id
 from app.services.auth_service import AuthService
 from app.services.event_service import EventService
 
@@ -111,12 +112,12 @@ class TranscriptPreprocessor:
             env["NVIDIA_API_KEY"] = self.auth.runtime.nvidia_api_key
         return env
 
-    async def preprocess_env(self) -> dict[str, str]:
+    async def preprocess_env(self, owner_id: str | None) -> dict[str, str]:
         env = self.python_env()
         if self.llm_settings is None:
             return env
         try:
-            env.update(await self.llm_settings.subprocess_env())
+            env.update(await self.llm_settings.subprocess_env(owner_id))
         except Exception:
             logger.exception(
                 "Failed to resolve LLM routing for transcript preprocess; using environment defaults."
@@ -145,7 +146,7 @@ class TranscriptPreprocessor:
             self.settings.scorer_python_bin,
             args,
             "LLM transcript preprocess",
-            env=await self.preprocess_env(),
+            env=await self.preprocess_env(provenance_user_id(session)),
             on_output=self.events.log_sink(str(session["id"]), "llm-preprocess"),
         )
         if not output_path.exists():

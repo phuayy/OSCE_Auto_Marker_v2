@@ -298,8 +298,8 @@ test('routing usage names the roles a provider is selected for', () => {
 });
 
 test('the endpoint helper encodes the id it is given', () => {
-  assert.equal(providerEndpoint('campus-gateway'), '/api/settings/llm-providers/campus-gateway');
-  assert.equal(providerEndpoint('a b'), '/api/settings/llm-providers/a%20b');
+  assert.equal(providerEndpoint('campus-gateway'), '/api/admin/settings/llm-providers/campus-gateway');
+  assert.equal(providerEndpoint('a b'), '/api/admin/settings/llm-providers/a%20b');
 });
 
 // --- the model dropdown's side of it --------------------------------------

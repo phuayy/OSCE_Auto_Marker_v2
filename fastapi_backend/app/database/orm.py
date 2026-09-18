@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
+
+from sqlalchemy import text
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -57,6 +60,29 @@ class OrmDatabase:
             autoflush=False,
         )
         self._initialized = False
+        self._unit: ContextVar[tuple[asyncio.Task, AsyncSession] | None] = ContextVar("database_unit", default=None)
+
+    def _current_unit(self) -> AsyncSession | None:
+        unit = self._unit.get()
+        return unit[1] if unit is not None and unit[0] is asyncio.current_task() else None
+
+    @asynccontextmanager
+    async def unit_of_work(self) -> AsyncIterator[AsyncSession]:
+        current = self._current_unit()
+        if current is not None:
+            yield current
+            return
+        await self.initialize()
+        async with self.session_factory() as session, session.begin():
+            if self.engine.dialect.name == "sqlite":
+                await session.execute(text("BEGIN IMMEDIATE"))
+                session.info["write_locked"] = True
+            token = self._unit.set((asyncio.current_task(), session))
+            try:
+                yield session
+                await session.flush()
+            finally:
+                self._unit.reset(token)
 
     async def initialize(self, *, migrate: bool | None = None) -> None:
         if self._initialized:
@@ -76,6 +102,10 @@ class OrmDatabase:
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
+        current = self._current_unit()
+        if current is not None:
+            yield current
+            return
         await self.initialize()
         async with self.session_factory() as session:
             try:
@@ -85,6 +115,11 @@ class OrmDatabase:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[AsyncSession]:
+        current = self._current_unit()
+        if current is not None:
+            yield current
+            await current.flush()
+            return
         await self.initialize()
         async with self.session_factory() as session:
             try:

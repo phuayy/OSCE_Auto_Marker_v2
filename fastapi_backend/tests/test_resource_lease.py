@@ -135,7 +135,7 @@ def test_router_holds_the_lease_around_whichever_engine_runs(tmp_path: Path) -> 
     router = TranscriptionRouter.__new__(TranscriptionRouter)
     router.settings = settings
     router.events = _Events()
-    router.app_settings = None
+    router.preferences = None
     router.engines = {"watch": engine}
     router.gpu = lease
 

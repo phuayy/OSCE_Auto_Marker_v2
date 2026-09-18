@@ -148,6 +148,24 @@ class AssessmentCriterionRecord(Base):
     result: Mapped[AssessmentResultRecord] = relationship(back_populates="criteria")
 
 
+class UploadRecord(Base):
+    __tablename__ = "uploads"
+    __table_args__ = (
+        Index("idx_uploads_session", "session_id"),
+        Index("idx_uploads_expiry", "expires_at", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False)
+    files_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    created_by: Mapped[str | None] = mapped_column(String(36))
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
 class VideoRecord(Base):
     __tablename__ = "source_videos"
     __table_args__ = (Index("idx_source_videos_session_id", "session_id"),)
@@ -422,12 +440,32 @@ class UserActionTokenRecord(Base):
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
+class UserSettingRecord(Base):
+    """One account's overrides of the *user-scoped* settings keys
+    (``app.domain.settings_scope.USER_SCOPED_KEYS``) — the transcription
+    engine, scoring model, marking mode and preprocess toggle they run their
+    own assessments with. Everything else stays in ``app_settings`` alone.
+
+    One row per user, the whole overlay as one JSON document, mirroring
+    ``AppSettingRecord``'s per-run, no-restart-needed contract but keyed on the
+    account rather than global. Deleting the account takes its overrides with
+    it — there is nothing left for them to mean.
+    """
+
+    __tablename__ = "user_settings"
+
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    values: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
 class SessionRecord(Base):
     __tablename__ = "sessions"
     __table_args__ = (
         Index("idx_sessions_status", "status"),
         Index("idx_sessions_parent_session_id", "parent_session_id"),
         Index("idx_sessions_created_at", "created_at"),
+        Index("idx_sessions_created_id", "created_at", "id"),
         Index("idx_sessions_created_by", "created_by"),
     )
 
