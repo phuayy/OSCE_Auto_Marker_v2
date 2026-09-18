@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.api.dependencies import require_admin
 from app.api.routes import settings as settings_routes
 from app.core.config import Settings
 from app.database.orm import OrmDatabase
@@ -57,6 +58,9 @@ def build_client(tmp_path: Path) -> TestClient:
     app = FastAPI()
     app.state.container = container
     app.include_router(settings_routes.router, prefix="/api")
+    app.include_router(settings_routes.admin_router, prefix="/api")
+    # This module exercises settings storage, not authorization.
+    app.dependency_overrides[require_admin] = lambda: {"sub": "test-admin", "username": "admin", "role": "admin"}
     return TestClient(app)
 
 
@@ -75,7 +79,7 @@ def test_settings_routes_get_put_and_reject_unknown_keys(tmp_path: Path) -> None
         "llmPanel": {},
     }
 
-    updated = client.put("/api/settings", json={"llmTranscriptPreprocess": True})
+    updated = client.put("/api/admin/settings", json={"llmTranscriptPreprocess": True})
     assert updated.status_code == 200
     assert updated.json()["settings"]["llmTranscriptPreprocess"] is True
 
@@ -83,5 +87,5 @@ def test_settings_routes_get_put_and_reject_unknown_keys(tmp_path: Path) -> None
     assert client.get("/api/settings").json()["settings"]["llmTranscriptPreprocess"] is True
 
     # Unknown keys 422 loudly (extra="forbid") instead of silently dropping.
-    rejected = client.put("/api/settings", json={"llmTranscriptPreprocess": True, "bogus": 1})
+    rejected = client.put("/api/admin/settings", json={"llmTranscriptPreprocess": True, "bogus": 1})
     assert rejected.status_code == 422

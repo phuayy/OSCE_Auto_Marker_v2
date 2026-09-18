@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.domain.notifications import SUBSCRIBABLE_EVENT_TYPES
 
 from tests.test_routes import build_test_client
+from tests.test_user_admin import GOOD_PASSWORD, MARKER_EMAIL, _activate_marker, _headers, _token
 
 
 def _authed(client) -> dict[str, str]:
@@ -39,6 +40,22 @@ def test_webhook_routes_require_authentication(tmp_path) -> None:
     assert client.get("/api/admin/webhooks").status_code == 401
     assert client.post("/api/admin/webhooks", json={"url": "https://example.com/h"}).status_code == 401
     assert client.delete("/api/admin/webhooks/anything").status_code == 401
+
+
+def test_a_marker_cannot_manage_webhooks(tmp_path) -> None:
+    """Webhooks are deployment-wide config: a marker may not even list them."""
+    client = build_test_client(tmp_path)
+    admin_token = _token(client)
+    _activate_marker(client, admin_token, MARKER_EMAIL)
+    marker_headers = _headers(_token(client, MARKER_EMAIL, GOOD_PASSWORD))
+
+    assert client.get("/api/admin/webhooks", headers=marker_headers).status_code == 403
+    assert (
+        client.post(
+            "/api/admin/webhooks", json={"url": "https://example.com/h"}, headers=marker_headers
+        ).status_code
+        == 403
+    )
 
 
 def test_create_returns_the_secret_once_then_masks_it(tmp_path) -> None:
