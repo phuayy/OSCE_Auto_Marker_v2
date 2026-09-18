@@ -74,10 +74,11 @@ from scorer_checkpoint import (
     read_checkpoint,
     write_checkpoint,
 )
+from scorer_env_allowlist import LLM_SCORER_ENV_ALLOWLIST
 from scorer_inputs import InputError, optional_directory, required_file, run_main, session_id_from
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-load_env_file(ROOT_DIR)
+load_env_file(ROOT_DIR, allowed_keys=LLM_SCORER_ENV_ALLOWLIST)
 
 CHECKPOINT_SCHEMA = "osce-panel-adjudicator-checkpoint-v1"
 # Schema of the adjudication record written beside the marker sheets.

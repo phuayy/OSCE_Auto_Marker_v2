@@ -33,9 +33,10 @@ from llm_bootstrap import (
     read_int_env,
     validator_from,
 )
+from scorer_env_allowlist import NEMOTRON_PREPROCESSOR_ENV_ALLOWLIST
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-load_env_file(ROOT_DIR)
+load_env_file(ROOT_DIR, allowed_keys=NEMOTRON_PREPROCESSOR_ENV_ALLOWLIST)
 
 # Provider and model come from the settings-driven router, the same selection
 # the scorers use. See scripts/llm_bootstrap.py.
