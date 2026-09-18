@@ -2389,19 +2389,28 @@ export default function OSCEAiMarkerMockup({
       </PageHeader>
 
       <main id="main" className="mx-auto max-w-7xl px-6 py-10">
-        {/* Three states share this slot: the dashboard, the placeholder for a
-            workspace being fetched, and the workspace. The placeholder is a
-            screen of its own — the dashboard stands down while it shows —
-            because that is what the click asked for: the next screen, in
-            outline, until its data arrives. `showWorkspace` itself only flips
-            once the payload is in, so the URL sync effects above see the
-            same sequence they always did.
+        {/* Two states share this slot: the dashboard, and the workspace panel
+            (which itself shows either the loading placeholder or the loaded
+            session). The placeholder is a screen of its own — the dashboard
+            stands down while it shows — because that is what the click asked
+            for: the next screen, in outline, until its data arrives.
+            `showWorkspace` itself only flips once the payload is in, so the
+            URL sync effects above see the same sequence they always did.
 
             Opening a session is a route change (#/session/<id>) even though
             it stays inside AppShell's single "dashboard" AnimatePresence
-            entry, so the fade between these three states is the same one
+            entry, so the fade between these two states is the same one
             AppShell gives every other route: opacity only, 0.25s, one state
-            in flight at a time (`mode="wait"`). */}
+            in flight at a time (`mode="wait"`).
+
+            The placeholder and the loaded session used to be two more keys
+            here (`workspace-loading` then `workspace`), so a fetch that
+            resolved before its own 0.25s enter fade finished forced a second,
+            immediate exit+enter — the skeleton visibly flashed in and back
+            out on anything but a slow load. They now share one key
+            (`workspace-panel`) and swap their *content* in place; the panel
+            itself only enters once, when the dashboard stands down, and only
+            exits when the user actually leaves the workspace (`goHome`). */}
         <AnimatePresence mode="wait">
         {!showWorkspace && !workspaceLoad && (
           <motion.section
@@ -2992,29 +3001,23 @@ export default function OSCEAiMarkerMockup({
           </motion.section>
         )}
 
-        {workspaceLoad && (
+        {/* One panel, one key, for both the placeholder and the loaded
+            session — see the comment above `<AnimatePresence mode="wait">`.
+            The chunk fallback inside `LazyBoundary` is the same skeleton, in
+            the layout the loaded session actually has: if the chunk arrives
+            after the payload — a slow network beats the preload — the
+            placeholder simply stays. */}
+        {(workspaceLoad || showWorkspace) && (
           <motion.div
-            key="workspace-loading"
+            key="workspace-panel"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.25 }}
           >
+          {workspaceLoad ? (
             <WorkspaceSkeleton layout={workspaceLoad.layout} label={workspaceLoad.label} />
-          </motion.div>
-        )}
-
-        {/* The chunk fallback is the same skeleton, in the layout the loaded
-            session actually has: if the chunk arrives after the payload — a
-            slow network beats the preload — the placeholder simply stays. */}
-        {showWorkspace && !workspaceLoad && (
-          <motion.div
-            key="workspace"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.25 }}
-          >
+          ) : (
           <LazyBoundary fallback={<WorkspaceSkeleton layout={workspaceLayoutFor(session)} />}>
             <SessionWorkspace
               session={session}
@@ -3075,6 +3078,7 @@ export default function OSCEAiMarkerMockup({
               demoLongVideoSummaries={demoLongVideoSummaries}
             />
           </LazyBoundary>
+          )}
           </motion.div>
         )}
         </AnimatePresence>

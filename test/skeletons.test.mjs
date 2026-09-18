@@ -174,8 +174,11 @@ test('opening a session draws the workspace in outline instead of dimming the da
   assert.match(DASHBOARD, /const \[workspaceLoad, setWorkspaceLoad\] = useState\(null\)/);
   // The skeleton fades in with the same transition every other route uses
   // (AppShell's rubric/analytics/settings/dashboard swap) — see the
-  // AnimatePresence wrapping this main slot.
-  assert.match(DASHBOARD, /\{workspaceLoad && \(\s*<motion\.div[\s\S]*?<WorkspaceSkeleton layout=\{workspaceLoad\.layout\} label=\{workspaceLoad\.label\} \/>/);
+  // AnimatePresence wrapping this main slot. It shares ONE AnimatePresence
+  // key with the loaded workspace ("workspace-panel"): they used to be two
+  // keys, so a fetch resolving inside the skeleton's own 0.25s enter fade
+  // forced an immediate second exit+enter and the skeleton visibly flashed.
+  assert.match(DASHBOARD, /\{\(workspaceLoad \|\| showWorkspace\) && \(\s*<motion\.div[\s\S]*?<WorkspaceSkeleton layout=\{workspaceLoad\.layout\} label=\{workspaceLoad\.label\} \/>/);
   // … and the dashboard stands down while it shows.
   assert.match(DASHBOARD, /\{!showWorkspace && !workspaceLoad && \(/);
   // The chunk fallback is the same skeleton, in the loaded session's layout.
