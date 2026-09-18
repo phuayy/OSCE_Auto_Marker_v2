@@ -956,9 +956,13 @@ role handed to the request is the *row's*. Consequences:
 
 Short-lived **stream tickets** (`GET /api/auth/stream-ticket`) for SSE and
 `<video>` URLs carry the same claims and die with the account. `POST
-/api/auth/logout` still revokes one token in `TokenRevocationRegistry`
-(in-process); `POST /api/auth/password` changes the caller's own password,
-ends every *other* session, and answers with a fresh token so the tab stays in.
+/api/auth/logout` revokes one token by writing its id to `revoked_tokens`
+(`token_revocation_repository.py`) — durable and cross-process, the same
+`SnapshotCache`-over-a-change-tracked-table shape `UserDirectory` uses over
+`users`, so a restart or a second API process honours the logout immediately
+rather than only the process that handled the request remembering it; `POST
+/api/auth/password` changes the caller's own password, ends every *other*
+session, and answers with a fresh token so the tab stays in.
 
 **Authorization is a router-level dependency.** `require_admin`
 ([api/dependencies.py](fastapi_backend/app/api/dependencies.py)) is declared on

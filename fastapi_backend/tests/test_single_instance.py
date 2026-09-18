@@ -1,6 +1,6 @@
 """Only one API process may hold a storage root's in-process state at a
-time — token revocation, the login/token rate limiters and the per-upload
-part lock. See app/core/single_instance.py and CLAUDE.md "Host hardening".
+time — the login/token rate limiters and the per-upload part lock. See
+app/core/single_instance.py and CLAUDE.md "Host hardening".
 """
 
 from __future__ import annotations

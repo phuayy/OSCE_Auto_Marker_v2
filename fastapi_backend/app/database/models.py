@@ -466,6 +466,29 @@ class UserActionTokenRecord(Base):
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
+class RevokedTokenRecord(Base):
+    """A logged-out bearer token's id, durable across restarts and processes.
+
+    Backs ``AuthService``'s revocation check the same way ``users`` backs
+    ``UserDirectory``: a ``SnapshotCache`` holds the active id set in memory,
+    refreshed by this table's change-tracking trigger. ``token_id`` is the
+    JWT's own ``tokenId`` claim (see ``core/security.py``), not a surrogate —
+    there is nothing else to key on. ``expires_at`` mirrors the token's own
+    expiry so a row can be purged once the token it names could never be
+    replayed again, the same purge shape as ``UserActionTokenRecord``.
+    """
+
+    __tablename__ = "revoked_tokens"
+    __table_args__ = (Index("idx_revoked_tokens_expires_at", "expires_at"),)
+
+    token_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Nullable and informational only (operator visibility) — verification
+    # keys on token_id alone, never on the account.
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
 class UserSettingRecord(Base):
     """One account's overrides of the *user-scoped* settings keys
     (``app.domain.settings_scope.USER_SCOPED_KEYS``) — the transcription
