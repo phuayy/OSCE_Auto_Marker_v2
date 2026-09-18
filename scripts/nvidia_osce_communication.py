@@ -48,11 +48,12 @@ from llm_bootstrap import (
 from llm_bootstrap import (
     read_json_transcript_text as read_transcript_text,
 )
+from scorer_env_allowlist import NVIDIA_OSCE_COMMUNICATION_ENV_ALLOWLIST
 from scorer_inputs import optional_file, required_file, run_main, session_id_from
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 read_json_transcript_text = partial(read_transcript_text, include_ms=False)
-load_env_file(ROOT_DIR)
+load_env_file(ROOT_DIR, allowed_keys=NVIDIA_OSCE_COMMUNICATION_ENV_ALLOWLIST)
 STORAGE_DIR = ROOT_DIR / "storage"
 COMM_SCORES_DIR = STORAGE_DIR / "output" / "communication_scores"
 AUTH_DIR = STORAGE_DIR / "auth"

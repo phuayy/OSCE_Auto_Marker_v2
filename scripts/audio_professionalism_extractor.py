@@ -14,10 +14,11 @@ from typing import Any, Iterable
 
 from env_loader import load_env_file
 from llm_bootstrap import write_text_atomic
+from scorer_env_allowlist import AUDIO_EXTRACTOR_ENV_ALLOWLIST
 from scorer_inputs import required_file, run_main, session_id_from
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-load_env_file(ROOT_DIR)
+load_env_file(ROOT_DIR, allowed_keys=AUDIO_EXTRACTOR_ENV_ALLOWLIST)
 STORAGE_DIR = ROOT_DIR / "storage"
 OUTPUT_DIR = STORAGE_DIR / "output" / "audio_professionalism"
 

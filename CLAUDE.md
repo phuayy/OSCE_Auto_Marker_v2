@@ -1753,7 +1753,16 @@ stays credential-free and safe to log.
 `scripts/llm_bootstrap.py` puts `fastapi_backend` on `sys.path` and re-exports
 the router, so the scorers and the API can never disagree about which model ran.
 Running a scorer by hand with no `OSCE_LLM_ROUTING` falls back to the legacy
-`NVIDIA_MODEL_NAME` / `NVIDIA_FALLBACK_MODELS` behaviour unchanged.
+`NVIDIA_MODEL_NAME` / `NVIDIA_FALLBACK_MODELS` behaviour unchanged. That
+by-hand case is also the only reason `scripts/env_loader.py` reads `.env` at
+all — a real run already receives everything it needs, explicitly, from the
+process that spawned it. `load_env_file` therefore takes an `allowed_keys`
+allowlist (`scripts/scorer_env_allowlist.py`, least-privilege per script) so
+a `.env` load cannot readmit `AUTH_SECRET`, `DATABASE_URL` or every provider
+key this deployment holds into a scorer's environment — nearly all of them
+would otherwise be unset in the curated environment a real run starts with,
+so an unrestricted load re-admitted the very secrets `inherited_env()`
+(`app/core/subprocess_env.py`) exists to withhold.
 
 Each score file records the model **that actually produced it** (`model`,
 `model_provider`) rather than the configured primary — after a fallback those
