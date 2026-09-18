@@ -146,7 +146,7 @@ def test_delete_session_cascades_children_and_wipes_data(tmp_path) -> None:
             with pytest.raises(FileNotFoundError):
                 await container.sessions.read(sid)
         assert await container.assessments.list_result_rows() == []
-        assert await container.notifications.list_rows() == []
+        assert await container.notifications.list_rows(viewer_id="viewer") == []
         assert await container.videos.get_for_session(child_id) is None
         assert await container.jobs.list_jobs(child_id) == []
         # Owned artifacts gone; shared case study spared.

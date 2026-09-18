@@ -89,21 +89,23 @@ class NotificationService:
         return notification
 
     async def _publish(self, event_type: str, notification: dict[str, Any]) -> None:
-        """Push the notification to connected browsers over the change feed."""
+        """Push the notification to connected browsers over the change feed.
+
+        No ``unreadCount`` in this payload: read state is per-viewer (see
+        :meth:`feed`) and this is one broadcast to every connected browser, so
+        there is no single count that would be correct for all of them. The
+        browser refetches its own count from ``GET /api/notifications``
+        instead — the same thing it already does for a cross-process
+        ``notifications`` change event.
+        """
         if self.changes is None:
             return
-        try:
-            unread = await self.repository.unread_count()
-        except Exception:
-            logger.warning("Could not read unread count for push payload.", exc_info=True)
-            unread = None
         try:
             self.changes.publish_event(
                 NOTIFICATION_EVENT,
                 {
                     "event": event_type,
                     "notification": notification,
-                    "unreadCount": unread,
                 },
             )
         except Exception:
@@ -135,7 +137,7 @@ class NotificationService:
 
     # -- read paths, delegated so routes depend on one collaborator ---------
 
-    async def feed(self, limit: int = 200) -> dict[str, Any]:
+    async def feed(self, limit: int = 200, *, viewer_id: str) -> dict[str, Any]:
         """The payload behind ``GET /api/notifications``, served from cache.
 
         This endpoint is fetched on every stream reconnect, on every change
@@ -143,32 +145,35 @@ class NotificationService:
         hottest reads in the app — and its two queries (the row list and the
         unread count) always move together. Caching them as one entry means a
         browser reconnect storm costs a single pair of queries rather than a
-        pair per client.
+        pair per client. The entry is keyed on ``viewer_id`` because read
+        state is per-viewer (see ``app/repositories/notification_repository.py``);
+        two markers open at once must never share a cached feed.
 
-        The entry is evicted by a write to ``notifications``, and its token is
-        that table's change counter, so a hit can never be stale. This process's
-        own writes evict it directly as well (:meth:`_evict_feed`), so the
-        response to a mark-read is never built from the feed it just changed.
+        The entry is evicted by a write to ``notifications`` *or*
+        ``notification_reads``, and its token is those tables' combined change
+        counter, so a hit can never be stale. This process's own writes evict
+        it directly as well (:meth:`_evict_feed`), so the response to a
+        mark-read is never built from the feed it just changed.
         """
         if self.cache is None or self.changes is None:
-            return await self._build_feed(limit)
+            return await self._build_feed(limit, viewer_id=viewer_id)
 
-        token = await self.changes.token(("notifications",))
+        token = await self.changes.token(("notifications", "notification_reads"))
         return await self.cache.get_or_build(
-            f"{NOTIFICATION_FEED_CACHE_KEY}:{limit}",
+            f"{NOTIFICATION_FEED_CACHE_KEY}:{viewer_id}:{limit}",
             token,
-            lambda: self._build_feed(limit),
-            tables=("notifications",),
+            lambda: self._build_feed(limit, viewer_id=viewer_id),
+            tables=("notifications", "notification_reads"),
         )
 
-    async def _build_feed(self, limit: int) -> dict[str, Any]:
+    async def _build_feed(self, limit: int, *, viewer_id: str) -> dict[str, Any]:
         return {
-            "notifications": await self.repository.list_rows(limit),
-            "unreadCount": await self.repository.unread_count(),
+            "notifications": await self.repository.list_rows(limit, viewer_id=viewer_id),
+            "unreadCount": await self.repository.unread_count(viewer_id=viewer_id),
         }
 
     def _evict_feed(self) -> None:
-        """Drop the cached feed after a write made by this process.
+        """Drop every viewer's cached feed after a write made by this process.
 
         The database announces every committed write and the change feed evicts
         on that announcement, but with the PostgreSQL listener connected the
@@ -177,32 +182,37 @@ class NotificationService:
         pre-write entry — and the browser that just marked everything read
         polls, reconnects and refetches on exactly that kind of boundary. The
         announcement still reaches every other process; this only closes the
-        read-your-writes window in the one that wrote.
+        read-your-writes window in the one that wrote. Every viewer's entry is
+        dropped (not just the writer's) because ``invalidate_tables`` matches
+        by table, not by cache key — cheap, since this table is written a
+        handful of times per session, not per request.
         """
         if self.cache is None:
             return
-        self.cache.invalidate_tables(("notifications",))
+        self.cache.invalidate_tables(("notifications", "notification_reads"))
 
-    async def list_rows(self, limit: int = 200) -> list[dict[str, Any]]:
-        return await self.repository.list_rows(limit)
+    async def list_rows(self, limit: int = 200, *, viewer_id: str) -> list[dict[str, Any]]:
+        return await self.repository.list_rows(limit, viewer_id=viewer_id)
 
-    async def unread_count(self) -> int:
-        return await self.repository.unread_count()
+    async def unread_count(self, *, viewer_id: str) -> int:
+        return await self.repository.unread_count(viewer_id=viewer_id)
 
-    async def mark_read(self, notification_id: str) -> bool:
-        marked = await self.repository.mark_read(notification_id)
+    async def mark_read(self, notification_id: str, *, viewer_id: str) -> bool:
+        marked = await self.repository.mark_read(notification_id, viewer_id=viewer_id)
         if marked:
             self._evict_feed()
         return marked
 
-    async def mark_all_read(self) -> int:
-        """Mark every unread notification read; returns how many were unread.
+    async def mark_all_read(self, *, viewer_id: str) -> int:
+        """Mark every notification this viewer has not read; returns how many
+        were unread.
 
         One repository call, one transaction, one change announcement — the
         "dismiss all" control must not be a loop over :meth:`mark_read`, which
-        would announce and refetch once per row.
+        would announce and refetch once per row. Scoped to ``viewer_id``: this
+        must never touch another marker's read state.
         """
-        marked = await self.repository.mark_all_read()
+        marked = await self.repository.mark_all_read(viewer_id=viewer_id)
         if marked:
             self._evict_feed()
         return marked

@@ -5,7 +5,9 @@ import asyncio
 from app.core.tasks import BackgroundTaskRegistry
 from app.database.orm import OrmDatabase
 from app.domain.notifications import NotificationType, event_types_match
+from app.domain.users import UserRole, UserStatus
 from app.repositories.notification_repository import NotificationRepository
+from app.repositories.user_repository import UserRepository
 from app.services.change_feed_service import ChangeFeedService
 from app.services.notification_service import NOTIFICATION_EVENT, NotificationService
 
@@ -35,7 +37,21 @@ def _service(tmp_path, *, dispatcher=None, changes=None):
         webhooks=dispatcher,
         tasks=BackgroundTaskRegistry(),
     )
-    return service, repository
+    return service, repository, database
+
+
+async def _account(database: OrmDatabase, username: str = "viewer") -> str:
+    """notification_reads.user_id is a real foreign key to users.id, the same
+    reason test_user_settings.py gives for creating real account rows."""
+    record = await UserRepository(database).create(
+        username=username,
+        email=f"{username}@example.edu",
+        display_name="",
+        role=UserRole.MARKER,
+        status=UserStatus.ACTIVE,
+        password_hash=None,
+    )
+    return record.id
 
 
 # --- domain filter ---------------------------------------------------------
@@ -55,7 +71,8 @@ def test_event_type_matching_rules() -> None:
 
 def test_emit_persists_the_notification_with_its_type(tmp_path) -> None:
     async def scenario() -> None:
-        service, repository = _service(tmp_path)
+        service, repository, database = _service(tmp_path)
+        viewer = await _account(database)
 
         stored = await service.emit(
             NotificationType.SCORING_COMPLETED,
@@ -71,17 +88,17 @@ def test_emit_persists_the_notification_with_its_type(tmp_path) -> None:
         assert stored["id"]
         assert stored["createdAt"]
 
-        rows = await repository.list_rows()
+        rows = await repository.list_rows(viewer_id=viewer)
         assert len(rows) == 1
         assert rows[0]["id"] == stored["id"]
-        assert await repository.unread_count() == 1
+        assert await repository.unread_count(viewer_id=viewer) == 1
 
     asyncio.run(scenario())
 
 
 def test_emit_accepts_a_plain_string_event_type(tmp_path) -> None:
     async def scenario() -> None:
-        service, _repository = _service(tmp_path)
+        service, _repository, _database = _service(tmp_path)
         stored = await service.emit("clips.ready", "Clips ready", "3 clips.")
         assert stored["eventType"] == "clips.ready"
 
@@ -93,7 +110,7 @@ def test_emit_pushes_the_stored_row_to_stream_subscribers(tmp_path) -> None:
 
     async def scenario() -> None:
         changes = ChangeFeedService(OrmDatabase(tmp_path / "app.sqlite3"))
-        service, _repository = _service(tmp_path, changes=changes)
+        service, _repository, _database = _service(tmp_path, changes=changes)
         queue = changes.subscribe()
 
         stored = await service.emit(
@@ -106,7 +123,9 @@ def test_emit_pushes_the_stored_row_to_stream_subscribers(tmp_path) -> None:
         assert event["notification"]["id"] == stored["id"]
         assert event["notification"]["title"] == "Clips ready"
         assert event["notification"]["sessionId"] == "s-9"
-        assert event["unreadCount"] == 1
+        # No badge count on the broadcast: it is per-viewer and this is one
+        # payload for every connected browser (see NotificationService._publish).
+        assert "unreadCount" not in event
 
     asyncio.run(scenario())
 
@@ -114,7 +133,7 @@ def test_emit_pushes_the_stored_row_to_stream_subscribers(tmp_path) -> None:
 def test_emit_dispatches_to_webhooks(tmp_path) -> None:
     async def scenario() -> None:
         dispatcher = _RecordingDispatcher()
-        service, _repository = _service(tmp_path, dispatcher=dispatcher)
+        service, _repository, _database = _service(tmp_path, dispatcher=dispatcher)
 
         stored = await service.emit(NotificationType.SESSION_FAILED, "Failed", "whisperx died")
         # Dispatch is a background task by design; wait for it to actually run.
@@ -134,7 +153,8 @@ def test_webhook_failure_never_breaks_emit(tmp_path) -> None:
 
     async def scenario() -> None:
         dispatcher = _RecordingDispatcher(fail=True)
-        service, repository = _service(tmp_path, dispatcher=dispatcher)
+        service, repository, database = _service(tmp_path, dispatcher=dispatcher)
+        viewer = await _account(database)
 
         stored = await service.emit(NotificationType.SCORING_COMPLETED, "Scoring complete", "Ready.")
         await asyncio.wait_for(dispatcher.done.wait(), timeout=1.0)
@@ -142,7 +162,7 @@ def test_webhook_failure_never_breaks_emit(tmp_path) -> None:
 
         # Emit still succeeded and the row is durable.
         assert stored is not None
-        assert len(await repository.list_rows()) == 1
+        assert len(await repository.list_rows(viewer_id=viewer)) == 1
 
     asyncio.run(scenario())
 
@@ -153,12 +173,13 @@ def test_push_failure_never_breaks_emit(tmp_path) -> None:
             raise RuntimeError("bus is down")
 
     async def scenario() -> None:
-        service, repository = _service(tmp_path, changes=_BrokenChanges())
+        service, repository, database = _service(tmp_path, changes=_BrokenChanges())
+        viewer = await _account(database)
 
         stored = await service.emit(NotificationType.SCORING_COMPLETED, "Scoring complete", "Ready.")
 
         assert stored is not None
-        assert len(await repository.list_rows()) == 1
+        assert len(await repository.list_rows(viewer_id=viewer)) == 1
 
     asyncio.run(scenario())
 
@@ -167,40 +188,49 @@ def test_emit_without_collaborators_still_persists(tmp_path) -> None:
     """A bare service (scripts, worker before wiring) degrades to persistence."""
 
     async def scenario() -> None:
-        service = NotificationService(NotificationRepository(OrmDatabase(tmp_path / "app.sqlite3")))
+        database = OrmDatabase(tmp_path / "app.sqlite3")
+        viewer = await _account(database)
+        service = NotificationService(NotificationRepository(database))
         stored = await service.emit(NotificationType.CLIPS_READY, "Clips ready", "done")
         assert stored is not None
-        assert await service.unread_count() == 1
+        assert await service.unread_count(viewer_id=viewer) == 1
 
     asyncio.run(scenario())
 
 
 def test_read_paths_are_delegated(tmp_path) -> None:
     async def scenario() -> None:
-        service, _repository = _service(tmp_path)
+        service, _repository, database = _service(tmp_path)
+        viewer = await _account(database)
         stored = await service.emit(NotificationType.SCORING_COMPLETED, "A", "b", session_id="s1")
 
-        assert await service.unread_count() == 1
-        assert await service.mark_read(stored["id"]) is True
-        assert await service.unread_count() == 0
-        assert await service.mark_read("nope") is False
+        assert await service.unread_count(viewer_id=viewer) == 1
+        assert await service.mark_read(stored["id"], viewer_id=viewer) is True
+        assert await service.unread_count(viewer_id=viewer) == 0
+        assert await service.mark_read("nope", viewer_id=viewer) is False
 
         assert await service.delete_for_session("s1") == 1
-        assert await service.list_rows() == []
+        assert await service.list_rows(viewer_id=viewer) == []
 
     asyncio.run(scenario())
 
 
-def test_mark_all_read_clears_the_badge_in_one_call(tmp_path) -> None:
+def test_mark_all_read_clears_only_this_viewers_badge(tmp_path) -> None:
     async def scenario() -> None:
-        service, _repository = _service(tmp_path)
+        service, _repository, database = _service(tmp_path)
+        first = await _account(database, "first")
+        second = await _account(database, "second")
         for index in range(3):
             await service.emit(NotificationType.SCORING_COMPLETED, f"n{index}", "body")
-        assert await service.unread_count() == 3
+        assert await service.unread_count(viewer_id=first) == 3
+        assert await service.unread_count(viewer_id=second) == 3
 
-        assert await service.mark_all_read() == 3
-        assert await service.unread_count() == 0
-        assert await service.mark_all_read() == 0
+        assert await service.mark_all_read(viewer_id=first) == 3
+        assert await service.unread_count(viewer_id=first) == 0
+        assert await service.mark_all_read(viewer_id=first) == 0
+
+        # The bug this closes: another viewer's badge is untouched.
+        assert await service.unread_count(viewer_id=second) == 3
 
     asyncio.run(scenario())
 
@@ -214,7 +244,7 @@ class _FrozenChanges:
     """
 
     async def token(self, _tables):
-        return ("notifications", 1)
+        return (("notifications", 1), ("notification_reads", 1))
 
     def publish_event(self, *_args, **_kwargs):
         return None
@@ -229,39 +259,40 @@ def test_own_writes_evict_the_cached_feed_before_any_announcement(tmp_path) -> N
         from app.core.versioned_cache import VersionedCache
 
         database = OrmDatabase(tmp_path / "app.sqlite3")
+        viewer = await _account(database)
         service = NotificationService(
             NotificationRepository(database), changes=_FrozenChanges(), cache=VersionedCache()
         )
 
         first = await service.emit(NotificationType.SCORING_COMPLETED, "one", "body", session_id="s-1")
-        assert (await service.feed())["unreadCount"] == 1
+        assert (await service.feed(viewer_id=viewer))["unreadCount"] == 1
 
         # emit
         await service.emit(NotificationType.CLIPS_READY, "two", "body", session_id="s-2")
-        assert (await service.feed())["unreadCount"] == 2
+        assert (await service.feed(viewer_id=viewer))["unreadCount"] == 2
 
         # mark_read
-        assert await service.mark_read(first["id"]) is True
-        after_one = await service.feed()
+        assert await service.mark_read(first["id"], viewer_id=viewer) is True
+        after_one = await service.feed(viewer_id=viewer)
         assert after_one["unreadCount"] == 1
         assert [row["read"] for row in after_one["notifications"]] == [False, True]
 
         # mark_all_read
-        assert await service.mark_all_read() == 1
-        after_all = await service.feed()
+        assert await service.mark_all_read(viewer_id=viewer) == 1
+        after_all = await service.feed(viewer_id=viewer)
         assert after_all["unreadCount"] == 0
         assert all(row["read"] for row in after_all["notifications"])
 
         # delete_for_session
         assert await service.delete_for_session("s-2") == 1
-        assert [row["id"] for row in (await service.feed())["notifications"]] == [first["id"]]
+        assert [row["id"] for row in (await service.feed(viewer_id=viewer))["notifications"]] == [first["id"]]
 
         # A write that changed nothing leaves the entry alone: the feed is a
         # hit, not a rebuild.
         misses_before = service.cache.misses
-        assert await service.mark_all_read() == 0
-        assert await service.mark_read("missing") is False
-        await service.feed()
+        assert await service.mark_all_read(viewer_id=viewer) == 0
+        assert await service.mark_read("missing", viewer_id=viewer) is False
+        await service.feed(viewer_id=viewer)
         assert service.cache.misses == misses_before
 
     asyncio.run(scenario())

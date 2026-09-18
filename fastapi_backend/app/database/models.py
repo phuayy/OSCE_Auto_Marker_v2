@@ -201,8 +201,33 @@ class NotificationRecord(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
-    # Null = unread. Single-user system, so read state lives on the row itself.
+    # Superseded by NotificationReadRecord (per-viewer read state) — every
+    # marker shares this feed, so a single row-level "read" flag cannot record
+    # who dismissed it. Kept, unread, rather than dropped in a destructive
+    # migration; no code reads it any more.
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class NotificationReadRecord(Base):
+    """One viewer's acknowledgement of one notification.
+
+    Notifications themselves stay team-wide — every marker sees every
+    session, so every marker sees every notification (see
+    ``app/domain/access.py``). Only *read state* is personal: one marker
+    dismissing the feed must not clear another marker's unread badge. The
+    composite key is the row; there is nothing else to store per pair.
+    """
+
+    __tablename__ = "notification_reads"
+    __table_args__ = (
+        Index("idx_notification_reads_user", "user_id"),
+    )
+
+    notification_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("notifications.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
 
 
 class WebhookSubscriptionRecord(Base):

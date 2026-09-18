@@ -12,9 +12,12 @@ from __future__ import annotations
 import asyncio
 import json
 
+from app.core.security import hash_password
 from app.database.orm import OrmDatabase
 from app.domain.notifications import NotificationType
+from app.domain.users import UserRole, UserStatus
 from app.repositories.notification_repository import NotificationRepository
+from app.repositories.user_repository import UserRepository
 from app.services.change_feed_service import ChangeFeedService
 from app.services.notification_service import NOTIFICATION_EVENT, NotificationService
 
@@ -25,6 +28,19 @@ def _authed(client) -> dict[str, str]:
     response = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
     assert response.status_code == 200
     return {"Authorization": f"Bearer {response.json()['token']}"}
+
+
+async def _account(database: OrmDatabase, username: str = "viewer") -> str:
+    """notification_reads.user_id is a real foreign key to users.id."""
+    record = await UserRepository(database).create(
+        username=username,
+        email=f"{username}@example.edu",
+        display_name="",
+        role=UserRole.MARKER,
+        status=UserStatus.ACTIVE,
+        password_hash=None,
+    )
+    return record.id
 
 
 # --- the polled REST API still works (fallback path) -----------------------
@@ -108,6 +124,45 @@ def test_notification_endpoints_still_require_auth(tmp_path) -> None:
     assert client.post("/api/notifications/read-all").status_code == 401
 
 
+def test_dismissing_all_does_not_clear_another_markers_badge(tmp_path) -> None:
+    """The A2 regression: notifications are team-wide, but read state is not.
+    One marker's "dismiss all" must never touch another marker's unread count."""
+    client = build_test_client(tmp_path)
+    container = client.app.state.container
+    admin_headers = _authed(client)
+
+    second_password = "correct-horse-battery"
+    asyncio.run(
+        container.users.create(
+            username="second-marker",
+            email="second-marker@example.edu",
+            display_name="",
+            role=UserRole.MARKER,
+            status=UserStatus.ACTIVE,
+            password_hash=hash_password(second_password),
+        )
+    )
+    second_login = client.post(
+        "/api/auth/login", json={"username": "second-marker", "password": second_password}
+    )
+    assert second_login.status_code == 200
+    second_headers = {"Authorization": f"Bearer {second_login.json()['token']}"}
+
+    for title in ("Clips ready", "Scoring complete"):
+        asyncio.run(container.notifications.emit(NotificationType.CLIPS_READY, title, "body"))
+
+    assert client.get("/api/notifications", headers=admin_headers).json()["unreadCount"] == 2
+    assert client.get("/api/notifications", headers=second_headers).json()["unreadCount"] == 2
+
+    read_all = client.post("/api/notifications/read-all", headers=admin_headers)
+    assert read_all.status_code == 200
+    assert read_all.json() == {"unreadCount": 0, "markedRead": 2}
+
+    assert client.get("/api/notifications", headers=admin_headers).json()["unreadCount"] == 0
+    # The bug this closes: the second marker's badge is untouched.
+    assert client.get("/api/notifications", headers=second_headers).json()["unreadCount"] == 2
+
+
 # --- the repository contract that predates the service ---------------------
 
 
@@ -116,35 +171,39 @@ def test_repository_notify_still_records_an_unread_row(tmp_path) -> None:
     that were never migrated must keep working."""
 
     async def scenario() -> None:
-        repository = NotificationRepository(OrmDatabase(tmp_path / "app.sqlite3"))
+        database = OrmDatabase(tmp_path / "app.sqlite3")
+        repository = NotificationRepository(database)
+        viewer = await _account(database)
 
         await repository.notify("Scoring complete", "for Session A", session_id="session-a")
         await repository.notify("Clips ready", "3 clips")
 
-        assert await repository.unread_count() == 2
-        rows = await repository.list_rows()
+        assert await repository.unread_count(viewer_id=viewer) == 2
+        rows = await repository.list_rows(viewer_id=viewer)
         assert len(rows) == 2
         assert rows[0]["title"] == "Clips ready"  # newest first
         assert rows[1]["sessionId"] == "session-a"
         assert all(row["read"] is False for row in rows)
 
-        assert await repository.mark_read(rows[0]["id"]) is True
-        assert await repository.mark_read(rows[0]["id"]) is True  # idempotent
-        assert await repository.unread_count() == 1
-        assert await repository.mark_read("missing") is False
+        assert await repository.mark_read(rows[0]["id"], viewer_id=viewer) is True
+        assert await repository.mark_read(rows[0]["id"], viewer_id=viewer) is True  # idempotent
+        assert await repository.unread_count(viewer_id=viewer) == 1
+        assert await repository.mark_read("missing", viewer_id=viewer) is False
 
     asyncio.run(scenario())
 
 
 def test_delete_for_session_still_removes_only_that_session(tmp_path) -> None:
     async def scenario() -> None:
-        repository = NotificationRepository(OrmDatabase(tmp_path / "app.sqlite3"))
+        database = OrmDatabase(tmp_path / "app.sqlite3")
+        repository = NotificationRepository(database)
+        viewer = await _account(database)
         await repository.notify("A", "a", session_id="keep")
         await repository.notify("B", "b", session_id="drop")
         await repository.notify("C", "c", session_id="drop")
 
         assert await repository.delete_for_session("drop") == 2
-        remaining = await repository.list_rows()
+        remaining = await repository.list_rows(viewer_id=viewer)
         assert [row["sessionId"] for row in remaining] == ["keep"]
 
     asyncio.run(scenario())
@@ -158,7 +217,9 @@ def test_completion_and_clip_notification_wording_is_unchanged(tmp_path) -> None
     the message must not have."""
 
     async def scenario() -> None:
-        service = NotificationService(NotificationRepository(OrmDatabase(tmp_path / "app.sqlite3")))
+        database = OrmDatabase(tmp_path / "app.sqlite3")
+        viewer = await _account(database)
+        service = NotificationService(NotificationRepository(database))
 
         await service.emit(
             NotificationType.SCORING_COMPLETED,
@@ -173,7 +234,7 @@ def test_completion_and_clip_notification_wording_is_unchanged(tmp_path) -> None
             session_id="s-1",
         )
 
-        rows = await service.list_rows()
+        rows = await service.list_rows(viewer_id=viewer)
         assert rows[1]["title"] == "Scoring complete"
         assert rows[1]["body"] == 'Scoring is complete for "Demo". Results are ready to review.'
         assert rows[0]["title"] == "Clips ready"
@@ -255,6 +316,7 @@ def test_slow_subscriber_drops_oldest_instead_of_blocking_the_emitter(tmp_path) 
 
     async def scenario() -> None:
         database = OrmDatabase(tmp_path / "app.sqlite3")
+        viewer = await _account(database)
         changes = ChangeFeedService(database)
         service = NotificationService(NotificationRepository(database), changes=changes)
         queue = changes.subscribe()
@@ -267,6 +329,6 @@ def test_slow_subscriber_drops_oldest_instead_of_blocking_the_emitter(tmp_path) 
 
         assert queue.qsize() <= 256
         # Every notification is still durable, even the ones the slow client lost.
-        assert await service.unread_count() == 400
+        assert await service.unread_count(viewer_id=viewer) == 400
 
     asyncio.run(scenario())
