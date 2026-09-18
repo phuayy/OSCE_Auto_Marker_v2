@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ipaddress import ip_address, ip_network
 from typing import Any, Callable
 
 from fastapi import Depends, HTTPException, Request, status
@@ -203,7 +204,7 @@ async def require_upload_owner(
     return upload
 
 
-def client_ip(request: Request, trusted_proxy_count: int = 0) -> str:
+def client_ip(request: Request, trusted_proxy_count: int = 0, trusted_proxy_ips: tuple[str, ...] = ()) -> str:
     """The address the rate limiters key on.
 
     With no proxy the socket address is the client. Behind ``n`` trusted
@@ -211,10 +212,25 @@ def client_ip(request: Request, trusted_proxy_count: int = 0) -> str:
     X-Forwarded-For: each proxy appends the peer it saw, so the rightmost
     entries are the ones our own infrastructure wrote and the leftmost are
     whatever the client chose to send. Counting from the right is what stops a
-    client from forging its way into a fresh rate-limit bucket per request.
+    client from forging its way into a fresh rate-limit bucket per request —
+    *if* the request actually traversed that many real proxies.
+
+    Hop-counting alone cannot verify that: a client that reaches the API port
+    directly with one forged X-Forwarded-For entry produces a header
+    indistinguishable in shape from the legitimate single-proxy case (both are
+    exactly ``trusted_proxy_count`` hops long). ``trusted_proxy_ips``, when
+    given, closes that gap the way nginx's own ``set_real_ip_from`` or
+    Django's proxy trust list do: the header is honoured only when the
+    *immediate* TCP peer — ``request.client.host``, which a client cannot
+    forge, unlike anything in a header it sends — is itself one of the
+    configured proxy addresses. Left empty (the default), the header is
+    trusted by count alone, unchanged from before this parameter existed;
+    ``Settings.collect_runtime_warnings`` flags that combination.
     """
     socket_host = request.client.host if request.client else "unknown"
     if trusted_proxy_count <= 0:
+        return socket_host
+    if trusted_proxy_ips and not _peer_is_trusted(socket_host, trusted_proxy_ips):
         return socket_host
 
     forwarded = str(request.headers.get("x-forwarded-for") or "")
@@ -226,3 +242,24 @@ def client_ip(request: Request, trusted_proxy_count: int = 0) -> str:
     # so fall back to the leftmost entry we actually have.
     index = max(0, len(hops) - trusted_proxy_count)
     return hops[index] if index < len(hops) else hops[0]
+
+
+def _peer_is_trusted(socket_host: str, trusted_proxy_ips: tuple[str, ...]) -> bool:
+    """Whether the direct TCP peer is a configured reverse-proxy address.
+
+    Malformed entries on either side (an unparseable peer, an unparseable
+    configured network) are simply not a match rather than a startup error —
+    ``client_ip`` runs on every request, and a typo here must fail closed
+    (untrusted) rather than crash request handling.
+    """
+    try:
+        peer = ip_address(socket_host)
+    except ValueError:
+        return False
+    for entry in trusted_proxy_ips:
+        try:
+            if peer in ip_network(entry, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False

@@ -342,6 +342,16 @@ class Settings:
     # to exactly that depth — never further, because the header is client-
     # supplied and anything beyond your own proxies is forgeable.
     trusted_proxy_count: int = read_int_env("TRUSTED_PROXY_COUNT", 0)
+    # Counting X-Forwarded-For hops cannot by itself tell a request that
+    # actually traversed the proxy chain apart from one that reached the API
+    # port directly and forged the same number of entries — both produce a
+    # header of exactly `trusted_proxy_count` hops. Naming the proxy's own
+    # address(es) here (literal IPs or CIDRs) closes that gap: the header is
+    # honoured only when the immediate TCP peer (`request.client.host`, which
+    # cannot be forged) is one of these. Empty (the default) keeps today's
+    # count-only behaviour — see the CORS-style warning this produces in
+    # collect_runtime_warnings() when trusted_proxy_count is set without it.
+    trusted_proxy_ips: tuple[str, ...] = read_csv_env("TRUSTED_PROXY_IPS", ())
     session_event_history_limit: int = read_int_env("SESSION_EVENT_HISTORY_LIMIT", 500)
     session_sse_enabled: bool = read_bool_env("SESSION_SSE_ENABLED", False)
     # Max events buffered per connected SSE client before the oldest is dropped
@@ -771,6 +781,14 @@ class Settings:
             warnings.append(
                 "PROTECT_MEDIA_ENDPOINTS is disabled; /media artifacts (videos, "
                 "PDFs, scores) are served without authentication."
+            )
+        if self.trusted_proxy_count > 0 and not self.trusted_proxy_ips:
+            warnings.append(
+                "TRUSTED_PROXY_COUNT is set without TRUSTED_PROXY_IPS; X-Forwarded-For "
+                "is trusted by hop count alone, so a client reaching the API port "
+                "directly can forge a fresh rate-limit bucket per request. Set "
+                "TRUSTED_PROXY_IPS to the reverse proxy's own address, or firewall "
+                "the API port so only the proxy can reach it."
             )
         warnings.extend(self._account_warnings())
         warnings.extend(self._frontend_warnings())

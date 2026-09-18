@@ -256,3 +256,83 @@ def test_a_shorter_chain_than_configured_uses_the_leftmost_entry() -> None:
     """Misconfiguration must not hand every request the same key."""
     request = _StubRequest("10.0.0.1", forwarded="198.51.100.7")
     assert _client_ip(request, trusted_proxy_count=5) == "198.51.100.7"
+
+
+# --- trusted_proxy_ips: header content alone cannot prove the request came
+# through the proxy, so these cases key on the peer instead ------------------
+
+
+def test_trusted_peer_still_resolves_the_header() -> None:
+    """The normal deployment: nginx (a configured trusted peer) forwards
+    the real client address, and the outcome is unchanged from count-only."""
+    request = _StubRequest("127.0.0.1", forwarded="198.51.100.7")
+    assert (
+        _client_ip(request, trusted_proxy_count=1, trusted_proxy_ips=("127.0.0.1",))
+        == "198.51.100.7"
+    )
+
+
+def test_untrusted_peer_forging_the_exact_expected_hop_count_is_ignored() -> None:
+    """The attack TRUSTED_PROXY_IPS exists to close: a client that reaches the
+    API port directly can send a header shaped exactly like the legitimate
+    single-proxy case. Without a peer check this is indistinguishable (see
+    test_behind_one_proxy_the_last_forwarded_entry_is_used above); with it,
+    an untrusted peer's header is never honoured, regardless of shape."""
+    request = _StubRequest("203.0.113.66", forwarded="198.51.100.7")
+    assert (
+        _client_ip(request, trusted_proxy_count=1, trusted_proxy_ips=("127.0.0.1",))
+        == "203.0.113.66"
+    )
+
+
+def test_trusted_proxy_ips_accepts_a_cidr_range() -> None:
+    request = _StubRequest("10.0.5.9", forwarded="198.51.100.7")
+    assert (
+        _client_ip(request, trusted_proxy_count=1, trusted_proxy_ips=("10.0.0.0/16",))
+        == "198.51.100.7"
+    )
+
+
+def test_trusted_proxy_ips_empty_keeps_count_only_behaviour() -> None:
+    """The default: no allowlist configured, nothing changes from before this
+    parameter existed."""
+    request = _StubRequest("203.0.113.66", forwarded="198.51.100.7")
+    assert _client_ip(request, trusted_proxy_count=1) == "198.51.100.7"
+
+
+def test_trusted_proxy_ips_malformed_entries_fail_closed() -> None:
+    """A typo'd CIDR in config must not silently trust everyone."""
+    request = _StubRequest("127.0.0.1", forwarded="198.51.100.7")
+    assert (
+        _client_ip(request, trusted_proxy_count=1, trusted_proxy_ips=("not-an-ip",))
+        == "127.0.0.1"
+    )
+
+
+def test_trusted_proxy_count_without_ips_produces_a_warning() -> None:
+    settings = Settings(
+        ffmpeg_bin="ffmpeg",
+        ffprobe_bin="ffprobe",
+        scorer_python_bin="python",
+        cors_allow_origins=("https://app.example.edu",),
+        trusted_proxy_count=1,
+    )
+    warnings = settings.collect_runtime_warnings()
+    assert any("TRUSTED_PROXY_IPS" in warning for warning in warnings)
+
+
+def test_trusted_proxy_count_with_ips_produces_no_warning() -> None:
+    settings = Settings(
+        ffmpeg_bin="ffmpeg",
+        ffprobe_bin="ffprobe",
+        scorer_python_bin="python",
+        cors_allow_origins=("https://app.example.edu",),
+        protect_media_endpoints=True,
+        email_backend="smtp",
+        smtp_host="smtp.example.edu",
+        email_from="OSCE AI Marker <no-reply@example.edu>",
+        app_public_url="https://app.example.edu",
+        trusted_proxy_count=1,
+        trusted_proxy_ips=("127.0.0.1",),
+    )
+    assert settings.collect_runtime_warnings() == []
