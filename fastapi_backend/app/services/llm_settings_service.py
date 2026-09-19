@@ -31,6 +31,7 @@ from app.llm import credentials as credential_resolver
 from app.llm import registry
 from app.llm.base import ChatRequest, LLMError, ProviderCredentials, ReasoningPolicy
 from app.llm.catalog import ProviderCatalog, builtin_catalog
+from app.llm.custom import redact_connection_secrets
 from app.llm.panel import MarkingMode, PanelConfig, TieBreak, marker_key, parse_marking_mode
 from app.llm.router import LLMRouter
 from app.llm.routing import LLMTarget, RoutingConfig
@@ -445,7 +446,7 @@ class LLMSettingsService:
 
     # --- settings screen ---------------------------------------------------
 
-    async def describe(self, user_id: str | None = None) -> dict[str, Any]:
+    async def describe(self, user_id: str | None = None, *, include_provider_secrets: bool = True) -> dict[str, Any]:
         """Every provider, its models, its availability, its credential state,
         and the current choice — the requesting account's own, falling back to
         the deployment default for whatever it has not personalised.
@@ -455,6 +456,15 @@ class LLMSettingsService:
         is never part of this response, and there is no endpoint that returns
         one: the settings screen is a place to *replace* a credential, not to
         read one back.
+
+        ``include_provider_secrets`` gates a *different* thing: a custom
+        provider's connection can carry a second credential of its own — a
+        gateway token in ``extraHeaders``, say (see
+        ``app.llm.custom.redact_connection_secrets``) — which the settings
+        screen's edit form legitimately needs back, but which this method is
+        also called to answer for every signed-in marker just so they can pick
+        a provider from a dropdown. Only the caller that has already checked
+        the requester is an operator should pass ``True``.
         """
         resolved = await self.resolve()
         stored = await self.stored_routing(user_id)
@@ -466,6 +476,8 @@ class LLMSettingsService:
         providers: list[dict[str, Any]] = []
         for provider_id, provider in resolved.providers.items():
             payload = provider.descriptor.to_public()
+            if not include_provider_secrets and payload.get("isCustom"):
+                payload["connection"] = redact_connection_secrets(payload["connection"])
             payload["availability"] = provider.availability().to_public()
             status = dict(statuses.get(provider_id) or {})
             payload["credential"] = {

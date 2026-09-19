@@ -106,6 +106,19 @@ def build_client(tmp_path: Path) -> TestClient:
     asyncio.run(container.orm_database.initialize())
 
     app = FastAPI()
+
+    @app.middleware("http")
+    async def _fake_actor(request, call_next):
+        # This module exercises the custom-provider feature, not the real
+        # auth middleware — but one test (see below) needs `current_actor`
+        # to see a marker vs. an admin, which reads `request.state.auth_user`
+        # the way the production middleware sets it. A test-only header picks
+        # the role; requests that omit it stay unauthenticated, as before.
+        role = request.headers.get("x-test-role")
+        if role:
+            request.state.auth_user = {"sub": "test-user", "username": "tester", "role": role}
+        return await call_next(request)
+
     app.state.container = container
     app.include_router(settings_routes.router, prefix="/api")
     app.include_router(settings_routes.admin_router, prefix="/api")
@@ -608,6 +621,36 @@ def test_a_key_can_be_rotated_for_a_custom_provider_through_the_normal_endpoint(
 
     cleared = client.delete("/api/admin/settings/llm-providers/campus-gateway/key")
     assert provider_in(cleared.json(), "campus-gateway")["credential"]["configured"] is False
+
+
+def test_a_markers_read_of_the_catalogue_cannot_see_a_gateways_second_credential(
+    tmp_path: Path,
+) -> None:
+    """``extraHeaders`` can carry a corporate gateway's own auth token (the
+    module docstring names this as a supported case) — a second credential
+    that has nothing to do with the model-routing choice this endpoint exists
+    for every marker to make. Only the admin who can already edit the
+    provider should get it back, for the edit form to pre-fill itself from."""
+    client = build_client(tmp_path)
+    client.post(
+        "/api/admin/settings/llm-providers",
+        json={**GATEWAY, "extraHeaders": {"X-Gateway-Token": "sk-second-secret"}},
+    )
+
+    marker_connection = provider_in(
+        client.get("/api/settings/llm-providers", headers={"x-test-role": "marker"}).json(),
+        "campus-gateway",
+    )["connection"]
+    admin_connection = provider_in(
+        client.get("/api/settings/llm-providers", headers={"x-test-role": "admin"}).json(),
+        "campus-gateway",
+    )["connection"]
+
+    assert "extraHeaders" not in marker_connection
+    assert "sk-second-secret" not in json.dumps(marker_connection)
+    assert admin_connection["extraHeaders"] == {"X-Gateway-Token": "sk-second-secret"}
+    # Non-secret shape stays visible, so a marker can still tell providers apart.
+    assert marker_connection["baseUrl"] == GATEWAY["baseUrl"]
 
 
 def test_a_connection_test_names_the_unknown_provider_rather_than_erroring(

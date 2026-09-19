@@ -118,8 +118,17 @@ async def get_llm_providers(
     backend registry appears in the UI with no frontend change. Availability
     reflects whether a key is configured *on this machine* — the response never
     contains a key itself.
+
+    Open to every marker, not just administrators, because picking a routing
+    target needs the catalogue. A custom provider's ``extraHeaders`` /
+    ``extraQuery`` / ``extraBody`` can carry a second credential of their own
+    (see ``app.llm.custom``), so only an admin's request gets them back
+    verbatim — the same admin-only edit form is what needs them pre-filled.
     """
-    return await container.llm_settings.describe(_owner_id(request))
+    actor = current_actor(request)
+    return await container.llm_settings.describe(
+        _owner_id(request), include_provider_secrets=bool(actor and actor.is_admin)
+    )
 
 
 @admin_router.post("/llm-providers/test")

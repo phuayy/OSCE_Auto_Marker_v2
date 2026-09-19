@@ -514,6 +514,29 @@ class CustomProviderSpec:
         )
 
 
+# The three fields the module docstring calls out as able to carry a *second*
+# credential — "corporate gateways with their own auth token" living in
+# ``extraHeaders``, an Azure-style key repeated into ``extraQuery``, a signed
+# switch embedded in ``extraBody``. ``to_public()`` has to include them
+# verbatim so the operator's own edit form can be pre-filled from the server's
+# copy (see ``redact_connection_secrets`` for who does *not* get that copy).
+SECRET_BEARING_CONNECTION_FIELDS = ("extraHeaders", "extraQuery", "extraBody")
+
+
+def redact_connection_secrets(connection: Mapping[str, Any]) -> dict[str, Any]:
+    """``connection`` with the fields that may carry a second credential removed.
+
+    ``to_public()`` is deliberately unredacted: it is what the settings
+    screen's edit form reads to pre-fill itself, and only an operator who can
+    already write these providers ever reaches that form. Everywhere else the
+    same dict is handed to every signed-in marker just to populate a routing
+    dropdown, which has no business seeing another operator's gateway token.
+    Non-secret shape (``baseUrl``, ``authScheme``, model routing hints, ...)
+    stays, so a marker can still tell providers apart.
+    """
+    return {key: value for key, value in connection.items() if key not in SECRET_BEARING_CONNECTION_FIELDS}
+
+
 def _snake(camel: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", camel).lower()
 
