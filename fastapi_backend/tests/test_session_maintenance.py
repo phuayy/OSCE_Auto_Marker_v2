@@ -51,7 +51,7 @@ def test_unrecorded_artifacts_are_owned_by_convention(tmp_path) -> None:
         paths.output_scores_dir / ".session-1.json.checkpoint.json",
         paths.output_scores_panel_dir / "session-1" / "marker.json",
         paths.storage_root / "output" / "future" / "session-1" / "result.bin",
-        settings.object_storage_root / ".uploads" / "upload-1" / "part",
+        settings.object_storage_staging_root / "upload-1" / "part",
     ]
     spared = [
         paths.output_audio_dir / "session-10.mp3",
