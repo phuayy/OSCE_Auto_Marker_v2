@@ -466,3 +466,59 @@ def test_every_application_table_is_in_the_orm_metadata() -> None:
 
     for table in JOBS_TABLES:
         assert table in Base.metadata.tables
+
+
+# --- L8: concurrent migrations against a shared Postgres database -----------
+#
+# The single-API-instance file lock (app/core/single_instance.py) only
+# protects processes that share one local filesystem storage root. Two hosts
+# pointed at the same Postgres database but with their own storage root apiece
+# (a rolling deploy, a blue/green swap, ALLOW_MULTIPLE_API_INSTANCES=true)
+# would not see each other's file lock at all, so the migration itself has to
+# be safe against a second runner starting mid-upgrade.
+
+
+def test_two_concurrent_postgres_migrations_do_not_race() -> None:
+    """Without the advisory lock in `_upgrade_connection`, two `alembic upgrade
+    head` runs against one empty schema race on CREATE TABLE — this is the
+    exact "two API instances started together against Postgres" scenario the
+    audit flagged. With the lock, one waits for the other, and both finish
+    with the schema at a single, consistent head."""
+    import os
+    from uuid import uuid4
+
+    from sqlalchemy.engine import make_url
+
+    from app.database.migration_runner import migrate_engine
+
+    url = os.environ.get("OSCE_TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("OSCE_TEST_POSTGRES_URL must point to a disposable PostgreSQL database")
+    schema = f"osce_test_{uuid4().hex}"
+    setup_engine = create_engine(url)
+    try:
+        with setup_engine.begin() as connection:
+            connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
+    finally:
+        setup_engine.dispose()
+    scoped_url = (
+        make_url(url).update_query_dict({"options": f"-csearch_path={schema}"}).render_as_string(hide_password=False)
+    )
+
+    async def scenario() -> None:
+        first, second = OrmDatabase(scoped_url), OrmDatabase(scoped_url)
+        try:
+            results = await asyncio.gather(
+                migrate_engine(first.engine), migrate_engine(second.engine), return_exceptions=True
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+            async with first.engine.connect() as connection:
+                heads = (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalars().all()
+            assert len(heads) == 1
+        finally:
+            await first.shutdown()
+            await second.shutdown()
+
+    asyncio.run(scenario())
