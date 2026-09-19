@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any
 
 from app.core.snapshot_cache import SnapshotCache
 from app.llm.catalog import ProviderCatalog, builtin_catalog
-from app.llm.custom import CustomProviderError, CustomProviderSpec
+from app.llm.custom import CustomProviderError, CustomProviderSpec, validate_provider_endpoint
 from app.llm.registry import PROVIDER_FACTORIES
 from app.repositories.custom_provider_repository import CustomProviderRepository
 
@@ -155,6 +155,11 @@ class CustomProviderService:
         be able to half-save a provider that scoring then tries to call.
         """
         spec = CustomProviderSpec.from_raw(raw, provider_id=provider_id)
+        # Resolves and classifies the endpoint's address (a DNS lookup) — only
+        # acceptable here, at the write boundary, and not inside from_raw
+        # itself, which also rehydrates every already-stored row on the
+        # scoring hot path (see validate_provider_endpoint's own docstring).
+        validate_provider_endpoint(spec)
 
         if spec.id in PROVIDER_FACTORIES:
             raise CustomProviderError(

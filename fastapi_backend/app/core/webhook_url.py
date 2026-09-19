@@ -1,15 +1,20 @@
 from __future__ import annotations
 
-import ipaddress
-import socket
 from urllib.parse import urlparse
 
+from app.core.network_guard import AddressPolicy, resolve_hostname
 
 # Schemes we are willing to POST to. Anything else (file:, gopher:, ftp:) is a
 # well-known SSRF pivot and has no legitimate webhook use.
 ALLOWED_SCHEMES = frozenset({"http", "https"})
 
 MAX_WEBHOOK_URL_LENGTH = 2048
+
+# A webhook always points at something external to this deployment — every
+# non-public address class is refused. Compare app.llm.custom's policy, which
+# deliberately allows private (RFC1918) space because a custom LLM provider
+# routinely IS on this deployment's own network.
+_ADDRESS_POLICY = AddressPolicy()
 
 
 class WebhookUrlError(ValueError):
@@ -25,18 +30,7 @@ def _is_blocked_address(address: str) -> bool:
     its own credentials — makes the request. Everything outside the public
     unicast range is refused unless the operator opts in.
     """
-    try:
-        parsed = ipaddress.ip_address(address)
-    except ValueError:
-        return False
-    return bool(
-        parsed.is_private
-        or parsed.is_loopback
-        or parsed.is_link_local
-        or parsed.is_multicast
-        or parsed.is_reserved
-        or parsed.is_unspecified
-    )
+    return _ADDRESS_POLICY.is_blocked(address)
 
 
 def _resolve(host: str) -> list[str]:
@@ -45,10 +39,7 @@ def _resolve(host: str) -> list[str]:
     All of them are checked, not just the first: a hostname that resolves to one
     public and one loopback address must still be refused.
     """
-    try:
-        return sorted({info[4][0] for info in socket.getaddrinfo(host, None)})
-    except OSError:
-        return []
+    return resolve_hostname(host)
 
 
 def validate_webhook_url(raw_url: str, *, allow_private: bool = False) -> str:
