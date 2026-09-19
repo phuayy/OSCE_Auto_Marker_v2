@@ -659,6 +659,36 @@ depends on it:
   model. They are the job document the browser reads and `session.job` stores,
   they sort as strings, and the rows on disk already hold text.
 
+**Every read-then-write transaction takes SQLite's write lock before it reads.**
+`claim_queued`, `_finish` (`mark_succeeded` / `mark_failed` / `mark_cancelled`),
+`requeue_interrupted_job`, `prepare_retry_attempt`, `rerun`, `write` and
+`delete_for_session` all call `OrmDatabase.ensure_write_locked` — `BEGIN
+IMMEDIATE` on SQLite, idempotent, a no-op on PostgreSQL — as their first
+statement. Without it, `transaction()`'s default deferred `BEGIN` takes only a
+read snapshot on the first statement; if another connection commits before
+this one's later write, that write used to fail with `SQLITE_BUSY_SNAPSHOT`
+instead of waiting its turn (`busy_timeout` only retries lock contention, not
+a stale snapshot) — a real, if rare, spurious job failure under
+`JOB_WORKER_CONCURRENCY > 1`. This is deliberately `transaction()` plus an
+explicit lock rather than switching these methods to `unit_of_work()`: unlike
+`transaction()`, a *nested* `unit_of_work()` call does not flush before
+returning, and callers such as `JobQueueService.create_waiting_job` rely on
+one repository call's write being flushed and visible to the very next
+statement on that session before the next repository call runs — this schema
+has no ORM `relationship()` wiring between `jobs` and `job_events` to let
+SQLAlchemy infer that insert order on its own, so skipping the flush silently
+reordered two pending inserts within one combined flush and tripped the
+`job_events` foreign key.
+
+**A terminal job status is first-writer-wins.** `_finish`'s `UPDATE` carries
+`WHERE status NOT IN (terminal statuses)`; a job already `succeeded`,
+`failed` or `cancelled` ignores a later call to any of the three rather than
+being overwritten. This closes the race where a user cancels a job whose
+Hatchet-side run could not be fully aborted (`_cancel_hatchet_run` is
+best-effort) and that run reports success afterwards — without the
+predicate, the late `succeeded` silently replaced `cancelled` and the session
+showed a result the user had asked to abort.
+
 **Reading an artefact: the file on disk is the document.** Every producer writes
 its JSON to disk and records only metadata (`fileName`, `absolutePath`,
 `sizeBytes`, `url`) on the session, so `read_artifact_payload` reads the file
@@ -899,6 +929,29 @@ joining the log.
 
 ---
 
+## HTTP middleware stack
+
+Two `@application.middleware("http")` layers in [main.py](fastapi_backend/app/main.py),
+in registration order (Starlette nests them so the one added *last* wraps the
+one added earlier, running first on the way in and last on the way out):
+
+1. `require_auth` — decides *who* may reach a route (`authorize_request`, see
+   **Authentication and accounts** below).
+2. `add_security_headers` — added after `require_auth` so it wraps it,
+   applying [core/security_headers.py](fastapi_backend/app/core/security_headers.py)'s
+   baseline headers (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+   `Referrer-Policy: strict-origin-when-cross-origin`, a same-origin
+   `Content-Security-Policy`) to *every* response — a 401 `require_auth`
+   short-circuits included, not only a route handler's own response. None of
+   this replaces authentication or input validation; it is defense in depth
+   against the class of bug that gets through anyway. `CONTENT_SECURITY_POLICY`
+   overrides the default CSP wholesale; `Strict-Transport-Security` is
+   separately opt-in (`ENABLE_HSTS`) because, unlike the other headers, it can
+   brick a deployment that turns it on carelessly — see the `ENABLE_HSTS` row
+   in **Key Environment Variables**.
+
+---
+
 ## Authentication and accounts
 
 Design and the reasoning behind it: [docs/user-administration.md](docs/user-administration.md).
@@ -924,6 +977,21 @@ app's routes the way `test_admin_routes_are_guarded.py` does for
 accounts existed, or by the job queue's own internal writes) has no owner to
 defer to and stays mutable by anyone, deliberately — a migrated deployment's
 old data must never lock everyone out.
+
+**An orphaned job — one whose session is gone — is not treated the same as a
+legacy record with no provenance.** `require_job_owner` looks up the job's
+session to defer to `ensure_may_mutate`; if that session has been deleted out
+from under it (a race with deletion, or a row a caller left behind with no
+session ever created), there is no provenance left to check, but this is not
+the "nothing to defer to, so leave it mutable" case above — the session, had
+it survived, may well have had an owner. Only an admin may act on an orphaned
+job in that case, rather than falling open to any signed-in marker.
+
+**`GET /api/uploads/{id}` is owner-gated like its siblings**, unlike
+`GET /api/sessions/{id}` — there is no "every marker sees every upload"
+policy the way there is for sessions, so its transfer progress, file names
+and sizes follow the same rule as every other route under `/api/uploads`
+rather than the session-read exception.
 
 **The first administrator is seeded at startup, API role only**
 (`UserAdminService.ensure_bootstrap_admin`). An empty table is filled from the
@@ -1437,6 +1505,8 @@ recording; its Student column the scored subject.
 | `JOB_STALE_RUNNING_TIMEOUT_SECONDS` | `900` | How long `running` with no heartbeat before the periodic reaper treats a job as orphaned and requeues it |
 | `JOB_REAPER_INTERVAL_SECONDS` | `300` | How often the reaper scans for stale-running jobs; `0` disables it (startup-only recovery, as before) |
 | `STORAGE_BACKEND` | `local` | `local` (parts through the API) or `gcs` (direct-to-bucket resumable uploads) |
+| `OBJECT_STORAGE_ROOT` | `storage/objects` | Local backend only: where committed objects live. Served verbatim by the `/media/source` mount |
+| `OBJECT_STORAGE_STAGING_ROOT` | `storage/objects_staging` | Local backend only: where an upload's parts are assembled while still in flight. Deliberately **not** under `OBJECT_STORAGE_ROOT` — that whole tree is public via `/media/source`, and a part on its way there is not something a stream ticket should be able to fetch |
 | `GCS_BUCKET` | — | Required when `STORAGE_BACKEND=gcs`; the factory refuses to start without it |
 | `GCS_UPLOAD_ORIGIN` | — | Origin allowed to PUT at the resumable session URI (browser CORS) |
 | `GCS_CACHE_ROOT` | `storage/cache/objects` | Worker-local cache of materialised bucket objects |
@@ -1458,8 +1528,11 @@ recording; its Student column the scored subject.
 | `LLM_CIRCUIT_FAILURE_THRESHOLD` / `LLM_CIRCUIT_COOLDOWN_SECONDS` | `6` / `60` | Consecutive failures before a provider is skipped, and for how long |
 | `LLM_TEMPERATURE` / `LLM_TOP_P` / `LLM_MAX_TOKENS` / `LLM_REQUEST_TIMEOUT_SECONDS` | `0.2` / `0.9` / `24576` / `360` | Sampling, shared by all providers. The `NVIDIA_*` spellings still work |
 | `WHISPERX_HF_TOKEN` | — | HuggingFace token for pyannote diarisation |
-| `PROTECT_MEDIA_ENDPOINTS` | `true` | Auth-gate `/media/*` |
+| `ENVIRONMENT` | `development` | Declares the deployment shape rather than any one behaviour. Most insecure config here stays a startup *warning* either way (`collect_runtime_warnings`) so a local checkout is never surprised by a hard crash over a default it did not touch; `production` additionally refuses to **start** with the handful of combinations in `Settings.startup_fatal_errors()` — currently just `PROTECT_MEDIA_ENDPOINTS=false` — where starting anyway would be actively unsafe. Never set this in local development |
+| `PROTECT_MEDIA_ENDPOINTS` | `true` | Auth-gate `/media/*`. `ENVIRONMENT=production` refuses to start with this off |
 | `API_DOCS_ENABLED` | `false` | Serve `/docs`, `/redoc`, `/openapi.json` — the whole API surface, admin routes included, with no auth of their own. Local-dev convenience only |
+| `CONTENT_SECURITY_POLICY` | built-in default | Overrides the CSP `app/core/security_headers.py` sends on every response wholesale — an escape hatch for the day the frontend needs a third-party origin. The baseline headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, this CSP) are always on, applied by a middleware added after `require_auth` so it wraps every response, a 401 included |
+| `ENABLE_HSTS` / `HSTS_MAX_AGE_SECONDS` | `false` / `15552000` | `Strict-Transport-Security`, opt-in only — never inferred from `ENVIRONMENT`. Once a browser has seen it, that browser refuses plain HTTP for this host until `max-age` expires, which would break the documented on-prem, TLS-less deployment shape (`docs/deployment-vm.md`) if defaulted on. Turn on once this deployment is actually served over HTTPS everywhere; the header itself is inert (per RFC 6797) when a response happens to go out over plain HTTP |
 | `SESSION_SSE_ENABLED` | `false` | Per-session event stream (`GET /api/sessions/{id}/events`). Off: the browser drives live state from the change feed, and the per-session stream only carries what the *API process* published — a Hatchet worker's output never reaches it. When off, producers install no per-line log callback at all (`EventService.log_sink` returns `None`) and the WhisperX heartbeat is not started |
 | `SSE_CLIENT_QUEUE_MAXSIZE` / `SSE_MAX_TRACKED_SESSIONS` / `SESSION_EVENT_HISTORY_LIMIT` | `1000` / `1000` / `500` | Bounds for that stream when it is on |
 | `LOG_LEVEL` | `INFO` | App logger level |
@@ -1902,6 +1975,25 @@ different decisions with different lifetimes — one key authorises a whole
 catalogue — so the model stays in Settings → Scoring model. A custom provider
 ships an empty model shortlist and `allowsCustomModel: true`, which is what makes
 that card ask for a typed id.
+
+**The endpoint is guarded against request forgery, but with a different
+policy than a webhook's.** [llm/custom.py](fastapi_backend/app/llm/custom.py)'s
+`validate_provider_endpoint` and [core/webhook_url.py](fastapi_backend/app/core/webhook_url.py)'s
+`validate_webhook_url` share one resolve-and-classify core
+([core/network_guard.py](fastapi_backend/app/core/network_guard.py)'s
+`AddressPolicy` / `resolve_hostname`), but a webhook always points *outside*
+this deployment while a custom provider routinely points at this
+deployment's own network on purpose — a self-hosted vLLM box, a departmental
+gateway, both explicitly documented use cases above. So private (RFC1918)
+space stays reachable; only loopback, link-local (the cloud metadata address
+included), multicast, reserved and unspecified addresses — which have no
+legitimate inference-endpoint use — are refused. The check runs against
+`resolved_base_url()` (placeholders filled in), not the stored template,
+which would only ever fail to resolve; and it runs once, at the write
+boundary (`CustomProviderService.save`), not from `from_raw` — that function
+also rehydrates every already-stored row on each catalogue rebuild, the
+scoring hot path, where a DNS lookup has no business running and a transient
+resolution failure must never make a previously-accepted provider unreadable.
 
 | Piece | Where |
 |---|---|
