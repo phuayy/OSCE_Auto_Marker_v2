@@ -188,3 +188,101 @@ def test_list_stale_running_ignores_non_running_rows(tmp_path) -> None:
     asyncio.run(repository.write(job))
 
     assert asyncio.run(repository.list_stale_running(older_than_seconds=60)) == []
+
+
+# --- B2: a terminal status is first-writer-wins ------------------------------
+
+
+def _queued_job(job_id: str = "job-1") -> dict:
+    return {
+        "id": job_id,
+        "sessionId": "session-1",
+        "taskType": "process_session",
+        "status": "queued",
+        "attempts": 0,
+        "maxAttempts": 3,
+        "createdAt": "2026-01-01T00:00:00Z",
+        "queuedAt": "2026-01-01T00:00:01Z",
+        "startedAt": None,
+        "endedAt": None,
+        "error": None,
+        "payload": {"workflow": "standard"},
+    }
+
+
+def test_a_cancelled_job_cannot_be_overwritten_by_a_late_success(tmp_path) -> None:
+    """A job the user cancelled must stay cancelled even if the engine run it
+    could not fully abort reports success afterwards — the race B2 covers."""
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
+    asyncio.run(repository.write(_queued_job()))
+    claim = asyncio.run(repository.claim_queued("job-1", "worker-1"))
+    assert claim.claimed
+
+    cancelled = asyncio.run(repository.mark_cancelled("job-1", "Session deleted."))
+    assert cancelled["status"] == "cancelled"
+
+    # The engine run's own completion callback lands after the cancel.
+    late_success = asyncio.run(repository.mark_succeeded("job-1"))
+    assert late_success["status"] == "cancelled"
+    assert late_success["error"] == "Session deleted."
+
+    on_disk = asyncio.run(repository.read("job-1"))
+    assert on_disk["status"] == "cancelled"
+
+
+def test_a_cancelled_job_cannot_be_overwritten_by_a_late_failure(tmp_path) -> None:
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
+    asyncio.run(repository.write(_queued_job()))
+    asyncio.run(repository.claim_queued("job-1", "worker-1"))
+    asyncio.run(repository.mark_cancelled("job-1", "Session deleted."))
+
+    late_failure = asyncio.run(repository.mark_failed("job-1", "boom"))
+
+    assert late_failure["status"] == "cancelled"
+
+
+def test_a_finished_job_cannot_be_cancelled_after_the_fact(tmp_path) -> None:
+    """Symmetric to the case above: once succeeded, a stray cancel must not
+    relabel a result the user already saw."""
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
+    asyncio.run(repository.write(_queued_job()))
+    asyncio.run(repository.claim_queued("job-1", "worker-1"))
+    asyncio.run(repository.mark_succeeded("job-1"))
+
+    late_cancel = asyncio.run(repository.mark_cancelled("job-1", "too late"))
+
+    assert late_cancel["status"] == "succeeded"
+
+
+# --- B1: SQLite read-then-write transactions take the write lock up front ---
+
+
+def test_finish_takes_the_write_lock_before_reading(tmp_path) -> None:
+    """``ensure_write_locked`` must run before the row is read, not after —
+    reading first is exactly the deferred-BEGIN window that lets a concurrent
+    commit produce SQLITE_BUSY_SNAPSHOT on the later write (see the
+    JobRepository class docstring)."""
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
+    asyncio.run(repository.write(_queued_job()))
+    asyncio.run(repository.claim_queued("job-1", "worker-1"))
+
+    calls: list[str] = []
+    original_ensure_write_locked = repository.database.ensure_write_locked
+    original_require = JobRepository._require
+
+    async def spy_ensure_write_locked(session):
+        calls.append("lock")
+        await original_ensure_write_locked(session)
+
+    async def spy_require(db, job_id):
+        calls.append("read")
+        return await original_require(db, job_id)
+
+    repository.database.ensure_write_locked = spy_ensure_write_locked  # type: ignore[method-assign]
+    JobRepository._require = staticmethod(spy_require)
+    try:
+        asyncio.run(repository.mark_succeeded("job-1"))
+    finally:
+        JobRepository._require = staticmethod(original_require)
+
+    assert calls == ["lock", "read"]

@@ -74,15 +74,39 @@ class OrmDatabase:
             return
         await self.initialize()
         async with self.session_factory() as session, session.begin():
-            if self.engine.dialect.name == "sqlite":
-                await session.execute(text("BEGIN IMMEDIATE"))
-                session.info["write_locked"] = True
+            await self.ensure_write_locked(session)
             token = self._unit.set((asyncio.current_task(), session))
             try:
                 yield session
                 await session.flush()
             finally:
                 self._unit.reset(token)
+
+    async def ensure_write_locked(self, session: AsyncSession) -> None:
+        """Take SQLite's exclusive write lock now, instead of whenever the
+        first write statement happens to run.
+
+        SQLite's default ``BEGIN`` is deferred: in WAL mode, a transaction
+        that reads before it writes takes only a read snapshot on that first
+        statement, and if another connection commits before this one's later
+        write, the write fails with ``SQLITE_BUSY_SNAPSHOT`` instead of
+        waiting its turn — ``busy_timeout`` only retries lock contention, not
+        a stale snapshot. Issuing ``BEGIN IMMEDIATE`` up front avoids that by
+        taking the write lock before anything is read.
+
+        Idempotent (checks ``session.info["write_locked"]``) so a
+        ``transaction()`` call that needs this can call it unconditionally,
+        whether it opened its own session or joined a caller's
+        ``unit_of_work()`` that already took the lock. A no-op on PostgreSQL,
+        whose MVCC has no equivalent snapshot-upgrade failure for this case —
+        row-level locking on the later ``UPDATE`` is enough.
+        """
+        if self.engine.dialect.name != "sqlite":
+            return
+        if session.info.get("write_locked"):
+            return
+        await session.execute(text("BEGIN IMMEDIATE"))
+        session.info["write_locked"] = True
 
     async def initialize(self, *, migrate: bool | None = None) -> None:
         if self._initialized:
