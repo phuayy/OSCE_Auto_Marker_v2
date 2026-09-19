@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.core.config import Settings
 from tests.test_routes import build_test_client
 
@@ -124,6 +126,76 @@ def test_unprotected_media_produces_warning() -> None:
     )
     warnings = settings.collect_runtime_warnings()
     assert any("PROTECT_MEDIA_ENDPOINTS" in warning for warning in warnings)
+
+
+# --- production refuses to start, rather than merely warn -------------------
+
+
+def test_unprotected_media_is_only_a_warning_outside_production() -> None:
+    """A local checkout or demo box must never be surprised by a startup
+    crash over a default it did not touch."""
+    settings = Settings(
+        ffmpeg_bin="ffmpeg",
+        ffprobe_bin="ffprobe",
+        scorer_python_bin="python",
+        environment="development",
+        protect_media_endpoints=False,
+    )
+    assert settings.startup_fatal_errors() == []
+
+
+def test_unprotected_media_is_fatal_in_production() -> None:
+    settings = Settings(
+        ffmpeg_bin="ffmpeg",
+        ffprobe_bin="ffprobe",
+        scorer_python_bin="python",
+        environment="production",
+        protect_media_endpoints=False,
+    )
+    errors = settings.startup_fatal_errors()
+    assert any("PROTECT_MEDIA_ENDPOINTS" in error for error in errors)
+
+
+def test_protected_media_in_production_has_no_fatal_errors() -> None:
+    settings = Settings(
+        ffmpeg_bin="ffmpeg",
+        ffprobe_bin="ffprobe",
+        scorer_python_bin="python",
+        environment="production",
+        protect_media_endpoints=True,
+    )
+    assert settings.startup_fatal_errors() == []
+    assert settings.is_production is True
+
+
+def test_environment_is_development_by_default() -> None:
+    settings = Settings(ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe", scorer_python_bin="python")
+    assert settings.is_production is False
+
+
+def test_container_startup_refuses_a_fatal_configuration(tmp_path) -> None:
+    """The container, not just the Settings value, actually refuses to boot."""
+    import asyncio
+
+    from app.services.container import create_container
+
+    settings = Settings(
+        root_dir=tmp_path,
+        backend_root=tmp_path,
+        ffmpeg_bin="ffmpeg",
+        ffprobe_bin="ffprobe",
+        scorer_python_bin="python",
+        app_database_url="",
+        database_url="",
+        environment="production",
+        protect_media_endpoints=False,
+    )
+    container = create_container(settings)
+    try:
+        with pytest.raises(RuntimeError, match="PROTECT_MEDIA_ENDPOINTS"):
+            asyncio.run(container.startup())
+    finally:
+        asyncio.run(container.shutdown())
 
 
 # --- where the API listens ---------------------------------------------------

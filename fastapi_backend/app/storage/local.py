@@ -64,7 +64,7 @@ class LocalObjectStorageService:
 
     async def ensure_layout(self) -> None:
         await asyncio.to_thread(self.settings.object_storage_root.mkdir, parents=True, exist_ok=True)
-        await asyncio.to_thread((self.settings.object_storage_root / ".uploads").mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(self.settings.object_storage_staging_root.mkdir, parents=True, exist_ok=True)
 
     async def prepare_upload_file(
         self,
@@ -241,7 +241,7 @@ class LocalObjectStorageService:
         return storage_ref
 
     async def abort_upload(self, upload: dict[str, Any]) -> None:
-        upload_dir = self.settings.object_storage_root / ".uploads" / str(upload["id"])
+        upload_dir = self.settings.object_storage_staging_root / str(upload["id"])
         await asyncio.to_thread(lambda: shutil.rmtree(upload_dir, ignore_errors=True))
 
     def public_url_for_key(self, key: str) -> str:
@@ -302,4 +302,8 @@ class LocalObjectStorageService:
         )
 
     def _part_path(self, upload_id: str, file_id: str, part_number: int) -> Path:
-        return self.settings.object_storage_root / ".uploads" / upload_id / file_id / f"part-{part_number:06d}"
+        # Deliberately not under object_storage_root: that whole tree is
+        # served verbatim by the /media/source mount, and an in-progress
+        # upload's parts are not something a valid stream ticket should be
+        # able to fetch — see Settings.object_storage_staging_root.
+        return self.settings.object_storage_staging_root / upload_id / file_id / f"part-{part_number:06d}"

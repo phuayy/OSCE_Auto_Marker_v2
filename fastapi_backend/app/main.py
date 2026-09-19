@@ -31,6 +31,7 @@ from app.api.routes import (
 from app.core.asyncio_compat import configure_windows_selector_event_loop_policy
 from app.core.config import Settings
 from app.core.exceptions import AppError
+from app.core.security_headers import apply_security_headers
 from app.services.container import AppContainer, create_container
 
 
@@ -112,6 +113,16 @@ def build_app(app_settings: Settings) -> FastAPI:
         if payload is not None:
             request.state.auth_user = payload
         return await call_next(request)
+
+    # Added after require_auth so it wraps it (Starlette's user middleware
+    # nests in reverse registration order — the most recently added is
+    # outermost): every response gets these headers, a 401 from require_auth
+    # included, rather than only the ones that reach a route handler.
+    @application.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        apply_security_headers(response.headers, app_settings)
+        return response
 
     @application.exception_handler(HTTPException)
     async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
