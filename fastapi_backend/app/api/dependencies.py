@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from fastapi import Depends, HTTPException, Request, status
 
+from app.core.exceptions import AppError
 from app.domain.access import ensure_may_mutate
 from app.domain.actors import Actor
 from app.domain.users import UserRole
@@ -189,6 +190,19 @@ async def require_job_owner(request: Request, container: AppContainer = Depends(
             session = None
     if session is not None:
         ensure_may_mutate(session, current_actor(request), subject="session")
+    else:
+        # The job's session is gone — deleted out from under it, or a job row
+        # left behind by a caller that never created one. Unlike a legacy
+        # record with no provenance snapshot (see app.domain.access), this is
+        # not "nothing to defer to, so leave it mutable": the session, if it
+        # still existed, might well have had an owner. An orphaned job is only
+        # worth an administrator's attention.
+        actor = current_actor(request)
+        if actor is None or not actor.is_admin:
+            raise AppError(
+                "This job's session no longer exists; only an administrator may act on it.",
+                status_code=403,
+            )
     return job
 
 
