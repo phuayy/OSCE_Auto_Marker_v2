@@ -197,6 +197,7 @@ export default function SessionWorkspace({
 
   const [mediaState, setMediaState] = useState({ error: null });
   const serverVideoUrl = session?.files?.video?.url;
+  const videoPurgedAt = session?.files?.video?.purgedAt || null;
   useEffect(() => {
     if (!serverVideoUrl?.startsWith('/media/')) return;
     let active = true;
@@ -792,6 +793,13 @@ export default function SessionWorkspace({
                             focused on transcript + scoring.
                           </div>
                         )}
+                      </div>
+                    ) : videoPurgedAt ? (
+                      <div className="flex aspect-video w-full flex-col items-center justify-center gap-1 rounded-2xl border border-dashed border-slate-300 bg-slate-100 px-4 text-center text-slate-500">
+                        <span>Video removed under the data retention policy</span>
+                        <span className="text-xs text-slate-400">
+                          Deleted {new Date(videoPurgedAt).toLocaleDateString()} · transcript and scores are unaffected
+                        </span>
                       </div>
                     ) : (
                       <div className="flex aspect-video w-full items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-100 text-slate-500">
