@@ -139,6 +139,55 @@ still use short-lived `?ticket=` credentials. Access logs containing those URLs
 remain sensitive until ticket expiry; restrict log access and retention. Emailed
 action-token API paths also remain sensitive. TLS is required on shared networks.
 
+## Backup and data retention
+
+**Two things make up all of this deployment's state, and a backup is only
+consistent if both are captured together.** The database (session rows,
+assessment results, accounts, settings) and `STORAGE_ROOT` (uploaded videos,
+case-study PDFs, transcripts, score JSON — everything a session's payload
+points at by `absolutePath`). Restoring one without the other breaks artifact
+reads: a database from before a video was deleted, replayed against a
+storage tree from after, points at a file that is no longer there, and vice
+versa. Snapshot both at the same time, on the same schedule.
+
+- **SQLite** (the single-marker default): the file lives at
+  `STORAGE_ROOT/database/*.sqlite3`. It is written in WAL mode, so a plain
+  file copy taken while the API is running can capture a torn, unusable
+  snapshot — use `sqlite3 <path> ".backup <dest>"` (SQLite's own online
+  backup, safe against a live writer) or stop the process first for a plain
+  copy.
+- **PostgreSQL** (the multi-marker deployment): back it up the way you back
+  up any other Postgres database — `pg_dump` for a logical snapshot,
+  `pg_basebackup` / your provider's automated snapshots for a physical one.
+  Nothing here is OSCE-AI-Marker-specific.
+- **`STORAGE_ROOT`**: a filesystem backup (`rsync`, a snapshotting volume) on
+  `STORAGE_BACKEND=local`. On `STORAGE_BACKEND=gcs` the bytes live in the
+  bucket, not on this VM — back up the bucket with GCS's own tools (object
+  versioning, a scheduled bucket-to-bucket copy), and only the local
+  `GCS_CACHE_ROOT` (a disposable, re-downloadable copy) stays out of scope.
+- **`AUTH_SECRET` and `CREDENTIAL_ENCRYPTION_KEY` are part of the backup too**,
+  even though they are `.env` values, not rows. Every operator-saved LLM
+  provider key is AES-256-GCM ciphertext keyed off `CREDENTIAL_ENCRYPTION_KEY`
+  (or `AUTH_SECRET` when that is unset) — restore the database without the
+  same key material and every saved key comes back unreadable (the settings
+  screen shows it as needing re-entry, same as a rotated key), not merely
+  missing.
+
+**The video-retention sweep is a scheduled deletion, not a backup or a
+substitute for one.** `SESSION_VIDEO_RETENTION_DAYS` (default 365; `0`
+disables it) deletes a session's stored video — the one artifact that is both
+the biggest thing on disk and the one carrying a student's face and voice —
+that many days after the session was created, on a timer
+(`SESSION_RETENTION_SWEEP_INTERVAL_SECONDS`, default every 6 hours; see
+`core/config.py`). It never touches the transcript, scores or feedback a run
+produced, so the assessment record a deployment needs to keep — the marks,
+not the recording — outlives the video indefinitely. It runs automatically;
+the only decision an operator makes is the window (or turning it off for a
+deployment with its own, longer-lived policy). A request to erase a session
+entirely — video, transcript, scores, everything — is `DELETE
+/api/sessions/{id}` (see **Session storage lifecycle contracts** in
+[CLAUDE.md](../CLAUDE.md)), not this sweep.
+
 ## Two things to know
 
 **Plain HTTP is fine for uploads, not for secrets.** The bearer token and the

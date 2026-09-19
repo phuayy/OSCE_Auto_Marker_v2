@@ -1604,6 +1604,8 @@ recording; its Student column the scored subject.
 | `JOB_HEARTBEAT_INTERVAL_SECONDS` | `60` | How often a genuinely-running job refreshes `jobs.locked_at`, proving the worker executing it is still alive |
 | `JOB_STALE_RUNNING_TIMEOUT_SECONDS` | `900` | How long `running` with no heartbeat before the periodic reaper treats a job as orphaned and requeues it |
 | `JOB_REAPER_INTERVAL_SECONDS` | `300` | How often the reaper scans for stale-running jobs; `0` disables it (startup-only recovery, as before) |
+| `SESSION_VIDEO_RETENTION_DAYS` | `365` | Delete a top-level session's stored video (not its transcript/scores) this many days after it was created. `0` disables the policy outright |
+| `SESSION_RETENTION_SWEEP_INTERVAL_SECONDS` | `21600` (6h) | How often the video-retention sweep runs after the one it always does at startup; `0` disables the periodic timer (startup-only sweep, as before) |
 | `STORAGE_BACKEND` | `local` | `local` (parts through the API) or `gcs` (direct-to-bucket resumable uploads) |
 | `OBJECT_STORAGE_ROOT` | `storage/objects` | Local backend only: where committed objects live. Served verbatim by the `/media/source` mount |
 | `OBJECT_STORAGE_STAGING_ROOT` | `storage/objects_staging` | Local backend only: where an upload's parts are assembled while still in flight. Deliberately **not** under `OBJECT_STORAGE_ROOT` — that whole tree is public via `/media/source`, and a part on its way there is not something a stream ticket should be able to fetch |
@@ -2190,11 +2192,16 @@ key taken from another.
 | PostgreSQL reconnecting, or SQLite | 2 small `table_versions` reads |
 | Cold cache / after any change | 1 read per table, shared by every concurrent caller |
 
-`GET /api/health/ready` reports `caches.providerCredentials`,
-`caches.appSettings`, `caches.customProviders`, `caches.userDirectory` (the
-account row every request is verified against — see **Authentication and
-accounts**) and `caches.changeFeedPushActive`. Counters only — a cache
-holding API keys must not become the way they leak. `pushActive: false` with a
+`GET /api/admin/health/diagnostics` (admin-only; see **HTTP middleware stack**)
+reports `caches.providerCredentials`, `caches.appSettings`,
+`caches.customProviders`, `caches.userDirectory` (the account row every
+request is verified against — see **Authentication and accounts**),
+`caches.readCache` (the session-index / notification-feed read cache — see
+**Two-tier settings**' sibling, `VersionedCache`; this used to be echoed on
+`GET /api/events/versions`, a route every signed-in marker polls, until that
+was judged more operator detail than a marker needs) and
+`caches.changeFeedPushActive`. Counters only — a cache holding API keys must
+not become the way they leak. `pushActive: false` with a
 high hit rate is the shape worth alerting on: rotations are still arriving, but
 by counter comparison rather than by announcement.
 
@@ -2260,3 +2267,4 @@ marker's input to a run.
 - Targeted verification: `cd fastapi_backend && uv run --no-sync pytest tests/test_upload_records.py tests/test_session_pagination.py tests/test_session_maintenance.py tests/test_routes.py tests/test_alembic_migrations.py`; frontend pagination: `node --test test/sessionPages.test.mjs`.
 - Resource admission: `require_expensive_operation` shares one per-account hourly budget across upload initiation and session/clip/job compute entry points. Upload service admission locks the account and counts persisted active uploads in the creation transaction; retryable failed uploads retain a slot until abort/expiry, and assembly consumes capacity even after transfer expiry. Migration `0013` indexes the admission query. Verify with `uv run --no-sync pytest fastapi_backend/tests/test_resource_admission.py fastapi_backend/tests/test_auth_security.py` and `node --test test/streamTicket.test.mjs`.
 - Bearer credentials belong only in Authorization headers. Media/SSE use short-lived tickets; failed minting must never add a bearer query parameter. Query strings can still contain ticket credentials, so logs are not credential-free.
+- **Video retention**: `SessionMaintenanceService.run_video_retention_sweep()` deletes a top-level session's stored video (`files.video.absolutePath`) once it is older than `SESSION_VIDEO_RETENTION_DAYS` (default 365; `0` disables), leaving transcript/scores/feedback untouched — see `session_video_retention_days` in `core/config.py` and **Backup and data retention** in [docs/deployment-vm.md](docs/deployment-vm.md). Runs once at API startup and then on a timer (`SESSION_RETENTION_SWEEP_INTERVAL_SECONDS`, default 6h; `AppContainer.startup`, API role only). Candidates come from `SessionRepository.list_video_retention_candidates` (parent-less sessions only — a clip child's `files.video` is its parent's exported clip, never its own to delete); `SessionMaintenanceService.purge_expired_video` does the actual unlink-and-mark, idempotent via the `files.video.purgedAt` field the browser reads to explain an empty player (`SessionWorkspace.jsx`). Verify with `uv run --no-sync pytest fastapi_backend/tests/test_session_maintenance.py -k retention`.

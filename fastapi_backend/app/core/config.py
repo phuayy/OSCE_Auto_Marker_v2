@@ -469,6 +469,26 @@ class Settings:
     # existed) — same convention as hatchet_redispatch_interval_seconds.
     job_reaper_interval_seconds: int = read_int_env("JOB_REAPER_INTERVAL_SECONDS", 300)
 
+    # --- Session video retention -----------------------------------------
+    # A session's stored video is the one artifact that both fills a disk
+    # (see storage/output/ growth) and carries a student's face and voice —
+    # everything else a run produces (transcript, scores, feedback) is text.
+    # This deletes only that file, past this many days since the session was
+    # created; the assessment record it produced is kept indefinitely, so a
+    # deployment never loses the marks over a recording it was never asked to
+    # keep forever. Applies to top-level sessions only — a clip-assessment
+    # child's own "video" is its parent's exported clip, not a file it owns
+    # (see SessionMaintenanceService._delete_artifacts). 0 disables retention
+    # outright, matching job_reaper_interval_seconds's convention.
+    session_video_retention_days: int = read_int_env("SESSION_VIDEO_RETENTION_DAYS", 365)
+    # How often the retention sweep runs. Deletion is not time-critical, so
+    # this defaults to hours, not seconds, unlike the job reaper. 0 disables
+    # the periodic loop even if a retention window is configured (startup
+    # still runs one sweep so a long-stopped deployment catches up).
+    session_retention_sweep_interval_seconds: int = read_int_env(
+        "SESSION_RETENTION_SWEEP_INTERVAL_SECONDS", 6 * 60 * 60
+    )
+
     # Watchdog for external commands (ffmpeg, WhisperX, the scorers). Generous
     # by design: it exists to end a *hung* child, not to bound a slow one. A CPU
     # WhisperX run on a long recording can legitimately take hours. 0 disables.
