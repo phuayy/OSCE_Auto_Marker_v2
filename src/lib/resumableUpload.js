@@ -6,6 +6,13 @@ export async function uploadFileToResumableSession(file, plan, onProgress, { sig
   if (!Number.isSafeInteger(chunkSize) || chunkSize <= 0) {
     throw new Error('Upload plan did not include a valid chunk size.');
   }
+  // A GCS resumable-session PUT is keyed by the byte range in `Content-Range`,
+  // not by "how many times this request landed": resending the same range
+  // after a lost response either re-lands the identical bytes or gets back
+  // the same 308 + acknowledged `Range` the session already recorded, so a
+  // retry is safe. `reportConnection: false` because this goes straight to
+  // GCS, not this app's own API — a stall here says nothing about whether our
+  // backend is reachable.
   const send = (range, body) => request(plan.uploadUrl, {
     method: 'PUT', headers: { 'Content-Range': range }, body, signal,
     idempotent: true, reportConnection: false,
