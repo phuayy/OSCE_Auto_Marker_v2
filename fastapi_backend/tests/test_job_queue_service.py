@@ -75,3 +75,59 @@ def test_concurrent_create_waiting_job_is_deduplicated(tmp_path) -> None:
         assert len(jobs) == 1
 
     asyncio.run(scenario())
+
+
+# --- unscoped job listing is paginated, not unbounded -----------------------
+
+
+def test_list_jobs_page_pages_through_every_job_with_no_duplicates_or_gaps(tmp_path) -> None:
+    service = _make_service(tmp_path)
+
+    async def scenario() -> None:
+        await service.repository.initialize()
+        for index in range(5):
+            await service.enqueue(
+                f"session-{index}", "process_session", {"workflow": "standard"}, auto_start=False
+            )
+
+        seen: list[str] = []
+        cursor = None
+        for _ in range(10):  # generous bound; five jobs need at most three pages of two
+            page = await service.list_jobs_page(limit=2, cursor=cursor)
+            seen.extend(job["id"] for job in page["jobs"])
+            cursor = page["nextCursor"]
+            if cursor is None:
+                break
+
+        assert len(seen) == 5
+        assert len(set(seen)) == 5  # no row repeated across pages
+
+    asyncio.run(scenario())
+
+
+def test_list_jobs_page_rejects_a_limit_outside_the_bounds(tmp_path) -> None:
+    service = _make_service(tmp_path)
+
+    async def scenario() -> None:
+        await service.repository.initialize()
+        try:
+            await service.list_jobs_page(limit=0)
+            assert False, "expected ValueError"
+        except ValueError as error:
+            assert "between 1 and 200" in str(error)
+
+    asyncio.run(scenario())
+
+
+def test_list_jobs_page_rejects_a_malformed_cursor(tmp_path) -> None:
+    service = _make_service(tmp_path)
+
+    async def scenario() -> None:
+        await service.repository.initialize()
+        try:
+            await service.list_jobs_page(cursor="not-a-real-cursor")
+            assert False, "expected ValueError"
+        except ValueError as error:
+            assert "Invalid job cursor" in str(error)
+
+    asyncio.run(scenario())

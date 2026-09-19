@@ -286,3 +286,53 @@ def test_finish_takes_the_write_lock_before_reading(tmp_path) -> None:
         JobRepository._require = staticmethod(original_require)
 
     assert calls == ["lock", "read"]
+
+
+def _job(job_id: str, created_at: str) -> dict:
+    return {
+        "id": job_id,
+        "sessionId": f"session-{job_id}",
+        "taskType": "process_session",
+        "status": "queued",
+        "attempts": 0,
+        "maxAttempts": 3,
+        "createdAt": created_at,
+        "queuedAt": created_at,
+        "startedAt": None,
+        "endedAt": None,
+        "error": None,
+        "payload": {},
+    }
+
+
+def test_read_page_orders_newest_first_with_id_as_the_tiebreak(tmp_path) -> None:
+    """Two jobs created in the same instant must still produce a total order —
+    otherwise a row can be skipped or repeated across a page boundary."""
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
+    same_instant = "2026-01-01T00:00:00Z"
+    for job_id in ["a", "b", "c"]:
+        asyncio.run(repository.write(_job(job_id, same_instant)))
+    asyncio.run(repository.write(_job("d", "2026-01-02T00:00:00Z")))
+
+    page = asyncio.run(repository.read_page(limit=10))
+
+    # Newest timestamp first; ties broken by id, descending.
+    assert [row["id"] for row in page] == ["d", "c", "b", "a"]
+
+
+def test_read_page_keyset_survives_a_row_inserted_ahead_of_the_cursor(tmp_path) -> None:
+    """The whole point of a keyset cursor over an offset: a row landing ahead
+    of a page already handed out must not shift what the next page returns."""
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
+    for index, job_id in enumerate(["a", "b", "c"]):
+        asyncio.run(repository.write(_job(job_id, f"2026-01-0{index + 1}T00:00:00Z")))
+
+    first_page = asyncio.run(repository.read_page(limit=2))
+    assert [row["id"] for row in first_page] == ["c", "b"]
+
+    # A brand-new job lands "ahead" of the page already served.
+    asyncio.run(repository.write(_job("new", "2026-02-01T00:00:00Z")))
+
+    after = (first_page[-1]["createdAt"], first_page[-1]["id"])
+    second_page = asyncio.run(repository.read_page(limit=2, after=after))
+    assert [row["id"] for row in second_page] == ["a"]

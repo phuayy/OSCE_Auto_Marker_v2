@@ -13,6 +13,8 @@ from uuid import uuid4
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.logging_utils import log_context
+from app.core.pagination_cursor import decode_cursor as decode_page_cursor
+from app.core.pagination_cursor import encode_cursor as encode_page_cursor
 from app.core.utils import exception_message, parse_iso, utc_now_iso
 from app.domain.jobs import (
     ACTIVE_JOB_STATUSES,
@@ -279,6 +281,29 @@ class JobQueueService:
         if session_id:
             return await self.repository.list_for_session(session_id)
         return await self.repository.read_all()
+
+    async def list_jobs_page(self, *, limit: int = 200, cursor: str | None = None) -> dict[str, Any]:
+        """The unscoped job list, newest first, keyset-paginated like the
+        session index (``SessionService.list_page``).
+
+        A session's own jobs (``list_jobs(session_id)``) stay unbounded — a
+        handful of retries and task types, never worth paging — but this list
+        has no such ceiling: it grows for the life of the deployment. Same
+        page contract as sessions: ``limit`` is 1-200, ``cursor`` is opaque and
+        comes back as ``nextCursor`` for the next page, and both raise
+        ``ValueError`` on anything malformed rather than silently clamping.
+        """
+        if not 1 <= limit <= 200:
+            raise ValueError("Job limit must be between 1 and 200.")
+        try:
+            after = decode_page_cursor(cursor)
+        except ValueError as error:
+            raise ValueError("Invalid job cursor.") from error
+        rows = await self.repository.read_page(limit=limit + 1, after=after)
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        next_cursor = encode_page_cursor(page[-1]["createdAt"], page[-1]["id"]) if has_more else None
+        return {"jobs": page, "nextCursor": next_cursor}
 
     async def read(self, job_id: str) -> dict[str, Any]:
         return await self.repository.read(job_id)
