@@ -65,7 +65,7 @@ def _reject_oversized_part(request: Request, max_bytes: int) -> None:
         )
 
 
-@router.get("/{upload_id}")
+@router.get("/{upload_id}", dependencies=[Depends(require_upload_owner)])
 async def get_upload_status(upload_id: str, container: AppContainer = Depends(get_container)) -> dict[str, object]:
     try:
         return await container.async_uploads.status(upload_id)

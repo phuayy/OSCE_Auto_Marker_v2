@@ -153,6 +153,37 @@ def test_a_marker_cannot_cancel_another_markers_job(tmp_path) -> None:
     assert allowed.status_code != 403, allowed.text
 
 
+def test_only_an_admin_may_act_on_a_job_whose_session_is_gone(tmp_path) -> None:
+    """A job row can outlive its session (a race with deletion, or a row a
+    caller left behind with no session ever created). Unlike a legacy record
+    with no provenance snapshot, this is not "nothing to defer to, so let
+    anyone through" — the session, had it survived, may well have had an
+    owner. Only an admin may act on the orphan."""
+    client = build_test_client(tmp_path)
+    admin_token = _token(client)
+    _activate_marker(client, admin_token, MARKER_EMAIL)
+    owner_token = _token(client, MARKER_EMAIL, GOOD_PASSWORD)
+    other_token = _second_marker_token(client, admin_token)
+
+    created = client.post("/api/uploads/initiate", headers=_headers(owner_token), json=UPLOAD)
+    job_id = created.json()["job"]["id"]
+    session_id = created.json()["session"]["id"]
+
+    # Delete the session row directly (not through the app), leaving the job
+    # row behind — the race/leftover case this dependency has to cope with.
+    container = client.app.state.container
+    asyncio.run(container.sessions.repository.delete(session_id))
+
+    forbidden = client.post(f"/api/jobs/{job_id}/cancel", headers=_headers(owner_token))
+    assert forbidden.status_code == 403, forbidden.text
+
+    forbidden_other = client.post(f"/api/jobs/{job_id}/cancel", headers=_headers(other_token))
+    assert forbidden_other.status_code == 403, forbidden_other.text
+
+    allowed = client.post(f"/api/jobs/{job_id}/cancel", headers=_headers(admin_token))
+    assert allowed.status_code != 403, allowed.text
+
+
 # --- uploads ------------------------------------------------------------------------
 
 
@@ -181,4 +212,25 @@ def test_a_marker_cannot_upload_a_part_onto_another_markers_upload(tmp_path) -> 
         headers=_headers(owner_token),
         content=b"12345",
     )
+    assert allowed.status_code == 200, allowed.text
+
+
+def test_a_marker_cannot_read_another_markers_upload_status(tmp_path) -> None:
+    """GET status is a read, but of an in-flight upload rather than a
+    session — unlike sessions, there is no "every marker sees every upload"
+    policy, so this follows every other upload route rather than the
+    session-read exception."""
+    client = build_test_client(tmp_path)
+    admin_token = _token(client)
+    _activate_marker(client, admin_token, MARKER_EMAIL)
+    owner_token = _token(client, MARKER_EMAIL, GOOD_PASSWORD)
+    other_token = _second_marker_token(client, admin_token)
+
+    created = client.post("/api/uploads/initiate", headers=_headers(owner_token), json=UPLOAD)
+    upload_id = created.json()["uploadId"]
+
+    forbidden = client.get(f"/api/uploads/{upload_id}", headers=_headers(other_token))
+    assert forbidden.status_code == 403, forbidden.text
+
+    allowed = client.get(f"/api/uploads/{upload_id}", headers=_headers(owner_token))
     assert allowed.status_code == 200, allowed.text
