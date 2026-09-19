@@ -187,28 +187,36 @@ class WebhookDispatcher:
         url = str(subscription.get("url") or "")
         context = log_context(subscription_id, "webhook_delivery", event_type=event_type)
 
-        # Re-validate at send time, not just at registration: the safety of a URL
-        # is a property of what it resolves to *now*, and the allow-private
-        # setting may have been tightened since the row was written.
-        try:
-            validate_webhook_url(url, allow_private=self.settings.webhook_allow_private_urls)
-        except WebhookUrlError as error:
-            await self.repository.record_delivery(
-                subscription_id=subscription_id,
-                notification_id=notification.get("id"),
-                event_type=event_type,
-                attempt=1,
-                status="failed",
-                error=str(error)[:_MAX_ERROR_CHARS],
-            )
-            logger.warning("Refusing webhook delivery to unsafe URL: %s", error, extra=context)
-            return False
-
         payload = self.build_payload(event_type, notification)
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         max_attempts = max(1, self.settings.webhook_max_attempts)
 
         for attempt in range(1, max_attempts + 1):
+            # Re-validate before *every* attempt, not just once before the
+            # loop: the safety of a URL is a property of what it resolves to
+            # right now, and retries are exactly where that can change under
+            # us — the backoff between attempts is real wall-clock time for a
+            # hostname to rebind to a private address, and the allow-private
+            # setting may itself have been tightened mid-run. This does not
+            # close the gap fully (the resolution here and the one httpx does
+            # to actually connect are still two separate lookups — see
+            # `validate_webhook_url`'s docstring); it only shrinks the window
+            # an attacker gets from "one validation, many deliveries" to "one
+            # validation per delivery".
+            try:
+                validate_webhook_url(url, allow_private=self.settings.webhook_allow_private_urls)
+            except WebhookUrlError as error:
+                await self.repository.record_delivery(
+                    subscription_id=subscription_id,
+                    notification_id=notification.get("id"),
+                    event_type=event_type,
+                    attempt=attempt,
+                    status="failed",
+                    error=str(error)[:_MAX_ERROR_CHARS],
+                )
+                logger.warning("Refusing webhook delivery to unsafe URL: %s", error, extra=context)
+                return False
+
             timestamp = int(time.time())
             headers = {
                 "Content-Type": "application/json",

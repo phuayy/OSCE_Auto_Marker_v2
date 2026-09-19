@@ -229,6 +229,54 @@ def test_transport_error_is_retried_then_recorded(tmp_path) -> None:
     asyncio.run(scenario())
 
 
+def test_unsafe_url_is_refused_before_a_retry_too(tmp_path, monkeypatch) -> None:
+    """The rebinding window closes per attempt, not just once before the loop.
+
+    A hostname that resolved safely for the first attempt can rebind to a
+    private address during the backoff before a retry — that gap is exactly
+    what a DNS-rebinding attack against this feature would use. Re-validating
+    only once, before the whole retry loop, would let a retry through on the
+    strength of a check performed against a since-changed DNS answer.
+    """
+
+    async def scenario() -> None:
+        client = _StubClient([_StubResponse(500)])
+        dispatcher, repository = _dispatcher(tmp_path, client, webhook_max_attempts=3)
+        subscription = await repository.create(url="https://hooks.example.com/rebind")
+
+        calls = {"count": 0}
+        real_validate = __import__(
+            "app.core.webhook_url", fromlist=["validate_webhook_url"]
+        ).validate_webhook_url
+
+        def _flip_unsafe_on_second_call(url: str, **kwargs):
+            calls["count"] += 1
+            if calls["count"] >= 2:
+                from app.core.webhook_url import WebhookUrlError
+
+                raise WebhookUrlError("host now resolves to a private address")
+            return real_validate(url, **kwargs)
+
+        monkeypatch.setattr(
+            "app.services.webhook_dispatcher.validate_webhook_url", _flip_unsafe_on_second_call
+        )
+
+        delivered = await dispatcher.deliver(subscription, "scoring.completed", _NOTIFICATION)
+
+        assert delivered is False
+        # One request went out (attempt 1, which 500'd and queued a retry);
+        # the retry never reached the network because re-validation caught it.
+        assert len(client.requests) == 1
+        assert calls["count"] == 2
+
+        deliveries = await repository.list_deliveries(subscription["id"])
+        assert deliveries[0]["status"] == "failed"
+        assert "private address" in str(deliveries[0]["error"])
+        assert deliveries[0]["attempt"] == 2
+
+    asyncio.run(scenario())
+
+
 def test_unsafe_url_is_refused_at_send_time(tmp_path) -> None:
     """A URL stored while private targets were allowed must not be delivered to
     after the setting is tightened."""
