@@ -14,7 +14,12 @@ from app.core.json_utils import read_json_file
 from app.core.utils import utc_now_iso
 from app.database.models import JobAttemptRecord, JobEventRecord, JobRecord
 from app.database.orm import OrmDatabase
-from app.domain.jobs import ACTIVE_JOB_STATUSES, RECOVERABLE_JOB_STATUSES, JobStatus
+from app.domain.jobs import (
+    ACTIVE_JOB_STATUSES,
+    RECOVERABLE_JOB_STATUSES,
+    TERMINAL_JOB_STATUSES,
+    JobStatus,
+)
 
 
 # Attempt rows are closed with the same status word the job ended on, except an
@@ -69,6 +74,29 @@ class JobRepository:
       ``SELECT FOR UPDATE``.
     * **Timestamps are ISO-8601 UTC text.** They are compared and ordered as
       strings and travel to the browser as-is; see ``JobRecord``.
+
+    Every method here that reads a row and then writes it back inside the same
+    ``transaction()`` calls :meth:`OrmDatabase.ensure_write_locked` as its
+    first statement. On SQLite in WAL mode, ``transaction()``'s ``BEGIN`` is
+    deferred: an unlocked first statement — a read — takes only a snapshot,
+    and if another connection commits before this one's later write, that
+    write fails with ``SQLITE_BUSY_SNAPSHOT`` instead of waiting its turn
+    (``busy_timeout`` only retries lock contention, not a stale snapshot).
+    ``ensure_write_locked`` takes the write lock up front instead (a no-op on
+    PostgreSQL, and idempotent if this ``transaction()`` turns out to be
+    nested inside a caller's ``unit_of_work()`` that already took it), so every
+    read that follows is already looking at the version it is about to update.
+    This is deliberately ``transaction()`` plus an explicit lock rather than
+    ``unit_of_work()`` itself: unlike ``transaction()``, a *nested*
+    ``unit_of_work()`` call does not flush before returning, and this
+    repository's callers (``JobQueueService.create_waiting_job`` chief among
+    them) rely on one repository call's write being flushed — visible to the
+    next statement on this session — before the next repository call runs, in
+    a schema with no ORM ``relationship()`` wiring between these tables to let
+    SQLAlchemy infer that insert order on its own. A method that only ever
+    executes a single conditional ``UPDATE`` with no prior read
+    (``touch_heartbeat``), or that writes before it reads
+    (``recover_interrupted_jobs``), has nothing to protect and takes no lock.
     """
 
     def __init__(self, database: OrmDatabase | Path, legacy_jobs_dir: Path | None = None) -> None:
@@ -168,7 +196,11 @@ class JobRepository:
         one-off legacy import).
         """
         columns = _columns_from_job_dict(job)
+        # merge() reads the row by primary key before writing it — read then
+        # write, so this takes the write lock up front (see the class
+        # docstring) even though write() itself never inspects the read.
         async with self.database.transaction() as db:
+            await self.database.ensure_write_locked(db)
             await db.merge(JobRecord(**columns))
 
     async def delete_for_session(self, session_id: str) -> int:
@@ -179,6 +211,7 @@ class JobRepository:
         protect writes that bypass this repository.
         """
         async with self.database.transaction() as db:
+            await self.database.ensure_write_locked(db)
             job_ids = list(
                 await db.scalars(select(JobRecord.id).where(JobRecord.session_id == session_id))
             )
@@ -222,6 +255,7 @@ class JobRepository:
     async def requeue_interrupted_job(self, job_id: str, reason: str) -> dict[str, Any]:
         now = utc_now_iso()
         async with self.database.transaction() as db:
+            await self.database.ensure_write_locked(db)
             row = await self._require(db, job_id)
             if row.status == JobStatus.RUNNING:
                 attempt_number = int(row.attempts or 0)
@@ -250,6 +284,7 @@ class JobRepository:
     async def prepare_retry_attempt(self, job_id: str, reason: str) -> dict[str, Any]:
         now = utc_now_iso()
         async with self.database.transaction() as db:
+            await self.database.ensure_write_locked(db)
             row = await self._require(db, job_id)
             status = row.status
             attempts = int(row.attempts or 0)
@@ -284,6 +319,7 @@ class JobRepository:
     async def claim_queued(self, job_id: str, worker_id: str) -> JobClaim:
         now = utc_now_iso()
         async with self.database.transaction() as db:
+            await self.database.ensure_write_locked(db)
             row = await self._require(db, job_id)
             if row.status != JobStatus.QUEUED:
                 return JobClaim("not_queued", _to_job_dict(row))
@@ -389,6 +425,7 @@ class JobRepository:
     async def rerun(self, job_id: str, *, reset_attempts: bool = True) -> dict[str, Any]:
         now = utc_now_iso()
         async with self.database.transaction() as db:
+            await self.database.ensure_write_locked(db)
             row = await self._require(db, job_id)
             if row.status == JobStatus.RUNNING:
                 raise ValueError("Running jobs cannot be rerun until they finish or are cancelled.")
@@ -434,17 +471,39 @@ class JobRepository:
     # --- internals -----------------------------------------------------------
 
     async def _finish(self, job_id: str, status: str, error: str | None) -> dict[str, Any]:
+        """Move a job to a terminal status — unless it is already at one.
+
+        First writer wins: a job the user cancelled must stay cancelled even if
+        the engine run it could not fully abort (see ``_cancel_hatchet_run``)
+        reports success or failure afterwards, and a job already finished must
+        not have its outcome silently replaced by a stray late call. The
+        predicate on the ``UPDATE`` is what makes that atomic rather than a
+        check-then-write race: whichever caller's statement matches a
+        non-terminal row is the one whose outcome sticks.
+        """
         now = utc_now_iso()
         async with self.database.transaction() as db:
+            await self.database.ensure_write_locked(db)
             row = await self._require(db, job_id)
+            if row.status in TERMINAL_JOB_STATUSES:
+                return _to_job_dict(row)
+
             attempt_number = int(row.attempts or 0)
-            row.status = status
-            row.ended_at = now
-            row.error = error
-            row.locked_by = None
-            row.locked_at = None
-            row.updated_at = now
-            if attempt_number > 0:
+            result = await db.execute(
+                update(JobRecord)
+                .where(JobRecord.id == job_id, JobRecord.status.notin_(sorted(TERMINAL_JOB_STATUSES)))
+                .values(
+                    status=status,
+                    ended_at=now,
+                    error=error,
+                    locked_by=None,
+                    locked_at=None,
+                    updated_at=now,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            await db.refresh(row)
+            if result.rowcount == 1 and attempt_number > 0:
                 await self._close_open_attempt(
                     db, job_id, attempt_number, status=status, ended_at=now, error=error
                 )

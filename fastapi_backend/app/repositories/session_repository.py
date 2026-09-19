@@ -217,9 +217,7 @@ class SessionRepository:
 
     async def _lock_names(self, db_session: AsyncSession) -> None:
         if self.database.engine.dialect.name == "sqlite":
-            if not db_session.info.get("write_locked"):
-                await db_session.execute(text("BEGIN IMMEDIATE"))
-                db_session.info["write_locked"] = True
+            await self.database.ensure_write_locked(db_session)
         else:
             await db_session.execute(text("SELECT pg_advisory_xact_lock(7482673901)"))
 
