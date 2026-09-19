@@ -74,6 +74,7 @@ def test_diagnostics_reports_binaries_caches_and_leases_for_an_admin(tmp_path) -
         "customProviders",
         "userDirectory",
         "tokenRevocations",
+        "readCache",
     ):
         assert key in body["caches"]
     assert "gpu" in body["leases"]

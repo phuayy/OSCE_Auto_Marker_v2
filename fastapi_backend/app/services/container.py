@@ -228,6 +228,12 @@ class AppContainer:
             # pinned at waiting_for_upload) once their TTL has elapsed. Frees
             # leaked bytes and clears dead session cards.
             await self.async_uploads.recover_expired_uploads()
+            # One sweep at boot regardless of the periodic interval below, so a
+            # deployment that was stopped for a while (or is enabling this for
+            # the first time against old data) does not wait for the first
+            # timer tick to start honouring the retention window.
+            if self.settings.session_video_retention_days > 0:
+                await self.session_maintenance.run_video_retention_sweep()
         await self.jobs.startup(dispatch_queued=dispatch_queued_jobs, recover_interrupted=recover_interrupted_jobs)
         # Weights are fetched after the process is otherwise ready, never
         # before: a deployment must serve requests while a multi-gigabyte
@@ -248,6 +254,18 @@ class AppContainer:
                     self.jobs.stale_job_reaper_loop(),
                     name="job-stale-reaper",
                 )
+        if (
+            api
+            and self.settings.session_video_retention_days > 0
+            and self.settings.session_retention_sweep_interval_seconds > 0
+        ):
+            # API only, like the upload-recovery sweeps above: the process that
+            # owns session lifecycle recovery is the one that should own this
+            # too, rather than a Hatchet worker racing it against the same rows.
+            self.background.spawn(
+                self.session_maintenance.video_retention_sweep_loop(),
+                name="session-video-retention",
+            )
 
     async def shutdown(self) -> None:
         # Cancelled rather than drained: a half-finished weight download is

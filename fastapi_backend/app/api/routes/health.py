@@ -88,6 +88,11 @@ async def diagnostics(response: Response, container: AppContainer = Depends(get_
             "customProviders": container.llm_settings.custom_provider_cache_stats(),
             "userDirectory": container.user_directory.cache_stats(),
             "tokenRevocations": container.auth.cache_stats(),
+            # Hot-path read cache behind the session index and notification
+            # feed. Used to be echoed on GET /api/events/versions, a route
+            # every signed-in marker polls — moved here, admin-only, with the
+            # rest of this endpoint's cache internals.
+            "readCache": container.read_cache.stats(),
             "changeFeedPushActive": container.changes.push_active,
         },
         # The accelerator lease: how many GPU steps run now and how many wait.
