@@ -1204,6 +1204,39 @@ sub-components without changing the upload/session-state behaviour they
 share), not something to fold into an unrelated change — flagged here so it
 is a deliberate choice, not a forgotten one.
 
+**The extraction plan, scoped but not yet started** (2026-09-19 architecture
+audit). `OSCEAiMarkerMockup.jsx` is 3,428 lines / 62 `useState` / 20
+`useEffect` today. The state already sorts into six mostly-independent
+clusters by what they're read/written for — a custom-hooks pass (state +
+effects move to `src/hooks/*.js`, JSX and render structure untouched) can
+pull each out without the render-structure risk a full component split would
+carry:
+
+| Hook | Owns | State it takes with it |
+|---|---|---|
+| `useUploadForm` | The new-session form before a file is sent | `videoFile`, `caseStudyFile`, `uploadFlow`, `segmentationMethod`, `segmentationPresets`, `segmentationPreset`, `customOccupancy`, `regionFocus`, `sessionNameInput`, `showConfirmStart`, `corpora`, `selectedCorpusId`, `showCorpusManager`, `videoInputRef`, `caseStudyInputRef` |
+| `useSessionIndex` | The dashboard list: fetch, page, coalesced refresh | `sessionIndex`, `sessionIndexLoading`, `hasMoreSessions`, `sessionPageCountRef`, `hasLoadedSessionIndex`, `sessionIndexError`, `sessionNameDrafts`, `renamingSessionId`, `deletingSessionId`, `rerunningSessionId`, `startingSessionId`, `sessionIndexRequestSeqRef`, `refreshSessionIndexRef`, `hasInFlightSessions` |
+| `useUploadTransfer` | An in-flight upload's own phase/overlay, independent of `uploadTracker` itself | `isUploading`, `uploadOverlayDismissed`, `activeUploadSessionIdRef`, `isDemoFallback`, `runtimeSeconds` |
+| `useOpenSession` | Loading/closing the workspace payload for one session | `session`, `transcript`, `scoreReport`, `communicationScores`, `audioProfessionalism`, `audioProfLoadError`, `isLoadingWorkspace`, `workspaceLoad`, `workspaceLoadRef`, `showWorkspace`, `parentSessionSnapshot`, `error`, `notice` |
+| `useManualTimelineEditor` | The crop timeline's own draft/drag state (stays owned by the dashboard per the rule below, just moved) | `localVideoUrl`, `activeSegmentId`, `selectedClipId`, `videoDurationSeconds`, `isRecropping`, `cropDraft`, `manualSegmentCount`, `manualBoundaries`, `manualLabels`, `manualSegmentKinds`, `timelineMenu`, `draggingBoundaryIndex`, `isSavingManualSegments`, `currentVideoTime`, `renamingClipId`, plus the six timeline/video refs |
+| `useClipAssessments` | Clip list derivations + per-clip run/export state | `clipAssessmentRuns`, `selectedClipAssessmentIds`, `isQueueingSelectedClips`, `clipSummaries`, `isLoadingClipSummaries`, `demoLongVideoSummaries`, `awaitingClipExportFor`, `clipExportJustFinished`, `clipExportWasWatchedRef`, plus the `videoClips`/`clipAssessmentIndex`/`selectedClip`/etc. `useMemo`s |
+
+Two rules carry over unchanged from the workspace split, because the same
+reasons apply: **the dashboard still owns session state** — nothing above
+moves ownership to a child component, only out of the 3,428-line function and
+into a hook the component calls, so the write-then-refetch contract in
+"Session write contract" is untouched — and each hook is a plain function of
+its inputs/outputs (return a bundle, the way `manualTimeline` and
+`clipSplitterSharedProps` already travel as bundles today), so
+`test/bundleSplit.test.mjs`-style structural tests can pin what each hook is
+and is not allowed to import. Expect the six to land at cyclomatic complexity
+101 minus roughly what each table row's effects/handlers account for, not
+zero — the JSX itself, and the handlers only JSX calls, stay in the
+component. Do this as its own branch with its own manual browser pass (the
+form, the dashboard list, opening/closing a session, the timeline editor, a
+clip run) before merging, the same bar "For UI or frontend changes" already
+sets project-wide.
+
 Three things make the seam honest rather than cosmetic:
 
 - **The dashboard still owns the session state.** The upload flow, the

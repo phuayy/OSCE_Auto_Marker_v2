@@ -106,13 +106,6 @@ def build_app(app_settings: Settings) -> FastAPI:
         openapi_url="/openapi.json" if app_settings.api_docs_enabled else None,
     )
 
-    application.add_middleware(
-        CORSMiddleware,
-        allow_origins=list(app_settings.cors_allow_origins),
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
     @application.middleware("http")
     async def require_auth(request: Request, call_next):
         container: AppContainer = request.app.state.container
@@ -129,8 +122,26 @@ def build_app(app_settings: Settings) -> FastAPI:
 
     # Added after require_auth so it wraps it (Starlette's user middleware
     # nests in reverse registration order — the most recently added is
-    # outermost): every response gets these headers, a 401 from require_auth
-    # included, rather than only the ones that reach a route handler.
+    # outermost, running first on the way in). A cross-origin preflight
+    # (`OPTIONS` with `Origin` + `Access-Control-Request-Method`) carries no
+    # bearer token by design — the browser sends it before the real request
+    # even exists — so it must reach CORSMiddleware's own short-circuit before
+    # require_auth ever sees it, or every preflight to a protected route dies
+    # as a 401 and the browser never sends the real request. Registering this
+    # after require_auth is what makes that true; a same-origin deployment
+    # (the documented shape — `SERVE_FRONTEND=true`, no `Origin` header on
+    # same-origin requests) never exercises this path at all.
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(app_settings.cors_allow_origins),
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Added last so it wraps everything, including the two middlewares above:
+    # every response gets these headers, a CORS preflight or a 401 from
+    # require_auth included, rather than only the ones that reach a route
+    # handler.
     @application.middleware("http")
     async def add_security_headers(request: Request, call_next):
         response = await call_next(request)
