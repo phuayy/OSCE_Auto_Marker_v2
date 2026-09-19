@@ -45,6 +45,18 @@ serves the built frontend.
    bounds a single upload; `UPLOAD_PART_SIZE_MB` is the size of each part the
    browser sends and matters again in step 6.
 
+   **Database: SQLite is fine for one marker, not for a real cohort.**
+   `DATABASE_URL` unset means SQLite — correct under concurrent access (WAL
+   plus `ensure_write_locked`'s `BEGIN IMMEDIATE`), but still one writer, so
+   upload parts, job events, session progress and notifications all serialise
+   behind that one lock. A single marker never notices; several markers
+   uploading and processing at once will feel it as queueing latency.
+   `ENVIRONMENT=production` on SQLite prints a startup warning for exactly
+   this, but the fix is cheapest decided before the first deploy: point
+   `DATABASE_URL` at PostgreSQL instead (`postgresql+asyncpg://...`) — no code
+   change, migrations run the same way at startup. Reserve SQLite for a
+   single-marker or evaluation deployment.
+
 4. **Open the port** on the VM's firewall (`ufw allow 8787/tcp`; on Windows
    `netsh advfirewall firewall add rule name="OSCE AI Marker" dir=in action=allow protocol=TCP localport=8787`)
    and in the cloud provider's security group.

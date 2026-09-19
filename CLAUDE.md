@@ -824,6 +824,15 @@ directories.
 retries mark the session terminally failed. `export_clips` opts out because a
 failed export must not bury a session whose clip list is still perfectly good.
 
+**`GET /api/jobs` with no `sessionId` is keyset-paginated**, the same
+`limit`/`cursor` in, `nextCursor` back contract as `GET /api/sessions`
+(`JobQueueService.list_jobs_page`, `JobRepository.read_page`) — the codec is
+shared with the session index (`app/core/pagination_cursor.py`), but the sort
+key is compared as the TEXT it is stored as rather than parsed into a
+`datetime`, matching this table's own string-ordered timestamps. A single
+session's jobs (`?sessionId=`) stay unbounded through `list_for_session` — a
+handful of retries, never worth paging.
+
 Jobs carry a `payload_json` and get retries with equal-jitter exponential
 backoff, interrupted-job requeue on restart, and Hatchet-side retry accounting.
 Any long multi-step operation belongs here rather than in a request handler —
@@ -932,9 +941,16 @@ creation; only a masked preview is.
 [core/webhook_url.py](fastapi_backend/app/core/webhook_url.py) resolves the
 host and refuses anything outside the public unicast range — loopback,
 link-local, the cloud metadata address — before a subscription is accepted
-and again before each delivery (DNS can change between the two), because the
-server making that POST holds this deployment's own trust. An operator who
-needs to reach an internal endpoint on purpose sets
+and again before *every* delivery attempt, not just once before a delivery's
+retry loop (DNS can change between the two, and a retry's backoff is real
+wall-clock time for a hostname to rebind — `WebhookDispatcher.deliver`),
+because the server making that POST holds this deployment's own trust. This
+narrows the DNS-rebinding gap the module's own docstring names — resolution
+here and the one httpx does to actually connect are still two separate
+lookups, and fully closing that means pinning the resolved address into the
+connection, judged out of proportion for a single-operator deployment — from
+"one validation, many deliveries" to "one validation per delivery". An
+operator who needs to reach an internal endpoint on purpose sets
 `WEBHOOK_ALLOW_PRIVATE_URLS=true`.
 
 **Deliveries are logged, not audited.** `webhook_deliveries` is pruned to a
@@ -949,24 +965,56 @@ joining the log.
 
 ## HTTP middleware stack
 
-Two `@application.middleware("http")` layers in [main.py](fastapi_backend/app/main.py),
-in registration order (Starlette nests them so the one added *last* wraps the
-one added earlier, running first on the way in and last on the way out):
+Four layers in [main.py](fastapi_backend/app/main.py), in registration order
+(Starlette nests them so the one added *last* wraps the one added earlier,
+running first on the way in and last on the way out):
 
 1. `require_auth` — decides *who* may reach a route (`authorize_request`, see
    **Authentication and accounts** below).
-2. `add_security_headers` — added after `require_auth` so it wraps it,
+2. `CORSMiddleware` — added after `require_auth` so it wraps it and answers a
+   cross-origin preflight before `require_auth` ever sees it (see
+   **One API client** / `test_cors_preflight.py`). `allow_credentials=False`
+   is explicit: auth here is a bearer token the caller must already hold,
+   never an ambient cookie, so `CORS_ALLOW_ORIGINS="*"` has nothing for a
+   cross-origin page to ride.
+3. `MaxBodySizeMiddleware` — added after CORS so it runs before both CORS and
+   `require_auth`, rejecting a request whose declared `Content-Length`
+   exceeds `MAX_REQUEST_BODY_MB` before Starlette ever buffers it. A pure
+   ASGI middleware, not `BaseHTTPMiddleware` (see
+   [core/body_limit.py](fastapi_backend/app/core/body_limit.py)) — it only
+   needs the headers, never the body. Exempts
+   `PUT /api/uploads/{id}/parts/{n}`, the one route built to carry a
+   multi-megabyte body, which already enforces its own larger cap on the
+   bytes actually received (`async_uploads.py::_reject_oversized_part` +
+   `LocalObjectStorageService.put_part`, `UPLOAD_PART_SIZE_MB`).
+4. `add_security_headers` — added last so it wraps everything above,
    applying [core/security_headers.py](fastapi_backend/app/core/security_headers.py)'s
    baseline headers (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
    `Referrer-Policy: strict-origin-when-cross-origin`, a same-origin
-   `Content-Security-Policy`) to *every* response — a 401 `require_auth`
-   short-circuits included, not only a route handler's own response. None of
-   this replaces authentication or input validation; it is defense in depth
-   against the class of bug that gets through anyway. `CONTENT_SECURITY_POLICY`
-   overrides the default CSP wholesale; `Strict-Transport-Security` is
-   separately opt-in (`ENABLE_HSTS`) because, unlike the other headers, it can
-   brick a deployment that turns it on carelessly — see the `ENABLE_HSTS` row
-   in **Key Environment Variables**.
+   `Content-Security-Policy`) to *every* response — a 401 from `require_auth`,
+   a 413 from the body cap, a CORS preflight, all included, not only a route
+   handler's own response. None of this replaces authentication or input
+   validation; it is defense in depth against the class of bug that gets
+   through anyway. `CONTENT_SECURITY_POLICY` overrides the default CSP
+   wholesale; `Strict-Transport-Security` is separately opt-in (`ENABLE_HSTS`)
+   because, unlike the other headers, it can brick a deployment that turns it
+   on carelessly — see the `ENABLE_HSTS` row in **Key Environment Variables**.
+
+`require_auth` trusts `request.client.host` — via `client_ip()` in
+[api/dependencies.py](fastapi_backend/app/api/dependencies.py) — as the
+*immediate TCP peer*, which a client cannot forge. That is only true because
+`scripts/run_api.py` starts uvicorn with `proxy_headers=False`: uvicorn's own
+`ProxyHeadersMiddleware` defaults to trusting loopback and rewriting the ASGI
+scope's client address from `X-Forwarded-For` for any connection from
+`127.0.0.1` — which, since `API_HOST` defaults to loopback and the documented
+nginx-on-the-same-VM shape proxies through it too, is nearly every real
+deployment. Left on, that rewrite happens *underneath and before* this app's
+own `TRUSTED_PROXY_COUNT` / `TRUSTED_PROXY_IPS` model ever runs, silently
+handing an unauthenticated caller on the loopback interface (an SSH local
+port-forward, another process on the box) a fresh rate-limit identity on
+every request by sending its own `X-Forwarded-For`. Disabled outright rather
+than tuned via `forwarded_allow_ips`, so `client_ip()` stays the one place
+that ever decides what a proxy is allowed to claim.
 
 ---
 
@@ -1518,8 +1566,9 @@ recording; its Student column the scored subject.
 | `API_HOST` / `API_PORT` | `127.0.0.1` / `8787` | Where uvicorn listens. Loopback by default; `0.0.0.0` for a VM other devices upload to. Read by `scripts/run_api.py` through `server_bind_from_env()` so `.env` applies without `dev.mjs` |
 | `SERVE_FRONTEND` / `FRONTEND_DIST_DIR` | `false` / `<root>/dist` | Serve the built frontend from the API at `/` (same origin as `/api`, so no CORS). `app/api/frontend.py`; a missing build is a startup warning and 404s, not a crash |
 | `DEV_SERVER_HOST` / `DEV_SERVER_PORT` / `PREVIEW_PORT` | `127.0.0.1` / `5173` / `4173` | Vite's own bind. The proxy target follows `API_HOST` / `API_PORT` (`scripts/dev-hosts.mjs` maps `0.0.0.0` to loopback) |
-| `CORS_ALLOW_ORIGINS` | `*` | Browser origins allowed to call `/api`. Moot when the frontend is served from the same origin; set it to that origin to clear the warning |
-| `TRUSTED_PROXY_COUNT` | `0` | Reverse proxies in front. Must match the hop count or the login rate limit keys on the proxy's address |
+| `CORS_ALLOW_ORIGINS` | `*` | Browser origins allowed to call `/api`. Moot when the frontend is served from the same origin; set it to that origin to clear the warning. `allow_credentials=False` is explicit alongside it — auth here is a bearer token the caller must already hold, never an ambient cookie, so a wildcard origin has nothing to ride |
+| `MAX_REQUEST_BODY_MB` | `2` | Declared `Content-Length` cap for every route except `PUT /api/uploads/{id}/parts/{n}`, which enforces its own larger cap on the bytes actually received (`UPLOAD_PART_SIZE_MB`). Rejected before Starlette buffers the body — see `app/core/body_limit.py` |
+| `TRUSTED_PROXY_COUNT` | `0` | Reverse proxies in front. Must match the hop count or the login rate limit keys on the proxy's address. `scripts/run_api.py` starts uvicorn with `proxy_headers=False` so this app's own resolution (`client_ip()` in `api/dependencies.py`) is the only thing that ever honours `X-Forwarded-For` — uvicorn's own equivalent trusts loopback by default and would otherwise rewrite the client address *before* this setting is even consulted |
 | `TRUSTED_PROXY_IPS` | — (count-only) | The proxy's own address(es)/CIDRs, verified against the immediate TCP peer before `X-Forwarded-For` is trusted at all — hop-counting alone cannot tell a header the proxy added from one forged by a client reaching the API port directly, since both are the same length. Unset with `TRUSTED_PROXY_COUNT > 0`: a startup warning outside production; `ENVIRONMENT=production` refuses to start |
 | `TRANSCRIPTION_ENGINE` | `whisperx` | Fallback engine when Settings has no stored selection (`whisperx` \| `canary-qwen`) |
 | `CANARY_MODEL` | `nvidia/canary-qwen-2.5b` | NeMo SALM checkpoint for the Canary engine (`uv sync --group canary`) |
@@ -2054,7 +2103,7 @@ resolution failure must never make a previously-accepted provider unreadable.
 | Storage, cache, CRUD | [services/custom_provider_service.py](fastapi_backend/app/services/custom_provider_service.py) |
 | The screen | [src/CustomProvidersSettings.jsx](src/CustomProvidersSettings.jsx) + [src/lib/customProviders.js](src/lib/customProviders.js) |
 
-Four properties the design rests on:
+Five properties the design rests on:
 
 * **`ProviderCatalog` is a value, not a mutated registry.** `registry.py` still
   answers "what did this build ship"; the catalogue answers "what can *this
@@ -2078,6 +2127,17 @@ Four properties the design rests on:
   that means and cannot disagree with the settings screen about it. The blob is
   credential-free and safe to log. Unset, a scorer sees exactly the six shipped
   providers, as before.
+* **A connection can carry a second credential, and only an admin reads it
+  back.** `extraHeaders` / `extraQuery` / `extraBody` are the escape hatch a
+  corporate gateway's own auth token, a repeated Azure key, or a signed
+  vendor switch lives in — the API key store handles the *platform* key, not
+  these. `GET /api/settings/llm-providers` is open to every marker so they
+  can pick a routing target, so `LLMSettingsService.describe()` takes
+  `include_provider_secrets` and the route passes it only for an admin actor
+  (`app.llm.custom.redact_connection_secrets` strips those three fields
+  otherwise). The admin-only write routes, and the settings screen's own edit
+  form re-reading through the same GET as an admin, still get the connection
+  verbatim — that form has to pre-fill itself from it.
 
 Deleting a custom provider removes its stored key with it — an orphaned
 ciphertext row is a credential nothing can use and nothing will ever rotate.
@@ -2137,6 +2197,58 @@ accounts**) and `caches.changeFeedPushActive`. Counters only — a cache
 holding API keys must not become the way they leak. `pushActive: false` with a
 high hit rate is the shape worth alerting on: rotations are still arriving, but
 by counter comparison rather than by announcement.
+
+### Prompt-version audit ledger
+
+Every `PROMPT_VERSION`-style constant (`scripts/content_marking.py`'s
+`PROMPT_VERSION` / `ADJUDICATION_PROMPT_VERSION`, and the same convention now
+on `nvidia_osce_communication.py`'s `COMMUNICATION_PROMPT_VERSION` and
+`nemotron_transcript_preprocessor.py`'s `PREPROCESSOR_PROMPT_VERSION`) has
+always meant "sheets stamped with different versions are not comparable — the
+wording behind them differs." Until now that wording only lived in git
+history. The `prompt_versions` table (migration `0016`) makes it a queryable,
+immutable ledger: one row per `(prompt_key, version)` ever seen, holding the
+full template text and a SHA-256 of it.
+
+**The prompt wording in `scripts/*.py` stays the sole source of truth for what
+actually runs.** Nothing on the scoring hot path reads this table back — it is
+audit tooling, not configuration, matching the project's deliberate
+decoupling of the API process from the scoring subprocesses ("every input is
+handed over, none is guessed"). This was a deliberate choice over a
+live-editable prompt store (the operator-defined-provider pattern): grading
+prompts are not a deployment-tuning knob like an LLM endpoint, and giving an
+admin the power to silently reword scoring criteria at runtime is a different
+risk profile than rotating an API key.
+
+**`scripts/prompt_catalog.py`** is the one place that knows how to extract
+every prompt's static wording. It imports `content_marking`,
+`nvidia_osce_communication` and `nemotron_transcript_preprocessor` and calls
+each builder function with small placeholders (empty rubric lists, placeholder
+session ids) — capturing the wording a version constant has always stood for,
+not one run's rendered output — and prints `{"entries": [...]}` as one line of
+JSON to stdout. It runs as its own subprocess only, same as every scorer;
+importing the comms/preprocessor modules runs their module-level
+`load_env_file` call, which is meant for a standalone script, not the API
+process.
+
+`PromptRegistryService.sync_from_scripts()` runs that script via the shared
+`CommandRunner` and hands the entries to `PromptVersionRepository.record_if_new`,
+called once at API startup (`AppContainer.startup`, API role only, alongside
+`corpora.seed_defaults()` / `rubrics.ensure_parsed()`) and wrapped in a bare
+`try/except` — this is best-effort: the prompts run fine from code whether or
+not the sync succeeds, so a failure here must never block boot. **The one
+invariant it enforces:** a `(prompt_key, version)` pair, once recorded, must
+always map to the same text. A later sync computing a different hash for an
+already-stored version means the wording changed without the version constant
+being bumped — logged loudly (`logger.warning`, naming the key, version and
+both hashes) and left unrecorded rather than silently overwriting the stored
+snapshot, because an immutable ledger's whole value is that a recorded
+version's text never moves under it.
+
+`GET /api/admin/prompt-versions` (optional `prompt_key` filter, metadata only)
+and `GET /api/admin/prompt-versions/{id}` (full stored text) are the read
+surface — admin-only, no marker-facing counterpart, since nothing here is a
+marker's input to a run.
 
 ### Session storage lifecycle contracts
 
