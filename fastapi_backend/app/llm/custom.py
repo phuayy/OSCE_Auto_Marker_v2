@@ -64,6 +64,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
+from app.core.network_guard import AddressPolicy, resolve_hostname
 from app.llm.base import ProviderDescriptor
 
 # Wire formats this build can speak. Both already have an adapter, so a custom
@@ -526,6 +527,56 @@ def _validate_url(url: str, *, field: str = "base URL") -> None:
         )
     if not parsed.netloc:
         raise CustomProviderError(f"The {field} is missing a host name.")
+
+
+# A custom provider's endpoint routinely lives on this deployment's own
+# network on purpose — a self-hosted vLLM box, a departmental gateway — unlike
+# a webhook, which by definition points outside this deployment (see
+# app.core.webhook_url). Private (RFC1918) space therefore stays reachable;
+# loopback, link-local (the cloud metadata address included), multicast,
+# reserved and unspecified addresses have no legitimate inference-endpoint use
+# and are refused the same way app.core.webhook_url refuses them for webhooks.
+_ENDPOINT_ADDRESS_POLICY = AddressPolicy(block_private=False)
+
+
+def validate_provider_endpoint(spec: "CustomProviderSpec") -> None:
+    """Refuse a definition whose *resolved* endpoint reaches an address this
+    server should not call on an admin's behalf.
+
+    Deliberately not part of :meth:`CustomProviderSpec.from_raw`. ``from_raw``
+    also rehydrates every already-stored row on each catalogue rebuild — the
+    scoring hot path (see ``CustomProviderService``) — where a DNS lookup has
+    no business running and a transient resolution failure must never make a
+    previously-accepted provider unreadable. It runs instead at the one place
+    an operator's definition is actually accepted for storage
+    (``CustomProviderService.save``), the same write-time boundary
+    ``app.core.webhook_url.validate_webhook_url`` is called from.
+
+    Checked against :meth:`CustomProviderSpec.resolved_base_url`, not the
+    stored ``base_url``: a Cloudflare/Azure/Vertex-shaped definition is not a
+    real host until its ``{accountId}``/``{region}`` placeholders are filled
+    in, and resolving the literal template would only ever fail to resolve.
+    """
+    host = urlparse(spec.resolved_base_url()).hostname
+    if not host:
+        raise CustomProviderError(
+            "The base URL is missing a host name once its placeholders are filled in."
+        )
+    if _ENDPOINT_ADDRESS_POLICY.is_blocked(host):
+        raise CustomProviderError(
+            f"The endpoint host '{host}' is an address this server will not call on your "
+            "behalf (loopback, link-local, or another reserved range). A self-hosted model on "
+            "this deployment's own private network is fine; the API's own host, or a "
+            "link-local / cloud-metadata address, is not."
+        )
+    addresses = resolve_hostname(host)
+    if not addresses:
+        raise CustomProviderError(f"The endpoint host '{host}' could not be resolved.")
+    if any(_ENDPOINT_ADDRESS_POLICY.is_blocked(address) for address in addresses):
+        raise CustomProviderError(
+            f"The endpoint host '{host}' resolves to an address this server will not call on "
+            "your behalf (loopback, link-local, or another reserved range)."
+        )
 
 
 def _flag(value: Any, fallback: bool) -> bool:

@@ -69,6 +69,19 @@ def _no_ambient_vendor_keys(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _fake_endpoint_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fake DNS for CustomProviderService.save()'s endpoint-reachability check.
+
+    This module's fixtures use hostnames like ``llm.example.edu`` that do not
+    actually resolve, and nothing here is testing DNS resolution — that is
+    ``test_custom_provider_endpoint_guard.py``'s job, with real lookups. A
+    fixed public (TEST-NET-3, RFC 5737) address stands in so every save here
+    exercises the real validation *logic* without a live-network dependency.
+    """
+    monkeypatch.setattr("app.llm.custom.resolve_hostname", lambda host: ["203.0.113.10"])
+
+
 def build_service(tmp_path: Path) -> CustomProviderService:
     database = OrmDatabase(tmp_path / "providers.sqlite3")
     asyncio.run(database.initialize())
