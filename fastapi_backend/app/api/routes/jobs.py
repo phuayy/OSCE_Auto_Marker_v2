@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.api.dependencies import get_container, require_expensive_operation, require_job_owner
 from app.api.errors import http_error
@@ -13,10 +13,25 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 @router.get("")
 async def list_jobs(
     sessionId: str | None = Query(None),
+    limit: int = Query(200, ge=1, le=200),
+    cursor: str | None = Query(None, max_length=512),
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
-    jobs = await container.jobs.list_jobs(sessionId)
-    return {"jobs": [container.jobs.public_job(job) for job in jobs]}
+    """A session's own jobs are returned in full (never many). With no
+    ``sessionId`` this lists every job in the deployment, so that listing is
+    paged the same way ``GET /api/sessions`` is — ``limit``/``cursor`` in,
+    ``nextCursor`` back, `None` once there is no more."""
+    if sessionId:
+        jobs = await container.jobs.list_jobs(sessionId)
+        return {"jobs": [container.jobs.public_job(job) for job in jobs], "nextCursor": None}
+    try:
+        page = await container.jobs.list_jobs_page(limit=limit, cursor=cursor)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {
+        "jobs": [container.jobs.public_job(job) for job in page["jobs"]],
+        "nextCursor": page["nextCursor"],
+    }
 
 
 @router.get("/{job_id}")
