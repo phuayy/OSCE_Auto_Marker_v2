@@ -51,6 +51,20 @@ INHERITED_NAMES: frozenset[str] = frozenset(
         "LOCALAPPDATA",
         "LANG",
         "LC_ALL",
+        # The OS account name, not a credential. `getpass.getuser()` reads
+        # these (in this order) before falling back to the POSIX-only `pwd`
+        # module — a fallback that does not exist on Windows. Nothing in this
+        # codebase calls getpass directly; a dependency's import-time code
+        # does (NeMo's transformer_encoder pulls in torch.compile, which asks
+        # Inductor for its cache dir, which calls getpass.getuser() to name
+        # it). Withholding these vars turns "the account has no username set"
+        # into "ModuleNotFoundError: No module named 'pwd'" on Windows, for a
+        # dependency this process does not control and cannot patch. See
+        # CLAUDE.md "Subprocess blast radius".
+        "USERNAME",
+        "USER",
+        "LOGNAME",
+        "LNAME",
         # Which physical accelerator(s) a subprocess may see — host/deployment
         # tuning, not a credential.
         "NVIDIA_VISIBLE_DEVICES",

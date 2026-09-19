@@ -49,6 +49,25 @@ def test_nvidia_api_key_is_not_inherited_by_the_nvidia_prefix(monkeypatch) -> No
     assert env["NVIDIA_VISIBLE_DEVICES"] == "0,1"
 
 
+def test_os_account_identity_is_inherited(monkeypatch) -> None:
+    """Not a credential — the OS username `getpass.getuser()` falls back to
+    reading. Withheld, a dependency's import-time getpass call (NeMo's
+    torch.compile-touching import chain, asking Inductor for a cache dir)
+    hits the Windows-only absence of the `pwd` module instead of a clean
+    username lookup."""
+    monkeypatch.setenv("USERNAME", "tester")
+    monkeypatch.setenv("USER", "tester")
+    monkeypatch.setenv("LOGNAME", "tester")
+    monkeypatch.setenv("LNAME", "tester")
+
+    env = inherited_env()
+
+    assert env["USERNAME"] == "tester"
+    assert env["USER"] == "tester"
+    assert env["LOGNAME"] == "tester"
+    assert env["LNAME"] == "tester"
+
+
 def test_accelerator_and_cache_prefixes_are_inherited(monkeypatch) -> None:
     monkeypatch.setenv("HF_HOME", "/cache/hf")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
