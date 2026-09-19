@@ -23,6 +23,7 @@ from app.api.routes import (
     health,
     jobs,
     notifications,
+    prompt_versions,
     rubrics,
     sessions,
     settings as settings_routes,
@@ -30,6 +31,7 @@ from app.api.routes import (
     webhooks,
 )
 from app.core.asyncio_compat import configure_windows_selector_event_loop_policy
+from app.core.body_limit import MaxBodySizeMiddleware
 from app.core.config import Settings, settings
 from app.core.exceptions import AppError
 from app.core.logging_utils import install_access_log_redaction
@@ -136,12 +138,23 @@ def build_app(app_settings: Settings) -> FastAPI:
         allow_origins=list(app_settings.cors_allow_origins),
         allow_methods=["*"],
         allow_headers=["*"],
+        # Explicit, not merely the default: auth here is an Authorization
+        # bearer token the caller must already possess, never an ambient
+        # cookie, so a cross-origin page has nothing to ride even with
+        # CORS_ALLOW_ORIGINS="*" — Starlette also refuses that combination
+        # outright if it were ever set to True.
+        allow_credentials=False,
     )
 
-    # Added last so it wraps everything, including the two middlewares above:
-    # every response gets these headers, a CORS preflight or a 401 from
-    # require_auth included, rather than only the ones that reach a route
-    # handler.
+    # Added after CORS so it runs before it (and long before require_auth):
+    # a body too large to read is rejected before either does any work, and
+    # certainly before Starlette buffers it. See app/core/body_limit.py.
+    application.add_middleware(MaxBodySizeMiddleware, max_bytes=app_settings.max_request_body_bytes)
+
+    # Added last so it wraps everything, including the middlewares above:
+    # every response gets these headers, a CORS preflight, a 413 from the
+    # body-size cap, or a 401 from require_auth included, rather than only
+    # the ones that reach a route handler.
     @application.middleware("http")
     async def add_security_headers(request: Request, call_next):
         response = await call_next(request)
@@ -231,6 +244,7 @@ def build_app(app_settings: Settings) -> FastAPI:
     application.include_router(webhooks.router, prefix="/api")
     application.include_router(corpora.router, prefix="/api")
     application.include_router(corpora.admin_router, prefix="/api")
+    application.include_router(prompt_versions.router, prefix="/api")
     application.include_router(settings_routes.router, prefix="/api")
     application.include_router(settings_routes.admin_router, prefix="/api")
 
