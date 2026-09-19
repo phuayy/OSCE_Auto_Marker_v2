@@ -55,6 +55,20 @@ BASELINE_REVISION = "0001"
 _SENTINEL_TABLE = "sessions"
 _VERSION_TABLE = "alembic_version"
 
+# Postgres-only: a session-level advisory lock serializing "alembic upgrade
+# head" across whatever reaches this database concurrently. `_MIGRATION_LOCK`
+# above only serializes calls inside *this* process, and the single-API-
+# instance file lock (app/core/single_instance.py) only serializes processes
+# sharing one *local filesystem* storage root — neither stops two hosts that
+# point at the same Postgres database but have their own storage root apiece
+# (a rolling deploy, a blue/green swap, ALLOW_MULTIPLE_API_INSTANCES=true) from
+# running Alembic at the same moment. A fixed, arbitrary constant identifies
+# this application's migrations on the shared cluster; the lock is held for
+# the DBAPI session's lifetime (not tied to any one transaction), so it
+# survives the commits Alembic issues mid-upgrade and is released explicitly
+# once the upgrade finishes either way.
+_POSTGRES_MIGRATION_LOCK_KEY = 747_275_551_002
+
 
 def to_sync_url(url: str) -> str:
     """Swap the async driver for its blocking equivalent.
@@ -85,6 +99,17 @@ def _build_config(sync_url: str):
 
 
 def _upgrade_connection(connection) -> str:
+    is_postgres = connection.dialect.name == "postgresql"
+    if is_postgres:
+        connection.exec_driver_sql(f"SELECT pg_advisory_lock({_POSTGRES_MIGRATION_LOCK_KEY})")
+    try:
+        return _upgrade_connection_locked(connection)
+    finally:
+        if is_postgres:
+            connection.exec_driver_sql(f"SELECT pg_advisory_unlock({_POSTGRES_MIGRATION_LOCK_KEY})")
+
+
+def _upgrade_connection_locked(connection) -> str:
     from alembic import command
 
     config = _build_config(connection.engine.url.render_as_string(hide_password=False))
