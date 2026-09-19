@@ -1,33 +1,31 @@
 from __future__ import annotations
 
-import base64
-import binascii
-import json
 from datetime import datetime
 
+from app.core.pagination_cursor import decode_cursor as _decode_cursor
+from app.core.pagination_cursor import encode_cursor as _encode_cursor
 from app.core.utils import parse_iso
+
+# Sessions order on a real DateTime column, so the generic codec's raw string
+# is parsed into a datetime here before it reaches SessionRepository's query
+# — see app/core/pagination_cursor.py's docstring for why the job queue's own
+# cursor (a TEXT-ordered column) does not share this parsing step.
+_SESSION_ID_MAX_LENGTH = 36
 
 
 def encode_cursor(row: dict) -> str:
-    value = json.dumps([row["createdAt"], row["id"]], separators=(",", ":")).encode()
-    return base64.urlsafe_b64encode(value).decode().rstrip("=")
+    return _encode_cursor(row["createdAt"], row["id"])
 
 
 def decode_cursor(cursor: str | None) -> tuple[datetime, str] | None:
-    if cursor is None:
-        return None
     try:
-        if not cursor or len(cursor) > 512:
-            raise ValueError
-        value = json.loads(base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True))
-        if not isinstance(value, list) or len(value) != 2:
-            raise ValueError
-        timestamp, identity = value
-        if not isinstance(timestamp, str) or not isinstance(identity, str) or not 1 <= len(identity) <= 36:
-            raise ValueError
-        created_at = parse_iso(timestamp)
-        if created_at is None:
-            raise ValueError
-        return created_at, identity
-    except (ValueError, TypeError, binascii.Error, UnicodeError) as error:
+        decoded = _decode_cursor(cursor, max_id_length=_SESSION_ID_MAX_LENGTH)
+    except ValueError as error:
         raise ValueError("Invalid session cursor.") from error
+    if decoded is None:
+        return None
+    raw_created_at, identity = decoded
+    created_at = parse_iso(raw_created_at)
+    if created_at is None:
+        raise ValueError("Invalid session cursor.")
+    return created_at, identity

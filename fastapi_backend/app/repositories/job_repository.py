@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.json_utils import read_json_file
@@ -142,6 +142,35 @@ class JobRepository:
     async def read_all(self) -> list[dict[str, Any]]:
         async with self.database.session() as db:
             rows = await db.scalars(select(JobRecord).order_by(JobRecord.created_at.desc()))
+            return [_to_job_dict(row) for row in rows]
+
+    async def read_page(
+        self, *, limit: int, after: tuple[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """The same rows as :meth:`read_all`, newest first, keyset-paginated.
+
+        ``read_all`` is unbounded and only ever safe for a single session's own
+        jobs (``list_for_session``, naturally small) or internal recovery. The
+        unscoped job list grows for the life of the deployment, so the HTTP
+        listing pages through here instead — the same ``(sortKey, id)``
+        contract as the session index (see ``app/core/pagination_cursor.py``),
+        with ``id`` as the tiebreak so two jobs created in the same instant
+        still produce a total order across pages.
+
+        ``created_at`` is compared as the TEXT it is stored as (see the module
+        docstring), not parsed into a datetime, so a page boundary can never
+        drift from the exact string a row was written with.
+        """
+        statement = select(JobRecord).order_by(JobRecord.created_at.desc(), JobRecord.id.desc())
+        if after is not None:
+            created_at, job_id = after
+            statement = statement.where(or_(
+                JobRecord.created_at < created_at,
+                and_(JobRecord.created_at == created_at, JobRecord.id < job_id),
+            ))
+        statement = statement.limit(limit)
+        async with self.database.session() as db:
+            rows = await db.scalars(statement)
             return [_to_job_dict(row) for row in rows]
 
     async def list_for_session(self, session_id: str) -> list[dict[str, Any]]:
