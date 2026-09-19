@@ -9,7 +9,7 @@ from app.core.asyncio_compat import (
     configure_windows_selector_event_loop_policy,
     configure_windows_signal_compatibility,
 )
-from app.core.config import Settings
+from app.core.config import settings
 from app.queue.hatchet_tasks import bind_worker_container, hatchet, process_job
 from app.services.container import AppContainer, ContainerRole, create_container
 
@@ -19,7 +19,8 @@ configure_windows_signal_compatibility()
 
 logger = logging.getLogger(__name__)
 
-settings = Settings.load()
+# Shared process-wide instance (see app/core/config.py) rather than a fresh
+# `Settings.load()` here — one env snapshot per process, not one per module.
 
 
 async def _redispatch_loop(container: AppContainer, interval_seconds: int) -> None:

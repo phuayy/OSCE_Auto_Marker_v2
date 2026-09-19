@@ -87,6 +87,36 @@ test('session contention displays the 409 message without replaying the mutation
   assert.equal(getConnectionSnapshot().status, CONNECTION_STATUS.ONLINE);
 });
 
+test('a retryable 409 carries the backend flag on ApiError.retryable', async () => {
+  const fetchImpl = scriptedFetch([
+    jsonResponse(409, { error: 'Session is being updated; try again.', retryable: true }),
+  ]);
+  const error = await apiJson('/api/sessions/x', { fetchImpl, sleep: instantSleep }).then(
+    () => null,
+    (thrown) => thrown,
+  );
+  assert.ok(error instanceof ApiError);
+  assert.equal(error.retryable, true);
+});
+
+test('a non-retryable AppError says so explicitly, not just absently', async () => {
+  const fetchImpl = scriptedFetch([jsonResponse(422, { error: 'No usable speech found.', retryable: false })]);
+  const error = await apiJson('/api/sessions/x/process', { fetchImpl, sleep: instantSleep }).then(
+    () => null,
+    (thrown) => thrown,
+  );
+  assert.equal(error.retryable, false);
+});
+
+test('retryable is null, not false, when the backend never said', async () => {
+  const fetchImpl = scriptedFetch([jsonResponse(404, { error: 'Session not found.' })]);
+  const error = await apiJson('/api/sessions/nope', { fetchImpl, sleep: instantSleep }).then(
+    () => null,
+    (thrown) => thrown,
+  );
+  assert.equal(error.retryable, null);
+});
+
 test('backoff grows exponentially and never drops below half the window', () => {
   const opts = { initialDelayMs: 300, maxDelayMs: 3000, random: () => 0 };
   assert.equal(backoffDelayMs(1, opts), 150);

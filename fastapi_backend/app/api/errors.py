@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -21,6 +22,24 @@ from app.core.exceptions import AppError
 logger = logging.getLogger(__name__)
 
 GENERIC_SERVER_ERROR = "Unexpected server error."
+
+
+def error_response_content(message: str, *, retryable: bool | None = None) -> dict[str, Any]:
+    """The JSON body shape for a rejected request.
+
+    Shared by both exception handlers in main.py (``AppError`` raised
+    directly, and the ``HTTPException`` ``http_error`` converts it to) so
+    ``retryable`` means the same thing — present only when actually known —
+    regardless of which of the two a given route happens to go through.
+    Every route in this codebase currently converts via ``http_error``
+    (see its module docstring), so that is the path that matters in
+    practice, but a bare ``raise AppError(...)`` reaches the client with the
+    same shape.
+    """
+    content: dict[str, Any] = {"error": message}
+    if retryable is not None:
+        content["retryable"] = retryable
+    return content
 
 
 def http_error(
@@ -41,7 +60,15 @@ def http_error(
     the stack trace without publishing it.
     """
     if isinstance(error, AppError):
-        return HTTPException(status_code=error.status_code, detail=error.message)
+        response = HTTPException(status_code=error.status_code, detail=error.message)
+        # Not an HTTPException field; attached so the generic handler in
+        # main.py can still tell a caller "this exact conflict is worth
+        # retrying" (StaleSessionError, from SessionService.update's retry
+        # loop) apart from a rejection that will fail identically again —
+        # without it every AppError raised inside a route's own try/except
+        # loses that distinction the moment it is converted here.
+        response.retryable = error.retryable  # type: ignore[attr-defined]
+        return response
     if isinstance(error, FileNotFoundError):
         # str() on a FileNotFoundError includes the path it failed to open, so
         # the caller-facing message is used instead of the exception's own.

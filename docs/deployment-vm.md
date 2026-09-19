@@ -101,6 +101,21 @@ clip exports may contain multiple clips, and committed uploads release their
 transfer slots before processing finishes. Existing queue concurrency and file
 size limits still apply. Adjust the hourly budget for legitimate cohort marking.
 
+**The hourly budget is per account, not a shared pool — plan capacity from
+`GPU_SLOTS` instead.** Every signed-in marker gets their own `RATE_LIMIT_RERUN_PER_HOUR`
+budget, so N markers marking at once can admit up to N times that many expensive
+operations in the same hour; nothing here caps the *total* rate across accounts.
+That is by design — it is an abuse guard, not a capacity plan. Actual throughput
+is bounded elsewhere and shared by everyone regardless of how many accounts are
+admitting work: `GPU_SLOTS` (default 1) serialises the one step that needs the
+accelerator (transcription, person detection) and `JOB_WORKER_CONCURRENCY`
+bounds jobs in flight. A larger cohort does not overrun the machine — GPU-bound
+jobs still queue for the lease — but it does mean queue latency grows roughly
+with the number of markers running sessions at the same time, not just with
+upload volume. `GET /api/admin/health/diagnostics` (admin-only) reports the
+GPU lease's current `inUse`/`waiting` counts, which is the number to watch if
+sessions feel slow to start under load.
+
 Bearer tokens are accepted only in the `Authorization` header, never through
 `?token=` (including media and SSE). The frontend never downgrades a failed
 stream-ticket request to a bearer URL; media reports unavailable and live updates

@@ -204,7 +204,7 @@ OSCE-AI-FYP/
 │       │       ├── async_uploads.py     # /api/uploads/** (initiate, part, complete, abort) — the ONLY ingest path
 │       │       ├── auth.py              # /api/auth/login|me|logout|stream-ticket|password + the public link endpoints
 │       │       ├── users.py             # /api/admin/users/** — router-level require_admin
-│       │       ├── health.py            # /api/health (liveness) + /api/health/ready (readiness)
+│       │       ├── health.py            # /api/health (liveness) + /api/health/ready (readiness, minimal) + /api/admin/health/diagnostics (binaries/caches/leases, admin-only)
 │       │       ├── jobs.py              # /api/jobs/**
 │       │       ├── rubrics.py           # /api/rubrics/**
 │       │       ├── media.py             # /media/** static file serving (auth-gated)
@@ -784,6 +784,24 @@ is attribution, not ownership: every marker still sees every session.
 
 - **`local`** (default): asyncio tasks in API process, bounded by `JOB_WORKER_CONCURRENCY` semaphore.
 - **`hatchet`**: gRPC dispatch to separate `hatchet_worker.py` process. Worker runs `_redispatch_loop` every `HATCHET_REDISPATCH_INTERVAL_SECONDS` (default 30s) to recover jobs API failed to dispatch.
+
+**`local` means exactly one API process, and that is enforced, not just
+documented.** The queue is `_tasks` in that one process's memory — a second
+API instance pointed at the same storage root would each dispatch and run the
+same queued job, and would each hold their own copy of the login/token rate
+limiters and the per-upload part lock ("Parts are serialised per upload"
+above), silently doubling both. `AppContainer.startup()` takes an OS-level
+advisory lock ([core/single_instance.py](fastapi_backend/app/core/single_instance.py),
+`SingleInstanceLock`, acquired for the `API` role only, before migrations run)
+that refuses a second API boot against the same storage root outright — a
+crashed process's lock releases itself (the OS drops it when the file
+descriptor closes), so there is nothing to clean up by hand after a kill.
+Scaling past one API process is `JOB_QUEUE_BACKEND=hatchet` (any number of
+`hatchet_worker.py` processes, on any number of machines, sharing one queue
+through the database) — not more `local` instances.
+`ALLOW_MULTIPLE_API_INSTANCES=true` opts out of the lock for a deployment
+that has verified it does not depend on any of that (a single-user demo, a
+read-mostly mirror); it does not make `local` safe to scale.
 
 Task types are declared once in [job_tasks.py](fastapi_backend/app/services/job_tasks.py) —
 the executor has no per-type branches. Each entry names its handler and answers
