@@ -866,6 +866,16 @@ class Settings:
                 "authentication to anyone who finds the URL. Set PROTECT_MEDIA_ENDPOINTS=true, "
                 "or ENVIRONMENT=development if this is not really a production deployment."
             )
+        if self.trusted_proxy_count > 0 and not self.trusted_proxy_ips:
+            errors.append(
+                "TRUSTED_PROXY_COUNT is set without TRUSTED_PROXY_IPS when ENVIRONMENT=production: "
+                "X-Forwarded-For would be trusted by hop count alone, and a client reaching the "
+                "API port directly can send a header shaped exactly like the legitimate proxied "
+                "case (see client_ip in api/dependencies.py) — forging its way into a fresh "
+                "login/token rate-limit bucket per request. Set TRUSTED_PROXY_IPS to the reverse "
+                "proxy's own address, or unset TRUSTED_PROXY_COUNT if this deployment has no "
+                "reverse proxy in front of it."
+            )
         return errors
 
     def collect_runtime_warnings(self) -> list[str]:

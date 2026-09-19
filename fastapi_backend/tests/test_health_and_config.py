@@ -215,6 +215,47 @@ def test_protected_media_in_production_has_no_fatal_errors() -> None:
     assert settings.is_production is True
 
 
+def test_trusted_proxy_count_without_ips_is_only_a_warning_outside_production() -> None:
+    settings = Settings(
+        ffmpeg_bin="ffmpeg",
+        ffprobe_bin="ffprobe",
+        scorer_python_bin="python",
+        environment="development",
+        trusted_proxy_count=1,
+    )
+    assert settings.startup_fatal_errors() == []
+
+
+def test_trusted_proxy_count_without_ips_is_fatal_in_production() -> None:
+    """Hop-counting alone cannot tell a header the proxy added from one
+    forged by a client reaching the API port directly — see client_ip's
+    docstring. Left as a bare warning, a production deployment could run
+    indefinitely with its rate limiter silently defeated."""
+    settings = Settings(
+        ffmpeg_bin="ffmpeg",
+        ffprobe_bin="ffprobe",
+        scorer_python_bin="python",
+        environment="production",
+        protect_media_endpoints=True,
+        trusted_proxy_count=1,
+    )
+    errors = settings.startup_fatal_errors()
+    assert any("TRUSTED_PROXY_IPS" in error for error in errors)
+
+
+def test_trusted_proxy_count_with_ips_in_production_has_no_fatal_errors() -> None:
+    settings = Settings(
+        ffmpeg_bin="ffmpeg",
+        ffprobe_bin="ffprobe",
+        scorer_python_bin="python",
+        environment="production",
+        protect_media_endpoints=True,
+        trusted_proxy_count=1,
+        trusted_proxy_ips=("127.0.0.1",),
+    )
+    assert settings.startup_fatal_errors() == []
+
+
 # --- resolved_database_source / resolved_database_path -----------------------
 # OrmDatabase._normalize_url accepts postgres://, postgresql://,
 # postgresql+psycopg://, sqlite://, sqlite:///, sqlite+aiosqlite:// and
