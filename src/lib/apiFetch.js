@@ -60,6 +60,23 @@ export class ApiError extends Error {
   get isAborted() {
     return this.kind === ERROR_KIND.ABORT;
   }
+
+  /**
+   * Whether the *backend* says this exact request is worth trying again —
+   * distinct from `RETRYABLE_STATUSES`, which is about a transient transport
+   * blip `apiFetch` already retried automatically. This is the backend's own
+   * `retryable` field (see `AppError` / `error_response_content` in
+   * fastapi_backend/app/api/errors.py): true for a benign conflict like two
+   * writers racing a session update (`StaleSessionError`), false for a
+   * rejection that will fail identically on a second attempt, and `null`
+   * when the backend never said (an ordinary HTTPException, a network
+   * failure with no body at all). A caller can use this to offer a "Retry"
+   * action instead of guessing from the status code or message text.
+   */
+  get retryable() {
+    const value = this.body?.retryable;
+    return typeof value === 'boolean' ? value : null;
+  }
 }
 
 // Methods with no side effect, so a retry is free. Everything else must opt in.

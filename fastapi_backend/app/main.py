@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.dependencies import authorize_request
+from app.api.errors import error_response_content
 from app.api.frontend import mount_frontend
 from app.api.routes import (
     analytics,
@@ -29,8 +30,9 @@ from app.api.routes import (
     webhooks,
 )
 from app.core.asyncio_compat import configure_windows_selector_event_loop_policy
-from app.core.config import Settings
+from app.core.config import Settings, settings
 from app.core.exceptions import AppError
+from app.core.logging_utils import install_access_log_redaction
 from app.core.security_headers import apply_security_headers
 from app.services.container import AppContainer, create_container
 
@@ -51,12 +53,23 @@ def _configure_app_logging() -> None:
         handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
         app_logger.addHandler(handler)
     app_logger.propagate = False
+    # uvicorn's own logging setup runs before this module is imported (see
+    # module docstring order in scripts/run_api.py), so uvicorn.access already
+    # exists by the time this filter is attached.
+    install_access_log_redaction()
 
 
 configure_windows_selector_event_loop_policy()
 _configure_app_logging()
 
-settings = Settings.load()
+# One process, one env snapshot: `app.core.config` resolves `Settings.load()`
+# once at import time and every process-wide caller shares that instance
+# rather than re-resolving its own (each `Settings.load()` call re-globs the
+# winget ffmpeg directories and re-probes binaries on PATH — harmless work,
+# but pointless to repeat, and a second instance is a second place the two
+# could silently disagree if `load()` ever grows a non-deterministic step).
+# `Settings` itself stays exported for callers that legitimately want an
+# independent instance (tests, `Depends` overrides).
 
 
 @asynccontextmanager
@@ -127,11 +140,28 @@ def build_app(app_settings: Settings) -> FastAPI:
     @application.exception_handler(HTTPException)
     async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
         detail = exc.detail if isinstance(exc.detail, str) else "Request failed."
-        return JSONResponse(status_code=exc.status_code, content={"error": detail})
+        # `retryable` is set only on an HTTPException that started life as an
+        # AppError and was converted by app/api/errors.py::http_error — the
+        # path every route actually takes (see that module's docstring).
+        # Absent (not merely false) for everything else, so a client can tell
+        # "we don't know" apart from "we checked, and no".
+        retryable = getattr(exc, "retryable", None)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_response_content(detail, retryable=retryable),
+        )
 
     @application.exception_handler(AppError)
     async def app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content={"error": exc.message})
+        # A defense-in-depth handler: every route wraps its own AppErrors
+        # through http_error() before raising (see above), so this fires only
+        # for one raised outside that try/except — middleware, a dependency,
+        # or a bug in a route that forgot the wrapper. Shares the same content
+        # shape so a client never has to tell the two paths apart.
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_response_content(exc.message, retryable=exc.retryable),
+        )
 
     @application.exception_handler(RequestValidationError)
     async def validation_exception_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -176,6 +206,7 @@ def build_app(app_settings: Settings) -> FastAPI:
     )
 
     application.include_router(health.router, prefix="/api")
+    application.include_router(health.admin_router, prefix="/api")
     application.include_router(events_routes.router, prefix="/api")
     application.include_router(auth.router, prefix="/api")
     application.include_router(users_routes.router, prefix="/api")

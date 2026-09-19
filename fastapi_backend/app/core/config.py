@@ -4,6 +4,7 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from app.core.env import read_bool_env, read_csv_env, read_float_env, read_int_env
 
@@ -706,15 +707,25 @@ class Settings:
     def max_case_study_upload_bytes(self) -> int:
         return max(1, self.max_case_study_upload_mb) * 1024 * 1024
 
+    # Every scheme OrmDatabase._normalize_url treats as PostgreSQL — deliberately
+    # read from one place rather than re-typed here, which is exactly how this
+    # drifted before: DATABASE_URL=postgresql+psycopg://... (the form this
+    # codebase's own migrations and tests use elsewhere) normalizes and connects
+    # fine everywhere else, but used to raise ValueError from this property alone
+    # because its prefix check only recognised the bare "postgres(ql)://" forms.
+    _POSTGRES_URL_SCHEMES = frozenset({"postgres", "postgresql", "postgresql+psycopg"})
+
     @property
     def resolved_database_path(self) -> Path:
         raw = self.resolved_app_database_url.strip()
         if not raw:
             return self.paths.database_path
-        if raw.startswith("sqlite:///"):
-            return Path(raw.removeprefix("sqlite:///")).expanduser()
-        if raw.startswith("sqlite://"):
-            return Path(raw.removeprefix("sqlite://")).expanduser()
+        # Longest prefix first: "sqlite:///" must not be matched by the
+        # "sqlite://" check first, or the extra leading "/" that distinguishes
+        # a relative path from an absolute one would never be stripped.
+        for prefix in ("sqlite+aiosqlite:///", "sqlite:///", "sqlite+aiosqlite://", "sqlite://"):
+            if raw.startswith(prefix):
+                return Path(raw.removeprefix(prefix)).expanduser()
         raise ValueError("resolved_database_path is only available for SQLite URLs; use resolved_database_source.")
 
     @property
@@ -726,7 +737,11 @@ class Settings:
         raw = self.resolved_app_database_url.strip()
         if not raw:
             return self.paths.database_path
-        if raw.startswith(("postgres://", "postgresql://")):
+        # Scheme only, via urlparse — not a prefix check on `raw` itself, which
+        # cannot tell a relative sqlite:/// path from an absolute sqlite:////
+        # one apart without re-deriving the slash-counting resolved_database_path
+        # already gets right below.
+        if urlparse(raw).scheme in self._POSTGRES_URL_SCHEMES:
             return raw
         return self.resolved_database_path
 
@@ -888,7 +903,34 @@ class Settings:
         warnings.extend(self._account_warnings())
         warnings.extend(self._frontend_warnings())
         warnings.extend(self._human_detector_warnings())
+        warnings.extend(self._database_warnings())
         return warnings
+
+    def _database_warnings(self) -> list[str]:
+        """Flag SQLite once a deployment calls itself production.
+
+        SQLite is a legitimate choice at any scale this app runs at solo —
+        WAL plus `ensure_write_locked`'s `BEGIN IMMEDIATE` (see
+        `OrmDatabase`) makes it correct under concurrent access, not
+        concurrent: it is still one writer, and upload parts, job events,
+        session progress and notifications all serialise on that one lock.
+        Not worth a startup refusal (a single-marker deployment on SQLite is
+        exactly what this app is built to support), but worth a line an
+        operator reads once rather than discovers as queueing latency under
+        a real cohort. PostgreSQL needs no code change — only `DATABASE_URL`.
+        """
+        if not self.is_production:
+            return []
+        if isinstance(self.resolved_database_source, Path):
+            return [
+                "ENVIRONMENT=production with no PostgreSQL DATABASE_URL configured: "
+                "this deployment is running on SQLite, which serialises every write — "
+                "uploads, job events, session progress, notifications — behind one "
+                "writer lock. Fine for a single marker; a real multi-user cohort should "
+                "set DATABASE_URL to a PostgreSQL URL (no code change needed). Ignore "
+                "this if SQLite is a deliberate choice for this deployment's size."
+            ]
+        return []
 
     def _frontend_warnings(self) -> list[str]:
         """Warn when the built frontend is asked for but is not there.

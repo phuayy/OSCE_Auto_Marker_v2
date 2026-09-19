@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.core.config import Settings
@@ -10,13 +12,57 @@ from tests.test_routes import build_test_client
 
 def test_readiness_reports_database_and_storage(tmp_path) -> None:
     client = build_test_client(tmp_path)
-    # Readiness is unauthenticated (orchestrator probe).
+    # Readiness is unauthenticated (orchestrator probe), so its body is
+    # deliberately minimal — the three booleans that decide the status code,
+    # nothing about installed binaries or cache internals. See
+    # test_diagnostics_* below for the admin-only endpoint that carries those.
     response = client.get("/api/health/ready")
     assert response.status_code == 200
     body = response.json()
     assert body["ready"] is True
+    assert body["checks"] == {"database": True, "changeTracking": True, "storage": True}
+    assert "caches" not in body
+    assert "leases" not in body
+
+
+def test_diagnostics_requires_authentication(tmp_path) -> None:
+    client = build_test_client(tmp_path)
+    response = client.get("/api/admin/health/diagnostics")
+    assert response.status_code == 401
+
+
+def test_diagnostics_requires_admin_role(tmp_path) -> None:
+    import asyncio
+
+    from app.core.security import hash_password
+    from app.domain.users import UserRole, UserStatus
+
+    client = build_test_client(tmp_path)
+    container = client.app.state.container
+    marker_password = "correct-horse-battery"
+    asyncio.run(
+        container.users.create(
+            username="marker1",
+            email="marker1@example.edu",
+            display_name="Marker One",
+            role=UserRole.MARKER,
+            status=UserStatus.ACTIVE,
+            password_hash=hash_password(marker_password),
+        )
+    )
+    token = client.post("/api/auth/login", json={"username": "marker1", "password": marker_password}).json()["token"]
+    response = client.get("/api/admin/health/diagnostics", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 403
+
+
+def test_diagnostics_reports_binaries_caches_and_leases_for_an_admin(tmp_path) -> None:
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    response = client.get("/api/admin/health/diagnostics", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ready"] is True
     assert body["checks"]["database"] is True
-    assert body["checks"]["storage"] is True
     # Binary availability is reported (informational, not required).
     for key in ("ffmpeg", "ffprobe", "whisperx"):
         assert key in body["checks"]
@@ -30,6 +76,7 @@ def test_readiness_reports_database_and_storage(tmp_path) -> None:
         "tokenRevocations",
     ):
         assert key in body["caches"]
+    assert "gpu" in body["leases"]
 
 
 def test_readiness_fails_when_counter_table_disappears(tmp_path) -> None:
@@ -166,6 +213,115 @@ def test_protected_media_in_production_has_no_fatal_errors() -> None:
     )
     assert settings.startup_fatal_errors() == []
     assert settings.is_production is True
+
+
+# --- resolved_database_source / resolved_database_path -----------------------
+# OrmDatabase._normalize_url accepts postgres://, postgresql://,
+# postgresql+psycopg://, sqlite://, sqlite:///, sqlite+aiosqlite:// and
+# sqlite+aiosqlite:///. These properties feed OrmDatabase's constructor
+# (app/services/container.py) and must recognise the exact same set, or a
+# DATABASE_URL that connects fine everywhere else crashes container startup.
+
+
+def test_resolved_database_source_accepts_the_psycopg_qualified_scheme() -> None:
+    """The regression this pins: this scheme is what alembic/env.py, the
+    Postgres tests and OrmDatabase._connect_args itself all use — it must not
+    be the one spelling that crashes Settings.resolved_database_source."""
+    settings = Settings(
+        ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe", scorer_python_bin="python",
+        app_database_url="postgresql+psycopg://user:pass@db.internal/osce",
+    )
+    assert settings.resolved_database_source == "postgresql+psycopg://user:pass@db.internal/osce"
+
+
+def test_resolved_database_source_accepts_the_bare_postgres_scheme() -> None:
+    settings = Settings(
+        ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe", scorer_python_bin="python",
+        app_database_url="postgresql://user:pass@db.internal/osce",
+    )
+    assert settings.resolved_database_source == "postgresql://user:pass@db.internal/osce"
+
+
+def test_resolved_database_path_distinguishes_relative_from_absolute_sqlite_urls() -> None:
+    """sqlite:/// (three slashes) is relative; a fourth slash makes it
+    absolute — the one detail a naive scheme-only rewrite would lose."""
+    settings = Settings(
+        ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe", scorer_python_bin="python",
+        app_database_url="sqlite:///relative/app.sqlite3",
+    )
+    assert settings.resolved_database_path == Path("relative/app.sqlite3")
+
+    settings = Settings(
+        ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe", scorer_python_bin="python",
+        app_database_url="sqlite:////absolute/app.sqlite3",
+    )
+    assert settings.resolved_database_path == Path("/absolute/app.sqlite3")
+
+
+def test_resolved_database_path_accepts_the_aiosqlite_qualified_scheme() -> None:
+    settings = Settings(
+        ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe", scorer_python_bin="python",
+        app_database_url="sqlite+aiosqlite:///relative/app.sqlite3",
+    )
+    assert settings.resolved_database_path == Path("relative/app.sqlite3")
+
+
+def test_resolved_database_source_falls_back_to_the_default_sqlite_path_when_unset() -> None:
+    settings = Settings(
+        ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe", scorer_python_bin="python",
+        app_database_url="", database_url="",
+    )
+    assert settings.resolved_database_source == settings.paths.database_path
+
+
+def test_sqlite_in_production_produces_a_warning() -> None:
+    settings = Settings(
+        ffmpeg_bin="ffmpeg",
+        ffprobe_bin="ffprobe",
+        scorer_python_bin="python",
+        cors_allow_origins=("https://app.example.edu",),
+        protect_media_endpoints=True,
+        email_backend="smtp",
+        smtp_host="smtp.example.edu",
+        email_from="OSCE AI Marker <no-reply@example.edu>",
+        app_public_url="https://app.example.edu",
+        environment="production",
+        app_database_url="",
+        database_url="",
+    )
+    warnings = settings.collect_runtime_warnings()
+    assert any("DATABASE_URL" in warning and "SQLite" in warning for warning in warnings)
+
+
+def test_sqlite_outside_production_produces_no_database_warning() -> None:
+    settings = Settings(
+        ffmpeg_bin="ffmpeg",
+        ffprobe_bin="ffprobe",
+        scorer_python_bin="python",
+        cors_allow_origins=("https://app.example.edu",),
+        app_database_url="",
+        database_url="",
+    )
+    warnings = settings.collect_runtime_warnings()
+    assert not any("DATABASE_URL" in warning for warning in warnings)
+
+
+def test_postgres_in_production_produces_no_database_warning() -> None:
+    settings = Settings(
+        ffmpeg_bin="ffmpeg",
+        ffprobe_bin="ffprobe",
+        scorer_python_bin="python",
+        cors_allow_origins=("https://app.example.edu",),
+        protect_media_endpoints=True,
+        email_backend="smtp",
+        smtp_host="smtp.example.edu",
+        email_from="OSCE AI Marker <no-reply@example.edu>",
+        app_public_url="https://app.example.edu",
+        environment="production",
+        app_database_url="postgresql+psycopg://user:pass@db.internal/osce",
+        database_url="",
+    )
+    assert settings.collect_runtime_warnings() == []
 
 
 def test_environment_is_development_by_default() -> None:

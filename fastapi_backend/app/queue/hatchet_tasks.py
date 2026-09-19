@@ -7,14 +7,15 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from pydantic import BaseModel
 
-from app.core.config import Settings
+from app.core.config import settings
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard (container imports the queue)
     from app.services.container import AppContainer
 
 
 T = TypeVar("T")
-settings = Settings.load()
+# Shared process-wide instance (see app/core/config.py) rather than a fresh
+# `Settings.load()` here — one env snapshot per process, not one per module.
 
 # The worker process's container. The worker lifespan binds it once; every job
 # that lands in this process then runs against the same connections, caches and

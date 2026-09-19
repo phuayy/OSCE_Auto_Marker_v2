@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
 from app.api.dependencies import authorize_request
+from app.api.errors import error_response_content
 from app.api.routes import (
     async_uploads,
     auth,
@@ -72,7 +73,10 @@ def build_test_client(tmp_path: Path) -> TestClient:
 
     @app.exception_handler(AppError)
     async def _app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content={"error": exc.message})
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_response_content(exc.message, retryable=exc.retryable),
+        )
 
     # Production maps a schema rejection to 400 + {"error": ...}; without the
     # same handler here the tests would assert FastAPI's default 422 shape and
@@ -89,6 +93,7 @@ def build_test_client(tmp_path: Path) -> TestClient:
         name="media-scores",
     )
     app.include_router(health.router, prefix="/api")
+    app.include_router(health.admin_router, prefix="/api")
     app.include_router(auth.router, prefix="/api")
     app.include_router(async_uploads.router, prefix="/api")
     app.include_router(jobs.router, prefix="/api")

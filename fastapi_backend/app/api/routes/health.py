@@ -8,13 +8,23 @@ from typing import Any
 from fastapi import APIRouter, Depends, Response
 from sqlalchemy import text
 
-from app.api.dependencies import get_container
+from app.api.dependencies import get_container, require_admin
 from app.database.change_tracking import verify_change_tracking
 from app.schemas.common import HealthResponse
 from app.services.container import AppContainer
 
 
 router = APIRouter()
+
+# Everything below /health/diagnostics is admin-only. Unlike /health/ready —
+# which infra (a load balancer, k8s, docker healthcheck) polls with no
+# credentials and must stay open — this is for an operator's own dashboard,
+# so it is free to say more: which binaries are installed, per-cache hit
+# rates, GPU lease occupancy. None of that is secret, but none of it needs to
+# be handed to an unauthenticated caller on the open internet either, and
+# together it is a more detailed map of the deployment's internals than a
+# readiness probe has any reason to publish.
+admin_router = APIRouter(prefix="/admin/health", dependencies=[Depends(require_admin)])
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -27,13 +37,29 @@ async def health() -> dict[str, object]:
 async def readiness(response: Response, container: AppContainer = Depends(get_container)) -> dict[str, Any]:
     """Readiness probe: verifies the dependencies a request actually needs.
 
-    Database and storage are *critical* (a failure returns 503). External media
-    binaries are *informational* — they are only needed by the worker, so their
-    absence is reported but does not fail readiness.
+    Unauthenticated by necessity (a load balancer or orchestrator probes this
+    with no credentials), so the response is deliberately minimal — the three
+    booleans that decide the status code, nothing about the host's installed
+    binaries or cache internals. An operator who wants that detail reads
+    GET /api/admin/health/diagnostics instead, which carries the same checks plus
+    everything this endpoint omits, behind admin auth.
     """
-    database_ok = await _check_database(container)
-    tracking_ok = await _check_change_tracking(container) if database_ok else False
-    storage_ok = await asyncio.to_thread(_check_storage_writable, container.settings.paths.storage_root)
+    database_ok, tracking_ok, storage_ok = await _run_critical_checks(container)
+    ready = database_ok and tracking_ok and storage_ok
+    if not ready:
+        response.status_code = 503
+    return {
+        "ready": ready,
+        "checks": {"database": database_ok, "changeTracking": tracking_ok, "storage": storage_ok},
+    }
+
+
+@admin_router.get("/diagnostics")
+async def diagnostics(response: Response, container: AppContainer = Depends(get_container)) -> dict[str, Any]:
+    """The full readiness report: the critical checks plus everything an
+    operator dashboard wants and a public probe should not expose — binary
+    availability, per-cache hit rates, GPU lease occupancy."""
+    database_ok, tracking_ok, storage_ok = await _run_critical_checks(container)
     settings = container.settings
     binaries = {
         "ffmpeg": _binary_available(settings.ffmpeg_bin),
@@ -51,10 +77,10 @@ async def readiness(response: Response, container: AppContainer = Depends(get_co
     return {
         "ready": ready,
         "checks": {"database": database_ok, "changeTracking": tracking_ok, "storage": storage_ok, **binaries},
-        # Informational. The credential cache is only correct while the change
-        # feed can tell it a key rotated, so "pushActive: false with a high hit
-        # rate" is the shape worth alerting on — it means rotations are reaching
-        # this process by counter comparison rather than by announcement.
+        # The credential cache is only correct while the change feed can tell
+        # it a key rotated, so "pushActive: false with a high hit rate" is the
+        # shape worth alerting on — it means rotations are reaching this
+        # process by counter comparison rather than by announcement.
         "caches": {
             "providerCredentials": container.llm_settings.credential_cache_stats(),
             "appSettings": container.app_settings.cache_stats(),
@@ -69,6 +95,13 @@ async def readiness(response: Response, container: AppContainer = Depends(get_co
         # not that anything is wrong.
         "leases": {"gpu": container.gpu.stats()},
     }
+
+
+async def _run_critical_checks(container: AppContainer) -> tuple[bool, bool, bool]:
+    database_ok = await _check_database(container)
+    tracking_ok = await _check_change_tracking(container) if database_ok else False
+    storage_ok = await asyncio.to_thread(_check_storage_writable, container.settings.paths.storage_root)
+    return database_ok, tracking_ok, storage_ok
 
 
 async def _check_database(container: AppContainer) -> bool:
