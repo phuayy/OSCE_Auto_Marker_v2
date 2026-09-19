@@ -90,9 +90,10 @@ def test_versions_endpoint_reports_counters_for_tracked_tables(tmp_path) -> None
         "reach the browser (see TRACKED_TABLES)"
     )
     assert body["push"] is False  # SQLite in tests: counters, no LISTEN/NOTIFY
-    # Superset assertion: the diagnostics payload gains fields over time, and
-    # pinning an exact set turns every added metric into a false failure.
-    assert {"hits", "misses", "entries"} <= set(body["cache"])
+    # Deliberately minimal: this endpoint is unprivileged (every signed-in
+    # marker polls it), so cache internals live behind the admin-only
+    # /api/admin/health/diagnostics endpoint instead (see test_health_and_config.py).
+    assert "cache" not in body
 
 
 def test_event_stream_path_accepts_stream_tickets() -> None:

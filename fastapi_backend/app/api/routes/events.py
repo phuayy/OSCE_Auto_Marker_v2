@@ -36,9 +36,15 @@ async def change_events(container: AppContainer = Depends(get_container)) -> Str
 async def change_versions(container: AppContainer = Depends(get_container)) -> dict[str, object]:
     """Current change counters — a cheap way for a client to check for staleness
     without holding a stream open, and the fallback a browser polls (slowly) if
-    ``EventSource`` is unavailable."""
+    ``EventSource`` is unavailable.
+
+    Deliberately minimal, the same reasoning as ``/health/ready``: this is a
+    marker-facing, unprivileged endpoint (every signed-in account polls it,
+    not just admins), so it carries only what the fallback poller reads. Cache
+    hit rates and other internals live behind ``GET /api/admin/health/diagnostics``
+    instead, admin-only like the rest of that operator detail.
+    """
     return {
         "versions": container.changes.versions(),
         "push": container.changes.push_active,
-        "cache": container.read_cache.stats(),
     }
