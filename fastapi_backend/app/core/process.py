@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import contextlib
+import signal
 import subprocess
 import threading
 import time
@@ -124,15 +125,21 @@ class CommandRunner:
                 submit_output(stream_name, text)
 
         def run_blocking() -> int:
+            popen_kwargs: dict[str, Any] = dict(
+                cwd=str(self.cwd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=process_env,
+                creationflags=creationflags,
+            )
+            if os.name != "nt":
+                # New session -> the child becomes its own process-group
+                # leader, so `os.killpg` below reaches every grandchild it
+                # spawns (ffmpeg under WhisperX, a scorer's own helpers) too,
+                # not just the direct child `Popen` tracks.
+                popen_kwargs["start_new_session"] = True
             try:
-                proc = subprocess.Popen(
-                    [command, *args],
-                    cwd=str(self.cwd),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    env=process_env,
-                    creationflags=creationflags,
-                )
+                proc = subprocess.Popen([command, *args], **popen_kwargs)
             except FileNotFoundError as error:
                 windows_hint = (
                     " On Windows, restart VS Code/terminal after PATH changes or set the executable env var to an absolute path."
@@ -207,12 +214,61 @@ class CommandRunner:
 
     @staticmethod
     def _terminate_process(proc: subprocess.Popen[bytes]) -> None:
+        """End the child and everything it spawned.
+
+        ``proc.terminate()`` / ``proc.kill()`` alone only ever signal the one
+        PID ``Popen`` tracks. WhisperX and the scorer scripts routinely shell
+        out to ffmpeg or a helper of their own; on a timeout or a cancelled
+        run those grandchildren kept running with no parent, still holding
+        the GPU/CPU and the output files the killed run was writing — a
+        second run then raced a "zombie" ffmpeg for the same resources. The
+        two platform helpers below reach the whole tree instead of just the
+        one PID.
+        """
         if proc.poll() is not None:
             return
+        if os.name == "nt":
+            CommandRunner._terminate_process_tree_windows(proc)
+        else:
+            CommandRunner._terminate_process_group_posix(proc)
+
+    @staticmethod
+    def _terminate_process_group_posix(proc: subprocess.Popen[bytes]) -> None:
+        # Safe because `run_blocking` always starts POSIX children with
+        # `start_new_session=True`, making the child its own process-group
+        # leader (pgid == pid) — signalling that group reaches every
+        # descendant without needing to walk /proc for them.
         try:
-            proc.terminate()
+            pgid = os.getpgid(proc.pid)
         except ProcessLookupError:
             return
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pgid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=10)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        if proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pgid, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=5)
+
+    @staticmethod
+    def _terminate_process_tree_windows(proc: subprocess.Popen[bytes]) -> None:
+        # Windows has no signal-based process-group kill that reaches
+        # grandchildren; `taskkill /T` walks the OS's own parent-PID records
+        # to terminate the whole tree, which is what a bare
+        # `proc.terminate()` (TerminateProcess on just this PID) cannot do.
+        with contextlib.suppress(Exception):
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=15,
+            )
         try:
             proc.wait(timeout=10)
             return
