@@ -23,10 +23,10 @@ from llm_bootstrap import normalize_timestamp, read_generic_text, read_json_tran
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
 # Bump on any change to build_system_prompt / build_user_prompt wording.
-PROMPT_VERSION = "content-marking-v1"
+PROMPT_VERSION = "content-marking-v2"
 # Bump on any change to the adjudication or feedback-merge wording. Recorded on
 # a panel's adjudication record, separately from the markers' prompt version.
-ADJUDICATION_PROMPT_VERSION = "content-adjudication-v1"
+ADJUDICATION_PROMPT_VERSION = "content-adjudication-v2"
 
 MAX_CASE_STUDY_CONTEXT_CHARS = 36_000
 MAX_RUBRIC_SECTION_CHARS = 48_000
@@ -214,7 +214,15 @@ TRANSCRIPT_RELIABILITY_CONTEXT = """CRITICAL reliability context (read carefully
 - Interpret garbled lines charitably. If a word sounds like a plausible misheard
   version of a clinically-relevant term that fits the context, treat it as if the
   student said the correct term. Do NOT penalise the student for transcription
-  artefacts. Be CONSISTENT across criteria when judging the same evidence."""
+  artefacts. Be CONSISTENT across criteria when judging the same evidence.
+- The student is the speaker performing the clinician role — eliciting history,
+  examining, explaining, and managing. The actor-patient answers and volunteers
+  information. Speaker tags are unreliable: attribute behaviour by conversational
+  role, not by tag. If a turn is mislabelled, score the behaviour, not the label.
+- For a "No" verdict, there is no evidence moment to cite. Instead cite the moment
+  where the behaviour was expected — e.g. the phase of the consultation it belongs
+  to — or the closest related exchange. Never invent a timestamp outside the
+  transcript's range."""
 
 LENIENCY_POLICY = """Leniency policy (very important — markers are generally lenient):
 - Real human OSCE markers grade leniently. When the evidence is borderline, lean
@@ -222,9 +230,14 @@ LENIENCY_POLICY = """Leniency policy (very important — markers are generally l
 - You only need PARTIAL or INDIRECT evidence to award "Yes" — e.g. an implied
   acknowledgment, an indirect question, a paraphrased equivalent, or a fragment of
   the expected behaviour is enough. Whole-sentence verbatim is NOT required.
-- Default to "Yes" unless there is clear, multi-turn evidence the student did
-  NOT address the criterion at all. Absence of explicit phrasing is not the same
-  as absence of behaviour — if the conversation reasonably implies it, give it.
+- Mark "No" when, after a full read of the transcript, you find no evidence —
+  direct or implied — that the student addressed the criterion. If the transcript
+  contains no assessable student speech at all, mark every criterion "No" and say
+  so in the reason.
+- Leniency applies to interpreting real evidence charitably; it is not a licence
+  to credit behaviour the encounter does not show. Absence of explicit phrasing is
+  not the same as absence of behaviour when the conversation genuinely implies
+  it — but no evidence at all is not a reasonable implication.
 - For critical criteria, still apply leniency: indirect or partial evidence still
   counts as "Yes"."""
 
@@ -245,14 +258,27 @@ You are an OSCE assessment model evaluating a doctor/student interaction with an
 
 {LENIENCY_POLICY}
 
+Marking procedure:
+1. Identify the student (see reliability context above).
+2. Read the entire transcript before scoring anything.
+3. For each criterion, locate the best evidence moment before deciding.
+4. Decide Yes/No under the leniency policy above.
+5. Cite that moment.
+
 Scoring behavior:
 - Score strictly against the rubric section extracted from the end of the case-study PDF.
 - Use CASE STUDY CONTEXT for clinical interpretation, but use RUBRIC SECTION for scoring criteria and critical flags.
 - In the rubric section, only score criteria that are explicitly Yes/No markable.
 - Ignore non-scorable fields (notes, comments, totals, metadata, signatures, free-text admin fields).
 - Use only values \"Yes\" or \"No\" for each criterion.
-- Each criterion MUST include a timestamp from the transcript (format HH:MM:SS) pointing to the evidence moment.
+- Each criterion MUST include a timestamp from the transcript (format HH:MM:SS, drop
+  milliseconds) pointing to the evidence moment — or, for a \"No\", the moment the
+  behaviour was expected (see reliability context above).
 - If evidence is ambiguous due to transcript quality, lean \"Yes\" and cite the closest moment.
+- In \"reason\", state the observable behaviour and where it occurred — paraphrase, do
+  not quote the transcript. For \"No\", state what was expected and absent.
+- Critical criteria fail the whole assessment when marked \"No\". Apply the same
+  leniency as any other criterion, but make the evidence basis in \"reason\" explicit.
 - {rubric_requirement}
 
 You must return ONLY valid JSON, with no markdown and no additional text.
@@ -314,7 +340,6 @@ Session metadata:
 - transcript_file: {transcript_path}
 - case_study_file: {case_study_path}
 - rubric_file: embedded_in_case_study_pdf
-- transcript_folder_matches_file_stem: {str(transcript_path.parent.name == transcript_path.stem).lower()}
 
 Scoring source of truth:
 - Use only the RUBRIC SECTION (copied below from the end of the case-study PDF) for criteria and critical criteria.
@@ -539,6 +564,15 @@ def validate_output(
     return normalized_payload, issues
 
 
+# Extracted so the wording can only ever exist once (matches
+# TRANSCRIPT_RELIABILITY_CONTEXT / LENIENCY_POLICY above). The "fix only the
+# listed issues" line stops a repair pass from silently revising a verdict
+# that had no issue in the first place.
+CONTENT_REPAIR_PREAMBLE = """Your previous response failed validation. Return corrected JSON only, with no markdown.
+Fix only the listed issues below and keep your reasoning evidence-based. Do not
+change verdicts, timestamps, or reasons for criteria that had no issue:"""
+
+
 def build_follow_up_messages(
     base_messages: list[dict[str, Any]],
     first_message: Any,
@@ -554,11 +588,7 @@ def build_follow_up_messages(
         assistant_message["reasoning_details"] = reasoning_details
 
     issue_lines = "\n".join(f"- {issue}" for issue in issues)
-    repair_instruction = (
-        "Your previous response failed validation. Return corrected JSON only, with no markdown.\n"
-        "Fix all issues below and keep your reasoning evidence-based:\n"
-        f"{issue_lines}"
-    )
+    repair_instruction = f"{CONTENT_REPAIR_PREAMBLE}\n{issue_lines}"
 
     return [*base_messages, assistant_message, {"role": "user", "content": repair_instruction}]
 
@@ -624,9 +654,12 @@ Required JSON shape:
 Rules for the fields:
 - "index" is the criterion number exactly as given in the request; return one item per
   disputed criterion and no others.
-- "sided_with" is the letter of the examiner whose verdict you agree with, or
-  "{SIDED_WITH_NEITHER}" when your reasoning differs from all of them.
-- "confidence" is a number from 0 to 1.
+- "sided_with" is the letter of the examiner whose verdict you agree with. If several
+  examiners share your verdict, side with the one whose reasoning best matches yours.
+  Use "{SIDED_WITH_NEITHER}" only when your reasoning differs from all of them.
+- "confidence" is a number from 0 to 1: 1.0 = decisive evidence either way; ~0.7 = clear
+  but incomplete evidence; ~0.5 = genuinely torn, resolved by the leniency policy; below
+  0.4 = essentially a coin-flip resolved by leniency.
 """.strip()
 
 
@@ -780,9 +813,14 @@ panel has since settled every rubric criterion; the final verdicts are given.
 
 Write ONE merged set of notes that:
 - reflects the FINAL verdicts (a criterion the panel awarded is not something to "start"),
+  including any critical criterion the panel marked "No",
 - keeps the examiners' points where they agree and reconciles them where they differ,
+- includes a point raised by only one examiner when it is consistent with the final
+  verdicts — do not drop a valid point just because only one examiner made it,
 - is directed to the STUDENT'S performance and reflects rubric criteria performance,
-- does NOT quote transcript lines, speaker tags (e.g. SPEAKER_01) or timestamps.
+- does NOT quote transcript lines, speaker tags (e.g. SPEAKER_01) or timestamps,
+- is written in a single examiner voice — never mention examiners, markers, votes, or
+  the panel; the student reads this as one set of feedback, not a summary of a meeting.
 
 You must return ONLY valid JSON, with no markdown and no additional text.
 
@@ -880,6 +918,7 @@ def to_repo_relative(path: Path) -> str:
 __all__ = [
     "ADJUDICATION_MIN_VALID_CONTENT_CHARS",
     "ADJUDICATION_PROMPT_VERSION",
+    "CONTENT_REPAIR_PREAMBLE",
     "LENIENCY_POLICY",
     "MAX_CASE_STUDY_CONTEXT_CHARS",
     "MAX_RUBRIC_SECTION_CHARS",

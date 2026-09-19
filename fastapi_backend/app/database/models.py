@@ -644,3 +644,34 @@ class JobEventRecord(Base):
     message: Mapped[str | None] = mapped_column(Text)
     payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class PromptVersionRecord(Base):
+    """An immutable snapshot of one LLM prompt's wording, captured the moment
+    its ``PROMPT_VERSION``-style constant (``scripts/content_marking.py`` and
+    siblings) is first seen with that value.
+
+    The prompt wording in ``scripts/*.py`` stays the sole source of truth for
+    what actually runs — nothing here is read by a scoring subprocess. This
+    table exists only so a later prompt edit is traceable and diffable
+    against what shipped before, without spelunking git blame: an admin can
+    list every version a prompt key has ever had and read its exact stored
+    text. A ``(prompt_key, version)`` pair is written once and never updated;
+    a version string, once recorded, must always map to the same text
+    (``PromptVersionRepository.record_if_new`` refuses to overwrite a
+    mismatch instead — see its docstring).
+    """
+
+    __tablename__ = "prompt_versions"
+    __table_args__ = (
+        UniqueConstraint("prompt_key", "version", name="uq_prompt_versions_key_version"),
+        Index("idx_prompt_versions_key", "prompt_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    prompt_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    version: Mapped[str] = mapped_column(String(80), nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    template_text: Mapped[str] = mapped_column(Text, nullable=False)
+    source_script: Mapped[str] = mapped_column(String(120), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)

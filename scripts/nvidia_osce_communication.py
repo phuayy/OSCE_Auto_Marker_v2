@@ -78,6 +78,11 @@ SCORE_LABEL_TO_POINTS = {
 }
 ALLOWED_SCORE_LABELS = list(SCORE_LABEL_TO_POINTS.keys())
 
+# Bump on any change to build_system_prompt / build_user_prompt / build_repair_prompt
+# wording. Stamped on every sheet, same contract as content_marking.PROMPT_VERSION:
+# sheets from different prompt versions are not comparable.
+COMMUNICATION_PROMPT_VERSION = "communication-scoring-v1"
+
 
 # Temperature, top_p and max_tokens come from the shared environment defaults
 # (see app.llm.runtime.request_defaults_from_env). Only the settings this
@@ -347,10 +352,10 @@ transcript evidence (and any audio professionalism / OpenSMILE prosody notes) an
 which of these four qualitative labels best describes how the student performed against
 the criterion's performance indicators:
 
-- "All"  -> the student consistently demonstrated ALMOST ALL observable performance indicators
-- "Most" -> the student consistently demonstrated MOST of the observable performance indicators
-- "Some" -> the student demonstrated ONLY SOME of the observable performance indicators
-- "None" -> the student demonstrated NONE of the observable performance indicators
+- "All"  -> every, or nearly every, observable indicator for the criterion is demonstrated
+- "Most" -> more than half of the observable indicators are demonstrated
+- "Some" -> at least one observable indicator is demonstrated, but fewer than half
+- "None" -> no observable indicator is demonstrated anywhere in the encounter
 
 MANDATORY transcript review (complete this BEFORE scoring any criterion):
 - Read the ENTIRE transcript from first line to last line at least once before you assign
@@ -372,6 +377,13 @@ CRITICAL reliability context (read carefully):
   the student for transcription artefacts and be CONSISTENT across criteria.
 - You MUST take ALL context into account when grading. Missing a line because you skimmed
   the transcript is an assessment error — read thoroughly.
+- The student is the speaker performing the clinician role — eliciting history,
+  examining, explaining, and managing. The actor-patient answers and volunteers
+  information. Speaker tags are unreliable: attribute behaviour by conversational role,
+  not by tag. If a turn is mislabelled, score the behaviour, not the label.
+- For a "None" label there is no evidence moment to cite. Instead cite the moment where
+  the behaviour was expected, or the closest related exchange. Never invent a timestamp
+  outside the transcript's range.
 
 LENIENCY policy (very important — real markers are extremely lenient):
 - Be EXTREMELY lenient. Do everything you can to award a good score. Your default posture
@@ -380,13 +392,16 @@ LENIENCY policy (very important — real markers are extremely lenient):
   next higher label (None -> Some, Some -> Most, Most -> All). Never downgrade on doubt.
 - Partial, indirect, implied, or single-turn evidence COUNTS. You do not need verbatim
   phrasing; paraphrasing, tone, context, or a short fragment is enough.
-- If even ONE relevant observable indicator is clearly met, prefer at least "Most" or "Some". If
-  several are met (even loosely), prefer "All".
+- If at least one observable indicator is met, score no lower than "Some". If most are
+  met — even loosely — prefer "All".
 - Performance indicators that are peripheral, redundant, overly narrow, or only weakly
-  related to the criterion label must NOT drag the score down. You may place them in
-  `indicators_not_observable` or treat them as satisfied when the student's overall
-  communication on that criterion was clearly adequate — real markers do not fail students
-  for missing a minor sub-bullet when the core behaviour was demonstrated.
+  related to the criterion label must NOT drag the score down. Keep the indicator lists
+  honest — `indicators_missing` is for observable indicators genuinely not seen,
+  `indicators_not_observable` is only for indicators not assessable from audio (see
+  below) — and then score leniently on top of that honest data: award "All" even with a
+  minor entry in `indicators_missing` when the criterion's core intent was clearly
+  demonstrated. Real markers do not fail students for missing a minor sub-bullet when the
+  core behaviour was there; they don't achieve that by pretending the sub-bullet was met.
 - When torn between two labels, choose the higher one. Uncertainty is not a reason to score low.
 - Use "None" only when, after a full transcript pass, there is genuinely no attempt at that
   communication behaviour anywhere in the encounter.
@@ -402,6 +417,11 @@ OpenSMILE / audio professionalism guidance:
   vocal delivery, fluency, attentive listening, and turn-taking.
 - Treat these features as supplementary; transcript content is still the primary
   source of truth.
+- Only cite prosody features you can interpret. Rough reference points: conversational
+  speech is roughly 120-160 words per minute; `jitter_local` / `shimmer` near 0 is
+  normal; higher pitch/loudness variability suggests expressive delivery; many long
+  pauses suggest hesitation. Ignore features that are NaN or that you cannot interpret —
+  do not invent a meaning for a raw functional you don't recognise.
 
 Output format:
 - Use ONLY {{"All","Most","Some","None"}} as the score_label value.
@@ -599,7 +619,8 @@ def build_repair_prompt(issues: list[str], raw_output: str, expected_count: int)
         f"in the same id order.\n"
         f"Every criterion must include a valid score_label from {ALLOWED_SCORE_LABELS}, a "
         "concrete evidence sentence, and a transcript timestamp in HH:MM:SS format.\n"
-        "Fix all issues below:\n"
+        "Fix only the listed issues below. Do not change score_label, evidence, or "
+        "timestamp for criteria that had no issue:\n"
         f"{issue_text}\n\n"
         "Previous invalid output:\n"
         f"{raw_output}"
@@ -749,6 +770,9 @@ def main() -> int:
     # not necessarily the configured primary.
     normalized_payload["model"] = getattr(last_message, "model", "") or routing_summary
     normalized_payload["model_provider"] = getattr(last_message, "provider_id", "")
+    # Which wording produced these marks. Same contract as content_marking.PROMPT_VERSION:
+    # sheets from different prompt versions are not comparable.
+    normalized_payload["prompt_version"] = COMMUNICATION_PROMPT_VERSION
     normalized_payload["generated_at"] = datetime.utcnow().isoformat() + "Z"
 
     output_json = json.dumps(normalized_payload, indent=2, ensure_ascii=False)

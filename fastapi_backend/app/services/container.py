@@ -31,6 +31,7 @@ from app.repositories.corpus_repository import CorpusRepository
 from app.repositories.custom_provider_repository import CustomProviderRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.notification_repository import NotificationRepository
+from app.repositories.prompt_version_repository import PromptVersionRepository
 from app.repositories.provider_credential_repository import ProviderCredentialRepository
 from app.repositories.rubric_asset_repository import RubricAssetRepository
 from app.repositories.session_repository import SessionRepository
@@ -49,6 +50,7 @@ from app.services.clip_service import ClipService
 from app.services.event_service import EventService
 from app.services.job_queue_service import JobQueueService
 from app.services.pipeline_service import PipelineService
+from app.services.prompt_registry_service import PromptRegistryService
 from app.services.rubric_asset_service import RubricAssetService
 from app.services.rubric_service import RubricService
 from app.services.session_maintenance_service import SessionMaintenanceService
@@ -102,6 +104,10 @@ class AppContainer:
     webhooks: WebhookRepository
     webhook_dispatcher: WebhookDispatcher
     corpora: CorpusRepository
+    # Immutable audit history of every prompt wording ever shipped — see
+    # PromptRegistryService's module docstring. Nothing on the scoring hot
+    # path reads it back.
+    prompt_registry: PromptRegistryService
     app_settings: AppSettingsRepository
     # A marker's own overrides of the user-scoped settings keys, and the
     # service that merges them with `app_settings` for a given account. Kept
@@ -208,6 +214,12 @@ class AppContainer:
             await self.async_uploads.repository.migrate_legacy()
             await self.corpora.seed_defaults()
             await self.rubrics.ensure_parsed()
+            try:
+                await self.prompt_registry.sync_from_scripts()
+            except Exception:
+                # Best-effort audit tooling: the prompts run fine from code
+                # either way, so a sync failure must never block boot.
+                logger.warning("Could not sync the prompt-version ledger.", exc_info=True)
             # Resume uploads whose assembly a restart cut short, and fail the
             # ones that cannot be resumed, before dispatching queued jobs so no
             # job starts for a session in a bad state.
@@ -350,6 +362,9 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         cache=read_cache,
     )
     corpora = CorpusRepository(orm_database)
+    prompt_registry = PromptRegistryService(
+        PromptVersionRepository(orm_database), runner, active_settings
+    )
     preprocessor = TranscriptPreprocessor(active_settings, runner, events, auth, llm_settings=llm_settings)
     transcription = TranscriptionRouter(
         active_settings,
@@ -430,6 +445,7 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         webhooks=webhooks,
         webhook_dispatcher=webhook_dispatcher,
         corpora=corpora,
+        prompt_registry=prompt_registry,
         app_settings=app_settings,
         user_settings=user_settings,
         preferences=preferences,

@@ -54,6 +54,10 @@ MAX_TOKENS = read_int_env("NVIDIA_PREPROCESS_MAX_TOKENS", 24_576)
 # per-batch id validation.
 MAX_INPUT_CHARS = read_int_env("NVIDIA_PREPROCESS_MAX_INPUT_CHARS", 120_000)
 
+# Bump on any change to SYSTEM_PROMPT wording. Stamped on every preprocessed output,
+# same contract as content_marking.PROMPT_VERSION.
+PREPROCESSOR_PROMPT_VERSION = "transcript-preprocess-v1"
+
 SYSTEM_PROMPT = """You are a professional medical transcription editor. You will receive a JSON array of dialogue segments from a speaker-diarised automatic transcription of an OSCE (clinical examination roleplay) between a student clinician and an actor-patient. Each segment has an `id`, a `speaker` label, and `text`.
 
 Your task: correct obvious automatic-transcription errors only — misheard words, garbled medical terminology (e.g. "parasympamol" -> "paracetamol", "block nurse" -> "blocked nose"), and grammatical breaks caused by mis-transcription. Use the clinical context of the whole dialogue to resolve ambiguous words.
@@ -62,7 +66,9 @@ Strict rules:
 1. Preserve meaning and tone. Never paraphrase, summarise, or "improve" phrasing that is already plausible speech. Disfluencies ("um", "uh", repetitions) are authentic speech — keep them.
 2. Never merge, split, reorder, add, or remove segments. Return every input `id` exactly once, with only its corrected `text`.
 3. If a segment needs no correction, return its text unchanged.
-4. Output ONLY a JSON object of the form {"segments": [{"id": <id>, "text": "<corrected text>"}]} — no explanations, no markdown fences."""
+4. When a token cannot be resolved confidently — especially numbers, dosages, drug names, and named entities — leave it unchanged. A plausible guess is worse than a transcription artefact: a wrong dosage looks like a real one to everyone downstream.
+5. Speaker labels may be wrong. Do not alter text to fix speaker attribution — that is not your job and you cannot see who actually spoke. Never translate or normalise dialect; correct transcription errors only.
+6. Output ONLY a JSON object of the form {"segments": [{"id": <id>, "text": "<corrected text>"}]} — no explanations, no markdown fences."""
 
 
 def extract_json_object(raw_text: str) -> dict[str, Any]:
@@ -192,7 +198,15 @@ def main() -> int:
     ]
     output_path = Path(args.output)
     if not items:
-        write_json_atomic(output_path, {"schema": "llm-preprocess-v1", "model": "", "segments": []})
+        write_json_atomic(
+            output_path,
+            {
+                "schema": "llm-preprocess-v1",
+                "model": "",
+                "prompt_version": PREPROCESSOR_PROMPT_VERSION,
+                "segments": [],
+            },
+        )
         print("No non-empty segments to preprocess; wrote empty output.")
         return 0
 
@@ -210,7 +224,12 @@ def main() -> int:
     corrected = validate_segments(extract_json_object(response.content), [item["id"] for item in items])
     write_json_atomic(
         output_path,
-        {"schema": "llm-preprocess-v1", "model": response.model, "segments": corrected},
+        {
+            "schema": "llm-preprocess-v1",
+            "model": response.model,
+            "prompt_version": PREPROCESSOR_PROMPT_VERSION,
+            "segments": corrected,
+        },
     )
     changed = sum(
         1 for item, original in zip(corrected, items) if str(item["text"]).strip() != str(original["text"]).strip()
