@@ -394,6 +394,12 @@ class SessionService:
                     "uploadStatus": video.get("uploadStatus"),
                     "uploadedBytes": video.get("uploadedBytes"),
                     "storageRef": public_storage_ref(video),
+                    # Set once the video-retention sweep deletes the file
+                    # (session_video_retention_days in core/config.py); the
+                    # workspace uses it to explain an empty player instead of
+                    # showing "No video loaded" for a recording that is gone
+                    # on purpose rather than one that never uploaded.
+                    "purgedAt": video.get("purgedAt"),
                 },
                 "caseStudy": {
                     "originalName": case_study.get("originalName"),

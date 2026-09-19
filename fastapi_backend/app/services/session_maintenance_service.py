@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.logging_utils import log_context
+from app.core.utils import utc_now_iso
 from app.domain.enums import TaskType, Workflow
 from app.domain.sessions import IN_FLIGHT_STATUSES, SessionStatus, session_clips, session_video_path
 from app.repositories.notification_repository import NotificationRepository
@@ -106,6 +109,115 @@ class SessionMaintenanceService:
 
         if session is not None:
             self._delete_artifacts(session)
+
+    # ------------------------------------------------------------------
+    # Video retention
+    #
+    # A student's assessment record — transcript, scores, feedback — is text
+    # this deployment has every reason to keep. The video it was scored from
+    # is what fills a disk (storage/output/ growth) and carries a face and a
+    # voice, so it is the one artifact worth deleting on a schedule rather
+    # than only on an explicit delete/rerun. See session_video_retention_days
+    # in core/config.py for the policy and how to disable it.
+    # ------------------------------------------------------------------
+
+    async def run_video_retention_sweep(self) -> int:
+        """Purge every top-level session's stored video past the configured
+        retention window, in one bounded batch.
+
+        Bounded rather than exhaustive: a backlog larger than one batch (a
+        fresh enable against years of old sessions) is worked down one sweep
+        at a time rather than holding up the caller — startup, or the
+        periodic loop below — until every candidate is done. Each purge is
+        independent and best-effort, so one failure (a locked file, a session
+        deleted mid-sweep) never stops the rest.
+        """
+        retention_days = self.settings.session_video_retention_days
+        if retention_days <= 0:
+            return 0
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        candidates = await self.sessions.repository.list_video_retention_candidates(cutoff)
+        purged = 0
+        for session_id in candidates:
+            try:
+                if await self.purge_expired_video(session_id):
+                    purged += 1
+            except Exception:
+                logger.warning(
+                    "Video-retention purge failed for session %s; will retry on the next sweep.",
+                    session_id,
+                    exc_info=True,
+                    extra=log_context(session_id, "session_video_retention"),
+                )
+        if purged:
+            logger.info(
+                "Video-retention sweep purged %d session video(s) older than %d day(s).",
+                purged,
+                retention_days,
+            )
+        return purged
+
+    async def video_retention_sweep_loop(self) -> None:
+        """Periodic companion to :meth:`run_video_retention_sweep`.
+
+        Template: ``JobQueueService.stale_job_reaper_loop`` — sleep first,
+        log and continue past a bad scan rather than let one end the loop, no
+        ``CancelledError`` handler so shutdown (``BackgroundTaskRegistry
+        .cancel_all()``) cancels it cleanly out of ``asyncio.sleep``.
+        """
+        interval = self.settings.session_retention_sweep_interval_seconds
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.run_video_retention_sweep()
+            except Exception:
+                logger.exception("Video-retention sweep failed; will retry on the next interval.")
+
+    async def purge_expired_video(self, session_id: str) -> bool:
+        """Delete one top-level session's stored video file, leaving its
+        transcript, scores and every other artifact untouched.
+
+        Idempotent and safe to call speculatively: a session with no video on
+        disk, one already purged, or a clip-assessment child (whose
+        ``files.video`` is its parent's exported clip, not its own) is a
+        no-op that returns ``False``.
+        """
+        session = await self.sessions.read(session_id)
+        if session.get("parentSessionId"):
+            return False
+        video = (session.get("files") or {}).get("video")
+        absolute_path = video.get("absolutePath") if isinstance(video, dict) else None
+        if not absolute_path:
+            return False
+
+        # Same removal the delete/re-run paths already use for this same
+        # field (`_delete_artifacts` below) — including its GCS caveat: the
+        # object storage layer has no delete operation yet, so under
+        # STORAGE_BACKEND=gcs this only clears the local materialised copy,
+        # not the bucket object. Giving every video path one storage-aware
+        # deletion is a larger, separately-scoped change; tracked here rather
+        # than silently assumed away.
+        self._unlink(absolute_path)
+        purged_at = utc_now_iso()
+
+        def mark_purged(current: dict[str, Any]) -> Any:
+            files = current.get("files")
+            current_video = files.get("video") if isinstance(files, dict) else None
+            if not isinstance(current_video, dict) or not current_video.get("absolutePath"):
+                return False
+            current_video["absolutePath"] = None
+            current_video["url"] = None
+            current_video["purgedAt"] = purged_at
+            return None
+
+        await self.sessions.update(session_id, mark_purged)
+        logger.info(
+            "Purged video for session %s under the %d-day video-retention policy.",
+            session_id,
+            self.settings.session_video_retention_days,
+            extra=log_context(session_id, "session_video_retention"),
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Starting work on an existing session

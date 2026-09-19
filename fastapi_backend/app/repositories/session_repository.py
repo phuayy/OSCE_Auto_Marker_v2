@@ -385,6 +385,34 @@ class SessionRepository:
             )
             return [str(row) for row in result.scalars().all()]
 
+    async def list_video_retention_candidates(self, cutoff: datetime, *, limit: int = 200) -> list[str]:
+        """Ids of top-level sessions created before ``cutoff`` whose stored
+        video has not yet been purged by the retention sweep.
+
+        Only a session with no parent owns the file on disk — a clip
+        child's ``files.video`` points at its parent's exported clip, not a
+        file it could remove on its own (see
+        ``SessionMaintenanceService._delete_artifacts``) — so this never
+        names one. Oldest first, so a sweep interrupted partway through a
+        large backlog always makes progress on the sessions the policy has
+        waited longest for.
+        """
+        payload = SessionRecord.payload
+        statement = (
+            select(SessionRecord.id)
+            .where(
+                SessionRecord.parent_session_id.is_(None),
+                SessionRecord.created_at < cutoff,
+                payload["files", "video", "absolutePath"].as_string().isnot(None),
+                payload["files", "video", "purgedAt"].as_string().is_(None),
+            )
+            .order_by(SessionRecord.created_at.asc())
+            .limit(limit)
+        )
+        async with self.database.session() as db_session:
+            result = await db_session.execute(statement)
+            return [str(row) for row in result.scalars().all()]
+
     async def find_clip_children(self, parent_session_id: str, clip_id: str) -> list[dict[str, Any]]:
         """Assessment children of one *clip*, newest first.
 

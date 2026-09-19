@@ -562,6 +562,210 @@ def test_the_checkpoint_sidecar_rule_matches_the_scorer_scripts(tmp_path, monkey
     )
 
 
+def _settings_with_retention(tmp_path: Path, *, retention_days: int = 365) -> Settings:
+    return Settings(
+        root_dir=tmp_path,
+        backend_root=tmp_path,
+        ffmpeg_bin="ffmpeg",
+        ffprobe_bin="ffprobe",
+        scorer_python_bin="python",
+        app_database_url="",
+        database_url="",
+        session_video_retention_days=retention_days,
+    )
+
+
+def test_purge_expired_video_removes_the_file_but_keeps_everything_else(tmp_path) -> None:
+    async def _run() -> None:
+        container = create_container(_settings_with_retention(tmp_path))
+        await _init(container)
+
+        video = tmp_path / "old-video.mp4"
+        score = tmp_path / "scores.json"
+        video.write_text("x", encoding="utf-8")
+        score.write_text(json.dumps(_score_payload()), encoding="utf-8")
+
+        session_id = "retained-1"
+        await container.sessions.write(
+            {
+                "id": session_id,
+                "name": "Old session",
+                "status": "completed",
+                "createdAt": "2020-01-01T00:00:00Z",
+                "files": {"video": {"fileName": "old-video.mp4", "absolutePath": str(video), "url": "/media/x"}},
+                "outputs": {"scores": {"absolutePath": str(score), "payload": _score_payload()}},
+            }
+        )
+
+        purged = await container.session_maintenance.purge_expired_video(session_id)
+
+        assert purged is True
+        assert not video.exists()
+        reloaded = await container.sessions.read(session_id)
+        assert reloaded["files"]["video"]["absolutePath"] is None
+        assert reloaded["files"]["video"]["url"] is None
+        assert reloaded["files"]["video"]["purgedAt"]
+        # Nothing but the video moved: the transcript/score record survives.
+        assert reloaded["outputs"]["scores"]["absolutePath"] == str(score)
+        assert score.exists()
+
+        await container.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_purge_expired_video_is_idempotent(tmp_path) -> None:
+    async def _run() -> None:
+        container = create_container(_settings_with_retention(tmp_path))
+        await _init(container)
+
+        video = tmp_path / "video.mp4"
+        video.write_text("x", encoding="utf-8")
+        session_id = "retained-2"
+        await container.sessions.write(
+            {
+                "id": session_id,
+                "name": "Session",
+                "status": "completed",
+                "files": {"video": {"fileName": "video.mp4", "absolutePath": str(video)}},
+                "outputs": {},
+            }
+        )
+
+        assert await container.session_maintenance.purge_expired_video(session_id) is True
+        # Second call: already purged, nothing left to do.
+        assert await container.session_maintenance.purge_expired_video(session_id) is False
+
+        await container.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_purge_expired_video_never_touches_a_clip_childs_shared_file(tmp_path) -> None:
+    async def _run() -> None:
+        container = create_container(_settings_with_retention(tmp_path))
+        await _init(container)
+
+        clip_file = tmp_path / "clip-1.mp4"
+        clip_file.write_text("x", encoding="utf-8")
+
+        child_id = "child-retention"
+        await container.sessions.write(
+            {
+                "id": child_id,
+                "name": "Student A",
+                "status": "completed",
+                "parentSessionId": "parent-retention",
+                "createdAt": "2020-01-01T00:00:00Z",
+                # A clip child's video IS its parent's exported clip.
+                "files": {"video": {"fileName": "clip-1.mp4", "absolutePath": str(clip_file)}},
+                "outputs": {},
+            }
+        )
+
+        purged = await container.session_maintenance.purge_expired_video(child_id)
+
+        assert purged is False
+        assert clip_file.exists()
+        reloaded = await container.sessions.read(child_id)
+        assert reloaded["files"]["video"]["absolutePath"] == str(clip_file)
+
+        await container.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_video_retention_sweep_purges_only_sessions_past_the_window(tmp_path) -> None:
+    async def _run() -> None:
+        container = create_container(_settings_with_retention(tmp_path, retention_days=365))
+        await _init(container)
+
+        old_video = tmp_path / "old.mp4"
+        recent_video = tmp_path / "recent.mp4"
+        child_video = tmp_path / "child.mp4"
+        for path in (old_video, recent_video, child_video):
+            path.write_text("x", encoding="utf-8")
+
+        await container.sessions.write(
+            {
+                "id": "sweep-old",
+                "name": "Old",
+                "status": "completed",
+                "createdAt": "2020-01-01T00:00:00Z",
+                "files": {"video": {"fileName": "old.mp4", "absolutePath": str(old_video)}},
+                "outputs": {},
+            }
+        )
+        await container.sessions.write(
+            {
+                "id": "sweep-recent",
+                "name": "Recent",
+                "status": "completed",
+                "files": {"video": {"fileName": "recent.mp4", "absolutePath": str(recent_video)}},
+                "outputs": {},
+            }
+        )
+        # An old *child* session must never be picked up directly — its parent
+        # (not present here) would own that decision.
+        await container.sessions.write(
+            {
+                "id": "sweep-old-child",
+                "name": "Old child",
+                "status": "completed",
+                "parentSessionId": "sweep-old",
+                "createdAt": "2020-01-01T00:00:00Z",
+                "files": {"video": {"fileName": "child.mp4", "absolutePath": str(child_video)}},
+                "outputs": {},
+            }
+        )
+
+        purged = await container.session_maintenance.run_video_retention_sweep()
+
+        assert purged == 1
+        assert not old_video.exists()
+        assert recent_video.exists()
+        assert child_video.exists()
+        old = await container.sessions.read("sweep-old")
+        assert old["files"]["video"]["purgedAt"]
+        recent = await container.sessions.read("sweep-recent")
+        assert not (recent.get("files", {}).get("video") or {}).get("purgedAt")
+
+        # Idempotent: a second sweep finds nothing left to do.
+        assert await container.session_maintenance.run_video_retention_sweep() == 0
+
+        await container.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_video_retention_sweep_disabled_when_retention_days_is_zero(tmp_path) -> None:
+    async def _run() -> None:
+        container = create_container(_settings_with_retention(tmp_path, retention_days=0))
+        await _init(container)
+
+        video = tmp_path / "old.mp4"
+        video.write_text("x", encoding="utf-8")
+        await container.sessions.write(
+            {
+                "id": "sweep-disabled",
+                "name": "Old",
+                "status": "completed",
+                "createdAt": "2020-01-01T00:00:00Z",
+                "files": {"video": {"fileName": "old.mp4", "absolutePath": str(video)}},
+                "outputs": {},
+            }
+        )
+
+        purged = await container.session_maintenance.run_video_retention_sweep()
+
+        assert purged == 0
+        assert video.exists()
+
+        await container.shutdown()
+
+    asyncio.run(_run())
+
+
 def test_artifact_teardown_with_no_session_id_never_touches_a_shared_root(tmp_path) -> None:
     async def _run() -> None:
         container = create_container(_settings(tmp_path))
