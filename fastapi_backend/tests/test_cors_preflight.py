@@ -111,3 +111,27 @@ def test_security_headers_still_wrap_a_preflight_response(tmp_path) -> None:
     )
     assert response.status_code == 200
     assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_cors_never_advertises_credentialed_access() -> None:
+    """Auth here is a bearer token the caller must already hold, never an
+    ambient cookie — CORSMiddleware only ever emits
+    Access-Control-Allow-Credentials when allow_credentials=True, so a
+    wildcard CORS_ALLOW_ORIGINS has nothing for a cross-origin page to ride.
+    Guards the explicit allow_credentials=False in app.main.build_app against
+    ever being flipped (or defaulted away) without noticing."""
+    from app.core.config import Settings as _Settings
+    from app.main import build_app as _build_app
+
+    settings = _Settings(
+        ffmpeg_bin="ffmpeg",
+        ffprobe_bin="ffprobe",
+        scorer_python_bin="python",
+        cors_allow_origins=("*",),
+    )
+    app = _build_app(settings)
+    for middleware in app.user_middleware:
+        if middleware.cls.__name__ == "CORSMiddleware":
+            assert middleware.kwargs.get("allow_credentials", False) is False
+            return
+    raise AssertionError("CORSMiddleware is not registered on the app")

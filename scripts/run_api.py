@@ -81,6 +81,22 @@ def serve(host: str, port: int) -> None:
         # Reloading is handled by watchfiles in the parent process (see
         # run_with_reload); uvicorn always runs as a plain single server here.
         reload=False,
+        # uvicorn's own ProxyHeadersMiddleware defaults to trusting the peer
+        # 127.0.0.1 and rewriting the ASGI scope's client/scheme from
+        # X-Forwarded-For / X-Forwarded-Proto whenever that peer connects —
+        # which, since API_HOST defaults to 127.0.0.1 and the documented
+        # nginx-on-the-same-VM shape proxies through loopback too, is nearly
+        # every real deployment of this app. That runs *underneath* and
+        # *before* the app's own trusted-proxy model (TRUSTED_PROXY_COUNT /
+        # TRUSTED_PROXY_IPS, see client_ip() in api/dependencies.py), so by
+        # the time the app inspects request.client.host it may already be
+        # whatever a client sent in a header, rate limiters included. The app
+        # implements its own — configurable, IP-verified — resolution of the
+        # real client; uvicorn's fixed, unconfigurable layer is redundant at
+        # best and silently overrides it at worst. Disabled outright rather
+        # than tuned via forwarded_allow_ips, so there is exactly one place
+        # (client_ip) that ever decides what a proxy is allowed to claim.
+        proxy_headers=False,
         # On Windows, uvicorn's default loop setup ("auto") forcibly installs the
         # WindowsProactorEventLoopPolicy, which async psycopg cannot use. loop="none"
         # keeps the WindowsSelectorEventLoopPolicy configured above; uvicorn's

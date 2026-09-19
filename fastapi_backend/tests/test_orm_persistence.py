@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from app.database.models import AssessmentCriterionRecord, AssessmentResultRecord, AssessmentSessionRecord
+from app.database.models import (
+    AssessmentCriterionRecord,
+    AssessmentResultRecord,
+    AssessmentSessionRecord,
+    ExaminerRecord,
+    StudentRecord,
+)
 from app.database.orm import OrmDatabase
 from app.repositories.assessment_repository import AssessmentRepository
 from app.repositories.rubric_asset_repository import RubricAssetRepository
@@ -251,6 +258,56 @@ def test_analytics_rows_name_the_recording_they_belong_to(tmp_path) -> None:
         assert rows["orphan-1"]["rootSessionId"] == "recording-gone"
         assert rows["orphan-1"]["rootSessionName"] is None
         assert rows["orphan-1"]["rootSessionCreatedAt"] is None
+        await database.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_list_result_rows_caps_growth_keeping_the_most_recent(tmp_path, monkeypatch) -> None:
+    """Analytics reads every result row as one page for client-side cross-tab
+    filtering (CLAUDE.md), so there is no cursor here the way there is for
+    sessions and jobs. The cap that stands in for one is a backstop, not a
+    pagination contract: patched down to 2 here so the test does not need
+    20,000 rows to prove a deployment that somehow outgrows it keeps its
+    newest history rather than an ever-growing response."""
+    monkeypatch.setattr(AssessmentRepository, "MAX_RESULT_ROWS", 2)
+
+    async def _run() -> None:
+        database = OrmDatabase(tmp_path / "app.sqlite3")
+        repository = AssessmentRepository(database)
+        await database.initialize()
+
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        async with database.session() as db_session:
+            examiner = ExaminerRecord(
+                id="examiner-1", external_id="ai-pipeline", display_name="AI Pipeline",
+                created_at=base, updated_at=base,
+            )
+            db_session.add(examiner)
+            for index in range(3):
+                created_at = base + timedelta(days=index)
+                student = StudentRecord(
+                    id=f"student-{index}", external_id=f"ext-{index}", display_name=f"Student {index}",
+                    created_at=created_at, updated_at=created_at,
+                )
+                assessment = AssessmentSessionRecord(
+                    id=f"session-{index}", student_id=student.id, status="completed",
+                    session_name=f"Run {index}", payload_json={},
+                    created_at=created_at, updated_at=created_at,
+                )
+                result = AssessmentResultRecord(
+                    id=f"result-{index}", assessment_session_id=assessment.id, examiner_id=examiner.id,
+                    result_type="content", status="completed", score_total=1.0, score_max=1.0,
+                    payload_json={}, created_at=created_at, updated_at=created_at,
+                )
+                db_session.add_all([student, assessment, result])
+            await db_session.commit()
+
+        rows = await repository.list_result_rows()
+
+        # Newest first, capped — session-2 (day 2) and session-1 (day 1) survive;
+        # session-0, the oldest, does not.
+        assert [row["sessionId"] for row in rows] == ["session-2", "session-1"]
         await database.shutdown()
 
     asyncio.run(_run())

@@ -240,6 +240,17 @@ class AssessmentRepository:
             await db_session.delete(assessment)
         return True
 
+    # Analytics rows are read as one page for the client-side cross-tab
+    # filtering CLAUDE.md documents ("Analytics filters are over recordings,
+    # students, and the cascade between them") — a keyset cursor here, like
+    # the session and job listings use, would break the very cohort
+    # aggregation this page exists for. This cap is a backstop against
+    # unbounded growth over a deployment's lifetime, not a pagination
+    # contract: high enough that no real cohort should ever reach it, so a
+    # deployment that somehow does keeps its most recent history rather than
+    # the response growing without bound.
+    MAX_RESULT_ROWS = 20_000
+
     async def list_result_rows(self) -> list[dict[str, Any]]:
         """Flat per-result rows joined with session + student, for analytics.
 
@@ -271,7 +282,8 @@ class AssessmentRepository:
                 )
                 .join(StudentRecord, AssessmentSessionRecord.student_id == StudentRecord.id)
                 .outerjoin(SessionRecord, SessionRecord.id == root_id)
-                .order_by(AssessmentSessionRecord.created_at)
+                .order_by(AssessmentSessionRecord.created_at.desc())
+                .limit(self.MAX_RESULT_ROWS)
             )
             return [
                 {

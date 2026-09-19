@@ -364,6 +364,15 @@ class Settings:
     rate_limit_rerun_per_hour: int = read_int_env("RATE_LIMIT_RERUN_PER_HOUR", 10)
     max_concurrent_uploads_per_user: int = read_int_env("MAX_CONCURRENT_UPLOADS_PER_USER", 3)
     cors_allow_origins: tuple[str, ...] = read_csv_env("CORS_ALLOW_ORIGINS", ("*",))
+    # Every JSON endpoint (login, settings, session mutations, ...) carries at
+    # most a few kilobytes; the one route built for megabyte-sized bodies
+    # (PUT /api/uploads/{id}/parts/{n}) already enforces its own, larger cap
+    # on the bytes actually received (async_uploads.py::_reject_oversized_part
+    # + LocalObjectStorageService.put_part) and is exempt from this one — see
+    # app/core/body_limit.py. Starlette buffers a request body in full before
+    # any route or pydantic model sees it, so an uncapped JSON endpoint is an
+    # unauthenticated-adjacent memory-exhaustion surface behind no proxy.
+    max_request_body_mb: int = read_int_env("MAX_REQUEST_BODY_MB", 2)
     # Number of reverse proxies in front of the app. 0 (the default) means the
     # socket address is the client. Behind a proxy the socket address is the
     # *proxy's*, so every login attempt shares one rate-limit key: ten bad
@@ -700,6 +709,10 @@ class Settings:
         return max(1, self.upload_part_size_mb) * 1024 * 1024
 
     @property
+    def max_request_body_bytes(self) -> int:
+        return max(1, self.max_request_body_mb) * 1024 * 1024
+
+    @property
     def max_video_upload_bytes(self) -> int:
         return max(1, self.max_video_upload_mb) * 1024 * 1024
 
@@ -794,6 +807,10 @@ class Settings:
     @property
     def diarization_script_path(self) -> Path:
         return self.root_dir / "scripts" / "pyannote_diarize.py"
+
+    @property
+    def prompt_catalog_script_path(self) -> Path:
+        return self.root_dir / "scripts" / "prompt_catalog.py"
 
     @property
     def auto_crop_segmentation_default(self) -> str:

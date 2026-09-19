@@ -21,6 +21,7 @@ from app.api.routes import (
     health,
     jobs,
     notifications,
+    prompt_versions,
     rubrics,
     sessions,
     settings as settings_routes,
@@ -105,6 +106,7 @@ def build_test_client(tmp_path: Path) -> TestClient:
     app.include_router(settings_routes.admin_router, prefix="/api")
     app.include_router(corpora.router, prefix="/api")
     app.include_router(corpora.admin_router, prefix="/api")
+    app.include_router(prompt_versions.router, prefix="/api")
     app.include_router(rubrics.router, prefix="/api")
     app.include_router(rubrics.admin_router, prefix="/api")
     app.include_router(users_routes.router, prefix="/api")
@@ -719,3 +721,60 @@ def test_recrop_answers_202_with_a_queued_job(tmp_path) -> None:
     assert body["clip"]["isDraft"] is True
     assert body["clip"]["revision"] == 1
     assert (body["clip"]["start"], body["clip"]["end"]) == (10.0, 140.0)
+
+
+def test_unscoped_job_listing_is_paginated_not_unbounded(tmp_path) -> None:
+    """``GET /api/jobs`` with no ``sessionId`` used to return every job row the
+    deployment had ever created. It now pages the same way ``GET /api/sessions``
+    does; a session-scoped request is unaffected since a session's own jobs are
+    never many."""
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    container = client.app.state.container
+
+    for index in range(5):
+        asyncio.run(
+            container.jobs.repository.write(
+                {
+                    "id": f"job-{index}",
+                    "sessionId": f"session-{index}",
+                    "taskType": "process_session",
+                    "status": "queued",
+                    "attempts": 0,
+                    "maxAttempts": 3,
+                    "createdAt": f"2026-01-0{index + 1}T00:00:00Z",
+                    "queuedAt": f"2026-01-0{index + 1}T00:00:00Z",
+                    "startedAt": None,
+                    "endedAt": None,
+                    "error": None,
+                    "payload": {},
+                }
+            )
+        )
+
+    first = client.get("/api/jobs?limit=2", headers=headers)
+    assert first.status_code == 200
+    first_body = first.json()
+    assert [job["id"] for job in first_body["jobs"]] == ["job-4", "job-3"]
+    assert first_body["nextCursor"]
+
+    second = client.get(f"/api/jobs?limit=2&cursor={first_body['nextCursor']}", headers=headers)
+    second_body = second.json()
+    assert [job["id"] for job in second_body["jobs"]] == ["job-2", "job-1"]
+
+    last = client.get(f"/api/jobs?limit=2&cursor={second_body['nextCursor']}", headers=headers)
+    last_body = last.json()
+    assert [job["id"] for job in last_body["jobs"]] == ["job-0"]
+    assert last_body["nextCursor"] is None
+
+    # A malformed cursor is a 422, not a 500 or a silently-empty page.
+    rejected = client.get("/api/jobs?cursor=not-valid", headers=headers)
+    assert rejected.status_code == 422
+
+    # Session-scoped listing is untouched: no pagination envelope needed for a
+    # handful of rows, and it still returns everything for that session.
+    scoped = client.get("/api/jobs?sessionId=session-2", headers=headers)
+    scoped_body = scoped.json()
+    assert [job["id"] for job in scoped_body["jobs"]] == ["job-2"]
+    assert scoped_body["nextCursor"] is None
