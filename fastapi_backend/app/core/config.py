@@ -259,6 +259,13 @@ class StoragePaths:
 class Settings:
     backend_root: Path = Path(__file__).resolve().parents[2]
     root_dir: Path = Path(__file__).resolve().parents[3]
+    # Declares the deployment shape rather than any one behaviour. Most
+    # config here stays a warning either way (collect_runtime_warnings) so a
+    # local checkout is never surprised by a hard failure; "production" is
+    # reserved for the handful of combinations where starting anyway would be
+    # actively unsafe rather than merely worth flagging — see
+    # startup_fatal_errors().
+    environment: str = os.getenv("ENVIRONMENT", "development").strip().lower() or "development"
     api_host: str = os.getenv("API_HOST", "").strip() or DEFAULT_API_HOST
     api_port: int = read_int_env("API_PORT", DEFAULT_API_PORT)
     # Serve the built frontend (``npm run build`` -> dist/) from this process,
@@ -323,7 +330,23 @@ class Settings:
     credential_encryption_key: str = os.getenv("CREDENTIAL_ENCRYPTION_KEY", "").strip()
     # When True, /media/* static artifacts require a valid bearer token or a
     # short-lived stream ticket. Disable only for fully trusted local setups.
+    # ENVIRONMENT=production refuses to start with this off — see
+    # startup_fatal_errors().
     protect_media_endpoints: bool = read_bool_env("PROTECT_MEDIA_ENDPOINTS", True)
+    # Baseline response headers (X-Content-Type-Options, X-Frame-Options,
+    # Referrer-Policy, Content-Security-Policy) applied to every response —
+    # see app/core/security_headers.py. An operator with a reason to serve a
+    # custom CSP (a CDN the frontend starts using, a different frame policy)
+    # can replace it wholesale without a code change.
+    content_security_policy_override: str = os.getenv("CONTENT_SECURITY_POLICY", "").strip()
+    # Strict-Transport-Security is opt-in, never inferred from ENVIRONMENT:
+    # once a browser has seen it, that browser refuses plain HTTP for this
+    # host until max-age expires, which would break the documented on-prem
+    # deployment shape (a VM on a local network with no reverse proxy and no
+    # TLS at all — see docs/deployment-vm.md). Turn it on once this
+    # deployment is actually served over HTTPS everywhere.
+    hsts_enabled: bool = read_bool_env("ENABLE_HSTS", False)
+    hsts_max_age_seconds: int = read_int_env("HSTS_MAX_AGE_SECONDS", 15552000)
     # /docs, /redoc and /openapi.json map this deployment's entire API surface
     # — every admin route included — and carry no authentication of their
     # own (the middleware's open-path list never covered them; anything
@@ -647,6 +670,26 @@ class Settings:
         return self.api_host.strip().lower() in LOOPBACK_HOSTS
 
     @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
+
+    @property
+    def object_storage_staging_root(self) -> Path:
+        """Where the local storage backend assembles an upload's parts while
+        it is still in flight.
+
+        Deliberately not under ``object_storage_root``: that whole tree is
+        served verbatim by the ``/media/source`` mount (see
+        ``app.storage.local``), and an in-progress upload's parts are not
+        something a valid stream ticket should be able to fetch — a
+        checksum-verified final object is; a part on its way there is not.
+        """
+        raw = os.getenv("OBJECT_STORAGE_STAGING_ROOT", "").strip()
+        if raw:
+            return Path(raw).expanduser()
+        return self.paths.storage_root / "objects_staging"
+
+    @property
     def object_storage_root(self) -> Path:
         raw = os.getenv("OBJECT_STORAGE_ROOT", "").strip()
         return Path(raw).expanduser() if raw else self.paths.storage_root / "objects"
@@ -787,11 +830,35 @@ class Settings:
         env.update(extra_env or {})
         return env
 
+    def startup_fatal_errors(self) -> list[str]:
+        """Configuration combinations ``ENVIRONMENT=production`` refuses to
+        boot with, rather than merely warn about.
+
+        Everything in :meth:`collect_runtime_warnings` stays a warning even
+        when insecure, on purpose: a local checkout or a demo box must never
+        be surprised by a startup crash over a default it did not touch. This
+        is the short list where "started anyway" is actively unsafe rather
+        than just worth flagging, and it only applies once an operator has
+        explicitly said this deployment is production.
+        """
+        if not self.is_production:
+            return []
+        errors: list[str] = []
+        if not self.protect_media_endpoints:
+            errors.append(
+                "PROTECT_MEDIA_ENDPOINTS=false is not allowed when ENVIRONMENT=production: "
+                "every /media artifact (videos, PDFs, scores) would be served with no "
+                "authentication to anyone who finds the URL. Set PROTECT_MEDIA_ENDPOINTS=true, "
+                "or ENVIRONMENT=development if this is not really a production deployment."
+            )
+        return errors
+
     def collect_runtime_warnings(self) -> list[str]:
         """Return human-readable warnings for insecure/permissive configuration.
 
         Emitted (not raised) at startup so operators are alerted without breaking
-        local development defaults.
+        local development defaults. See :meth:`startup_fatal_errors` for the
+        handful of combinations production refuses to start with instead.
         """
         warnings: list[str] = []
         if "*" in self.cors_allow_origins:

@@ -172,6 +172,13 @@ class AppContainer:
                 and self.settings.recover_running_jobs_on_startup
                 and self.settings.job_queue_backend == "local"
             )
+        fatal_errors = self.settings.startup_fatal_errors()
+        if fatal_errors:
+            for message in fatal_errors:
+                logger.error(
+                    "Refusing to start: %s", message, extra=log_context("startup", "config_validation")
+                )
+            raise RuntimeError("Refusing to start: " + " ".join(fatal_errors))
         for warning in self.settings.collect_runtime_warnings():
             logger.warning("Configuration warning: %s", warning, extra=log_context("startup", "config_validation"))
         if api and not self.settings.allow_multiple_api_instances:

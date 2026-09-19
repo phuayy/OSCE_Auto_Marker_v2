@@ -42,5 +42,5 @@ class SessionArtifacts:
             if self.valid_id(upload_id):
                 owned.add(paths.uploads_dir / f"{upload_id}.json")
                 owned.add(paths.uploads_dir / f"{upload_id}.json.migrated")
-                owned.add(self.settings.object_storage_root / ".uploads" / upload_id)
+                owned.add(self.settings.object_storage_staging_root / upload_id)
         return {path for path in owned if not any(parent.is_symlink() for parent in path.parents)}

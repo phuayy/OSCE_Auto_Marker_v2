@@ -622,7 +622,7 @@ def test_recover_expired_uploads_reclaims_abandoned_and_spares_fresh(tmp_path) -
     expired_upload["expiresAt"] = "2000-01-01T00:00:00Z"
     asyncio.run(service.repository.write(expired_upload))
 
-    parts_dir = container.storage.settings.object_storage_root / ".uploads" / expired_id
+    parts_dir = container.storage.settings.object_storage_staging_root / expired_id
     assert parts_dir.exists()  # raw part files present before the sweep
 
     asyncio.run(service.recover_expired_uploads())
@@ -642,7 +642,7 @@ def test_recover_expired_uploads_reclaims_abandoned_and_spares_fresh(tmp_path) -
     # Fresh upload untouched — still live, parts intact.
     fresh_upload = asyncio.run(service.repository.read(fresh_id))
     assert fresh_upload["status"] == "uploading"
-    fresh_parts = container.storage.settings.object_storage_root / ".uploads" / fresh_id
+    fresh_parts = container.storage.settings.object_storage_staging_root / fresh_id
     assert fresh_parts.exists()
     fresh_session = asyncio.run(container.sessions.read(str(fresh_upload["sessionId"])))
     assert fresh_session["status"] == "waiting_for_upload"
