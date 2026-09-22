@@ -28,6 +28,12 @@ from app.domain.jobs import (
 ATTEMPT_INTERRUPTED = "interrupted"
 ATTEMPT_RUNNING = "running"
 
+# Where a job's payload records the engine run it was handed to (Hatchet's run
+# id, when it was dispatched, which task). ``LEGACY_DISPATCH_RUN_ID_KEY`` is the
+# flat spelling older rows carry; both are stripped together.
+DISPATCH_PAYLOAD_KEY = "hatchet"
+LEGACY_DISPATCH_RUN_ID_KEY = "hatchetRunId"
+
 
 @dataclass(frozen=True)
 class JobClaim:
@@ -223,6 +229,17 @@ class JobRepository:
         ``merge`` rather than a dialect-specific upsert: the statement has to
         work on both backends, and this is not a hot path (enqueue, and the
         one-off legacy import).
+
+        This is a whole-row write from the caller's snapshot, so it is only
+        safe where nothing else can be writing the row: creating one, or
+        (re)queuing inside ``JobQueueService``'s enqueue critical section,
+        where ``find_active`` has just proven no worker holds it. Once a job
+        is queued it belongs to whichever worker's ``claim_queued`` matches
+        first, and a ``merge()`` of a pre-claim snapshot would silently put the
+        row back to ``queued`` with no lock — undoing that claim. Anything
+        that edits a job after it has been handed out goes through a
+        column-scoped, predicated update instead (:meth:`record_dispatch`,
+        :meth:`clear_dispatch_if_queued`, :meth:`rerun`).
         """
         columns = _columns_from_job_dict(job)
         # merge() reads the row by primary key before writing it — read then
@@ -451,13 +468,88 @@ class JobRepository:
             )
             return [_to_job_dict(row) for row in rows]
 
+    async def record_dispatch(self, job_id: str, dispatch: dict[str, Any]) -> dict[str, Any] | None:
+        """Attach the engine run this job was just handed to — and change
+        nothing else.
+
+        The dispatcher learns the run id only after the engine has accepted
+        the run, and by then a worker may already have claimed the row. The
+        ``UPDATE`` here sets ``payload_json`` (and ``updated_at``) only, so it
+        cannot undo a claim: status, lock and attempts stay whatever the
+        worker wrote. It deliberately does *not* require ``status = 'queued'``
+        — a claimed job still wants its run id on record so ``cancel`` can
+        abort the engine run later. Returns the row as it now stands, or
+        ``None`` when the row is gone (purged mid-dispatch); a ``merge()``
+        would have re-inserted it.
+        """
+        now = utc_now_iso()
+        async with self.database.transaction() as db:
+            await self.database.ensure_write_locked(db)
+            row = await db.get(JobRecord, job_id)
+            if row is None:
+                return None
+            payload = _load_json(str(row.payload_json or "{}"))
+            _strip_dispatch(payload)
+            payload[DISPATCH_PAYLOAD_KEY] = dict(dispatch)
+            await db.execute(
+                update(JobRecord)
+                .where(JobRecord.id == job_id)
+                .values(payload_json=_dump_json(payload), updated_at=now)
+                .execution_options(synchronize_session=False)
+            )
+            await db.refresh(row)
+            return _to_job_dict(row)
+
+    async def clear_dispatch_if_queued(self, job_id: str) -> dict[str, Any] | None:
+        """Drop a queued job's dispatch metadata so it can be handed to the
+        engine again.
+
+        Callers (the stale-dispatch sweep, the stale-job reaper) decided from
+        a snapshot that this row is queued and its dispatch is dead. The
+        predicate re-checks that at write time: a row a worker has claimed
+        since is that worker's, its metadata names the run that is actually
+        executing it, and clearing it would invite a duplicate dispatch.
+        Returns the refreshed row when it is still queued (whether or not
+        there was anything to strip), ``None`` when it is not — in which case
+        nothing was written and the caller must not dispatch.
+        """
+        now = utc_now_iso()
+        async with self.database.transaction() as db:
+            await self.database.ensure_write_locked(db)
+            row = await self._require(db, job_id)
+            if row.status != JobStatus.QUEUED:
+                return None
+            payload = _load_json(str(row.payload_json or "{}"))
+            if not _strip_dispatch(payload):
+                return _to_job_dict(row)
+            result = await db.execute(
+                update(JobRecord)
+                .where(JobRecord.id == job_id, JobRecord.status == JobStatus.QUEUED)
+                .values(payload_json=_dump_json(payload), updated_at=now)
+                .execution_options(synchronize_session=False)
+            )
+            await db.refresh(row)
+            if result.rowcount != 1 or row.status != JobStatus.QUEUED:
+                return None
+            return _to_job_dict(row)
+
     async def rerun(self, job_id: str, *, reset_attempts: bool = True) -> dict[str, Any]:
+        """Return a finished job to ``queued`` for a fresh start.
+
+        Any dispatch metadata is stripped in the same transaction: a rerun is
+        by definition a new engine run, and doing it here (rather than a
+        second whole-row write from the caller) leaves no window in which a
+        claim could land between the requeue and the strip.
+        """
         now = utc_now_iso()
         async with self.database.transaction() as db:
             await self.database.ensure_write_locked(db)
             row = await self._require(db, job_id)
             if row.status == JobStatus.RUNNING:
                 raise ValueError("Running jobs cannot be rerun until they finish or are cancelled.")
+            payload = _load_json(str(row.payload_json or "{}"))
+            if _strip_dispatch(payload):
+                row.payload_json = _dump_json(payload)
             row.status = JobStatus.QUEUED
             row.attempts = 0 if reset_attempts else int(row.attempts or 0)
             row.queued_at = now
@@ -636,6 +728,15 @@ def _columns_from_job_dict(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _strip_dispatch(payload: dict[str, Any]) -> bool:
+    """Remove every dispatch-metadata key from ``payload`` in place; True if
+    there was anything to remove."""
+    removed = False
+    for key in (DISPATCH_PAYLOAD_KEY, LEGACY_DISPATCH_RUN_ID_KEY):
+        removed |= payload.pop(key, None) is not None
+    return removed
+
+
 def _dump_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
@@ -648,4 +749,4 @@ def _load_json(raw: str) -> dict[str, Any]:
         return {}
 
 
-__all__ = ["JobClaim", "JobRepository"]
+__all__ = ["DISPATCH_PAYLOAD_KEY", "LEGACY_DISPATCH_RUN_ID_KEY", "JobClaim", "JobRepository"]

@@ -288,6 +288,81 @@ def test_finish_takes_the_write_lock_before_reading(tmp_path) -> None:
     assert calls == ["lock", "read"]
 
 
+# --- F1: dispatch metadata writes never touch the claim columns -------------
+
+
+def test_record_dispatch_keeps_a_concurrent_claim_intact(tmp_path) -> None:
+    """The dispatcher's write lands after a worker has already claimed the
+    row: only the payload may change — status, lock and attempts are the
+    worker's."""
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
+    asyncio.run(repository.write(_queued_job()))
+    claim = asyncio.run(repository.claim_queued("job-1", "worker-1"))
+    assert claim.claimed
+
+    recorded = asyncio.run(repository.record_dispatch("job-1", {"runId": "run-1", "dispatchedAt": "2026-01-01T00:00:03Z"}))
+
+    assert recorded is not None
+    assert recorded["status"] == "running"
+    assert recorded["lockedBy"] == "worker-1"
+    assert recorded["lockedAt"] == claim.job["lockedAt"]
+    assert recorded["attempts"] == 1
+    assert recorded["payload"] == {"workflow": "standard", "hatchet": {"runId": "run-1", "dispatchedAt": "2026-01-01T00:00:03Z"}}
+
+
+def test_record_dispatch_returns_none_for_a_missing_row_instead_of_recreating_it(tmp_path) -> None:
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
+    asyncio.run(repository.initialize())
+
+    assert asyncio.run(repository.record_dispatch("job-missing", {"runId": "run-1"})) is None
+    assert asyncio.run(repository.exists("job-missing")) is False
+
+
+def test_clear_dispatch_if_queued_strips_metadata_from_a_queued_row(tmp_path) -> None:
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
+    job = _queued_job()
+    job["payload"] = {"workflow": "standard", "hatchet": {"runId": "run-old"}, "hatchetRunId": "run-legacy"}
+    asyncio.run(repository.write(job))
+
+    cleared = asyncio.run(repository.clear_dispatch_if_queued("job-1"))
+
+    assert cleared is not None
+    assert cleared["status"] == "queued"
+    assert cleared["payload"] == {"workflow": "standard"}
+
+
+def test_clear_dispatch_if_queued_refuses_a_claimed_row(tmp_path) -> None:
+    """A row that was claimed between the caller's read and this write is no
+    longer the caller's to redispatch: nothing is written and ``None`` says so."""
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
+    job = _queued_job()
+    job["payload"] = {"workflow": "standard", "hatchet": {"runId": "run-live"}}
+    asyncio.run(repository.write(job))
+    asyncio.run(repository.claim_queued("job-1", "worker-1"))
+
+    assert asyncio.run(repository.clear_dispatch_if_queued("job-1")) is None
+    untouched = asyncio.run(repository.read("job-1"))
+    assert untouched["status"] == "running"
+    assert untouched["lockedBy"] == "worker-1"
+    assert untouched["payload"]["hatchet"] == {"runId": "run-live"}
+
+
+def test_rerun_strips_dispatch_metadata_in_the_same_transaction(tmp_path) -> None:
+    repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
+    job = _queued_job()
+    job["status"] = "failed"
+    job["attempts"] = 1
+    job["payload"] = {"workflow": "standard", "hatchet": {"runId": "run-old"}}
+    asyncio.run(repository.write(job))
+
+    rerun = asyncio.run(repository.rerun("job-1"))
+
+    assert rerun["status"] == "queued"
+    assert rerun["attempts"] == 0
+    assert rerun["payload"] == {"workflow": "standard"}
+    assert asyncio.run(repository.read("job-1"))["payload"] == {"workflow": "standard"}
+
+
 def _job(job_id: str, created_at: str) -> dict:
     return {
         "id": job_id,

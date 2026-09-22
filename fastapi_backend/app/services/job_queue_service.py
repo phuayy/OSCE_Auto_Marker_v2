@@ -25,7 +25,7 @@ from app.domain.jobs import (
 )
 from app.domain.session_lifecycle import fail_session
 from app.domain.sessions import JOB_DRIVEN_STATUSES, SessionStatus
-from app.repositories.job_repository import JobRepository
+from app.repositories.job_repository import DISPATCH_PAYLOAD_KEY, LEGACY_DISPATCH_RUN_ID_KEY, JobRepository
 from app.services.event_service import EventService
 from app.services.job_tasks import get_task_spec, queue_owns_session_status
 from app.services.session_service import SessionService
@@ -260,12 +260,10 @@ class JobQueueService:
         return job
 
     async def rerun(self, job_id: str) -> dict[str, Any]:
+        # The repository strips the old dispatch metadata inside the same
+        # transaction that requeues the row, so there is no second write here
+        # for a concurrent claim to be undone by.
         job = await self.repository.rerun(job_id)
-        payload = dict(job.get("payload") or {})
-        payload.pop("hatchet", None)
-        payload.pop("hatchetRunId", None)
-        job["payload"] = payload
-        await self.repository.write(job)
         session_id = str(job.get("sessionId"))
         await self.repository.append_event(job_id, "rerun", "Job manually requeued.", {"sessionId": session_id})
         await self._sync_session_job(job)
@@ -342,8 +340,8 @@ class JobQueueService:
         if self.settings.job_queue_backend != "hatchet":
             return
         payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
-        hatchet_meta = payload.get("hatchet") if isinstance(payload.get("hatchet"), dict) else {}
-        run_id = hatchet_meta.get("runId") or payload.get("hatchetRunId")
+        hatchet_meta = payload.get(DISPATCH_PAYLOAD_KEY) if isinstance(payload.get(DISPATCH_PAYLOAD_KEY), dict) else {}
+        run_id = hatchet_meta.get("runId") or payload.get(LEGACY_DISPATCH_RUN_ID_KEY)
         if not run_id:
             return
         job_id = str(job.get("id"))
@@ -471,6 +469,10 @@ class JobQueueService:
         Both are safe to repeat: ``_dispatch_hatchet`` skips jobs that already
         carry fresh metadata, and ``claim_queued`` atomically no-ops a job that a
         worker has meanwhile started, so a duplicate dispatch cannot double-run.
+        The stale branch clears metadata through ``clear_dispatch_if_queued``,
+        whose predicate re-checks ``queued`` at write time: the run this scan's
+        snapshot called stale may legitimately have claimed the row since, and
+        that claim (and the metadata naming its run) must be left alone.
         """
         if self.settings.job_queue_backend != "hatchet":
             return
@@ -484,7 +486,7 @@ class JobQueueService:
         stale: list[dict[str, Any]] = []
         for job in queued_jobs:
             payload = job.get("payload") or {}
-            hatchet_meta = payload.get("hatchet") if isinstance(payload.get("hatchet"), dict) else {}
+            hatchet_meta = payload.get(DISPATCH_PAYLOAD_KEY) if isinstance(payload.get(DISPATCH_PAYLOAD_KEY), dict) else {}
             dispatched_at_str = hatchet_meta.get("dispatchedAt")
             if not dispatched_at_str:
                 continue
@@ -492,7 +494,7 @@ class JobQueueService:
             if dispatched_at is not None and dispatched_at < stale_cutoff:
                 stale.append(job)
 
-        undispatched = [j for j in queued_jobs if not (j.get("payload") or {}).get("hatchet")]
+        undispatched = [j for j in queued_jobs if not (j.get("payload") or {}).get(DISPATCH_PAYLOAD_KEY)]
         if undispatched:
             logger.info(
                 "Hatchet recovery: dispatching %d queued job(s) with no Hatchet metadata.",
@@ -514,17 +516,20 @@ class JobQueueService:
 
         for job in stale:
             job_id = str(job["id"])
-            payload = dict(job.get("payload") or {})
-            old_run_id = (payload.get("hatchet") or {}).get("runId")
-            payload.pop("hatchet", None)
-            job["payload"] = payload
-            await self.repository.write(job)
+            old_run_id = ((job.get("payload") or {}).get(DISPATCH_PAYLOAD_KEY) or {}).get("runId")
+            cleared = await self.repository.clear_dispatch_if_queued(job_id)
+            if cleared is None:
+                logger.info(
+                    "Stale job %s was claimed or finished before its dispatch could be cleared; leaving it.",
+                    job_id,
+                )
+                continue
             await self.repository.append_event(
                 job_id,
                 "redispatch_stale",
                 f"Stale Hatchet dispatch (runId={old_run_id}) cleared. Re-dispatching.",
             )
-            await self._dispatch(job)
+            await self._dispatch(cleared)
             logger.info("Stale job %s re-dispatched to Hatchet.", job_id)
 
     async def _dispatch(self, job: dict[str, Any]) -> None:
@@ -557,14 +562,14 @@ class JobQueueService:
 
     async def _dispatch_hatchet(self, job: dict[str, Any]) -> None:
         job_id = str(job["id"])
-        payload = dict(job.get("payload") or {})
-        hatchet_meta = payload.get("hatchet") if isinstance(payload.get("hatchet"), dict) else {}
-        if hatchet_meta.get("dispatchedAt") or hatchet_meta.get("runId") or payload.get("hatchetRunId"):
+        payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+        hatchet_meta = payload.get(DISPATCH_PAYLOAD_KEY) if isinstance(payload.get(DISPATCH_PAYLOAD_KEY), dict) else {}
+        if hatchet_meta.get("dispatchedAt") or hatchet_meta.get("runId") or payload.get(LEGACY_DISPATCH_RUN_ID_KEY):
             await self.repository.append_event(
                 job_id,
                 "dispatch_skipped",
                 "Queued job already has Hatchet dispatch metadata; skipping duplicate dispatch.",
-                {"hatchet": hatchet_meta or {"runId": payload.get("hatchetRunId")}},
+                {"hatchet": hatchet_meta or {"runId": payload.get(LEGACY_DISPATCH_RUN_ID_KEY)}},
             )
             return
         try:
@@ -572,13 +577,25 @@ class JobQueueService:
 
             run_ref = await enqueue_process_job(job_id)
             run_id = self._hatchet_run_id(run_ref)
-            payload["hatchet"] = {
-                "runId": run_id,
-                "dispatchedAt": utc_now_iso(),
-                "task": "osce-process-job",
-            }
-            job["payload"] = payload
-            await self.repository.write(job)
+            # The engine has the run by now, and so may a worker have the row:
+            # ``enqueue_process_job`` returns once the run is accepted, and a
+            # worker can claim it in the same instant. ``job`` is the
+            # pre-dispatch snapshot, so it is never written back whole — only
+            # the dispatch metadata is recorded, on whatever the row now says.
+            recorded = await self.repository.record_dispatch(
+                job_id,
+                {"runId": run_id, "dispatchedAt": utc_now_iso(), "task": "osce-process-job"},
+            )
+            if recorded is None:
+                # Purged between the engine accepting the run and this write.
+                # The run itself finds no row on claim and stops quietly
+                # (see ``_execute_job``); nothing left to record it against.
+                logger.info(
+                    "Job %s was deleted while being dispatched to Hatchet (runId=%s); nothing to record.",
+                    job_id,
+                    run_id,
+                )
+                return
             await self.repository.append_event(
                 job_id,
                 "dispatched",
@@ -918,10 +935,14 @@ class JobQueueService:
                 # Finished, cancelled, or reclaimed by a live worker between
                 # the scan and this requeue attempt — nothing to reap.
                 continue
-            payload = dict(requeued.get("payload") or {})
-            if payload.pop("hatchet", None) is not None:
-                requeued["payload"] = payload
-                await self.repository.write(requeued)
+            if (requeued.get("payload") or {}).get(DISPATCH_PAYLOAD_KEY) is not None:
+                # Predicated on the row still being queued: a worker that
+                # claims it between the requeue above and this strip owns it
+                # now, and its metadata names the run actually executing it.
+                cleared = await self.repository.clear_dispatch_if_queued(job_id)
+                if cleared is None:
+                    continue
+                requeued = cleared
             await self.repository.append_event(
                 job_id,
                 "reaped_stale",
