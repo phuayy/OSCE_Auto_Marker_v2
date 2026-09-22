@@ -73,6 +73,8 @@ OSCE-AI-FYP/
 │   │   ├── lazyRoute.jsx       # Code-splitting plumbing: lazy + preload + chunk error boundary
 │   │   ├── theme.js            # Theme preference: rules + the store that owns <html class="dark"> and localStorage (pure)
 │   │   ├── useTheme.js         # useSyncExternalStore over that store; no provider
+│   │   ├── scoreDisplay.js     # Percent vs raw score labels: formatScore / sharedMaximum + the store (pure; see Two-tier settings)
+│   │   ├── useScoreDisplay.js  # useSyncExternalStore over that store; AppShell hydrates it from /api/settings
 │   │   └── useHashRoute.js     # React hook for URL <-> state sync
 │   └── auth.js                 # Session storage (token + identity), fetch shim, stream tickets, the account request helpers
 ├── index.html                  # Carries the theme boot script (applies the dark class before React loads)
@@ -138,7 +140,7 @@ OSCE-AI-FYP/
 │       │   ├── rubric_asset_repository.py
 │       │   ├── upload_repository.py     # JSON files on disk (uploads_dir)
 │       │   ├── video_repository.py
-│       │   ├── user_settings_repository.py  # Per-account overrides of the seven user-scoped keys (see Two-tier settings)
+│       │   ├── user_settings_repository.py  # Per-account overrides of the user-scoped keys (see Two-tier settings)
 │       │   ├── corpus_repository.py     # Named term lists for WhisperX hotwords + transcript correction
 │       │   └── webhook_repository.py    # Subscriptions + the bounded per-subscription delivery log
 │       ├── services/
@@ -636,7 +638,7 @@ Defined in [models.py](fastapi_backend/app/database/models.py):
 | `users` | `UserRecord` | Accounts: `username` / `email` (lowercased, unique), `display_name`, `role` (`admin` \| `marker`), `status` (`invited` \| `active` \| `disabled`), bcrypt `password_hash` (null while invited), `token_version` — bumped by activation, a password change/reset and suspension, so every bearer token the account holds dies on its next request |
 | `user_action_tokens` | `UserActionTokenRecord` | The emailed capabilities: `purpose` (`invite` \| `password_reset`), SHA-256 `token_hash` (the token itself is never stored), `expires_at`, `used_at` (set by an atomic conditional update — single use, and a resend voids the earlier link) |
 | `app_settings` | `AppSettingRecord` | Global key/value settings — model routing, marking mode + panel, transcription engine, preprocess toggle — written by `PUT /api/settings` (replace) or `PATCH /api/settings` (merge only the keys sent; what the settings cards use, so no card can revert another's save) |
-| `user_settings` | `UserSettingRecord` | One row per account: its overrides of the seven user-scoped keys, as one JSON document — see **Two-tier settings** |
+| `user_settings` | `UserSettingRecord` | One row per account: its overrides of the user-scoped keys, as one JSON document — see **Two-tier settings** |
 | `corpora` | `CorpusRecord` | Named term lists (`terms: list[str]`) that bias WhisperX `--hotwords` and drive deterministic transcript correction; picked per session at upload time and snapshotted into the session payload, so editing or deleting a corpus never affects a session that already used it |
 | `webhook_subscriptions` | `WebhookSubscriptionRecord` | Outbound HTTP endpoints registered for notification events — URL, HMAC secret (plaintext; it is the shared signing key, not a credential *for* this system), subscribed event types, and a denormalised summary of the most recent delivery for the management UI |
 | `webhook_deliveries` | `WebhookDeliveryRecord` | One row per delivery attempt, pruned to a bounded number per subscription — a debugging log, not an audit trail — see **Webhooks** |
@@ -661,8 +663,9 @@ depends on it:
 
 **Every read-then-write transaction takes SQLite's write lock before it reads.**
 `claim_queued`, `_finish` (`mark_succeeded` / `mark_failed` / `mark_cancelled`),
-`requeue_interrupted_job`, `prepare_retry_attempt`, `rerun`, `write` and
-`delete_for_session` all call `OrmDatabase.ensure_write_locked` — `BEGIN
+`requeue_interrupted_job`, `prepare_retry_attempt`, `rerun`, `record_dispatch`,
+`clear_dispatch_if_queued`, `write` and `delete_for_session` all call
+`OrmDatabase.ensure_write_locked` — `BEGIN
 IMMEDIATE` on SQLite, idempotent, a no-op on PostgreSQL — as their first
 statement. Without it, `transaction()`'s default deferred `BEGIN` takes only a
 read snapshot on the first statement; if another connection commits before
@@ -679,6 +682,27 @@ has no ORM `relationship()` wiring between `jobs` and `job_events` to let
 SQLAlchemy infer that insert order on its own, so skipping the flush silently
 reordered two pending inserts within one combined flush and tripped the
 `job_events` foreign key.
+
+**`JobRepository.write` is for rows nobody else can be writing.** It is a
+whole-row `merge()` of the caller's snapshot, so it is only used to create a
+job or to (re)queue one inside the enqueue critical section, where
+`find_active` has just proven no worker holds it. Once a job is handed out,
+every edit is column-scoped and predicated: `record_dispatch` sets
+`payload_json` only (no `status` predicate — a claimed job still wants its
+run id on record so `cancel` can abort the engine run), and
+`clear_dispatch_if_queued` strips the dispatch metadata `WHERE status =
+'queued'` and returns `None` when the row is no longer queued, which the
+caller reads as "not mine to redispatch". `rerun` strips the metadata inside
+its own requeue transaction. This closed F1: `_dispatch_hatchet` learns the
+run id only after the engine has accepted the run, by which point a worker's
+`claim_queued` may already have set `running` + `locked_by`; writing the
+pre-dispatch snapshot back whole put the row back to `queued` with no lock,
+the live worker's heartbeat stopped matching, and the reaper redispatched a
+job that was already executing — the whole pipeline ran twice. The stale
+branch of `redispatch_stale_hatchet_jobs` and `reap_stale_jobs` had the same
+read-then-`merge()` shape and now go through `clear_dispatch_if_queued`,
+skipping dispatch when it returns `None`. `tests/test_job_queue_hatchet_dispatch.py`
+forces a claim into each window.
 
 **A terminal job status is first-writer-wins.** `_finish`'s `UPDATE` carries
 `WHERE status NOT IN (terminal statuses)`; a job already `succeeded`,
@@ -1151,12 +1175,14 @@ takes a `mailer=` override, which is how `tests/fixtures/mail.py`'s
 
 `app_settings` (`AppSettingRecord`) stays the one deployment-wide document —
 the provider catalogue and its keys, the corpus, the rubric, and the admin's
-own defaults for everything else. Seven of its keys may additionally be
+own defaults for everything else. Eight of its keys may additionally be
 personalised per account: which transcription engine a marker's own runs use,
-how they mark content (single model or panel, and which), and whether the
-transcript preprocessing pass runs before scoring
+how they mark content (single model or panel, and which), whether the
+transcript preprocessing pass runs before scoring, and how the screens show a
+score — `scoreDisplay`, `percent` (default) or `raw`
+(`app.domain.enums.ScoreDisplay`; see **Score display** below)
 (`app.domain.settings_scope.USER_SCOPED_KEYS`). `user_settings`
-(`UserSettingRecord`) holds each account's overrides of exactly those seven,
+(`UserSettingRecord`) holds each account's overrides of exactly those eight,
 one JSON document per user, mirroring how `app_settings` itself is stored.
 
 [services/preferences_service.py](fastapi_backend/app/services/preferences_service.py)
@@ -1179,6 +1205,28 @@ that account's next run in every process, with no restart, because both
 repositories are cached `SnapshotCache` snapshots kept fresh by the change
 feed (see **Caching the scoring hot path**) — the merge itself costs nothing
 beyond what resolving the deployment document already cost.
+
+### Score display
+
+`scoreDisplay` is the one user-scoped key the pipeline never reads: it only
+decides whether a score label shows `82%` or `9 / 11`. Nothing stored about a
+session changes with it — a score is always `total / max`, and every
+percentage in the app is derived at read time, so the two readings can never
+disagree. [lib/scoreDisplay.js](src/lib/scoreDisplay.js) holds the rules
+(`formatScore`, `formatAggregate`, `sharedMaximum`) and a
+`useSyncExternalStore`-shaped store; [lib/useScoreDisplay.js](src/lib/useScoreDisplay.js)
+is the module singleton every score view subscribes to (Analytics, the
+workspace's Content and Communication tabs, the cohort chart). `AppShell`
+hydrates it from `GET /api/settings` once per token and resets it on sign-out;
+the Settings card (`SettingsPage.jsx`, "Score display") PATCHes the key and
+writes the saved value into the same store, so an open Analytics tab follows
+the toggle at once.
+
+Two places keep a percentage under the raw preference, and say so: a
+distribution histogram (bucketed by share of the maximum by construction),
+and a mean/median over rows whose maxima differ (`sharedMaximum` answers
+`null`; scaling a mean of percentages back to points needs one maximum).
+The CSV score sheet is unaffected — it writes raw numbers regardless.
 
 ---
 
