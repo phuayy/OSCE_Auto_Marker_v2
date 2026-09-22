@@ -90,6 +90,15 @@ class UploadFileKind(StrEnum):
     CASE_STUDY = "caseStudy"
 
 
+class ScoreDisplay(StrEnum):
+    """How the screens present a score: a share of the maximum, or the points
+    themselves. A per-account display preference (see CLAUDE.md "Two-tier
+    settings"); nothing stored about a session depends on it."""
+
+    PERCENT = "percent"
+    RAW = "raw"
+
+
 class OutputKey(StrEnum):
     AUDIO = "audio"
     WHISPERX_JSON = "whisperxJson"

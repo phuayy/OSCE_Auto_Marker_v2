@@ -334,6 +334,9 @@ export function SettingsSkeleton({ onBack, isAdmin = false }) {
         <SettingsCardSkeleton descriptionLines={4}>
           <ToggleRowSkeleton />
         </SettingsCardSkeleton>
+        <SettingsCardSkeleton descriptionLines={4}>
+          <ToggleRowSkeleton />
+        </SettingsCardSkeleton>
 
         {isAdmin ? (
           <>

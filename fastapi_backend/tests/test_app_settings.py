@@ -28,6 +28,8 @@ def test_settings_repository_roundtrip(tmp_path: Path) -> None:
         # "single" / {} = one model marks, no panel configured.
         "llmMarkingMode": "single",
         "llmPanel": {},
+        # "percent" = the screens show a score as a share of its maximum.
+        "scoreDisplay": "percent",
     }
     assert asyncio.run(repository.llm_preprocess_enabled()) is False
     assert asyncio.run(repository.llm_routing_selection()) == ({}, [])
@@ -77,6 +79,7 @@ def test_settings_routes_get_put_and_reject_unknown_keys(tmp_path: Path) -> None
         "llmFallbacks": [],
         "llmMarkingMode": "single",
         "llmPanel": {},
+        "scoreDisplay": "percent",
     }
 
     updated = client.put("/api/admin/settings", json={"llmTranscriptPreprocess": True})

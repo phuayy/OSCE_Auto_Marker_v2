@@ -8,6 +8,7 @@ from sqlalchemy import select
 from app.core.snapshot_cache import SnapshotCache
 from app.database.models import AppSettingRecord, utc_now
 from app.database.orm import OrmDatabase
+from app.domain.enums import ScoreDisplay
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard
     from app.services.change_feed_service import ChangeFeedService
@@ -36,6 +37,11 @@ LLM_FALLBACKS_KEY = "llmFallbacks"
 # schema field: {"markers": [...], "adjudicator": {...}, "tieBreak": "..."}.
 LLM_MARKING_MODE_KEY = "llmMarkingMode"
 LLM_PANEL_KEY = "llmPanel"
+# How the screens present a score (app.domain.enums.ScoreDisplay): "percent"
+# (share of the maximum) or "raw" (points out of the maximum). A display
+# preference only — nothing stored about a session changes, and the pipeline
+# never reads it.
+SCORE_DISPLAY_KEY = "scoreDisplay"
 
 # Known settings and their defaults. GET merges stored rows over these so the
 # API response shape stays stable as settings are added. An empty engine id
@@ -53,6 +59,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # existed, so a missing row must mean exactly that.
     LLM_MARKING_MODE_KEY: "single",
     LLM_PANEL_KEY: {},
+    # Percentages are what every screen showed before the choice existed.
+    SCORE_DISPLAY_KEY: str(ScoreDisplay.PERCENT),
 }
 
 

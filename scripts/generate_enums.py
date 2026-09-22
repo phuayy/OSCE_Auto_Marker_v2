@@ -13,6 +13,7 @@ from app.domain.enums import (
     ClipKind,
     OutputKey,
     PipelineStep,
+    ScoreDisplay,
     SegmentationMethod,
     StepStatus,
     TaskType,
@@ -33,7 +34,7 @@ def render() -> str:
     for enum in (
         SessionStatus, PipelineStep, StepStatus, UploadStatus, ClipExportStatus, ClipExportScope,
         JobStatus, TaskType, Workflow, SegmentationMethod, ClipKind, UploadFileKind, OutputKey,
-        MarkingMode, TieBreak, UserRole, UserStatus,
+        MarkingMode, TieBreak, UserRole, UserStatus, ScoreDisplay,
     ):
         values = {item.name: item.value for item in enum}
         definitions.append(

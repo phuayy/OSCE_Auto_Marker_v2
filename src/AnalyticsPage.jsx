@@ -19,6 +19,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { AnalyticsSkeletonBody, LoadingRegion } from '@/components/skeletons.jsx';
 import { PageHeader } from '@/components/PageHeader.jsx';
 import { apiJson } from '@/lib/apiFetch';
+import { formatAggregate, formatScore, isRawScoreDisplay, percentOf, sharedMaximum } from '@/lib/scoreDisplay';
+import { useScoreDisplay } from '@/lib/useScoreDisplay';
 import {
   DATE_PRESETS,
   applyFilter,
@@ -43,10 +45,18 @@ const SERIES_COMMUNICATION = '#1baf7a'; // aqua (sub-3:1 on white — relieved b
 const BUCKET_COUNT = 10;
 
 function scorePercent(row) {
-  const total = Number(row.scoreTotal);
-  const max = Number(row.scoreMax);
-  if (!Number.isFinite(total) || !Number.isFinite(max) || max <= 0) return null;
-  return Math.min(100, Math.max(0, (total / max) * 100));
+  return percentOf(row.scoreTotal, row.scoreMax);
+}
+
+// The one maximum every scored row of this type shares, or null when the
+// rows come from rubrics with different maxima. A mean or median of
+// percentages scales back to points only over a shared maximum; without one
+// the raw reading would compare unlike things, so the percentage stands
+// whatever the preference (see lib/scoreDisplay.js).
+function sharedMax(rows, resultType) {
+  return sharedMaximum(
+    rows.filter((row) => row.resultType === resultType && scorePercent(row) !== null).map((row) => row.scoreMax),
+  );
 }
 
 function mean(values) {
@@ -69,6 +79,7 @@ function summarize(rows, resultType) {
     count: typed.length,
     mean: mean(percents),
     median: median(percents),
+    sharedMax: sharedMax(typed, resultType),
     passRate: decided.length ? (passed.length / decided.length) * 100 : null,
     failRate: decided.length ? ((decided.length - passed.length) / decided.length) * 100 : null,
   };
@@ -88,6 +99,23 @@ function histogram(rows, resultType) {
 
 function formatPct(value, digits = 1) {
   return value === null || value === undefined ? '—' : `${value.toFixed(digits)}%`;
+}
+
+/** A summary's mean/median in the preferred reading — points over a shared maximum, else %. */
+function formatCentral(value, summary, mode, percentDigits) {
+  return formatAggregate(value, mode, summary.sharedMax, { percentDigits });
+}
+
+/** "mean 67% · median 71%" or "mean 14 / 21 · median 15 / 21", for a tile hint or a chart description. */
+function describeCentral(summary, mode, percentDigits) {
+  return `mean ${formatCentral(summary.mean, summary, mode, percentDigits)} · median ${formatCentral(summary.median, summary, mode, percentDigits)}`;
+}
+
+/** The note a raw-mode aggregate carries when it had to stay a percentage. */
+function mixedMaxNote(summary, mode) {
+  return isRawScoreDisplay(mode) && summary.count > 0 && !summary.sharedMax
+    ? ' (as % — rubrics with different maximums)'
+    : '';
 }
 
 function formatDate(value) {
@@ -303,7 +331,7 @@ function StatTile({ icon: Icon, label, primary, secondary, hint, compare }) {
 }
 
 /** Column histogram: score-% buckets × assessment count, 1–2 series. */
-function DistributionChart({ title, description, seriesA, seriesB, compare }) {
+function DistributionChart({ title, description, seriesA, seriesB, compare, mode }) {
   const [tooltip, setTooltip] = useState(null);
   const containerRef = useRef(null);
   const maxCount = Math.max(1, ...seriesA, ...(compare && seriesB ? seriesB : []));
@@ -390,6 +418,11 @@ function DistributionChart({ title, description, seriesA, seriesB, compare }) {
               ))}
             </div>
             <div className="mt-1 text-center text-[11px] uppercase tracking-wide text-slate-500">Score (%)</div>
+            {isRawScoreDisplay(mode) ? (
+              <div className="mt-1 text-center text-[11px] text-slate-500">
+                A distribution is bucketed by share of the maximum, so it stays in % under the raw-score preference.
+              </div>
+            ) : null}
           </div>
         )}
       </CardContent>
@@ -397,22 +430,42 @@ function DistributionChart({ title, description, seriesA, seriesB, compare }) {
   );
 }
 
-/** Horizontal grouped bars: per-student mean % for content + communication. */
-function StudentBreakdownChart({ rows }) {
+/** Horizontal grouped bars: per-student mean % for content + communication.
+ *  Bar lengths are always % so students line up; the label beside each bar
+ *  follows the preference — points when the student's rows share one maximum. */
+function StudentBreakdownChart({ rows, mode }) {
   const students = useMemo(() => {
     const byStudent = new Map();
     rows.forEach((row) => {
       const pct = scorePercent(row);
       if (pct === null) return;
       if (!byStudent.has(row.studentId)) {
-        byStudent.set(row.studentId, { name: row.studentName || row.studentId, content: [], communication: [] });
+        byStudent.set(row.studentId, {
+          name: row.studentName || row.studentId,
+          content: [],
+          communication: [],
+          contentMax: [],
+          communicationMax: [],
+        });
       }
       const bucket = byStudent.get(row.studentId);
-      if (row.resultType === 'content') bucket.content.push(pct);
-      if (row.resultType === 'communication') bucket.communication.push(pct);
+      if (row.resultType === 'content') {
+        bucket.content.push(pct);
+        bucket.contentMax.push(row.scoreMax);
+      }
+      if (row.resultType === 'communication') {
+        bucket.communication.push(pct);
+        bucket.communicationMax.push(row.scoreMax);
+      }
     });
     return [...byStudent.values()]
-      .map((entry) => ({ name: entry.name, content: mean(entry.content), communication: mean(entry.communication) }))
+      .map((entry) => ({
+        name: entry.name,
+        content: mean(entry.content),
+        communication: mean(entry.communication),
+        contentMax: sharedMaximum(entry.contentMax),
+        communicationMax: sharedMaximum(entry.communicationMax),
+      }))
       .sort((a, b) => (b.content ?? -1) - (a.content ?? -1));
   }, [rows]);
 
@@ -444,23 +497,26 @@ function StudentBreakdownChart({ rows }) {
                 <div className="truncate text-sm text-slate-700" title={student.name}>{student.name}</div>
                 <div className="flex flex-col gap-1">
                   {[
-                    { value: student.content, color: SERIES_CONTENT, label: 'Content' },
-                    { value: student.communication, color: SERIES_COMMUNICATION, label: 'Communication' },
-                  ].map((series) => (
-                    <div key={series.label} className="flex items-center gap-2">
-                      <div className="h-2.5 flex-1 overflow-hidden rounded-full bg-slate-100">
-                        <div
-                          className="h-full rounded-full"
-                          style={{ width: `${series.value ?? 0}%`, background: series.color }}
-                          role="img"
-                          aria-label={`${series.label}: ${formatPct(series.value)}`}
-                        />
+                    { value: student.content, max: student.contentMax, color: SERIES_CONTENT, label: 'Content' },
+                    { value: student.communication, max: student.communicationMax, color: SERIES_COMMUNICATION, label: 'Communication' },
+                  ].map((series) => {
+                    const reading = formatAggregate(series.value, mode, series.max);
+                    return (
+                      <div key={series.label} className="flex items-center gap-2">
+                        <div className="h-2.5 flex-1 overflow-hidden rounded-full bg-slate-100">
+                          <div
+                            className="h-full rounded-full"
+                            style={{ width: `${series.value ?? 0}%`, background: series.color }}
+                            role="img"
+                            aria-label={`${series.label}: ${reading}`}
+                          />
+                        </div>
+                        <span className="w-16 shrink-0 text-right text-[11px] tabular-nums text-slate-600">
+                          {reading}
+                        </span>
                       </div>
-                      <span className="w-12 shrink-0 text-right text-[11px] tabular-nums text-slate-600">
-                        {formatPct(series.value, 0)}
-                      </span>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             ))}
@@ -471,7 +527,7 @@ function StudentBreakdownChart({ rows }) {
   );
 }
 
-function ResultsTable({ rows }) {
+function ResultsTable({ rows, mode }) {
   const sorted = useMemo(
     () => [...rows].sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''))),
     [rows],
@@ -485,15 +541,19 @@ function ResultsTable({ rows }) {
             <th className="px-3 py-2 font-medium">Student</th>
             <th className="px-3 py-2 font-medium">Type</th>
             <th className="px-3 py-2 font-medium text-right">Score</th>
-            <th className="px-3 py-2 font-medium text-right">%</th>
+            <th className="px-3 py-2 font-medium text-right">{isRawScoreDisplay(mode) ? '%' : 'Points'}</th>
             <th className="px-3 py-2 font-medium">Result</th>
             <th className="px-3 py-2 font-medium">Date</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
           {sorted.map((row) => {
-            const pct = scorePercent(row);
             const isPass = /^pass$/i.test(String(row.passFail || ''));
+            // Both readings stay reachable: the preferred one leads, the
+            // other sits in the next column — the table is where a reader
+            // checks a chart, so it should not have to flip a setting to.
+            const preferred = formatScore(row.scoreTotal, row.scoreMax, mode);
+            const other = isRawScoreDisplay(mode) ? formatPct(scorePercent(row), 0) : formatScore(row.scoreTotal, row.scoreMax, 'raw');
             return (
               <tr key={`${row.sessionId}-${row.resultType}`} className="bg-white">
                 <td className="max-w-56 truncate px-3 py-2 text-slate-700" title={rootSessionOf(row).name}>
@@ -501,10 +561,8 @@ function ResultsTable({ rows }) {
                 </td>
                 <td className="max-w-44 truncate px-3 py-2 text-slate-700">{row.studentName || '—'}</td>
                 <td className="px-3 py-2 capitalize text-slate-600">{String(row.resultType).replace(/_/g, ' ')}</td>
-                <td className="px-3 py-2 text-right tabular-nums text-slate-700">
-                  {row.scoreTotal ?? '—'}{row.scoreMax ? ` / ${row.scoreMax}` : ''}
-                </td>
-                <td className="px-3 py-2 text-right tabular-nums text-slate-700">{formatPct(pct, 0)}</td>
+                <td className="px-3 py-2 text-right tabular-nums font-medium text-slate-800">{preferred}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-slate-500">{other}</td>
                 <td className="px-3 py-2">
                   {row.passFail ? (
                     <Badge variant={isPass ? 'success' : 'danger'}>
@@ -539,6 +597,10 @@ export default function AnalyticsPage({ onBack }) {
   const [storedFilterB, setFilterB] = useState(emptyFilter);
   const [compare, setCompare] = useState(false);
   const [showTable, setShowTable] = useState(false);
+  // Percent or raw points — the account's preference (Settings > Score
+  // display). Every label below reads it; the histograms are % by
+  // construction and say so in their axis title.
+  const mode = useScoreDisplay();
 
   useEffect(() => {
     loadData();
@@ -698,14 +760,14 @@ export default function AnalyticsPage({ onBack }) {
               <StatTile
                 icon={ListChecks}
                 label="Content pass rate"
-                hint={`mean ${formatPct(statsA.content.mean, 0)} · median ${formatPct(statsA.content.median, 0)}`}
+                hint={describeCentral(statsA.content, mode, 0) + mixedMaxNote(statsA.content, mode)}
                 compare={compare}
                 {...summaryPair((s) => s.content.passRate, (v) => formatPct(v, 0))}
               />
               <StatTile
                 icon={ListChecks}
                 label="Communication pass rate"
-                hint={`mean ${formatPct(statsA.communication.mean, 0)} · median ${formatPct(statsA.communication.median, 0)}`}
+                hint={describeCentral(statsA.communication, mode, 0) + mixedMaxNote(statsA.communication, mode)}
                 compare={compare}
                 {...summaryPair((s) => s.communication.passRate, (v) => formatPct(v, 0))}
               />
@@ -715,21 +777,23 @@ export default function AnalyticsPage({ onBack }) {
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
               <DistributionChart
                 title="Content score distribution"
-                description={`mean ${formatPct(statsA.content.mean)} · median ${formatPct(statsA.content.median)} · pass ${formatPct(statsA.content.passRate, 0)} / fail ${formatPct(statsA.content.failRate, 0)}`}
+                description={`${describeCentral(statsA.content, mode, 1)} · pass ${formatPct(statsA.content.passRate, 0)} / fail ${formatPct(statsA.content.failRate, 0)}${mixedMaxNote(statsA.content, mode)}`}
                 seriesA={contentHistA}
                 seriesB={contentHistB}
                 compare={compare}
+                mode={mode}
               />
               <DistributionChart
                 title="Communication score distribution"
-                description={`mean ${formatPct(statsA.communication.mean)} · median ${formatPct(statsA.communication.median)} · pass ${formatPct(statsA.communication.passRate, 0)} / fail ${formatPct(statsA.communication.failRate, 0)}`}
+                description={`${describeCentral(statsA.communication, mode, 1)} · pass ${formatPct(statsA.communication.passRate, 0)} / fail ${formatPct(statsA.communication.failRate, 0)}${mixedMaxNote(statsA.communication, mode)}`}
                 seriesA={communicationHistA}
                 seriesB={communicationHistB}
                 compare={compare}
+                mode={mode}
               />
             </div>
 
-            <StudentBreakdownChart rows={rowsA} />
+            <StudentBreakdownChart rows={rowsA} mode={mode} />
 
             {/* Table view — every charted value reachable without hover. */}
             <Card className="border-slate-200 bg-white shadow-sm">
@@ -752,7 +816,7 @@ export default function AnalyticsPage({ onBack }) {
               </CardHeader>
               {showTable ? (
                 <CardContent>
-                  <ResultsTable rows={rowsA} />
+                  <ResultsTable rows={rowsA} mode={mode} />
                 </CardContent>
               ) : null}
             </Card>

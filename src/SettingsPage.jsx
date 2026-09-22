@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Settings as SettingsIcon, Wand2 } from 'lucide-react';
+import { Percent, Settings as SettingsIcon, Wand2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { LoadingRegion, ToggleRowSkeleton } from '@/components/skeletons.jsx';
@@ -12,6 +12,8 @@ import ProviderKeysSettings from '@/ProviderKeysSettings.jsx';
 import TranscriptionEngineSettings from '@/TranscriptionEngineSettings.jsx';
 import WebhooksManager from '@/WebhooksManager.jsx';
 import { apiJson } from '@/lib/apiFetch';
+import { SCORE_DISPLAY_MODES, describeScoreDisplay, normalizeScoreDisplay } from '@/lib/scoreDisplay';
+import { getScoreDisplayStore } from '@/lib/useScoreDisplay';
 
 // Settings page (#/settings), in two tiers (see CLAUDE.md "Two-tier
 // settings"): "Your preferences" — transcription engine, scoring model,
@@ -71,6 +73,9 @@ export default function SettingsPage({ onBack, isAdmin = false }) {
         fallbackMessage: 'Failed to save settings.',
       });
       setSettings(body.settings || next);
+      // The score views read the shared store, not this page's copy: the
+      // saved reading reaches an open Analytics tab or workspace at once.
+      if (key === 'scoreDisplay') getScoreDisplayStore().setMode(body.settings?.scoreDisplay ?? value);
     } catch (error) {
       // Optimistic toggle reverts so the UI never lies about the stored value.
       setSettings(previous);
@@ -81,6 +86,7 @@ export default function SettingsPage({ onBack, isAdmin = false }) {
   }
 
   const llmPreprocessOn = Boolean(settings?.llmTranscriptPreprocess);
+  const scoreDisplay = normalizeScoreDisplay(settings?.scoreDisplay);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
@@ -171,6 +177,64 @@ export default function SettingsPage({ onBack, isAdmin = false }) {
                       }`}
                     />
                   </button>
+                </div>
+              )}
+              {saveError && (
+                <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  {saveError}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="border-slate-200 bg-white shadow-sm">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-lg">
+                <Percent className="h-5 w-5 text-cyan-700" aria-hidden="true" />
+                Score display
+              </CardTitle>
+              <CardDescription>
+                How a score reads wherever one is shown — the Analytics page, a session&apos;s Content and
+                Communication tabs, and a long recording&apos;s cohort charts. The stored marks never
+                change; only the reading does. Where only a percentage compares like with like (a
+                distribution, or a mean across rubrics with different maximums), the percentage stays.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {settings === null && !loadError ? (
+                <LoadingRegion label="Loading score display setting">
+                  <ToggleRowSkeleton />
+                </LoadingRegion>
+              ) : (
+                <div
+                  role="radiogroup"
+                  aria-label="Score display"
+                  className="grid gap-2 sm:grid-cols-2"
+                >
+                  {SCORE_DISPLAY_MODES.map((mode) => {
+                    const words = describeScoreDisplay(mode);
+                    const selected = mode === scoreDisplay;
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        disabled={saving || settings === null}
+                        onClick={() => {
+                          if (!selected) updateSetting('scoreDisplay', mode);
+                        }}
+                        className={`flex flex-col items-start gap-1 rounded-xl border px-4 py-3 text-left transition disabled:opacity-60 ${
+                          selected
+                            ? 'border-cyan-500 bg-cyan-50 ring-1 ring-cyan-500'
+                            : 'border-slate-200 bg-slate-50 hover:border-cyan-200 hover:bg-white'
+                        }`}
+                      >
+                        <span className="text-sm font-semibold text-slate-800">{words.label}</span>
+                        <span className="text-xs text-slate-500">{words.description}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
               {saveError && (

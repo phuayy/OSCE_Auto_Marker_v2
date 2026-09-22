@@ -2,6 +2,8 @@ import React from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { IndicatorList } from '@/workspace/primitives.jsx';
+import { formatScore, isRawScoreDisplay } from '@/lib/scoreDisplay';
+import { useScoreDisplay } from '@/lib/useScoreDisplay';
 
 const COMMUNICATION_LABEL_META = {
   All: {
@@ -28,6 +30,11 @@ const COMMUNICATION_LABEL_META = {
 
 export default function CommunicationScoresTab({ criteria, summary, overallSummary, sessionStatus, onSeek }) {
   const hasCriteria = Array.isArray(criteria) && criteria.length > 0;
+  // Percent or raw points — the account's preference. The total leads in the
+  // chosen reading; the other reading and the threshold sit beneath it, so a
+  // pass/fail margin can always be read against the marks it was decided on.
+  const scoreDisplay = useScoreDisplay();
+  const isRaw = isRawScoreDisplay(scoreDisplay);
 
   return (
     <Card className="border-slate-200 bg-white shadow-sm">
@@ -35,7 +42,7 @@ export default function CommunicationScoresTab({ criteria, summary, overallSumma
         <CardTitle className="text-base">Communication scores</CardTitle>
         <CardDescription>
           Communication rubric scoring on a None / Some / Most / All scale. All=3, Most=2, Some=1, None=0.
-          Pass threshold is {summary?.passThreshold ?? 11}/{summary?.maxScore ?? 21}.
+          Pass threshold is {formatScore(summary?.passThreshold ?? 11, summary?.maxScore ?? 21, scoreDisplay)}.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -61,10 +68,11 @@ export default function CommunicationScoresTab({ criteria, summary, overallSumma
               <div className="text-right">
                 <div className="text-xs uppercase tracking-wide text-slate-500">Total</div>
                 <div className="text-2xl font-bold text-slate-900">
-                  {summary.totalScore} / {summary.maxScore}
+                  {formatScore(summary.totalScore, summary.maxScore, scoreDisplay)}
                 </div>
                 <div className="text-[11px] text-slate-500">
-                  Pass at {summary.passThreshold}/{summary.maxScore}
+                  {isRaw ? null : `${formatScore(summary.totalScore, summary.maxScore, 'raw')} · `}
+                  Pass at {formatScore(summary.passThreshold, summary.maxScore, scoreDisplay)}
                 </div>
               </div>
             </div>

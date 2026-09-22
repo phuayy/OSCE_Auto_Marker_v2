@@ -1,7 +1,7 @@
 """Two-tier settings: a marker's own overrides of transcriptionEngine,
-transcriptionEngineOptions, llmPrimary/llmFallbacks, llmMarkingMode/llmPanel
-and llmTranscriptPreprocess, layered over the deployment defaults an admin
-sets. See CLAUDE.md "Two-tier settings" and app/services/preferences_service.py.
+transcriptionEngineOptions, llmPrimary/llmFallbacks, llmMarkingMode/llmPanel,
+llmTranscriptPreprocess and scoreDisplay, layered over the deployment defaults
+an admin sets. See CLAUDE.md "Two-tier settings" and app/services/preferences_service.py.
 
 Unit tests exercise UserSettingsRepository + PreferencesService directly, the
 way test_app_settings.py exercises AppSettingsRepository. The HTTP tests prove
@@ -179,6 +179,29 @@ def test_clearing_a_setting_reverts_to_the_deployment_default_over_http(tmp_path
 
     assert cleared.status_code == 200, cleared.text
     assert cleared.json()["settings"]["transcriptionEngine"] == ""
+
+
+def test_score_display_is_a_markers_own_preference_with_a_closed_vocabulary(tmp_path: Path) -> None:
+    """The percent/raw choice is user-scoped — one marker's "raw" leaves every
+    other marker on the deployment's "percent" — and only those two spellings
+    are storable, so no screen ever has to render a value it does not know."""
+    client = build_test_client(tmp_path)
+    admin_token = _token(client)
+    _activate_marker(client, admin_token, MARKER_EMAIL)
+    first_token = _token(client, MARKER_EMAIL, GOOD_PASSWORD)
+    second_token = _second_marker_token(client, admin_token)
+
+    saved = client.patch("/api/settings", json={"scoreDisplay": "RAW"}, headers=_headers(first_token))
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["settings"]["scoreDisplay"] == "raw"  # case-normalised on the way in
+
+    assert client.get("/api/settings", headers=_headers(second_token)).json()["settings"]["scoreDisplay"] == "percent"
+
+    # The app's RequestValidationError handler answers 400 with the validator's message.
+    rejected = client.patch("/api/settings", json={"scoreDisplay": "fraction"}, headers=_headers(first_token))
+    assert rejected.status_code == 400, rejected.text
+    assert "Unknown score display 'fraction'" in rejected.json()["error"]
+    assert client.get("/api/settings", headers=_headers(first_token)).json()["settings"]["scoreDisplay"] == "raw"
 
 
 def test_a_marker_cannot_write_deployment_settings(tmp_path: Path) -> None:

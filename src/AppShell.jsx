@@ -4,6 +4,8 @@ import { getStoredAuth, installFetchAuthShim, logout, refreshIdentity } from '@/
 import { useHashRoute } from '@/lib/useHashRoute';
 import { isAdminView, isPublicView } from '@/lib/navigation';
 import { canManageUsers } from '@/lib/authz';
+import { apiJson } from '@/lib/apiFetch';
+import { getScoreDisplayStore } from '@/lib/useScoreDisplay';
 import { LazyBoundary, lazyComponent, preloadComponent } from '@/lib/lazyRoute';
 import {
   AccountSkeleton,
@@ -84,6 +86,29 @@ export default function AppShell() {
     refreshIdentity().then((fresh) => {
       if (!cancelled && fresh) setAuthState(fresh);
     });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  // The account's score-display preference (percent or raw points) is read
+  // once per token into the shared store every score view subscribes to, so
+  // Analytics and the workspace open already in the right reading. A failed
+  // read costs nothing but the default: the Settings card re-reads for itself
+  // and writes the saved value into the same store. Signing out resets it so
+  // the next account does not inherit this one's choice.
+  useEffect(() => {
+    const store = getScoreDisplayStore();
+    if (!token) {
+      store.reset();
+      return undefined;
+    }
+    let cancelled = false;
+    apiJson('/api/settings', { fallbackMessage: 'Failed to load settings.' })
+      .then((body) => {
+        if (!cancelled) store.hydrate(body?.settings?.scoreDisplay);
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };

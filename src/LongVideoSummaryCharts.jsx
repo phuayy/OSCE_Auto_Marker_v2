@@ -11,6 +11,8 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { formatScore, isRawScoreDisplay } from '@/lib/scoreDisplay';
+import { useScoreDisplay } from '@/lib/useScoreDisplay';
 
 const SCORE_LABEL_COLORS = {
   All: '#16a34a',
@@ -100,8 +102,10 @@ function ChartFullscreenShell({ title, open, onClose, children }) {
   );
 }
 
-/** Grouped bar chart — content vs communication % */
-function StudentScoreComparisonChart({ summaries }) {
+/** Grouped bar chart — content vs communication. Bars are always % so every
+ *  student shares one axis; the label above each bar follows the account's
+ *  score-display preference (points in raw mode). */
+function StudentScoreComparisonChart({ summaries, mode }) {
   const data = summaries.map((summary) => {
     const contentPercent = clampPercent(summary.content?.percentYes ?? 0);
     const communicationMaxScore = safeNumber(summary.communication?.maxScore, 0);
@@ -116,6 +120,8 @@ function StudentScoreComparisonChart({ summaries }) {
       label: summary.clipLabel,
       content: contentPercent,
       communication: communicationPercent,
+      contentLabel: formatScore(summary.content?.yesCount, summary.content?.totalCriteria, mode),
+      communicationLabel: formatScore(summary.communication?.totalScore, summary.communication?.maxScore, mode),
       contentPass: summary.content?.passFail || '',
       communicationPass: summary.communication?.passFail || '',
     };
@@ -192,7 +198,7 @@ function StudentScoreComparisonChart({ summaries }) {
                   textAnchor="middle"
                   className="fill-slate-700 text-[11px] font-semibold"
                 >
-                  {row.content.toFixed(0)}%
+                  {row.contentLabel}
                 </text>
                 <text
                   x={communicationX + barWidth / 2}
@@ -200,7 +206,7 @@ function StudentScoreComparisonChart({ summaries }) {
                   textAnchor="middle"
                   className="fill-slate-700 text-[11px] font-semibold"
                 >
-                  {row.communication.toFixed(0)}%
+                  {row.communicationLabel}
                 </text>
                 <text
                   x={centerX}
@@ -442,6 +448,8 @@ function ExpandChartButton({ label, expanded, chartKey, onToggle }) {
 
 export default function LongVideoSummaryCharts({ data }) {
   const [fullscreenChart, setFullscreenChart] = useState(null);
+  const scoreDisplay = useScoreDisplay();
+  const isRaw = isRawScoreDisplay(scoreDisplay);
 
   const summaries = useMemo(() => {
     return Array.isArray(data?.summaries)
@@ -495,7 +503,7 @@ export default function LongVideoSummaryCharts({ data }) {
         open={fullscreenChart === 'student'}
         onClose={() => setFullscreenChart(null)}
       >
-        <StudentScoreComparisonChart summaries={summaries} />
+        <StudentScoreComparisonChart summaries={summaries} mode={scoreDisplay} />
       </ChartFullscreenShell>
       <ChartFullscreenShell
         title="Communication rubric — criterion-by-criterion"
@@ -564,8 +572,8 @@ export default function LongVideoSummaryCharts({ data }) {
               <div className="flex flex-wrap items-center justify-end gap-2">
                 <ChartLegend
                   items={[
-                    { label: 'Content rubric (% Yes)', color: '#2563eb' },
-                    { label: 'Communication rubric (% of max)', color: '#7c3aed' },
+                    { label: isRaw ? 'Content rubric (Yes / criteria)' : 'Content rubric (% Yes)', color: '#2563eb' },
+                    { label: isRaw ? 'Communication rubric (points / max)' : 'Communication rubric (% of max)', color: '#7c3aed' },
                   ]}
                 />
                 <ExpandChartButton
@@ -576,7 +584,7 @@ export default function LongVideoSummaryCharts({ data }) {
                 />
               </div>
             </div>
-            <StudentScoreComparisonChart summaries={summaries} />
+            <StudentScoreComparisonChart summaries={summaries} mode={scoreDisplay} />
           </section>
 
           {hasCriterionRows ? (

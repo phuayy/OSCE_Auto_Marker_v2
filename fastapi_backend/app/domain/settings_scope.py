@@ -1,8 +1,9 @@
 """Which settings keys are per-user, and which stay deployment-wide.
 
-Seven keys move with the account: which transcription engine it runs, how it
-marks content (one model or a panel, and which), and whether the transcript
-preprocessing pass runs before scoring. Everything else — which providers this
+Eight keys move with the account: which transcription engine it runs, how it
+marks content (one model or a panel, and which), whether the transcript
+preprocessing pass runs before scoring, and whether the screens show a score
+as a percentage or as raw points. Everything else — which providers this
 deployment can reach at all and the API keys that authorise them, the
 transcription corpus, the communication rubric, webhooks, and any setting
 added later — is one shared answer for everyone, an admin's to set.
@@ -30,6 +31,7 @@ USER_SCOPED_KEYS: frozenset[str] = frozenset(
         "llmMarkingMode",
         "llmPanel",
         "llmTranscriptPreprocess",
+        "scoreDisplay",
     }
 )
 

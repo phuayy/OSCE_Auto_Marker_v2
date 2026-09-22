@@ -125,4 +125,9 @@ export const UserStatus = Object.freeze({
   "DISABLED": "disabled"
 });
 
+export const ScoreDisplay = Object.freeze({
+  "PERCENT": "percent",
+  "RAW": "raw"
+});
+
 export const IN_FLIGHT_STATUSES = new Set(["assembling", "processing", "queued"]);

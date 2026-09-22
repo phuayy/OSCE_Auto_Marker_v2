@@ -22,6 +22,8 @@ import { describeProcessingStage, formatProcessingStageLabel } from '@/lib/proce
 import { describeCreator } from '@/lib/provenance';
 import { INTERMISSION_KIND } from '@/lib/manualTimeline.js';
 import { formatMetricValue, formatRuntime, prettySpeaker } from '@/lib/format';
+import { formatScore } from '@/lib/scoreDisplay';
+import { useScoreDisplay } from '@/lib/useScoreDisplay';
 import { downloadBlob, rowsToCsv, toSafeDownloadName } from '@/lib/download';
 import { contentCriteriaState, feedbackCsvRows } from '@/lib/scoreSheet';
 import { panelCsvColumns, panelReport } from '@/lib/panelReport';
@@ -150,6 +152,11 @@ export default function SessionWorkspace({
   // time). Local, not lifted: only this card reads it, and the dashboard's
   // `isLoadingWorkspace` means a whole view is on its way, which this is not.
   const [isLoadingAudioProf, setIsLoadingAudioProf] = useState(false);
+  // Percent or raw points for every score label in this view — the account's
+  // preference (Settings > Score display). The CSV keeps raw numbers: a
+  // spreadsheet computes its own percentages, and its columns must not
+  // change shape with a screen setting.
+  const scoreDisplay = useScoreDisplay();
 
   const audioProfMetrics = audioProfPayload?.metrics || null;
   const audioProfFeatures = audioProfPayload?.audio_features || null;
@@ -990,8 +997,8 @@ export default function SessionWorkspace({
                               {scoringSummary.passFail}
                             </div>
                             <div className="mt-2 text-sm text-slate-700">
-                              Yes: {scoringSummary.yesCount} / {scoringSummary.totalCriteria} | Critical Yes:{' '}
-                              {scoringSummary.criticalYes} / {scoringSummary.criticalTotal}
+                              Yes: {formatScore(scoringSummary.yesCount, scoringSummary.totalCriteria, scoreDisplay)} | Critical Yes:{' '}
+                              {formatScore(scoringSummary.criticalYes, scoringSummary.criticalTotal, scoreDisplay)}
                             </div>
                             {scoringSummary.decisionReason ? (
                               <div className="mt-2 text-xs text-slate-600">{scoringSummary.decisionReason}</div>

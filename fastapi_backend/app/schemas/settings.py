@@ -18,6 +18,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.domain.enums import ScoreDisplay
 from app.llm.panel import MarkingMode, TieBreak
 from app.pipeline.transcription import registry
 
@@ -178,6 +179,18 @@ class SettingsPayload(BaseModel):
     # markers in llmPanel and settles their disagreements with its adjudicator.
     llmMarkingMode: str = str(MarkingMode.SINGLE)
     llmPanel: PanelPayload = PanelPayload()
+    # How the screens show a score: "percent" or "raw" points. Display only.
+    scoreDisplay: str = str(ScoreDisplay.PERCENT)
+
+    @field_validator("scoreDisplay")
+    @classmethod
+    def known_score_display(cls, value: str) -> str:
+        token = str(value or "").strip().lower() or str(ScoreDisplay.PERCENT)
+        try:
+            return str(ScoreDisplay(token))
+        except ValueError:
+            known = ", ".join(str(mode) for mode in ScoreDisplay)
+            raise ValueError(f"Unknown score display '{token}'. Available: {known}.") from None
 
     @field_validator("llmMarkingMode")
     @classmethod
