@@ -34,7 +34,7 @@ from app.services.container import create_container
 from tests.fixtures.mail import RecordingEmailSender
 
 
-def build_test_client(tmp_path: Path) -> TestClient:
+def build_test_client(tmp_path: Path, **settings_overrides: object) -> TestClient:
     settings = Settings(
         root_dir=tmp_path,
         backend_root=tmp_path,
@@ -46,6 +46,9 @@ def build_test_client(tmp_path: Path) -> TestClient:
         # Force SQLite so tests never hit a real database from APP_DATABASE_URL env var.
         app_database_url="",
         database_url="",
+        # Lets a test pin one knob (an upload cap, a feature flag) without
+        # restating the whole fixture around it.
+        **settings_overrides,
     )
     container = create_container(settings, mailer=RecordingEmailSender())
     asyncio.run(container.artifacts.ensure_storage_layout())

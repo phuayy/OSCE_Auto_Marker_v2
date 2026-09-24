@@ -278,7 +278,15 @@ class Settings:
     serve_frontend: bool = read_bool_env("SERVE_FRONTEND", False)
     frontend_dist_dir_override: str = os.getenv("FRONTEND_DIST_DIR", "").strip()
     max_video_upload_mb: int = read_int_env("MAX_VIDEO_UPLOAD_MB", 2048)
-    max_case_study_upload_mb: int = read_int_env("MAX_CASE_STUDY_UPLOAD_MB", 50)
+    # Bounds every PDF this deployment accepts: the per-session caseStudy slot
+    # (a size *declared* at /api/uploads/initiate) and the admin communication
+    # rubric (bytes streamed straight through). One knob rather than two
+    # because they are the same artefact to an operator sizing a disk — and
+    # because two spellings of "how big may a PDF be" is exactly how the
+    # caseStudy slot came to have none. ``MAX_CASE_STUDY_UPLOAD_MB`` is the
+    # name this shipped under while nothing read it; still honoured so an
+    # operator who set it then gets the value they asked for now.
+    max_pdf_upload_mb: int = read_int_env("MAX_PDF_UPLOAD_MB", read_int_env("MAX_CASE_STUDY_UPLOAD_MB", 50))
     auth_token_ttl_seconds: int = read_int_env("AUTH_TOKEN_TTL_SECONDS", 60 * 60 * 8)
     default_admin_username: str = os.getenv("DEFAULT_ADMIN_USERNAME", "admin")
     default_admin_password: str = os.getenv("DEFAULT_ADMIN_PASSWORD", "")
@@ -737,8 +745,8 @@ class Settings:
         return max(1, self.max_video_upload_mb) * 1024 * 1024
 
     @property
-    def max_case_study_upload_bytes(self) -> int:
-        return max(1, self.max_case_study_upload_mb) * 1024 * 1024
+    def max_pdf_upload_bytes(self) -> int:
+        return max(1, self.max_pdf_upload_mb) * 1024 * 1024
 
     # Every scheme OrmDatabase._normalize_url treats as PostgreSQL — deliberately
     # read from one place rather than re-typed here, which is exactly how this

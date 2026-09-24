@@ -877,6 +877,17 @@ class AsyncUploadService:
                 if item.mimeType and not str(item.mimeType).startswith("video/"):
                     raise AppError("Video MIME type must start with video/.", status_code=400)
             elif item.kind == "caseStudy":
+                # The declaration is the only bound either backend ever applies
+                # to the transfer itself: the local one holds received bytes to
+                # it (storage/local.py's cumulative guard), and GCS opens a
+                # resumable session of exactly this length. So an unbounded
+                # declaration is an unbounded write, and capping it here — the
+                # one place both backends agree on — is what bounds both.
+                if item.sizeBytes > self.settings.max_pdf_upload_bytes:
+                    raise AppError(
+                        f"caseStudy PDF exceeds the {self.settings.max_pdf_upload_mb} MB limit.",
+                        status_code=413,
+                    )
                 if extension != ".pdf":
                     raise AppError("caseStudy must be a PDF file.", status_code=400)
                 if item.mimeType and item.mimeType != "application/pdf":

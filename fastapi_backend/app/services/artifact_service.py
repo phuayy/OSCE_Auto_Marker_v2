@@ -35,7 +35,7 @@ class ArtifactService:
     async def save_rubric_upload(self, upload: UploadFile) -> Path:
         safe_name = sanitize_file_name(upload.filename or "communication-rubric.pdf")
         target = self.settings.paths.input_rubrics_dir / f"{int(time.time() * 1000)}-{safe_name}"
-        await self._copy_upload(upload, target, max_bytes=10 * 1024 * 1024)
+        await self._copy_upload(upload, target, max_bytes=self.settings.max_pdf_upload_bytes)
         return target
 
     async def copy_file(self, source: Path, target: Path) -> None:
