@@ -11,15 +11,27 @@ would not be defense in depth.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import re
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
-from app.core.security_headers import apply_security_headers, build_content_security_policy
+from app.core.security_headers import (
+    THEME_BOOT_SCRIPT_HASH,
+    apply_security_headers,
+    build_content_security_policy,
+)
 from app.main import build_app
 from app.services.container import create_container
 from tests.fixtures.mail import RecordingEmailSender
+
+
+def _headers_settings() -> Settings:
+    return Settings(ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe", scorer_python_bin="python")
 
 
 # --- apply_security_headers: a pure function over a header mapping ----------
@@ -63,6 +75,64 @@ def test_content_security_policy_override_replaces_the_default() -> None:
     headers: dict[str, str] = {}
     apply_security_headers(headers, settings)
     assert headers["Content-Security-Policy"] == "default-src 'none'"
+
+
+# --- F4: the policy has to cover index.html's own inline script -------------
+
+# The frontend entry document, from this test file: tests/ -> fastapi_backend/
+# -> the checkout root.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+# A <script> with no src= is what the browser treats as inline, and so what a
+# hash has to cover. Mirrors the extraction in test/theme.test.mjs.
+INLINE_SCRIPT = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.DOTALL)
+
+
+def _inline_script_hashes(html: str) -> list[str]:
+    """The CSP source expression for each inline script, as a browser computes
+    it: SHA-256 over the exact bytes between the tags, base64-encoded."""
+    return [
+        "sha256-" + base64.b64encode(hashlib.sha256(body.encode("utf-8")).digest()).decode("ascii")
+        for body in INLINE_SCRIPT.findall(html)
+    ]
+
+
+def _script_src(policy: str) -> str:
+    return next(part for part in policy.split("; ") if part.startswith("script-src"))
+
+
+def test_csp_covers_every_inline_script_in_index_html() -> None:
+    """``script-src 'self'`` refuses inline scripts, and index.html carries one:
+    the theme boot that adds the dark class before the first paint. Blocked, a
+    dark-theme user gets a white flash on every load.
+
+    The digest is recomputed from index.html here rather than restated, so
+    editing the boot script — or adding a second inline one — fails this test
+    instead of failing silently in a browser no test drives.
+    """
+    index_html = REPO_ROOT / "index.html"
+    if not index_html.is_file():
+        pytest.skip(f"no frontend entry document at {index_html} (backend-only checkout)")
+
+    hashes = _inline_script_hashes(index_html.read_text(encoding="utf-8"))
+    assert hashes, "index.html no longer has an inline script; THEME_BOOT_SCRIPT_HASH is now dead weight"
+    assert THEME_BOOT_SCRIPT_HASH in hashes, (
+        "THEME_BOOT_SCRIPT_HASH is stale: index.html's inline script(s) now hash to "
+        f"{hashes}. Update the constant in app/core/security_headers.py."
+    )
+
+    script_src = _script_src(build_content_security_policy(_headers_settings()))
+    for digest in hashes:
+        assert f"'{digest}'" in script_src, f"script-src does not admit index.html's inline script ({digest})"
+
+
+def test_csp_admits_the_boot_script_without_opening_up_inline_script() -> None:
+    """A hash is the whole point: this exact script runs and nothing else
+    injected does. ``'unsafe-inline'`` would have been the lazy fix and is
+    also the one that gives up the protection."""
+    script_src = _script_src(build_content_security_policy(_headers_settings()))
+    assert "'unsafe-inline'" not in script_src
+    assert "'unsafe-eval'" not in script_src
+    assert "'self'" in script_src
 
 
 # --- wired into the real app, success and refusal responses alike -----------

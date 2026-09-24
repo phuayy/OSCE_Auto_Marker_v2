@@ -16,10 +16,26 @@ from app.core.config import Settings
 # call it makes is served by itself (see CLAUDE.md "One API client" / "Serve
 # the built frontend"). No third-party origin belongs in any directive here
 # unless the frontend starts loading one.
+
+# index.html runs exactly one inline classic script before anything else: the
+# theme boot, which adds the dark class in the same parse step as the document
+# (index.html, mirroring src/lib/theme.js). It is inline for the reason it
+# exists — an external file costs a request before the first paint, and a
+# `type="module"` one is deferred past it, either of which is the white flash
+# the script is there to prevent. So it is named here instead: a hash keeps
+# `script-src` strict, admitting this exact script while still refusing
+# `'unsafe-inline'` and so anything injected.
+#
+# Vite copies the script into dist/index.html byte for byte, so this covers
+# the built app an operator actually serves (SERVE_FRONTEND=true), not just
+# the source. tests/test_security_headers.py recomputes the digest from
+# index.html, so editing either side fails a test rather than a browser.
+THEME_BOOT_SCRIPT_HASH = "sha256-xlM6V+tRQErr140pAz50kQrp/Yb2W8bAPwTwDzpb7P8="
+
 DEFAULT_CONTENT_SECURITY_POLICY = "; ".join(
     [
         "default-src 'self'",
-        "script-src 'self'",
+        f"script-src 'self' '{THEME_BOOT_SCRIPT_HASH}'",
         # framer-motion (a vendor chunk of this app, see CLAUDE.md "Code
         # splitting") animates via inline `style` attributes; refusing that
         # would break every transition for a class of injection (styling)
@@ -75,4 +91,9 @@ def apply_security_headers(headers: object, settings: Settings) -> None:
         )
 
 
-__all__ = ["DEFAULT_CONTENT_SECURITY_POLICY", "apply_security_headers", "build_content_security_policy"]
+__all__ = [
+    "DEFAULT_CONTENT_SECURITY_POLICY",
+    "THEME_BOOT_SCRIPT_HASH",
+    "apply_security_headers",
+    "build_content_security_policy",
+]
