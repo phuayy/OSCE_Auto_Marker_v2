@@ -8,9 +8,11 @@
     where an automatic database restore could silently discard writes made
     while the site was live  --  see Deploy-Release.ps1's description).
 
-    Stops the tunnel, then the worker, then the API; checks out the target
-    commit; uv syncs; repoints the dist junction; optionally restores a
-    database backup; starts API -> worker -> tunnel; health-checks.
+    Stops the tunnel, then the worker, then the API, verifying each one
+    actually reaches Stopped before proceeding (aborts outright if any does
+    not -- see Stop-OsceServiceAndWait in OsceDeploy.psm1); checks out the
+    target commit; uv syncs; repoints the dist junction; optionally restores
+    a database backup; starts API -> worker -> tunnel; health-checks.
 .PARAMETER HostConfig
     Path to a host.config.json (see host.config.example.json).
 .PARAMETER ToTag
@@ -94,17 +96,20 @@ $releaseInfo = Get-Content -LiteralPath $releaseJsonFile -Raw | ConvertFrom-Json
 
 Write-OsceLog "Rolling back to $targetTag (commit $($releaseInfo.commit))" -Level 'STEP'
 
+# Every stop below is VERIFIED (Stop-OsceServiceAndWait throws if the
+# service does not actually reach Stopped) and runs BEFORE the checkout moves
+# or any database restore happens -- a service that refuses to stop must
+# abort this script outright rather than let it proceed as if isolated (see
+# OsceDeploy.psm1's Stop-OsceServiceAndWait doc comment; 2026-09-29 audit
+# finding 7).
 Write-OsceLog "Stopping tunnel service $tunnelService"
-Stop-Service -Name $tunnelService -Force -ErrorAction SilentlyContinue
-Wait-OsceServiceStatus -Name $tunnelService -Status 'Stopped' -TimeoutSeconds 30 | Out-Null
+Stop-OsceServiceAndWait -Name $tunnelService -TimeoutSeconds 30
 
 Write-OsceLog "Stopping worker service $($config.workerServiceName)"
-Stop-Service -Name $config.workerServiceName -Force -ErrorAction SilentlyContinue
-Wait-OsceServiceStatus -Name $config.workerServiceName -Status 'Stopped' -TimeoutSeconds 60 | Out-Null
+Stop-OsceServiceAndWait -Name $config.workerServiceName -TimeoutSeconds 60
 
 Write-OsceLog "Stopping API service $($config.serviceName)"
-Stop-Service -Name $config.serviceName -Force -ErrorAction SilentlyContinue
-Wait-OsceServiceStatus -Name $config.serviceName -Status 'Stopped' -TimeoutSeconds 60 | Out-Null
+Stop-OsceServiceAndWait -Name $config.serviceName -TimeoutSeconds 60
 
 Write-OsceLog "Checking out commit $($releaseInfo.commit)"
 Push-Location $repoDir
@@ -180,23 +185,27 @@ if ($RestoreDatabase) {
 }
 
 Write-OsceLog "Starting API service $($config.serviceName)"
-Start-Service -Name $config.serviceName
-if (-not (Wait-OsceServiceStatus -Name $config.serviceName -Status 'Running' -TimeoutSeconds 60)) {
-    throw "API service did not reach Running within 60s."
-}
+Start-OsceServiceAndWait -Name $config.serviceName -TimeoutSeconds 60
 if (-not (Wait-OsceHealth -Url $config.localHealthUrl -TimeoutSeconds $config.healthTimeoutSeconds)) {
     throw 'API did not become healthy after rollback.'
 }
 
 Write-OsceLog "Starting worker service $($config.workerServiceName)"
-Start-Service -Name $config.workerServiceName
+Start-OsceServiceAndWait -Name $config.workerServiceName -TimeoutSeconds 60
 if (-not (Test-OsceServiceStableRunning -Name $config.workerServiceName -HoldSeconds 30)) {
     Write-OsceLog 'Worker did not stay Running for 30s after rollback  --  check its logs.' -Level 'WARN'
 }
 
 Write-OsceLog "Starting tunnel service $tunnelService"
-Start-Service -Name $tunnelService -ErrorAction SilentlyContinue
-Wait-OsceServiceStatus -Name $tunnelService -Status 'Running' -TimeoutSeconds 30 | Out-Null
+try {
+    Start-OsceServiceAndWait -Name $tunnelService -TimeoutSeconds 30
+} catch {
+    # The rollback itself (code, environment, dist junction, DB if
+    # requested) has already completed above -- only the tunnel failed to
+    # reopen, so this is a WARN: the site stays closed until resolved, but
+    # nothing here should undo a rollback that already succeeded.
+    Write-OsceLog "Tunnel service $tunnelService did not reach Running -- the site remains closed until this is resolved: $($_.Exception.Message)" -Level 'WARN'
+}
 
 Write-OsceState -StateFile $config.stateFile -State @{
     currentTag     = $targetTag

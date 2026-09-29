@@ -338,11 +338,15 @@ def test_junction_removal_never_uses_remove_item_recurse() -> None:
 
 
 def test_deploy_release_stops_tunnel_before_api_and_worker() -> None:
+    """Since the 2026-09-29 tunnel-isolation hardening, the main flow's
+    tunnel stop is a VERIFIED Stop-OsceServiceAndWait call made BEFORE the
+    rollback try/catch even opens (see test_deploy_tunnel_isolation.py), not
+    a bare Stop-Service inside the try like the worker/API stops still are.
+    Find each by its first occurrence in document order, same as before, just
+    matching the tunnel's new call shape; the ordering intent -- tunnel, then
+    worker, then API -- is unchanged."""
     text = (DEPLOY_WINDOWS / "Deploy-Release.ps1").read_text(encoding="utf-8")
-    # Find the main deploy try-block's stop sequence (not the rollback
-    # helper's, which has its own copy in the same order for the same
-    # reason) by looking at first occurrences in document order.
-    tunnel_stop_idx = text.index(f"Stop-Service -Name $tunnelService")
+    tunnel_stop_idx = text.index("Stop-OsceServiceAndWait -Name $tunnelService")
     worker_stop_idx = text.index("Stop-OsceServiceAndWait -Name $config.workerServiceName")
     api_stop_idx = text.index("Stop-OsceServiceAndWait -Name $config.serviceName")
     assert tunnel_stop_idx < worker_stop_idx < api_stop_idx, (
@@ -354,8 +358,21 @@ def test_deploy_release_starts_api_then_worker_then_tunnel() -> None:
     text = (DEPLOY_WINDOWS / "Deploy-Release.ps1").read_text(encoding="utf-8")
     # Restrict to the main success path (before the catch block) so this
     # doesn't accidentally match the rollback helper's own (differently
-    # ordered by necessity) start sequence.
-    catch_idx = text.index("} catch {")
+    # ordered by necessity) start sequence. Invoke-FullRollback defines its
+    # OWN "} catch {" earlier in the file (it has its own try/catch around
+    # the rollback steps), so the first occurrence of "} catch {" in the
+    # whole document is that one, not the main script's -- text.index found
+    # the wrong catch and this assertion happened to still pass only because
+    # Invoke-FullRollback's own start sequence (API, then worker, then
+    # tunnel) coincidentally matches the same order being asserted here.
+    # 2026-09-29 tunnel-isolation hardening wraps Invoke-FullRollback's
+    # tunnel start in its own try/catch (it now warns rather than throws if
+    # the tunnel fails to reach Running -- the rollback itself already
+    # succeeded), which removed the literal "Start-Service -Name
+    # $tunnelService" text from that earlier region and exposed the bug.
+    # rindex finds the LAST "} catch {" in the file, which is the main
+    # script's own -- the region this test was always meant to check.
+    catch_idx = text.rindex("} catch {")
     main_path = text[:catch_idx]
     api_start_idx = main_path.index("Start-OsceServiceAndWait -Name $config.serviceName")
     worker_start_idx = main_path.index("Start-OsceServiceAndWait -Name $config.workerServiceName")
