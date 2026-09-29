@@ -118,9 +118,22 @@ def build_auth_payload(subject: TokenSubject, ttl_seconds: int) -> tuple[dict[st
 STREAM_TICKET_SCOPE = "stream"
 
 
-def build_stream_ticket_payload(subject: TokenSubject, ttl_seconds: int) -> tuple[dict[str, Any], int]:
+def build_stream_ticket_payload(
+    subject: TokenSubject, ttl_seconds: int, *, parent_token_id: str | None = None
+) -> tuple[dict[str, Any], int]:
+    """A ticket carries its own ``tokenId`` (so it can be listed/revoked on its
+    own), but ``parentTokenId`` — the bearer token it was minted from, when
+    there is one — is what lets it die with that bearer. Logout only revokes
+    the bearer's own id; without this a ticket handed out from a session that
+    later logs out would keep working until its own expiry regardless. A
+    ticket minted with no parent (there was no bearer to name, or it predates
+    this field) is unaffected by any logout and simply lives out its TTL, the
+    same as before.
+    """
     payload, expires_at = _base_claims(subject, ttl_seconds)
     payload["scope"] = STREAM_TICKET_SCOPE
+    if parent_token_id:
+        payload["parentTokenId"] = parent_token_id
     return payload, expires_at
 
 

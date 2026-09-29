@@ -1124,7 +1124,11 @@ role handed to the request is the *row's*. Consequences:
   signs in once after the upgrade.
 
 Short-lived **stream tickets** (`GET /api/auth/stream-ticket`) for SSE and
-`<video>` URLs carry the same claims and die with the account. `POST
+`<video>` URLs carry the same claims and die with the account — and with the
+bearer token that minted them: a ticket records that token's id as
+`parentTokenId`, and verification refuses it once that id is revoked, so a
+copied `?ticket=` URL stops working at logout rather than at its own expiry
+(a ticket minted before this carries no parent and lives out its TTL). `POST
 /api/auth/logout` revokes one token by writing its id to `revoked_tokens`
 (`token_revocation_repository.py`) — durable and cross-process, the same
 `SnapshotCache`-over-a-change-tracked-table shape `UserDirectory` uses over

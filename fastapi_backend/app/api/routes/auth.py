@@ -66,11 +66,17 @@ async def me(request: Request, container: AppContainer = Depends(get_container))
 
 @router.get("/stream-ticket", response_model=StreamTicketResponse)
 async def stream_ticket(request: Request, container: AppContainer = Depends(get_container)) -> dict[str, object]:
-    """Mint a short-lived ticket for SSE/media URLs (requires a valid bearer token)."""
+    """Mint a short-lived ticket for SSE/media URLs (requires a valid bearer token).
+
+    Stamped with the caller's own bearer ``tokenId`` as ``parentTokenId`` so
+    the ticket dies with that bearer on logout instead of outliving it — see
+    ``AuthService.issue_stream_ticket``.
+    """
     payload = get_auth_payload(request)
     if not payload:
         raise HTTPException(status_code=401, detail="Authentication required.")
-    ticket = await container.auth.issue_stream_ticket(str(payload["sub"]))
+    parent_token_id = str(payload.get("tokenId") or "") or None
+    ticket = await container.auth.issue_stream_ticket(str(payload["sub"]), parent_token_id=parent_token_id)
     if ticket is None:
         raise HTTPException(status_code=401, detail="Authentication required.")
     return ticket
