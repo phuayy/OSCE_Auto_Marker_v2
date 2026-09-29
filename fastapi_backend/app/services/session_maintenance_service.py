@@ -17,8 +17,14 @@ from app.repositories.notification_repository import NotificationRepository
 from app.repositories.video_repository import VideoRepository
 from app.services.assessment_service import AssessmentService
 from app.services.job_queue_service import JobQueueService
-from app.services.session_service import SessionService
+from app.services.session_service import SessionMutator, SessionService
 from app.services.session_artifacts import SessionArtifacts
+
+# `app.storage` is intentionally not imported here for typing: the storage
+# service's own module is another agent's concurrent work, and this file only
+# ever calls the one method on the `ObjectStorage` protocol its docstring
+# promises (`delete_committed_object`). Duck-typed via `Any` so this file
+# never fails to import while that lands.
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +55,17 @@ class SessionMaintenanceService:
     Deletes span two databases (ORM + raw-SQL jobs) and the filesystem, so they
     cannot be one atomic transaction. Jobs are cancelled first (so a live local
     worker stops writing the about-to-be-removed session), DB rows are removed
-    before files, and each step is best-effort so a partial failure cannot wedge
-    a session in a half-deleted state.
+    before files. Every DB step is REQUIRED, not best-effort: a step that fails
+    stops that session's teardown before any file is touched and the failure
+    propagates out of ``delete_session``, so a session is never reported
+    deleted while a row of it (or a job still writing it) survives, and its
+    files are never removed out from under a row that still exists. Because
+    every repository delete used here is a no-op on an already-missing row,
+    the whole operation is idempotent: a retry after a failure picks up
+    exactly where it stopped rather than erroring on what the first attempt
+    already finished. Artifact removal (files, then — for a top-level
+    session's video — the committed object storage) stays best-effort and
+    runs only once every DB step for that session has succeeded.
     """
 
     def __init__(
@@ -61,6 +76,8 @@ class SessionMaintenanceService:
         jobs: JobQueueService,
         notifications: NotificationRepository,
         videos: VideoRepository,
+        *,
+        storage: Any | None = None,
     ) -> None:
         self.settings = settings
         self.sessions = sessions
@@ -68,6 +85,12 @@ class SessionMaintenanceService:
         self.jobs = jobs
         self.notifications = notifications
         self.videos = videos
+        # Keyword-only, default None: existing direct-construction call sites
+        # (and this module's own tests that pass ``None`` for every other
+        # collaborator too) keep working with object-storage deletion simply
+        # skipped, the same way a caller with no storage backend configured
+        # would see it.
+        self.storage = storage
 
     async def delete_session(self, session_id: str) -> dict[str, Any]:
         """Delete a session and every child clip-assessment session, wiping all
@@ -100,15 +123,38 @@ class SessionMaintenanceService:
             except FileNotFoundError:
                 session = None
 
-        # Cancel + delete jobs first so the local worker stops writing the row.
-        await self._safe("purge jobs", session_id, self.jobs.purge_session(session_id))
-        await self._safe("delete assessments", session_id, self.assessments.delete_session_results(session_id))
-        await self._safe("delete notifications", session_id, self.notifications.delete_for_session(session_id))
-        await self._safe("delete source video row", session_id, self.videos.delete_for_session(session_id))
-        await self._safe("delete session row", session_id, self.sessions.repository.delete(session_id))
+        # Every step here is required, in this order: jobs first (so a live
+        # local worker stops writing the row before anything else moves), the
+        # session row last (so a crash after some rows are gone still leaves
+        # something for a retry to find and finish). The first failure raises
+        # straight out of this method — see ``_required`` — before artifact
+        # removal runs, so a DB failure never leaves a visible session whose
+        # files are already gone.
+        delete_failure_message = "Session deletion did not complete; nothing more was removed. Try again."
+        await self._required(
+            "purge jobs", session_id, self.jobs.purge_session(session_id),
+            failure_message=delete_failure_message, stage="session_delete",
+        )
+        await self._required(
+            "delete assessments", session_id, self.assessments.delete_session_results(session_id),
+            failure_message=delete_failure_message, stage="session_delete",
+        )
+        await self._required(
+            "delete notifications", session_id, self.notifications.delete_for_session(session_id),
+            failure_message=delete_failure_message, stage="session_delete",
+        )
+        await self._required(
+            "delete source video row", session_id, self.videos.delete_for_session(session_id),
+            failure_message=delete_failure_message, stage="session_delete",
+        )
+        await self._required(
+            "delete session row", session_id, self.sessions.repository.delete(session_id),
+            failure_message=delete_failure_message, stage="session_delete",
+        )
 
         if session is not None:
             self._delete_artifacts(session)
+            await self._best_effort_delete_committed_video(session)
 
     # ------------------------------------------------------------------
     # Video retention
@@ -191,12 +237,16 @@ class SessionMaintenanceService:
             return False
 
         # Same removal the delete/re-run paths already use for this same
-        # field (`_delete_artifacts` below) — including its GCS caveat: the
-        # object storage layer has no delete operation yet, so under
-        # STORAGE_BACKEND=gcs this only clears the local materialised copy,
-        # not the bucket object. Giving every video path one storage-aware
-        # deletion is a larger, separately-scoped change; tracked here rather
-        # than silently assumed away.
+        # field (`_delete_artifacts` below), plus the committed object in
+        # object storage under STORAGE_BACKEND=gcs (or any other backend
+        # ``ObjectStorage.delete_committed_object`` is wired for). That call
+        # is deliberately awaited BEFORE ``purgedAt`` is recorded, and its
+        # exception is left to propagate: a failure here must stop the
+        # purge, not report a video gone that the bucket still holds — the
+        # sweep already retries a failed candidate on its next run.
+        storage_ref = video.get("storageRef") if isinstance(video, dict) else None
+        if self.storage is not None and isinstance(storage_ref, dict):
+            await self.storage.delete_committed_object(storage_ref)
         self._unlink(absolute_path)
         purged_at = utc_now_iso()
 
@@ -287,7 +337,37 @@ class SessionMaintenanceService:
             return TaskType.AUTO_CROP
         return TaskType.PROCESS_SESSION
 
-    async def _queue_job(
+    async def _admit(self, session_id: str, *, reset: SessionMutator | None = None) -> dict[str, Any]:
+        """Atomically claim the session for a run: one ``sessions.update``
+        mutator that refuses (409) a session already in flight and otherwise
+        flips it to ``queued``, applying ``reset`` (a rerun's outputs/pipeline
+        reset) in the very same write.
+
+        This is what makes admission exact under a race, not just the cheap
+        pre-check in ``_ready_to_start``: ``SessionService.update`` re-reads
+        and re-applies the mutator on a conflicting write, so of two
+        concurrent admissions, whichever loses the underlying write sees the
+        *other's* ``queued`` status on its re-read and raises 409 here instead
+        of silently re-queuing (or, for a rerun, re-resetting) a session
+        someone else already claimed. Folding the reset into the same mutator
+        as the status flip is what keeps a rerun's destructive cleanup (in
+        ``rerun_session``, after this call) safe to run unconditionally once
+        it returns: nothing can be running the session while it has no job,
+        because this write is what makes the job possible.
+        """
+
+        def admit(current: dict[str, Any]) -> Any:
+            if str(current.get("status") or "").lower() in IN_FLIGHT_STATUSES:
+                raise AppError("This session is already being processed.", status_code=409)
+            current["status"] = SessionStatus.QUEUED
+            current["error"] = None
+            if reset is not None:
+                reset(current)
+            return None
+
+        return await self.sessions.update(session_id, admit)
+
+    async def _enqueue_and_attach(
         self,
         session_id: str,
         task_type: str,
@@ -295,22 +375,35 @@ class SessionMaintenanceService:
         *,
         stage: str,
     ) -> dict[str, Any]:
-        """Move the session to ``queued`` and enqueue ``task_type`` for it.
+        """Enqueue ``task_type`` for a session ``_admit`` has already claimed,
+        and attach the job's public record.
 
-        The status flips before the job exists so the card gauges "queued" and
-        the workspace refuses to open the session from the first moment; the
-        job's public record is attached afterwards through ``update``, because
-        the local runner may already have claimed the job and written the
-        session by the time the enqueue call returns.
+        A failed enqueue must not strand the session ``queued`` with no job to
+        move it — that reads as "already in flight" to every later start or
+        rerun request until a restart's ``reconcile_orphaned_sessions`` fails
+        it for an unrelated reason. On failure this compensates immediately:
+        flips the session to ``failed`` itself, guarded on it still being the
+        ``queued`` state this call's own admission put it in, so a concurrent
+        legitimate writer that has since moved the session on is never
+        overwritten by a stale compensation.
         """
+        try:
+            job = await self.jobs.enqueue(session_id, task_type, payload)
+        except Exception as error:
+            logger.error(
+                "Failed to enqueue %s for session %s; flipping it to failed rather than "
+                "leaving it queued with no job able to move it.",
+                task_type,
+                session_id,
+                exc_info=True,
+                extra=log_context(session_id, stage, task_type=task_type),
+            )
 
-        def to_queued(current: dict[str, Any]) -> Any:
-            current["status"] = SessionStatus.QUEUED
-            current["error"] = None
-            return None
+            await self._release_admission(session_id, "Could not queue this session's job; try again.")
+            raise AppError(
+                "Could not queue this session's job; try again.", status_code=503, retryable=True,
+            ) from error
 
-        await self.sessions.update(session_id, to_queued)
-        job = await self.jobs.enqueue(session_id, task_type, payload)
         public_job = self.jobs.public_job(job)
 
         def attach(current: dict[str, Any]) -> Any:
@@ -327,6 +420,51 @@ class SessionMaintenanceService:
         )
         return {"session": self.sessions.public_session(session), "job": public_job}
 
+    async def _release_admission(self, session_id: str, message: str) -> None:
+        """Undo a won admission that will get no job: flip ``queued`` to
+        ``failed`` so the card offers Re-run instead of reading as in flight.
+
+        Guarded on the session still being ``queued`` — the state this call's
+        own admission put it in — so a concurrent legitimate writer that has
+        since moved it on is never overwritten. Best-effort itself: if this
+        write fails too, startup's ``reconcile_orphaned_sessions`` still fails
+        a queued session with no job, and the caller's own error is the one
+        worth surfacing.
+        """
+
+        def fail_if_still_queued(current: dict[str, Any]) -> Any:
+            if current.get("status") != SessionStatus.QUEUED:
+                return False
+            current["status"] = SessionStatus.FAILED
+            current["error"] = message
+            return None
+
+        try:
+            await self.sessions.update(session_id, fail_if_still_queued)
+        except Exception:
+            logger.error(
+                "Could not release the admission of session %s; startup reconciliation will fail it.",
+                session_id,
+                exc_info=True,
+                extra=log_context(session_id, "session_admission"),
+            )
+
+    async def _queue_job(
+        self,
+        session_id: str,
+        task_type: str,
+        payload: dict[str, Any],
+        *,
+        stage: str,
+    ) -> dict[str, Any]:
+        """Admit the session (queued, atomically) and enqueue ``task_type`` for
+        it. Used by :meth:`start_processing` / :meth:`start_auto_crop`, which
+        have no reset to fold into the admission and no destructive cleanup to
+        run in between — see :meth:`rerun_session` for the case that does.
+        """
+        await self._admit(session_id)
+        return await self._enqueue_and_attach(session_id, task_type, payload, stage=stage)
+
     async def rerun_session(self, session_id: str) -> dict[str, Any]:
         """Re-run a session's own run in place under the SAME id.
 
@@ -337,22 +475,18 @@ class SessionMaintenanceService:
         — segmentation is its run — keeping its exported MP4s and the child
         sessions cut from them, which stay valid assessments of clips taken
         from the same source video.
+
+        Admission happens before any of the destructive cleanup below: this
+        used to delete artifacts and assessment rows first and only then try
+        to admit, so a rerun that lost the 409 race could destroy a
+        concurrently-running attempt's fresh outputs on its way to being
+        refused (test_a_refused_rerun_never_deletes_the_running_sessions_artifacts).
+        Admitting first means the cheap ``_ready_to_start`` check plus
+        ``_admit``'s own race handling both run — and can both refuse — before
+        a single file or row this call does not own is touched.
         """
         session = await self._ready_to_start(session_id)
         task_type = self._task_type_for(session)
-
-        # Remove stale score artifacts + old assessment rows so a failed re-run
-        # never leaves last run's scores behind masquerading as current. That
-        # includes ``scores/panel/<id>/``: a re-run means "mark this again",
-        # and a panel used to adopt the marker sheets written against the
-        # previous transcript because nothing in the session's lifecycle owned
-        # that dir.
-        self._delete_artifacts(session, keep_clips=True, keep_owned_video=True)
-        # Wipe the whole WhisperX artifact dir too: its cache lookup has a
-        # latest-file fallback, so any unrecorded leftover JSON from an old
-        # attempt would silently skip re-transcription on this re-run.
-        self._rmtree(self.settings.paths.output_whisperx_dir / session_id)
-        await self._safe("delete assessments", session_id, self.assessments.delete_session_results(session_id))
 
         reset_pipeline = {
             "startedAt": None,
@@ -361,11 +495,11 @@ class SessionMaintenanceService:
             "mode": self.settings.whisperx_device,
         }
 
-        def reset(current: dict[str, Any]) -> Any:
+        def reset(current: dict[str, Any]) -> None:
             if task_type == TaskType.AUTO_CROP:
                 # Segmentation re-run. Clear only what was just deleted or
                 # superseded: the standard-pipeline outputs whose files
-                # ``_delete_artifacts`` unlinked above (leftovers from a run
+                # ``_delete_artifacts`` unlinks below (leftovers from a run
                 # that should never have happened), and the export record for
                 # a plan this run is about to replace. The clip list stays —
                 # ``ClipService.auto_crop_session_by_id`` replaces it wholesale
@@ -378,11 +512,44 @@ class SessionMaintenanceService:
                 current["clipExport"] = None
             else:
                 current["outputs"] = {}
-            current["error"] = None
             current["pipeline"] = dict(reset_pipeline)
-            return None
+            # status/error are set by ``_admit`` itself in the same write.
 
-        await self.sessions.update(session_id, reset)
+        await self._admit(session_id, reset=reset)
+
+        # From here on this call has won the run: nothing else can be scoring
+        # this session while it holds no job (``_admit`` is what makes a job
+        # possible), so the destructive cleanup below is safe unconditionally.
+        #
+        # Remove stale score artifacts so a failed re-run never leaves last
+        # run's scores behind masquerading as current. That includes
+        # ``scores/panel/<id>/``: a re-run means "mark this again", and a
+        # panel used to adopt the marker sheets written against the previous
+        # transcript because nothing in the session's lifecycle owned that dir.
+        self._delete_artifacts(session, keep_clips=True, keep_owned_video=True)
+        # Wipe the whole WhisperX artifact dir too: its cache lookup has a
+        # latest-file fallback, so any unrecorded leftover JSON from an old
+        # attempt would silently skip re-transcription on this re-run.
+        self._rmtree(self.settings.paths.output_whisperx_dir / session_id)
+        # Required, not best-effort: a rerun whose assessment-row delete fails
+        # must not proceed to re-queue a run that would leave the old rows
+        # stale — and duplicated, once the fresh run finishes and writes its
+        # own. Unlike the artifact cleanup above (files, safe to retry), a
+        # left-behind assessment row is a second source of truth the next
+        # successful run would silently coexist with.
+        try:
+            await self._required(
+                "delete assessments", session_id, self.assessments.delete_session_results(session_id),
+                failure_message="Re-run could not clear this session's previous results; try again.",
+                stage="session_rerun",
+            )
+        except AppError as error:
+            # Admission already flipped the session to queued; with no job
+            # coming, leaving it there would strand it exactly as a failed
+            # enqueue would.
+            await self._release_admission(session_id, error.message)
+            raise
+
         if task_type == TaskType.AUTO_CROP:
             payload: dict[str, Any] = {
                 "workflow": session.get("workflow"),
@@ -395,7 +562,7 @@ class SessionMaintenanceService:
                 "clipId": (session.get("clipSource") or {}).get("clipId"),
                 "rerun": True,
             }
-        return await self._queue_job(session_id, task_type, payload, stage="session_rerun")
+        return await self._enqueue_and_attach(session_id, task_type, payload, stage="session_rerun")
 
     def _delete_artifacts(
         self,
@@ -455,13 +622,54 @@ class SessionMaintenanceService:
             self._rmtree(self.settings.paths.output_scores_panel_dir / session_id)
 
     @staticmethod
-    async def _safe(action: str, session_id: str, coro: Any) -> None:
+    async def _required(
+        action: str, session_id: str, coro: Any, *, failure_message: str, stage: str,
+    ) -> None:
+        """Run one DB step that the caller's operation cannot proceed without;
+        a failure stops that operation rather than being swallowed. Shared by
+        ``_delete_one`` (a delete) and ``rerun_session`` (dropping the old
+        assessment rows before re-queuing) — each names its own
+        ``failure_message`` because "did not complete" means something
+        different in each caller's context, and its own ``stage`` for the log.
+        """
         try:
             await coro
+        except Exception as error:
+            logger.error(
+                "Required step failed (%s) for session %s.",
+                action,
+                session_id,
+                exc_info=True,
+                extra=log_context(session_id, stage),
+            )
+            raise AppError(failure_message, status_code=500, retryable=True) from error
+
+    async def _best_effort_delete_committed_video(self, session: dict[str, Any]) -> None:
+        """Remove a top-level session's committed video object from object
+        storage, after every DB step for it has already succeeded.
+
+        Best-effort and logged, not required: the session row is already
+        gone by this point, so there is nothing left to mark on a failure —
+        the object would simply be retried by a human operator or a future
+        sweep, not by this call. (A durable retry queue for orphaned objects
+        is out of scope here.) A clip child's video is its parent's exported
+        clip, never its own to delete, so this only ever runs for a
+        parent-less session. The case study PDF is a shared, ref-counted
+        rubric asset and is never touched by any deletion path.
+        """
+        if self.storage is None or session.get("parentSessionId"):
+            return
+        video = (session.get("files") or {}).get("video")
+        storage_ref = video.get("storageRef") if isinstance(video, dict) else None
+        if not isinstance(storage_ref, dict):
+            return
+        session_id = str(session.get("id") or "")
+        try:
+            await self.storage.delete_committed_object(storage_ref)
         except Exception:
             logger.warning(
-                "Best-effort teardown step failed (%s) for session %s.",
-                action,
+                "Could not delete committed video object for session %s; the session row is "
+                "already gone, so this is left for an operator to clean up by hand.",
                 session_id,
                 exc_info=True,
                 extra=log_context(session_id, "session_delete"),
