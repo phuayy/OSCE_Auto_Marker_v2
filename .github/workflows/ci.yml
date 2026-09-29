@@ -80,7 +80,7 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
           df -h /
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: ${{ env.UV_LOCK_GLOB }}
@@ -122,7 +122,7 @@ jobs:
       - name: Free disk space for the CUDA torch download
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: ${{ env.UV_LOCK_GLOB }}
@@ -175,7 +175,7 @@ jobs:
       - name: Free disk space for the CUDA torch download
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: ${{ env.UV_LOCK_GLOB }}
@@ -204,7 +204,7 @@ jobs:
         with:
           name: dist
           path: dist
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
       # build_release.py's module-level imports are the standard library
       # only; get_alembic_heads() lazily imports alembic (to list migration
       # heads via ScriptDirectory, never a real database — see that
