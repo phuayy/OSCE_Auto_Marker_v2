@@ -1667,7 +1667,7 @@ recording; its Student column the scored subject.
 | `GCS_UPLOAD_ORIGIN` | — | Origin allowed to PUT at the resumable session URI (browser CORS) |
 | `GCS_CACHE_ROOT` | `storage/cache/objects` | Worker-local cache of materialised bucket objects |
 | `GCS_SIGNED_URL_TTL_SECONDS` | `3600` | Lifetime of V4 signed playback URLs |
-| `DATABASE_URL` | SQLite in storage/ | PostgreSQL or SQLite URL |
+| `DATABASE_URL` | SQLite in storage/ | `APP_DATABASE_URL` is primary; this is the legacy fallback read when it is empty. Accepted: `postgres://`, `postgresql://`, `postgresql+psycopg://` (this repo installs psycopg, not asyncpg/psycopg2/pg8000), `sqlite://`, `sqlite+aiosqlite://`, or no scheme at all (a plain filesystem path — relative, absolute, `~`, or Windows, either slash style). One shared validator (`app/database/db_url.py`) backs `OrmDatabase`, `Settings.resolved_database_source`, alembic, and every `scripts/*.py` that touches the database. Anything else — a typo, an unsupported driver — refuses to start with a redacted error naming the scheme it got, in every environment; there is no silent SQLite fallback |
 | `DB_AUTO_MIGRATE` | `true` | Run `alembic upgrade head` at startup; false = migrate as a deploy step |
 | `DEFAULT_ADMIN_USERNAME` / `DEFAULT_ADMIN_PASSWORD` / `DEFAULT_ADMIN_EMAIL` | `admin` / — / — | The first administrator, seeded on the first boot of an empty `users` table (a legacy `credentials.json` wins). Never read again once any account exists |
 | `APP_PUBLIC_URL` | `http://localhost:5173` | Origin every emailed link starts with; must be the deployment's public https address |

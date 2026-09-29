@@ -28,6 +28,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from app.core.asyncio_compat import configure_windows_selector_event_loop_policy  # noqa: E402
 from app.core.config import settings  # noqa: E402
+from app.database.db_url import DatabaseUrlError  # noqa: E402
 from app.database.migration_runner import ALEMBIC_SCRIPTS, to_sync_url  # noqa: E402
 from app.database.orm import OrmDatabase  # noqa: E402
 from app.domain.jobs import ACTIVE_JOB_STATUSES  # noqa: E402
@@ -47,14 +48,19 @@ class DeployCheckError(RuntimeError):
 
 
 def build_report(*, require_drained: bool, require_up_to_date: bool) -> tuple[dict, int]:
-    source = settings.resolved_database_source
-    normalized_url = OrmDatabase._normalize_url(source)
-    backend = "postgres" if normalized_url.startswith("postgresql") else "sqlite"
-    sync_url = to_sync_url(normalized_url)
-
-    source_label = str(source) if backend == "sqlite" else redact_database_url(str(source))
-
     try:
+        # Resolving and normalising the configured URL can itself raise
+        # (DatabaseUrlError, a ValueError subclass, for an unsupported
+        # scheme) — inside the try, not before it, so that failure is
+        # reported the same clean way as an unreachable database rather than
+        # as an uncaught traceback main() has no handler for.
+        source = settings.resolved_database_source
+        normalized_url = OrmDatabase._normalize_url(source)
+        backend = "postgres" if normalized_url.startswith("postgresql") else "sqlite"
+        sync_url = to_sync_url(normalized_url)
+
+        source_label = str(source) if backend == "sqlite" else redact_database_url(str(source))
+
         engine = create_engine(sync_url, future=True)
         try:
             with engine.connect() as connection:
@@ -114,6 +120,12 @@ def build_report(*, require_drained: bool, require_up_to_date: bool) -> tuple[di
             engine.dispose()
     except DeployCheckError:
         raise
+    except DatabaseUrlError as exc:
+        # A distinct message from "unreachable": the database may well be up
+        # and reachable — the configured URL just names a scheme this app
+        # cannot use. exc's own message already names the scheme, the
+        # supported ones, and (redacted) the URL it saw.
+        raise DeployCheckError(f"Invalid database URL: {exc}") from exc
     except Exception as exc:  # noqa: BLE001 - reported to the caller, not swallowed
         raise DeployCheckError(f"Database unreachable: {exc}") from exc
 

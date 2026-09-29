@@ -7,6 +7,12 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from app.core.env import read_bool_env, read_csv_env, read_float_env, read_int_env
+from app.database.db_url import (
+    POSTGRES_SCHEMES,
+    SQLITE_SCHEMES,
+    looks_like_a_url,
+    normalize_database_url,
+)
 
 
 def load_env_file(root_dir: Path, file_name: str = ".env") -> bool:
@@ -761,19 +767,30 @@ class Settings:
     def max_pdf_upload_bytes(self) -> int:
         return max(1, self.max_pdf_upload_mb) * 1024 * 1024
 
-    # Every scheme OrmDatabase._normalize_url treats as PostgreSQL — deliberately
-    # read from one place rather than re-typed here, which is exactly how this
-    # drifted before: DATABASE_URL=postgresql+psycopg://... (the form this
-    # codebase's own migrations and tests use elsewhere) normalizes and connects
-    # fine everywhere else, but used to raise ValueError from this property alone
-    # because its prefix check only recognised the bare "postgres(ql)://" forms.
-    _POSTGRES_URL_SCHEMES = frozenset({"postgres", "postgresql", "postgresql+psycopg"})
+    # POSTGRES_SCHEMES / SQLITE_SCHEMES / looks_like_a_url / normalize_database_url
+    # all come from app.database.db_url — the one module every consumer of the
+    # configured database URL shares (OrmDatabase, alembic/env.py,
+    # scripts/deploy_check.py, scripts/backup_database.py,
+    # scripts/check_database.py, scripts/reset_db.py). Read from there rather
+    # than re-typed here, which is exactly how this drifted before:
+    # DATABASE_URL=postgresql+psycopg://... (the form this codebase's own
+    # migrations and tests use elsewhere) normalizes and connects fine
+    # everywhere else, but used to raise ValueError from this property alone
+    # because its own prefix check only recognised the bare "postgres(ql)://"
+    # forms — and a bare filesystem path with no scheme at all (a Windows path
+    # typed directly into APP_DATABASE_URL, exactly what OrmDatabase._normalize_url
+    # itself accepts) used to raise here too, for the same reason.
 
     @property
     def resolved_database_path(self) -> Path:
         raw = self.resolved_app_database_url.strip()
         if not raw:
             return self.paths.database_path
+        if not looks_like_a_url(raw):
+            # A bare filesystem path (relative, absolute POSIX, "~", or a
+            # Windows path in either slash style) — always SQLite, exactly
+            # like OrmDatabase._normalize_url's own path branch.
+            return Path(raw).expanduser()
         # Longest prefix first: "sqlite:///" must not be matched by the
         # "sqlite://" check first, or the extra leading "/" that distinguishes
         # a relative path from an absolute one would never be stripped.
@@ -791,13 +808,25 @@ class Settings:
         raw = self.resolved_app_database_url.strip()
         if not raw:
             return self.paths.database_path
+        if not looks_like_a_url(raw):
+            return self.resolved_database_path
         # Scheme only, via urlparse — not a prefix check on `raw` itself, which
         # cannot tell a relative sqlite:/// path from an absolute sqlite:////
         # one apart without re-deriving the slash-counting resolved_database_path
         # already gets right below.
-        if urlparse(raw).scheme in self._POSTGRES_URL_SCHEMES:
+        scheme = urlparse(raw).scheme
+        if scheme in POSTGRES_SCHEMES:
             return raw
-        return self.resolved_database_path
+        if scheme in SQLITE_SCHEMES:
+            return self.resolved_database_path
+        # An unsupported scheme is a configuration error, not a path to guess
+        # at: validate through the shared normaliser so the message is the
+        # same clear, redacted, scheme-naming one every other consumer of a
+        # bad URL gets. normalize_database_url always raises for a scheme
+        # that reaches this branch (it is not one of the two sets just
+        # checked), so this call never returns.
+        normalize_database_url(raw)
+        raise AssertionError("unreachable: normalize_database_url must have raised")
 
     @property
     def python_bell_pairing_mode(self) -> str:
