@@ -76,7 +76,6 @@ export default function SessionWorkspace({
   audioProfLoadError,
   setAudioProfLoadError,
   localVideoUrl,
-  isDemoFallback,
   runtimeSeconds,
   notice,
   isLoadingWorkspace,
@@ -120,7 +119,6 @@ export default function SessionWorkspace({
   sessionIndex,
   clipSummaries,
   isLoadingClipSummaries,
-  demoLongVideoSummaries,
 }) {
   // Who uploaded the recording (or queued this clip's assessment), as the
   // server snapshotted them; null for a session recorded before creators were.
@@ -198,7 +196,6 @@ export default function SessionWorkspace({
   // sheet is 'empty' (or 'failed'), never a template preview.
   const contentState = contentCriteriaState({
     criteriaCount: aiCriteria.length,
-    isDemoFallback,
     sessionStatus: session?.status || null,
   });
 
@@ -591,7 +588,7 @@ export default function SessionWorkspace({
                   <div className="flex items-baseline gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-slate-700">
                     <dt className="text-xs font-semibold text-slate-500">Case study</dt>
                     <dd className="max-w-[16rem] truncate" title={session?.files?.caseStudy?.originalName || caseStudyFile?.name || ''}>
-                      {session?.files?.caseStudy?.originalName || caseStudyFile?.name || 'Bundled demo'}
+                      {session?.files?.caseStudy?.originalName || caseStudyFile?.name || '—'}
                     </dd>
                   </div>
                   {creator ? (
@@ -968,7 +965,7 @@ export default function SessionWorkspace({
                           </Button>
                         </div>
 
-                        {!scoringSummary && !isDemoFallback && session?.status === SessionStatus.COMPLETED && !aiCriteria.length ? (
+                        {!scoringSummary && session?.status === SessionStatus.COMPLETED && !aiCriteria.length ? (
                           <div className="rounded-xl border border-amber-200 bg-gradient-to-br from-amber-50 to-white p-4 text-sm leading-relaxed text-amber-950 shadow-sm">
                             <p className="font-semibold text-amber-900">No rubric JSON attached to this session.</p>
                             <p className="mt-2 text-amber-900/85">
@@ -1136,14 +1133,14 @@ export default function SessionWorkspace({
                     height and nothing below moves when the charts land. A
                     recomputation (another clip finishing) keeps the charts
                     that are up. */}
-                {showClipAssessmentPanel && isLoadingClipSummaries && !clipSummaries && !demoLongVideoSummaries ? (
+                {showClipAssessmentPanel && isLoadingClipSummaries && !clipSummaries ? (
                   <LoadingRegion label="Building cohort summary charts">
                     <CohortSummarySkeleton />
                   </LoadingRegion>
                 ) : null}
                 {showClipAssessmentPanel ? (
                   <LongVideoSummaryCharts
-                    data={demoLongVideoSummaries || clipSummaries}
+                    data={clipSummaries}
                   />
                 ) : null}
               </div>
@@ -1158,7 +1155,7 @@ export default function SessionWorkspace({
                     <StatusRow label="Runtime" value={`${formatRuntime(runtimeSeconds)}`} />
                     <StatusRow
                       label="Mode"
-                      value={isDemoFallback ? 'Demo fallback (model skipped)' : `WhisperX ${currentModeLabel}`}
+                      value={`WhisperX ${currentModeLabel}`}
                     />
                     {/* <StatusRow
                       label="Audio Output"
@@ -1184,13 +1181,11 @@ export default function SessionWorkspace({
                     <StatusRow
                       label="AI scoring"
                       value={
-                        isDemoFallback && scoreReport
-                          ? 'Demo bundle'
-                          : session?.outputs?.scores?.fileName
-                            ? 'Completed'
-                            : session?.status === SessionStatus.COMPLETED
-                              ? 'Not produced — check OpenRouter key'
-                              : 'Runs after transcription'
+                        session?.outputs?.scores?.fileName
+                          ? 'Completed'
+                          : session?.status === SessionStatus.COMPLETED
+                            ? 'Not produced — check OpenRouter key'
+                            : 'Runs after transcription'
                       }
                     />
                   </CardContent>

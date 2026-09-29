@@ -184,18 +184,16 @@ test('opening a session draws the workspace in outline instead of dimming the da
   // The chunk fallback is the same skeleton, in the loaded session's layout.
   assert.match(DASHBOARD, /<LazyBoundary fallback=\{<WorkspaceSkeleton layout=\{workspaceLayoutFor\(session\)\} \/>\}>/);
   // Every navigation into a workspace declares its outline: a saved session
-  // (from the list projection), a clip child, and the two demo bundles.
+  // (from the list projection) and a clip child.
   const layouts = [...DASHBOARD.matchAll(/setWorkspaceLoad\(\{[\s\S]*?layout: ([^,}\n]+)/g)].map((match) => match[1].trim());
   assert.deepEqual(layouts, [
     'workspaceLayoutFor(sessionIndex.find((entry) => String(entry.id) === String(sessionId)))',
-    'WORKSPACE_LAYOUT.STANDARD',
-    'WORKSPACE_LAYOUT.LONG',
     'WORKSPACE_LAYOUT.CLIP',
   ]);
   // A pending load is cleared where the fetch settles, and by "Back".
-  assert.ok((DASHBOARD.match(/setWorkspaceLoad\(null\)/g) || []).length >= 6);
-  // The busy flag still exists on its own: it also covers the demo re-run,
-  // which stays on the clip list and must not swap the view for a placeholder.
+  assert.ok((DASHBOARD.match(/setWorkspaceLoad\(null\)/g) || []).length >= 5);
+  // The busy flag still exists on its own: it is what the controls read, while
+  // workspaceLoad alone decides whether the view is swapped for a placeholder.
   assert.match(DASHBOARD, /const \[isLoadingWorkspace, setIsLoadingWorkspace\]/);
 });
 
@@ -258,7 +256,7 @@ test('the workspace shows the audio artefact and the cohort charts in outline wh
   // when there is neither a payload nor a fetch in flight.
   assert.match(workspace, /\) : isLoadingAudioProf \? \([\s\S]*?<AudioProfessionalismSkeleton \/>[\s\S]*?\) : \(\s*<div className="space-y-2">/);
   // The cohort placeholder stands in the charts' own slot, first computation only.
-  assert.match(workspace, /isLoadingClipSummaries && !clipSummaries && !demoLongVideoSummaries \? \(\s*<LoadingRegion label="Building cohort summary charts">\s*<CohortSummarySkeleton \/>/);
+  assert.match(workspace, /isLoadingClipSummaries && !clipSummaries \? \(\s*<LoadingRegion label="Building cohort summary charts">\s*<CohortSummarySkeleton \/>/);
   assert.equal(/Building cohort summary charts\.\.\./.test(workspace), false, 'the spinner card is gone');
   // One shape for both waits: the workspace placeholder draws the same card.
   assert.match(SKELETONS, /export function WorkspaceSkeleton[\s\S]*?<AudioProfessionalismSkeleton \/>/);

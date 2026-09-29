@@ -8,7 +8,7 @@ import React from 'react';
 import { FEEDBACK_NOT_PROVIDED, contentSheetEmptyCopy } from '@/lib/scoreSheet';
 
 // Empty state for the Content Scores and Feedback tabs when the session has no
-// content sheet. The copy says why (failed run, demo bundle, not produced yet)
+// content sheet. The copy says why (failed run, not produced yet)
 // and never stands in for the sheet with template numbers or canned sentences:
 // an examiner must be able to trust everything these tabs show.
 export function ContentSheetEmptyState({ state, error, subject }) {

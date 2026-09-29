@@ -60,7 +60,6 @@ OSCE-AI-FYP/
 │   │   ├── sessionStatus.js    # Machine status -> label + badge tone + busy (pure)
 │   │   ├── format.js           # formatRuntime / prettySpeaker / evidence-timestamp parsing (pure)
 │   │   ├── download.js         # downloadBlob + the CSV encoder behind the score sheet (pure)
-│   │   ├── demoSessions.js     # Bundled demo fixtures; imported dynamically, never in the entry chunk
 │   │   ├── anchors.js          # DOM ids the dashboard scrolls to and the workspace renders
 │   │   ├── clipAssessments.js  # Clip -> its newest child session, run status, stale-cut flag (pure)
 │   │   ├── coalesce.js         # Single-flight wrapper: a burst of refresh triggers = one run + one catch-up (pure)
@@ -1325,9 +1324,7 @@ session *in flight is not enterable at all*, so reaching the workspace is always
 a deliberate second click on a terminal session. Everything only it can show —
 the player, the crop timeline, the four result tabs, the clip-assessment list,
 `LongVideoSummaryCharts`, `PanelMarkingSummary` — now lives under
-[src/workspace/](src/workspace/) and loads with it. The bundled demo fixtures
-([lib/demoSessions.js](src/lib/demoSessions.js)) went the same way behind
-`await import(...)`, because a demo button is a click too. Entry chunk: 186 kB
+[src/workspace/](src/workspace/) and loads with it. Entry chunk: 186 kB
 -> 105 kB (53.6 -> 32.1 kB gzipped); the dashboard file, 5,872 -> 3,160 lines.
 **That split is a load-time win, not a maintainability one** — line count and
 cyclomatic complexity are different axes, and only one moved: the component
@@ -1350,10 +1347,10 @@ carry:
 |---|---|---|
 | `useUploadForm` | The new-session form before a file is sent | `videoFile`, `caseStudyFile`, `uploadFlow`, `segmentationMethod`, `segmentationPresets`, `segmentationPreset`, `customOccupancy`, `regionFocus`, `sessionNameInput`, `showConfirmStart`, `corpora`, `selectedCorpusId`, `showCorpusManager`, `videoInputRef`, `caseStudyInputRef` |
 | `useSessionIndex` | The dashboard list: fetch, page, coalesced refresh | `sessionIndex`, `sessionIndexLoading`, `hasMoreSessions`, `sessionPageCountRef`, `hasLoadedSessionIndex`, `sessionIndexError`, `sessionNameDrafts`, `renamingSessionId`, `deletingSessionId`, `rerunningSessionId`, `startingSessionId`, `sessionIndexRequestSeqRef`, `refreshSessionIndexRef`, `hasInFlightSessions` |
-| `useUploadTransfer` | An in-flight upload's own phase/overlay, independent of `uploadTracker` itself | `isUploading`, `uploadOverlayDismissed`, `activeUploadSessionIdRef`, `isDemoFallback`, `runtimeSeconds` |
+| `useUploadTransfer` | An in-flight upload's own phase/overlay, independent of `uploadTracker` itself | `isUploading`, `uploadOverlayDismissed`, `activeUploadSessionIdRef`, `runtimeSeconds` |
 | `useOpenSession` | Loading/closing the workspace payload for one session | `session`, `transcript`, `scoreReport`, `communicationScores`, `audioProfessionalism`, `audioProfLoadError`, `isLoadingWorkspace`, `workspaceLoad`, `workspaceLoadRef`, `showWorkspace`, `parentSessionSnapshot`, `error`, `notice` |
 | `useManualTimelineEditor` | The crop timeline's own draft/drag state (stays owned by the dashboard per the rule below, just moved) | `localVideoUrl`, `activeSegmentId`, `selectedClipId`, `videoDurationSeconds`, `isRecropping`, `cropDraft`, `manualSegmentCount`, `manualBoundaries`, `manualLabels`, `manualSegmentKinds`, `timelineMenu`, `draggingBoundaryIndex`, `isSavingManualSegments`, `currentVideoTime`, `renamingClipId`, plus the six timeline/video refs |
-| `useClipAssessments` | Clip list derivations + per-clip run/export state | `clipAssessmentRuns`, `selectedClipAssessmentIds`, `isQueueingSelectedClips`, `clipSummaries`, `isLoadingClipSummaries`, `demoLongVideoSummaries`, `awaitingClipExportFor`, `clipExportJustFinished`, `clipExportWasWatchedRef`, plus the `videoClips`/`clipAssessmentIndex`/`selectedClip`/etc. `useMemo`s |
+| `useClipAssessments` | Clip list derivations + per-clip run/export state | `clipAssessmentRuns`, `selectedClipAssessmentIds`, `isQueueingSelectedClips`, `clipSummaries`, `isLoadingClipSummaries`, `awaitingClipExportFor`, `clipExportJustFinished`, `clipExportWasWatchedRef`, plus the `videoClips`/`clipAssessmentIndex`/`selectedClip`/etc. `useMemo`s |
 
 Two rules carry over unchanged from the workspace split, because the same
 reasons apply: **the dashboard still owns session state** — nothing above
@@ -1481,9 +1478,9 @@ rules it is built on, and what `test/skeletons.test.mjs` pins:
   `workspaceLayoutFor(entry)` in `lib/sessionWorkspace.js` — the list
   projection's `workflow` / `hasVideoClips` / `parentSessionId` — so the
   outline does not change when the payload lands; a deep link on a cold start
-  gets `standard`. `isLoadingWorkspace` is kept apart from it on purpose: the
-  demo re-run sets the busy flag but stays on the clip list, and must not swap
-  the view for a placeholder. The `LazyBoundary` fallback for the workspace
+  gets `standard`. `isLoadingWorkspace` is kept apart from it on purpose: it
+  is the busy state the controls read, while `workspaceLoad` alone decides
+  whether the view is swapped for a placeholder. The `LazyBoundary` fallback for the workspace
   chunk is the same skeleton in the loaded session's layout.
 - **First load only.** Gate on `data === null` (or `isLoading && !data`),
   never on `isLoading` alone: a refresh keeps what is on screen and dims it

@@ -88,9 +88,8 @@ test('no module hand-rolls the client\'s error-body parsing', () => {
   // `detail`, not `error`.
   //
   // Deliberately not a ban on touching `response.ok`: `apiFetch` returns the
-  // Response on purpose, and two callers need it for something other than an
-  // API error — the GCS transport reads a 308's committed offset, and the
-  // bundled-demo loader reports a plain HTTP status for a static file.
+  // Response on purpose, and a caller may need it for something other than an
+  // API error — the GCS transport reads a 308's committed offset.
   const HAND_ROLLED = [/response\.json\(\)\.catch/, /throw new Error\(\s*body\??\.?\.?(error|detail)/];
   const offenders = [];
   for (const [name, path] of sourceFiles(SRC)) {

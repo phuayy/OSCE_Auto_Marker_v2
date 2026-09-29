@@ -222,7 +222,7 @@ export function withStreamTicket(url) {
 
 /**
  * Resolve a server media URL (/media/...) for use in a <video>/<img>/<a> tag,
- * attaching a stream ticket. Non-media URLs (blob:, demo resources, external)
+ * attaching a stream ticket. Non-media URLs (blob:, external)
  * are returned untouched.
  */
 export function resolveMediaUrl(url) {
