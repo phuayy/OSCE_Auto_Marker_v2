@@ -10,7 +10,7 @@ Final-year project (FYP) that automatically marks OSCE (Objective Structured Cli
 
 | Layer | Technology |
 |---|---|
-| Frontend | React 18 + Vite, Tailwind CSS, shadcn/ui, plain JS (no TypeScript) |
+| Frontend | React 18 + Vite 8 (Rolldown), Tailwind CSS, shadcn/ui, plain JS (no TypeScript) |
 | Backend | FastAPI (Python 3.11+), uvicorn, SQLAlchemy async |
 | Databases | One SQLAlchemy async engine (`OrmDatabase`) for everything — sessions, assessments, rubric assets, videos **and** the job queue. `app/database/models.py` is the only schema description; Alembic migrates it. SQLite or PostgreSQL |
 | AI scoring | Pluggable LLM providers behind a router (NVIDIA, OpenAI, Anthropic, DeepSeek, Gemini, OpenRouter) for content + communication; librosa for audio professionalism — all run as **subprocesses** via `scripts/`. Primary and fallback model chosen in Settings, stored in `app_settings`, read live per run |
@@ -1314,7 +1314,7 @@ bare `React.lazy`, because a deployed app needs all three:
   pairs the Suspense with it and offers the reload that actually fixes it.
 
 Vendor code is split from application code in
-[vite.config.js](vite.config.js) (`manualChunks`): React, framer-motion and the
+[vite.config.js](vite.config.js) (Rolldown's `codeSplitting.groups`; Vite 8): React, framer-motion and the
 icon set are their own chunks, so shipping a UI fix does not invalidate the
 ~280 kB of dependencies a returning browser already holds.
 
