@@ -35,7 +35,7 @@ The auth middleware already lets non-``/api``, non-``/media`` paths through
 from __future__ import annotations
 
 import logging
-from pathlib import Path, PurePath, PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from fastapi import FastAPI
 from starlette.exceptions import HTTPException
@@ -62,9 +62,18 @@ def relative_url_path(path: str) -> str:
 
     Starlette builds it with ``os.path.join`` + ``normpath``, so on Windows it
     arrives with backslashes and the root arrives as ``"."``; the rules below
-    are about URLs and must not depend on either.
+    are about URLs and must not depend on either. ``PurePosixPath`` alone is
+    not enough: it is the *host's* separator handling that would depend on,
+    not the input's — ``pathlib.PurePath`` resolves to ``PureWindowsPath`` on
+    Windows (backslash is a separator) and to ``PurePosixPath`` everywhere
+    else (backslash is just a character), so a path built with backslashes —
+    exactly what Starlette hands this function on a Windows host — would
+    fail to match ``assets/...`` on a Linux one and vice versa. Normalising
+    backslashes to forward slashes before parsing, then always parsing as
+    ``PurePosixPath``, makes the result depend on the *path's own* spelling
+    rather than on whichever OS happens to be running this process.
     """
-    normalised = PurePath(path).as_posix().strip("/")
+    normalised = PurePosixPath(path.replace("\\", "/")).as_posix().strip("/")
     return "" if normalised == "." else normalised
 
 

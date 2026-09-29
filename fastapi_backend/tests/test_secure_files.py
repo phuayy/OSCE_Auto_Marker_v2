@@ -114,6 +114,27 @@ def test_harden_swallows_a_permission_error_rather_than_failing_startup(tmp_path
 # --- AuthService actually applies this on startup -----------------------
 
 
+class _UsersStub:
+    """The minimal stand-in AuthService.__init__ needs since commit 2d1cece
+    (durable logout revocation): it reads ``users.database`` once, to build a
+    ``TokenRevocationRepository``, before either test below gets a chance to
+    run anything. ``None`` would do for that read alone, but
+    ``initialize()`` also calls ``purge_expired`` on that repository as
+    best-effort housekeeping — see the module docstring on
+    ``TokenRevocationRepository.purge_expired`` and the broad
+    ``except Exception`` around it in ``AuthService.initialize()``. That call
+    reaches ``self.database.transaction()``, and ``None`` has no such
+    attribute, so with ``database = None`` the purge fails and is logged and
+    swallowed exactly the way a real deployment's housekeeping failure would
+    be — never raised, never asserted on here. Neither test below exercises
+    login, verification or revocation, only the file-permission side effects
+    of ``initialize()``, so a repository that cannot actually do anything is
+    the right amount of fake.
+    """
+
+    database = None
+
+
 def test_auth_service_writes_the_signing_secret_and_secrets_file_owner_only(tmp_path: Path) -> None:
     if sys.platform == "win32":
         pytest.skip("POSIX permission bits only")
@@ -129,7 +150,7 @@ def test_auth_service_writes_the_signing_secret_and_secrets_file_owner_only(tmp_
         ffprobe_bin="ffprobe",
         scorer_python_bin="python",
     )
-    service = AuthService(settings, users=None, directory=None)  # type: ignore[arg-type]
+    service = AuthService(settings, users=_UsersStub(), directory=None)  # type: ignore[arg-type]
 
     asyncio.run(service.initialize())
 
@@ -160,7 +181,7 @@ def test_auth_service_narrows_files_from_before_this_hardening_existed(tmp_path:
     settings.paths.auth_secret_path.write_text("pre-existing-secret", encoding="utf-8")
     settings.paths.auth_secret_path.chmod(0o644)
 
-    service = AuthService(settings, users=None, directory=None)  # type: ignore[arg-type]
+    service = AuthService(settings, users=_UsersStub(), directory=None)  # type: ignore[arg-type]
     asyncio.run(service.initialize())
 
     assert service.runtime.auth_secret == "pre-existing-secret"  # the value is kept, only the mode changes

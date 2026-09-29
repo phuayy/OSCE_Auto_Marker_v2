@@ -96,7 +96,11 @@ def test_the_two_caps_are_independent(tmp_path) -> None:
     client = build_test_client(tmp_path, max_video_upload_mb=4096, max_pdf_upload_mb=2)
     response = _initiate(client, video_bytes=8 * MEGABYTE, case_study_bytes=64 * MEGABYTE)
     assert response.status_code == 413, response.text
-    assert "caseStudy" in response.json()["error"]
+    # This route converts AppError through http_error() -> HTTPException, so
+    # the body carries FastAPI's own "detail" key here, not "error" (see
+    # api/errors.py's module docstring: the two envelopes coexist by design,
+    # and apiFetch on the frontend reads either).
+    assert "caseStudy" in response.json()["detail"]
 
 
 def test_pdf_cap_derives_from_the_configured_megabytes() -> None:
