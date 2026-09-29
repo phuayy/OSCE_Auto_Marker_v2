@@ -117,12 +117,23 @@ reverses the order (worker, then API) and leaves Docker running unless
 `-IncludeHatchet` is passed.
 
 `Deploy-Release.ps1` uses a stricter order again because it is a *maintenance
-window*, not just a restart: it stops the **tunnel first** (closing the
-public site), then the worker, then the API — so nothing external can reach
-the box mid-deploy — and on success starts API, then worker, then reopens the
-tunnel last. See that script's own doc comment for exactly how its rollback
-behaviour depends on whether the tunnel had already been reopened when a
-failure happened.
+window*, not just a restart: it stops the **tunnel first** and verifies the
+stop actually took (`Stop-OsceServiceAndWait` — a discarded verification is
+exactly how a 2026-09-29 audit found the tunnel could stay live through a
+window the script believed closed), then **re-checks the drain gate** with
+the tunnel now actually closed (work admitted through the still-open tunnel
+between the first drained snapshot and the tunnel reaching Stopped needs
+waiting out too), and only then stops the worker, then the API — so nothing
+external can reach the box for the rest of the deploy. Both the tunnel-close
+and the second drain check happen **outside** the rollback region: if either
+fails, nothing else has changed yet, so the script aborts (reopening the
+tunnel best-effort first) rather than entering rollback at all. On success it
+starts API, then worker, then reopens the tunnel last — isolation is
+considered lost the instant that reopen is *attempted*, not once it is
+confirmed Running, since a tunnel that reaches Running only after the
+confirmation wait gave up still served traffic in the meantime. See that
+script's own doc comment for exactly how its rollback behaviour depends on
+whether the tunnel had already been reopened when a failure happened.
 
 ## Hatchet in Docker
 

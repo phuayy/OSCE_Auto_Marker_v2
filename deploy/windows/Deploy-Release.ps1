@@ -4,21 +4,30 @@
     with automatic rollback on failure.
 .DESCRIPTION
     Downloads and verifies the release assets, waits for in-flight work to
-    drain, closes the public tunnel, stops the worker then the API, checks
-    out the release commit, syncs the Python environment, swaps the frontend
-    dist junction, backs up the database, migrates it if needed, starts the
-    API then the worker then the tunnel, and health-checks both the local and
-    public endpoints.
+    drain, closes the public tunnel with a VERIFIED stop (outside the
+    rollback region below -- if the tunnel will not close, nothing else has
+    changed yet, so the deploy just aborts), re-checks the drain gate now
+    that the tunnel is actually shut (work can be admitted through the still
+    -open tunnel between the first drained snapshot and the tunnel reaching
+    Stopped), then stops the worker then the API, checks out the release
+    commit, syncs the Python environment, swaps the frontend dist junction,
+    backs up the database, migrates it if needed, starts the API then the
+    worker then the tunnel, and health-checks both the local and public
+    endpoints.
 
     Both the API service and the Hatchet worker service run from the SAME
     checkout/commit (JOB_QUEUE_BACKEND=hatchet  --  the worker is the process
     that actually runs GPU pipeline jobs; see CLAUDE.md "Job Queue"), so both
     must be stopped before the checkout moves and both restarted after.
 
-    The public tunnel (cloudflared) is stopped before the API and restarted
-    only once the API is locally healthy and the worker is stably running  -- 
-    the public site shows Cloudflare's own error page for that window; this
-    IS the maintenance window.
+    The public tunnel (cloudflared) is stopped, verified Stopped, and the
+    drain gate re-checked BEFORE the worker and the API are touched at all,
+    and restarted only once the API is locally healthy and the worker is
+    stably running  --  the public site shows Cloudflare's own error page for
+    that window; this IS the maintenance window. Isolation is considered lost
+    the moment the reopening Start-Service call is made, not once it is
+    confirmed Running (a tunnel that reaches Running only after the
+    confirmation wait gave up still served traffic in the meantime).
 
     Rollback behaviour depends on whether the tunnel had already been
     reopened when the failure happened, because that is the point after
@@ -85,19 +94,41 @@ function Get-UvSyncArgs {
     return $syncArgs
 }
 
-function Stop-OsceServiceAndWait {
-    param([Parameter(Mandatory)][string]$Name, [int]$TimeoutSeconds = 60)
-    Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
-    if (-not (Wait-OsceServiceStatus -Name $Name -Status 'Stopped' -TimeoutSeconds $TimeoutSeconds)) {
-        throw "Service $Name did not stop within ${TimeoutSeconds}s."
-    }
-}
+# Stop-OsceServiceAndWait / Start-OsceServiceAndWait live in OsceDeploy.psm1
+# now (Rollback-Release.ps1 needs the exact same verified-stop behaviour, and
+# a duplicate copy here was how the tunnel's own stop went unverified in the
+# first place -- see the module's doc comment on Stop-OsceServiceAndWait).
 
-function Start-OsceServiceAndWait {
-    param([Parameter(Mandatory)][string]$Name, [int]$TimeoutSeconds = 60)
-    Start-Service -Name $Name
-    if (-not (Wait-OsceServiceStatus -Name $Name -Status 'Running' -TimeoutSeconds $TimeoutSeconds)) {
-        throw "Service $Name did not reach Running within ${TimeoutSeconds}s."
+function Wait-OsceDrained {
+    <#
+    .SYNOPSIS
+        Polls deploy_check.py --require-drained until it reports drained, or
+        throws once DrainTimeoutMinutes has elapsed.
+    .DESCRIPTION
+        Used twice in the main flow below: once with the tunnel still open
+        (so the operator is not surprised by a long silent wait before
+        anything visibly happens), and again immediately after the tunnel
+        closes -- because work can be admitted through the still-open tunnel
+        between the first drained snapshot and the tunnel actually reaching
+        Stopped, and that second window needs to be waited out too, not just
+        assumed closed along with the tunnel.
+    #>
+    param([Parameter(Mandatory)][string]$RepoDir, [Parameter(Mandatory)][int]$DrainTimeoutMinutes)
+    $deadline = (Get-Date).AddMinutes($DrainTimeoutMinutes)
+    while ($true) {
+        $check = Invoke-OsceDeployCheck -RepoDir $RepoDir -RequireDrained
+        if ($check.ExitCode -eq 0) {
+            Write-OsceLog 'Drained.'
+            return
+        } elseif ($check.ExitCode -eq 3) {
+            if ((Get-Date) -ge $deadline) {
+                throw "Timed out after $DrainTimeoutMinutes minutes waiting to drain. Re-run with -Force to deploy anyway (in-flight work may be interrupted)."
+            }
+            Write-OsceLog 'Not drained yet, retrying in 30s...'
+            Start-Sleep -Seconds 30
+        } else {
+            throw "deploy_check.py --require-drained exited $($check.ExitCode) (2 = database unreachable/usage error). Aborting."
+        }
     }
 }
 
@@ -117,9 +148,12 @@ function Invoke-FullRollback {
     )
     Write-OsceLog 'Rolling back to previous release...' -Level 'ERROR'
     try {
+        # Verified stop, not a discarded wait: a tunnel that will not close
+        # must abort this rollback (the surrounding catch below logs
+        # rollback_failed / needs operator) BEFORE the checkout moves or the
+        # database is touched, exactly like the main flow's own tunnel close.
         Step "Rollback: stopping tunnel service $tunnelService"
-        Stop-Service -Name $tunnelService -Force -ErrorAction SilentlyContinue
-        Wait-OsceServiceStatus -Name $tunnelService -Status 'Stopped' -TimeoutSeconds 30 | Out-Null
+        Stop-OsceServiceAndWait -Name $tunnelService -TimeoutSeconds 30
 
         Step "Rollback: stopping worker service $($config.workerServiceName)"
         Stop-OsceServiceAndWait -Name $config.workerServiceName
@@ -180,8 +214,16 @@ function Invoke-FullRollback {
         }
 
         Step "Rollback: starting tunnel service $tunnelService"
-        Start-Service -Name $tunnelService -ErrorAction SilentlyContinue
-        Wait-OsceServiceStatus -Name $tunnelService -Status 'Running' -TimeoutSeconds 30 | Out-Null
+        try {
+            Start-OsceServiceAndWait -Name $tunnelService -TimeoutSeconds 30
+        } catch {
+            # The rollback itself already succeeded above (code + DB, if
+            # applicable, are back to the previous release) -- only the
+            # tunnel failed to reopen, so this is a WARN, not a rethrow: the
+            # site stays closed until this is resolved, but nothing here
+            # should undo the rollback that already worked.
+            Write-OsceLog "Tunnel service $tunnelService did not reach Running after rollback -- the site remains closed until this is resolved: $($_.Exception.Message)" -Level 'WARN'
+        }
 
         Write-OsceState -StateFile $config.stateFile -State @{
             currentTag      = $PreviousState.currentTag
@@ -228,6 +270,17 @@ function Invoke-NeedsOperatorStop {
     Stop-Service -Name $config.workerServiceName -Force -ErrorAction SilentlyContinue
     Step "Stopping API service $($config.serviceName)"
     Stop-Service -Name $config.serviceName -Force -ErrorAction SilentlyContinue
+
+    # Best-effort stops (SilentlyContinue, no wait): there is nothing left to
+    # protect by aborting here, the box is already headed for an operator.
+    # But the tunnel is the one service whose failure to stop matters even in
+    # a best-effort branch -- it decides whether the public site is actually
+    # closed while a human is being paged -- so it gets a loud check the
+    # other two do not need.
+    $tunnelStatusAfterStop = Get-Service -Name $tunnelService -ErrorAction SilentlyContinue
+    if (-not $tunnelStatusAfterStop -or $tunnelStatusAfterStop.Status -ne 'Stopped') {
+        Write-OsceLog "Tunnel service $tunnelService is not confirmed Stopped -- the public site may still be reachable." -Level 'ERROR'
+    }
 
     $failedAt = (Get-Date).ToUniversalTime().ToString('o')
     Add-OsceDeployLogEntry -DeployLogPath $config.deployLog -Entry @{
@@ -336,27 +389,14 @@ if ($isFirstDeploy) {
 }
 
 # =============================================================================
-# (d) Drain gate. Also confirms Hatchet is reachable before we stop anything  -- 
-# the worker that comes back up after this deploy needs somewhere to connect.
+# (d) Drain gate (tunnel still open -- an operator watching the console sees
+# this wait before anything about the site itself changes). Also confirms
+# Hatchet is reachable before we stop anything  --  the worker that comes
+# back up after this deploy needs somewhere to connect.
 # =============================================================================
 if (-not $Force) {
     Step 'Waiting for in-flight sessions/jobs to drain (deploy_check.py --require-drained)'
-    $deadline = (Get-Date).AddMinutes($config.drainTimeoutMinutes)
-    while ($true) {
-        $check = Invoke-OsceDeployCheck -RepoDir $repoDir -RequireDrained
-        if ($check.ExitCode -eq 0) {
-            Write-OsceLog 'Drained.'
-            break
-        } elseif ($check.ExitCode -eq 3) {
-            if ((Get-Date) -ge $deadline) {
-                throw "Timed out after $($config.drainTimeoutMinutes) minutes waiting to drain. Re-run with -Force to deploy anyway (in-flight work may be interrupted)."
-            }
-            Write-OsceLog 'Not drained yet, retrying in 30s...'
-            Start-Sleep -Seconds 30
-        } else {
-            throw "deploy_check.py --require-drained exited $($check.ExitCode) (2 = database unreachable/usage error). Aborting."
-        }
-    }
+    Wait-OsceDrained -RepoDir $repoDir -DrainTimeoutMinutes $config.drainTimeoutMinutes
 } else {
     Write-OsceLog '-Force set: skipping the drain gate. In-flight work may be interrupted.' -Level 'WARN'
 }
@@ -368,9 +408,60 @@ if (-not (Test-OscePortListening -ComputerName '127.0.0.1' -Port $grpcPort)) {
 }
 
 # =============================================================================
+# (d2) Close the public tunnel, VERIFIED, before anything else changes. This
+# is deliberately OUTSIDE the rollback try/catch below: if the tunnel will
+# not close, nothing has been touched yet, so there is nothing to roll back
+# -- only to abort, leaving the site exactly as it was, tunnel included (best
+# effort: if even the reopen attempt fails here, the operator is looking at
+# an explicit ERROR, not a silent assumption of "still open").
+# =============================================================================
+Step "Stopping tunnel service $tunnelService (public site enters maintenance window)"
+try {
+    Stop-OsceServiceAndWait -Name $tunnelService -TimeoutSeconds 30
+} catch {
+    Write-OsceLog "Tunnel service $tunnelService did not verify Stopped: $($_.Exception.Message)" -Level 'ERROR'
+    try {
+        Start-OsceServiceAndWait -Name $tunnelService
+        Write-OsceLog "Tunnel service $tunnelService reopened (best effort) -- nothing else was changed." -Level 'WARN'
+    } catch {
+        Write-OsceLog "Best-effort reopen of $tunnelService also failed: $($_.Exception.Message)" -Level 'ERROR'
+    }
+    throw "Aborting before any change: the public tunnel could not be verified closed."
+}
+
+# =============================================================================
+# (d3) Re-check the drain gate with the tunnel now actually closed. Work can
+# be admitted through the tunnel between the first drained snapshot above and
+# the tunnel reaching Stopped just now, so that window needs to be waited out
+# too -- not offered a -Force bypass of its own, because -Force already
+# accepted interrupting in-flight work at the first gate; skipping the
+# re-check would just be trusting a promise the tunnel closing already broke.
+# A failure here (timeout or error) means only the tunnel is down so far, so
+# it is reopened and the deploy aborts rather than proceeding with the queue
+# possibly still moving.
+# =============================================================================
+if (-not $Force) {
+    Step 'Re-checking drain with the tunnel closed (deploy_check.py --require-drained)'
+    try {
+        Wait-OsceDrained -RepoDir $repoDir -DrainTimeoutMinutes $config.drainTimeoutMinutes
+    } catch {
+        Write-OsceLog "Drain re-check after closing the tunnel failed: $($_.Exception.Message)" -Level 'ERROR'
+        try {
+            Start-OsceServiceAndWait -Name $tunnelService
+            Write-OsceLog "Tunnel service $tunnelService reopened -- nothing else was changed." -Level 'WARN'
+        } catch {
+            Write-OsceLog "Failed to reopen $tunnelService after aborting the drain re-check: $($_.Exception.Message)" -Level 'ERROR'
+        }
+        throw "Aborting before any change: drain re-check after closing the tunnel did not succeed."
+    }
+}
+
+# =============================================================================
 # From here on, a failure triggers rollback (unless this is the first
 # deploy). $tunnelReopened tracks the point after which an external client
 # could have written something a database restore would silently discard.
+# The tunnel itself is already closed and verified above, outside this
+# region, so it is not touched again until the reopen step near the bottom.
 # =============================================================================
 $migrated = $false
 # Set true right before invoking alembic, not after it succeeds -- SQLite's
@@ -387,13 +478,9 @@ $backupResult = $null
 $script:BackupCreatedAt = $null
 $tunnelReopened = $false
 try {
-    # Close the public site FIRST  --  this is the start of the maintenance
-    # window. The public hostname now shows Cloudflare's own error page
-    # until the tunnel is restarted below.
-    Step "Stopping tunnel service $tunnelService (public site enters maintenance window)"
-    Stop-Service -Name $tunnelService -Force -ErrorAction SilentlyContinue
-    Wait-OsceServiceStatus -Name $tunnelService -Status 'Stopped' -TimeoutSeconds 30 | Out-Null
-
+    # The tunnel is already stopped and verified above, outside this
+    # try/catch. Stop the worker then the API next -- both run from the
+    # checkout this deploy is about to move.
     Step "Stopping worker service $($config.workerServiceName)"
     Stop-OsceServiceAndWait -Name $config.workerServiceName
 
@@ -485,17 +572,22 @@ try {
     }
 
     Step "Reopening tunnel service $tunnelService  --  end of maintenance window"
+    # Isolation is lost the moment a start is ATTEMPTED, not when Running is
+    # confirmed: Start-Service can return having only requested the start,
+    # and even the confirmation wait below can succeed late -- a tunnel that
+    # reaches Running only after the wait "gave up" still served traffic in
+    # the meantime. So the flag flips here, before the call, not after the
+    # wait below succeeds.
+    $tunnelReopened = $true
     Start-Service -Name $tunnelService
     if (-not (Wait-OsceServiceStatus -Name $tunnelService -Status 'Running' -TimeoutSeconds 30)) {
-        # The tunnel service itself never reached Running: nothing external
-        # could have reached the new deploy through it, so this still counts
-        # as "before reopened" for rollback purposes.
+        # $tunnelReopened is already $true above: the start was attempted, so
+        # isolation may already be broken even though Running could not be
+        # confirmed. This still throws so the failure is visible; the catch
+        # below reads $tunnelReopened and treats the site as potentially
+        # live, not as "before reopened".
         throw "Tunnel service $tunnelService did not reach Running within 30s."
     }
-    # From this instant on, an external client MAY be able to reach the site
-    # through the tunnel. A failure from here on must not silently discard a
-    # write made in this window.
-    $tunnelReopened = $true
 
     if (-not $SkipPublicCheck) {
         Step "Waiting for public health: $($config.publicHealthUrl)"
@@ -527,18 +619,23 @@ try {
     Write-OsceLog "Deploy of $Tag succeeded." -Level 'STEP'
 
 } catch {
-    # Every path that reaches this catch block does so from inside the try  --
-    # whose own first three steps stop the tunnel, worker and API, in that
-    # order, before anything else. So by the time we are here, those services
-    # are already stopped (or Stop-OsceServiceAndWait already threw trying to
-    # stop them, which itself lands here). Invoke-FullRollback's own
-    # stop-tunnel/worker/API sequence below is therefore a redundant, idempotent
-    # re-assertion of "stopped" -- Stop-Service on an already-stopped service is
-    # a no-op, not a stop+start -- never an unnecessary bounce (stop-then-start)
-    # of a service this failure never touched. The drain gate and the Hatchet
-    # reachability check above are deliberately OUTSIDE this try/catch for the
-    # same reason: a failure there means nothing was ever stopped, so there is
-    # nothing to roll back and nothing to needlessly bounce either.
+    # The tunnel is already stopped and verified (or this catch would never
+    # be reached at all -- see the tunnel-close block above, which is
+    # deliberately OUTSIDE this try/catch and throws its own way out before
+    # $tunnelReopened even exists). Every path that reaches HERE does so from
+    # inside the try, whose own first two steps stop the worker then the API,
+    # in that order, before anything else -- so by the time we are here those
+    # two are already stopped (or Stop-OsceServiceAndWait already threw
+    # trying to stop them, which itself lands here). Invoke-FullRollback's
+    # own stop-tunnel/worker/API sequence below is therefore a redundant,
+    # idempotent re-assertion of "stopped" -- Stop-Service (or
+    # Stop-OsceServiceAndWait) on an already-stopped service is a no-op, not
+    # a stop+start -- never an unnecessary bounce of a service this failure
+    # never touched. The drain gate, the Hatchet reachability check and the
+    # tunnel-close-plus-re-drain block above are deliberately OUTSIDE this
+    # try/catch for the same reason: a failure there means nothing besides
+    # (at most) the tunnel was ever touched, so there is nothing else to roll
+    # back and nothing to needlessly bounce.
     $failure = $_
     Write-OsceLog "Deploy failed: $($failure.Exception.Message)" -Level 'ERROR'
     Add-OsceDeployLogEntry -DeployLogPath $config.deployLog -Entry @{
@@ -555,6 +652,10 @@ try {
         Stop-Service -Name $tunnelService -Force -ErrorAction SilentlyContinue
         Stop-Service -Name $config.workerServiceName -Force -ErrorAction SilentlyContinue
         Stop-Service -Name $config.serviceName -Force -ErrorAction SilentlyContinue
+        $tunnelStatusAfterStop = Get-Service -Name $tunnelService -ErrorAction SilentlyContinue
+        if (-not $tunnelStatusAfterStop -or $tunnelStatusAfterStop.Status -ne 'Stopped') {
+            Write-OsceLog "Tunnel service $tunnelService is not confirmed Stopped -- the public site may still be reachable." -Level 'ERROR'
+        }
         exit 1
     }
 

@@ -509,6 +509,45 @@ function Start-OsceHatchetStack {
     return $true
 }
 
+function Stop-OsceServiceAndWait {
+    <#
+    .SYNOPSIS
+        Stops a service and verifies it actually reached Stopped before
+        returning; throws if it did not.
+    .DESCRIPTION
+        Shared by Deploy-Release.ps1 and Rollback-Release.ps1 so neither can
+        silently discard the wait's result the way a bare
+        `Stop-Service ... -ErrorAction SilentlyContinue` followed by
+        `Wait-OsceServiceStatus ... | Out-Null` used to (2026-09-29 audit
+        finding 7): a service that refuses to stop is either not installed at
+        all (fine -- ErrorAction SilentlyContinue covers that) or genuinely
+        stuck, and only checking the wait's return value tells the two apart.
+        This matters most for the tunnel: a caller that treats "stop
+        requested" as "isolated from the public Internet" without checking
+        can go on to restore a database backup while the tunnel is still
+        serving live traffic.
+    #>
+    param([Parameter(Mandatory)][string]$Name, [int]$TimeoutSeconds = 60)
+    Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
+    if (-not (Wait-OsceServiceStatus -Name $Name -Status 'Stopped' -TimeoutSeconds $TimeoutSeconds)) {
+        throw "Service $Name did not stop within ${TimeoutSeconds}s."
+    }
+}
+
+function Start-OsceServiceAndWait {
+    <#
+    .SYNOPSIS
+        Starts a service and verifies it reaches Running before returning;
+        throws if it does not. See Stop-OsceServiceAndWait for why callers
+        must not discard this result either.
+    #>
+    param([Parameter(Mandatory)][string]$Name, [int]$TimeoutSeconds = 60)
+    Start-Service -Name $Name
+    if (-not (Wait-OsceServiceStatus -Name $Name -Status 'Running' -TimeoutSeconds $TimeoutSeconds)) {
+        throw "Service $Name did not reach Running within ${TimeoutSeconds}s."
+    }
+}
+
 function Test-OsceGitTreeClean {
     param([Parameter(Mandatory)][string]$RepoDir)
     Push-Location $RepoDir
@@ -526,4 +565,5 @@ Export-ModuleMember -Function `
     Invoke-OsceDeployCheck, Invoke-OsceBackupDatabase, Invoke-OsceRestoreDatabase, `
     Set-OsceDistJunction, Wait-OsceHealth, Test-OsceGitTreeClean, `
     Wait-OsceServiceStatus, Test-OsceServiceStableRunning, Test-OscePortListening, `
-    Wait-OscePort, Invoke-OsceDockerCommand, Start-OsceDockerEngine, Start-OsceHatchetStack
+    Wait-OscePort, Invoke-OsceDockerCommand, Start-OsceDockerEngine, Start-OsceHatchetStack, `
+    Stop-OsceServiceAndWait, Start-OsceServiceAndWait
