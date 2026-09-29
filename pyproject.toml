@@ -64,7 +64,7 @@ dependencies = [
     "pypdf==6.19.0",
     # 2.4.4 (not 2.4.6) is what the CUDA torch 2.8.0+cu128 stack was installed
     # and tested against locally; keep the two moving in lockstep.
-    "numpy==2.4.4",
+    "numpy==2.4.6",
     "librosa==0.11.0",
     "soundfile==0.14.0",
     "opensmile==2.6.0",
