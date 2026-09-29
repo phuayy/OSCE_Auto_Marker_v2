@@ -1,0 +1,92 @@
+name: Promote release
+
+# A version tag never builds anything new — it re-publishes a build that
+# already went through ci.yml's full test matrix as a push to main. Cutting
+# a build and promoting it are deliberately two different events so that
+# "which commit is v1.2.3" is always answerable by "whichever build-<sha12>
+# release it repackages", never by a second, possibly different build of the
+# same source.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Cheap here (no CUDA wheels to fetch in this workflow — see below),
+          # and it removes any doubt about an annotated tag's target commit
+          # being reachable under a shallow clone.
+          fetch-depth: 0
+      # scripts/ci/build_release.py and promote_release.py import nothing but
+      # the standard library at module level (get_alembic_heads is the only
+      # function that needs alembic, and this workflow never calls it — a
+      # promotion never re-derives anything, only verifies and republishes),
+      # so this workflow needs no uv sync and pays none of ci.yml's CUDA
+      # wheel download.
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - name: Resolve the tag's commit
+        id: resolve
+        run: |
+          # git rev-list dereferences an annotated tag to the commit it
+          # points at; github.sha on a tag-push event is the TAG object's own
+          # sha for an annotated tag, not the commit's, which is why that is
+          # not used here.
+          commit=$(git rev-list -n 1 "${GITHUB_REF_NAME}")
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - name: Compute the build tag this commit must already have a release for
+        id: build_tag
+        run: |
+          tag=$(python3 -c "
+          import sys
+          sys.path.insert(0, 'scripts/ci')
+          from build_release import build_tag
+          print(build_tag('${{ steps.resolve.outputs.commit }}'))
+          ")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Confirm the build release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          build_tag="${{ steps.build_tag.outputs.tag }}"
+          if ! gh release view "$build_tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::No $build_tag release for commit ${{ steps.resolve.outputs.commit }}. Every commit on main gets one from ci.yml's release job; this tag's commit either never merged to main, or that job has not finished yet."
+            exit 1
+          fi
+      - name: Download the build's assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p downloaded-assets
+          gh release download "${{ steps.build_tag.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --dir downloaded-assets \
+            --clobber
+      - name: Verify checksums and commit match before promoting
+        run: |
+          python3 scripts/ci/promote_release.py \
+            --assets-dir downloaded-assets \
+            --commit "${{ steps.resolve.outputs.commit }}"
+      - name: Publish the version release (byte-identical assets)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${{ github.repository }}" \
+            --verify-tag \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Promoted from ${{ steps.build_tag.outputs.tag }} (commit ${{ steps.resolve.outputs.commit }})." \
+            downloaded-assets/osce-marker-dist.zip \
+            downloaded-assets/release.json \
+            downloaded-assets/SHA256SUMS.txt

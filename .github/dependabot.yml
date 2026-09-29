@@ -1,0 +1,50 @@
+version: 2
+
+updates:
+  # Frontend (Vite/React) dependencies declared in package.json.
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # The workflow files themselves (actions/checkout, astral-sh/setup-uv, ...).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # Python backend + AI pipeline, resolved via uv.lock.
+  - package-ecosystem: uv
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      # torch/torchaudio/torchvision/whisperx/nemo_toolkit are pinned in
+      # deliberate lockstep (see pyproject.toml's own comments beside each):
+      # torch's CUDA build, whisperx's model stack, and NeMo's speechlm2 path
+      # were installed and verified together against a specific CUDA 12.8 /
+      # cuDNN combination on the real GPU box this pipeline runs
+      # transcription and scoring on. A Dependabot PR runs no GPU job, so it
+      # cannot tell a genuinely compatible bump from one that only imports
+      # cleanly — moving one of these five without the others (or without
+      # re-testing on that machine) risks the same class of bug
+      # pyproject.toml's own lockstep comments exist to prevent. Patch
+      # releases still come through for security fixes; a major/minor bump
+      # is silently skipped, not opened as a PR — Dependabot's `ignore`
+      # entries suppress those updates outright, they do not surface them as
+      # a comment anywhere — so any of these five moving still has to start
+      # as a deliberate, manual bump, verified on the GPU box before it
+      # merges.
+      - dependency-name: "torch"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "torchaudio"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "torchvision"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "whisperx"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "nemo_toolkit"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
