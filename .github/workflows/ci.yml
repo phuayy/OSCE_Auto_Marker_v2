@@ -1,0 +1,256 @@
+name: CI
+
+# Pull requests get fast feedback and never touch the release surface; only a
+# push to main (i.e. a merge) is allowed to cut a build. workflow_dispatch is
+# for a manual re-run of the same checks with no code change.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Read-only by default — nothing in the test/build path needs to write
+# anything back to the repo or to GitHub. The release job is the one
+# exception and opts back into `contents: write` at the job level, which is
+# exactly the shape test_ci_workflows.py pins.
+permissions:
+  contents: read
+
+# One run per ref at a time. A PR's older run is superseded by its newer
+# push (cancel-in-progress); a push to main is never cancelled mid-flight —
+# the release job at the end of it must run to completion once started.
+#
+# One consequence worth knowing: with cancel-in-progress false on the main
+# group, a *queued* (not yet started) run for main is still superseded by a
+# newer one landing in the same concurrency group — GitHub runs at most one
+# queued run per group behind the in-progress one, and keeps only the
+# newest. A burst of merges to main therefore produces a build-<sha12>
+# release only for the newest commit in the burst; the in-between commits
+# never get one. promote.yml then fails loudly (by design — see its "Confirm
+# the build release exists" step) for a v* tag placed on one of those
+# skipped commits, rather than silently promoting the wrong build.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # uv.lock routes torch/torchaudio/torchvision to PyTorch's CUDA 12.8 index
+  # (see pyproject.toml's [tool.uv.sources]) — every job below that runs
+  # `uv sync --frozen` downloads those wheels regardless of whether the job
+  # actually exercises GPU code, because they are base dependencies, not
+  # behind an optional group. The disk-space-freeing step each such job runs
+  # exists for that download, not for anything else in the job.
+  UV_LOCK_GLOB: uv.lock
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run lint:ui
+      - run: npm run test:ui
+      - run: npm run build
+      # Consumed by the release job (push-to-main only); short retention
+      # because a PR build is never released and a main build is re-derivable
+      # from the commit at any time.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      # See the top-level env comment: torch's CUDA wheels alone run several
+      # GB, and GitHub's standard ubuntu-latest runner does not have that much
+      # spare disk after the toolchains it preinstalls. None of what is
+      # removed here (.NET, Android SDK, GHC) is used anywhere in this repo.
+      - name: Free disk space for the CUDA torch download
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          df -h /
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: ${{ env.UV_LOCK_GLOB }}
+      # Base + dev group (pytest, ruff) — never --group canary, which needs
+      # NeMo/PEFT that nothing in CI exercises (Canary-Qwen is opt-in, and a
+      # bare `uv sync` correctly leaves it uninstalled; see CLAUDE.md's "A uv
+      # sync is exact, not additive").
+      - run: uv sync --frozen
+      - run: uv run --no-sync ruff check fastapi_backend/app scripts
+      - run: uv run --no-sync python scripts/generate_enums.py --check
+      # No apt-installed ffmpeg here on purpose: every fastapi_backend/tests
+      # reference to ffmpeg_bin/ffprobe_bin is a literal string handed to
+      # Settings (path-resolution and command-construction tests), never a
+      # real subprocess invocation — grepped for `subprocess`/`CommandRunner`
+      # alongside `ffmpeg` across tests/ and found none. If a future test
+      # actually shells out to ffmpeg, install it here rather than skip it.
+      - run: uv run --no-sync python -m pytest fastapi_backend/tests -q
+
+  migrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # A fresh SQLite file per run, never the developer's own database.
+      # Written to $GITHUB_ENV (rather than the job's own `env:` block) so it
+      # can reference $RUNNER_TEMP — the `runner` context is not available
+      # where a job-level `env:` expression is evaluated, only inside steps.
+      # Explicit and non-empty matters too: app/core/config.py's
+      # load_env_file only lets a real .env override a variable that reads as
+      # unset OR empty, so an empty value here would be just as overridable
+      # as no value at all — it has to be a real sqlite:// URL to actually
+      # win. (CI has no .env checked out either way, but this keeps the same
+      # env recipe correct for a developer replaying this job locally against
+      # their own .env.)
+      - name: Point the app at a fresh, temporary SQLite database
+        run: |
+          mkdir -p "$RUNNER_TEMP/osce-ci-db"
+          echo "APP_DATABASE_URL=sqlite:///$RUNNER_TEMP/osce-ci-db/ci.sqlite3" >> "$GITHUB_ENV"
+      - name: Free disk space for the CUDA torch download
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: ${{ env.UV_LOCK_GLOB }}
+      - run: uv sync --frozen
+      # Gated on the file existing so this workflow keeps working before that
+      # session's deploy_check.py lands and after, with no edit needed here.
+      - name: deploy_check.py before migrating (must report not up to date)
+        if: hashFiles('scripts/deploy_check.py') != ''
+        run: |
+          output=$(uv run --no-sync python scripts/deploy_check.py --json)
+          echo "$output"
+          echo "$output" | grep -q '"upToDate": false'
+      - name: alembic upgrade head
+        working-directory: fastapi_backend
+        run: uv run --no-sync alembic upgrade head
+      - name: alembic check (ORM models match the migration history)
+        working-directory: fastapi_backend
+        run: uv run --no-sync alembic check
+      - name: deploy_check.py after migrating (must report up to date)
+        if: hashFiles('scripts/deploy_check.py') != ''
+        run: uv run --no-sync python scripts/deploy_check.py --json --require-up-to-date
+
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: osce_test
+          POSTGRES_PASSWORD: osce_test
+          POSTGRES_DB: osce_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U osce_test -d osce_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      # postgresql+psycopg, not bare postgresql:// — this repo installs
+      # psycopg (v3) only, not psycopg2, and both the app's own
+      # OrmDatabase._normalize_url and these tests' own create_engine() calls
+      # expect the +psycopg driver spelled out (see
+      # fastapi_backend/tests/test_alembic_migrations.py and
+      # alembic/env.py's "psycopg 3 serves both" sync/async comment).
+      OSCE_TEST_POSTGRES_URL: postgresql+psycopg://osce_test:osce_test@localhost:5432/osce_test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space for the CUDA torch download
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: ${{ env.UV_LOCK_GLOB }}
+      - run: uv sync --frozen
+      # CLAUDE.md "Database verification" — the schema-parity and
+      # disabled-trigger checks that only run against a real PostgreSQL.
+      - run: |
+          uv run --no-sync python -m pytest \
+            fastapi_backend/tests/test_alembic_migrations.py \
+            fastapi_backend/tests/test_migrations.py \
+            fastapi_backend/tests/test_change_tracking.py \
+            fastapi_backend/tests/test_health_and_config.py \
+            fastapi_backend/tests/test_container_roles.py \
+            -q
+
+  release:
+    needs: [frontend, backend, migrations, postgres]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: astral-sh/setup-uv@v5
+      # build_release.py's module-level imports are the standard library
+      # only; get_alembic_heads() lazily imports alembic (to list migration
+      # heads via ScriptDirectory, never a real database — see that
+      # function's own docstring), which pulls in SQLAlchemy as its own
+      # dependency. Nothing here imports `app`, so this job does not need the
+      # project's full environment — `--no-project` skips uv.lock (and with
+      # it, the CUDA torch download every other job in this file pays for),
+      # and `--with` pins exactly the two packages actually used, at the
+      # same versions pyproject.toml pins them at
+      # (test_ci_workflows.py::test_release_job_dependency_pins_match_pyproject
+      # keeps the two from drifting apart).
+      - name: Build release assets
+        run: |
+          uv run --no-project --with alembic==1.19.1 --with SQLAlchemy==2.0.50 \
+            python scripts/ci/build_release.py \
+            --dist dist \
+            --out release-assets \
+            --commit "${{ github.sha }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      - name: Read the build tag from release.json
+        id: manifest
+        run: echo "tag=$(jq -r '.buildTag' release-assets/release.json)" >> "$GITHUB_OUTPUT"
+      - name: Publish the build-<sha12> prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.manifest.outputs.tag }}"
+          # Idempotent: a workflow_dispatch re-run of an already-released
+          # commit finds the same tag already published. Re-running
+          # build_release.py would NOT reproduce byte-identical assets even
+          # though the commit and dist/ are unchanged — release.json's
+          # createdAt and workflowRunUrl are this run's own, not the first
+          # run's — so overwriting with --clobber would replace a correct
+          # release with one whose manifest claims a build time and run URL
+          # that misrepresent when this exact content actually shipped.
+          # Skipping leaves the original, honest manifest in place.
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $tag already exists; a re-run of the same commit publishes nothing new."
+            exit 0
+          fi
+          gh release create "$tag" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "$tag" \
+            --prerelease \
+            --notes "Automated build from commit ${{ github.sha }}." \
+            release-assets/osce-marker-dist.zip \
+            release-assets/release.json \
+            release-assets/SHA256SUMS.txt
