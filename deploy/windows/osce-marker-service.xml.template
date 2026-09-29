@@ -1,0 +1,65 @@
+<!--
+  WinSW (https://github.com/winsw/winsw) service definition template, shared
+  by BOTH Windows services this deployment installs from the same checkout:
+    - the API            (SERVICE_ID={{SERVICE_ID}} e.g. OsceMarker,        SCRIPT=scripts\run_api.py)
+    - the Hatchet worker (SERVICE_ID={{SERVICE_ID}} e.g. OsceMarkerWorker,  SCRIPT=scripts\run_hatchet_worker.py)
+
+  Under JOB_QUEUE_BACKEND=hatchet the worker is the process that actually runs
+  GPU pipeline steps (transcription, scoring, person detection) — the API
+  process dispatches to Hatchet and runs no jobs itself. Worker startup skips
+  schema migration and the startup recovery sweeps the API performs (see
+  CLAUDE.md "The same container boots in two processes with different
+  duties").
+
+  Install-OsceService.ps1 substitutes every {{TOKEN}} below and installs one
+  copy of the resulting XML per service via `<WinSW.exe> install`. Both
+  services are configured start type Manual/Demand — see
+  deploy/windows/Start-OsceStack.ps1, which is what actually starts them at
+  boot, in the required order (API before worker, and only once Docker's
+  Hatchet containers and the tunnel service are up).
+
+  Everything the process itself needs (ports, database URL, LLM keys,
+  HATCHET_CLIENT_* ...) comes from the repo's .env, read by the app at
+  import time — nothing app-specific is duplicated here.
+-->
+<service>
+  <id>{{SERVICE_ID}}</id>
+  <name>{{SERVICE_ID}}</name>
+  <description>{{DESCRIPTION}}</description>
+
+  <!-- No `uv` at runtime: the deploy already ran `uv sync`, so the service
+       launches the synced venv's interpreter directly. -->
+  <executable>{{REPO_DIR}}\.venv\Scripts\python.exe</executable>
+  <arguments>{{SCRIPT}}</arguments>
+  <workingdirectory>{{REPO_DIR}}</workingdirectory>
+
+  <!-- Manual/Demand: Install-OsceService.ps1 sets this via
+       `sc.exe config {{SERVICE_ID}} start= demand`. Boot-time startup is
+       orchestrated by the Start-OsceStack.ps1 scheduled task, not by the
+       Service Control Manager's own auto-start, because the worker and the
+       tunnel must come up in a specific order relative to Docker/Hatchet and
+       the API — see deploy/windows/README.md "Boot order". -->
+  <startmode>Manual</startmode>
+
+  <!-- Uvicorn's own graceful shutdown window is 10s (scripts/run_api.py,
+       timeout_graceful_shutdown=10). 25s gives it that plus margin before
+       WinSW escalates to a hard kill, so an in-flight upload part or SSE
+       client isn't cut mid-drain. The worker has no such window of its own
+       (Hatchet's SDK handles in-flight task cancellation on SIGTERM), so the
+       same generous timeout is used for both rather than maintaining two. -->
+  <stoptimeout>25 sec</stoptimeout>
+  <stopparentprocessfirst>true</stopparentprocessfirst>
+
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <onfailure action="restart" delay="60 sec"/>
+  <resetfailure>1 hour</resetfailure>
+
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+
+  <env name="PYTHONUNBUFFERED" value="1"/>
+  <env name="PYTHONUTF8" value="1"/>
+</service>

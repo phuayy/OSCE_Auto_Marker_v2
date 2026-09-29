@@ -32,6 +32,7 @@ from app.api.routes import (
 )
 from app.core.asyncio_compat import configure_windows_selector_event_loop_policy
 from app.core.body_limit import MaxBodySizeMiddleware
+from app.core.cache_policy import default_cache_control
 from app.core.config import Settings, settings
 from app.core.exceptions import AppError
 from app.core.logging_utils import install_access_log_redaction
@@ -159,6 +160,16 @@ def build_app(app_settings: Settings) -> FastAPI:
     async def add_security_headers(request: Request, call_next):
         response = await call_next(request)
         apply_security_headers(response.headers, app_settings)
+        # Same "wraps everything" placement as the headers above, and for the
+        # same reason: a 401 from require_auth or a 413 from the body-size cap
+        # needs this default as much as a route's own response does — see
+        # app/core/cache_policy.py for why a CDN in front of /api and /media
+        # makes this more than cosmetic. setdefault() so a route or mount that
+        # already set its own Cache-Control (the frontend's hashed assets, the
+        # SSE endpoints) is left alone.
+        cache_control = default_cache_control(request.url.path)
+        if cache_control is not None:
+            response.headers.setdefault("Cache-Control", cache_control)
         return response
 
     @application.exception_handler(HTTPException)

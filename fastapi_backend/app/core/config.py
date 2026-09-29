@@ -399,6 +399,19 @@ class Settings:
     # count-only behaviour — see the CORS-style warning this produces in
     # collect_runtime_warnings() when trusted_proxy_count is set without it.
     trusted_proxy_ips: tuple[str, ...] = read_csv_env("TRUSTED_PROXY_IPS", ())
+    # A single header name a trusted proxy is known to overwrite with the
+    # real visitor address, rather than merely append to — Cloudflare's
+    # CF-Connecting-IP is the motivating case (a Cloudflare Tunnel/cloudflared
+    # process puts the TCP peer at loopback for every request, so
+    # X-Forwarded-For hop-counting has nothing real to count). Stronger than
+    # X-Forwarded-For because there is no chain to reason about: the proxy
+    # either sets this header to the visitor's address or it does not.
+    # Still gated on trusted_proxy_ips (see client_ip in api/dependencies.py):
+    # naming a header here is meaningless — and dangerous — unless the
+    # immediate TCP peer is first proven to be that trusted proxy, the same
+    # requirement X-Forwarded-For already has. Empty (the default) leaves
+    # every request on the X-Forwarded-For/socket-address logic unchanged.
+    trusted_client_ip_header: str = os.getenv("TRUSTED_CLIENT_IP_HEADER", "").strip()
     session_event_history_limit: int = read_int_env("SESSION_EVENT_HISTORY_LIMIT", 500)
     session_sse_enabled: bool = read_bool_env("SESSION_SSE_ENABLED", False)
     # Max events buffered per connected SSE client before the oldest is dropped
@@ -921,6 +934,18 @@ class Settings:
                 "proxy's own address, or unset TRUSTED_PROXY_COUNT if this deployment has no "
                 "reverse proxy in front of it."
             )
+        if self.trusted_client_ip_header and not self.trusted_proxy_ips:
+            errors.append(
+                "TRUSTED_CLIENT_IP_HEADER is set without TRUSTED_PROXY_IPS when "
+                "ENVIRONMENT=production: the header is never honoured without proving the "
+                "immediate TCP peer is the trusted proxy first (see client_ip in "
+                "api/dependencies.py), so as configured it is silently ignored and every "
+                "request falls back to X-Forwarded-For/socket-address logic instead — the "
+                "login/token rate limiters key on whatever that resolves to, not the header "
+                "an operator believes is in force. Set TRUSTED_PROXY_IPS to the proxy's own "
+                "address, or unset TRUSTED_CLIENT_IP_HEADER if this deployment has no such "
+                "proxy in front of it."
+            )
         return errors
 
     def collect_runtime_warnings(self) -> list[str]:
@@ -954,6 +979,14 @@ class Settings:
                 "directly can forge a fresh rate-limit bucket per request. Set "
                 "TRUSTED_PROXY_IPS to the reverse proxy's own address, or firewall "
                 "the API port so only the proxy can reach it."
+            )
+        if self.trusted_client_ip_header and not self.trusted_proxy_ips:
+            warnings.append(
+                "TRUSTED_CLIENT_IP_HEADER is set without TRUSTED_PROXY_IPS; the header is "
+                "never honoured without an established trusted proxy address (see client_ip "
+                "in api/dependencies.py), so it is silently ignored and the rate limiters key "
+                "on X-Forwarded-For/socket-address logic instead. Set TRUSTED_PROXY_IPS to "
+                "the proxy's own address, or unset TRUSTED_CLIENT_IP_HEADER."
             )
         warnings.extend(self._account_warnings())
         warnings.extend(self._frontend_warnings())

@@ -1,0 +1,39 @@
+# cloudflared config for the LOCALLY-managed tunnel alternative.
+#
+# The recommended path is the REMOTELY-managed tunnel (created and edited in
+# the Cloudflare dashboard, then `cloudflared.exe service install <token>` —
+# see deploy/cloudflared/README.md). This file is for the alternative where
+# the tunnel's configuration is a file on this box instead of in the
+# dashboard. Copy to C:\ProgramData\cloudflared\config.yml and fill in the
+# placeholders; `cloudflared service install` (no token) then reads it.
+#
+# Only ONE hostname is ever routed here: the OSCE AI Marker API/frontend, at
+# 127.0.0.1:8787 (API_HOST/API_PORT in .env). Never add ingress rules for
+# anything else running on this box — PostgreSQL, the Hatchet dashboard
+# (127.0.0.1:8888), Hatchet's gRPC port (127.0.0.1:7077), SSH, RDP. None of
+# those have this app's authentication in front of them; exposing one to the
+# Internet through the tunnel would be a direct compromise path.
+
+tunnel: <TUNNEL-UUID>
+credentials-file: C:\ProgramData\cloudflared\<TUNNEL-UUID>.json
+
+ingress:
+  - hostname: osce.example.edu
+    service: http://127.0.0.1:8787
+    originRequest:
+      # The API's own connect is fast (loopback); this just avoids cloudflared
+      # hanging on a half-open TCP handshake if the API process is down.
+      connectTimeout: 10s
+      # Comfortably above the API's own timeout_keep_alive (120s in
+      # scripts/run_api.py is for browser<->API; this is cloudflared<->API)
+      # and, more importantly, longer than the /api/events change-feed's
+      # keepalive interval so an idle SSE connection is never dropped by the
+      # tunnel itself.
+      keepAliveTimeout: 90s
+      # This app is plain HTTP/1.1 end to end from cloudflared to uvicorn;
+      # no need for cloudflared to negotiate h2 with the origin.
+      http2Origin: false
+
+  # Catch-all: anything not matched above gets a 404, not a silent proxy to
+  # whatever else happens to be listening on this box. Must be the LAST rule.
+  - service: http_status:404
