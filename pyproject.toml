@@ -54,7 +54,7 @@ dependencies = [
     # See fastapi_backend/alembic/README.md.
     "alembic==1.19.1",
     "aiosqlite==0.22.0",
-    "hatchet-sdk==1.33.7",
+    "hatchet-sdk==1.41.1",
     "psycopg[binary,pool]==3.3.4",
 
     # OpenAI-compatible client used by NVIDIA/OpenRouter scoring scripts.
