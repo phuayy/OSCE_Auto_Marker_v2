@@ -98,7 +98,7 @@ dependencies = [
 # Installed by default by "uv sync". Skip with "uv sync --no-dev".
 dev = [
     "pytest==9.0.3",
-    "ruff==0.11.13",
+    "ruff==0.16.9",
 ]
 
 # Hand-run experiments under debug_scripts/ (RT-DETR tuning sheets). Nothing in
