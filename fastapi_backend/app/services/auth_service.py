@@ -245,6 +245,14 @@ class AuthService:
         revoked_ids = await self._revocation_cache.get(self._load_revoked_ids)
         if str(payload.get("tokenId") or "") in revoked_ids:
             return None
+        # A stream ticket also dies with the bearer token it was minted from:
+        # ``parentTokenId`` is checked against the same revoked-id set, no
+        # extra query, so revoking the bearer on logout revokes every ticket
+        # issued from it in the same instant. A ticket with no parent (or a
+        # bare bearer token, which never has one) is unaffected. See
+        # ``build_stream_ticket_payload``.
+        if str(payload.get("parentTokenId") or "") in revoked_ids:
+            return None
         return payload
 
     async def _load_revoked_ids(self) -> frozenset[str]:
@@ -276,13 +284,19 @@ class AuthService:
 
     # --- stream tickets and logout -------------------------------------------
 
-    async def issue_stream_ticket(self, user_id: str) -> dict[str, Any] | None:
-        """Mint a short-lived ticket for SSE/media URLs (no Authorization header)."""
+    async def issue_stream_ticket(self, user_id: str, *, parent_token_id: str | None = None) -> dict[str, Any] | None:
+        """Mint a short-lived ticket for SSE/media URLs (no Authorization header).
+
+        ``parent_token_id`` — the caller's own bearer ``tokenId``, when the
+        route has one to hand over — is stamped onto the ticket so it dies
+        the moment that bearer is revoked (logout). See
+        ``build_stream_ticket_payload`` and ``_verify_signature``.
+        """
         snapshot = await self.directory.get(user_id)
         if snapshot is None or not snapshot.active:
             return None
         payload, expires_at = build_stream_ticket_payload(
-            self._subject(snapshot), self.settings.stream_ticket_ttl_seconds
+            self._subject(snapshot), self.settings.stream_ticket_ttl_seconds, parent_token_id=parent_token_id
         )
         return {"ticket": sign_payload(payload, self._runtime.auth_secret), "expiresAt": expires_at}
 
