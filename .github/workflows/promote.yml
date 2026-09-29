@@ -21,7 +21,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Cheap here (no CUDA wheels to fetch in this workflow — see below),
           # and it removes any doubt about an annotated tag's target commit
