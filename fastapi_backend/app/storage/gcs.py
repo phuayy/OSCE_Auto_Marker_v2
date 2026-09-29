@@ -56,6 +56,10 @@ class GcsObjectStorageService:
     # Tells the browser to PUT the bytes at `uploadUrl` with Content-Range
     # headers rather than relaying parts through /api/uploads/{id}/parts/{n}.
     strategy = "gcs_resumable"
+    # A direct upload never has relayed parts — the browser PUTs straight at
+    # the bucket — so completeness is checked against the bucket object
+    # itself (see ``verify_received``), not against a ``parts`` list.
+    relays_parts = False
 
     def __init__(self, settings: Settings) -> None:
         if not settings.gcs_bucket:
@@ -200,6 +204,31 @@ class GcsObjectStorageService:
             status_code=409,
         )
 
+    async def verify_received(self, upload: dict[str, Any], file_record: dict[str, Any]) -> None:
+        """Confirm the bucket actually holds what the browser says it sent.
+
+        Cheap on purpose: a metadata read (``get_blob``), not a download —
+        the checksum verification happens later, in the background, via
+        ``complete_file``. This is what makes a direct upload's ``complete``
+        call answer "was it received" honestly instead of trusting a client
+        that never had any relayed parts to prove it with.
+        """
+        key = self._safe_key(str(file_record.get("key") or ""))
+        expected_size = int(file_record.get("sizeBytes") or 0)
+        bucket = await self._get_bucket()
+        blob = await asyncio.to_thread(bucket.get_blob, key)
+        if blob is None:
+            raise AppError(
+                f"{file_record.get('kind')} upload was never received by object storage.",
+                status_code=400,
+            )
+        actual_size = int(blob.size or 0)
+        if expected_size and actual_size != expected_size:
+            raise AppError(
+                f"{file_record.get('kind')} upload is incomplete ({actual_size}/{expected_size} bytes).",
+                status_code=400,
+            )
+
     async def complete_file(self, upload: dict[str, Any], file_record: dict[str, Any]) -> dict[str, Any]:
         """Verify the client's direct upload and commit it.
 
@@ -266,6 +295,56 @@ class GcsObjectStorageService:
                 # Includes NotFound for a session that never completed.
                 logger.debug("Nothing to delete for aborted upload object %s.", key)
             await asyncio.to_thread(self._cache_path(key).unlink, True)
+
+    async def release_staging(self, upload: dict[str, Any]) -> None:
+        """Nothing to release on this backend.
+
+        A finalized resumable session leaves no staging object behind — the
+        bytes the browser PUT *are* the committed object, not a part file
+        this API relayed. This must stay a no-op: the equivalent local method
+        deletes staging, and calling ``abort_upload`` here instead (as
+        ``_assemble_and_dispatch`` used to) deletes the objects the commit
+        that just ran wrote — see the module docstring's finding 3b.
+        """
+        return None
+
+    async def delete_committed_object(self, storage_ref: dict[str, Any]) -> bool:
+        """Delete one committed source object, generation-scoped when known.
+
+        Only acts on a ref this backend produced (``provider == "gcs"``); a
+        foreign ref returns ``False`` so the caller falls back to its own
+        cleanup. A missing object is treated as success (already gone). A
+        generation mismatch means the object at this key has since been
+        replaced by something else — not this ref's to delete — so that is
+        also treated as "ours is gone" rather than as a failure.
+        """
+        if str(storage_ref.get("provider") or "") != self.provider:
+            return False
+        raw_key = str(storage_ref.get("key") or "")
+        if not raw_key:
+            return False
+        key = self._safe_key(raw_key)
+
+        from google.api_core.exceptions import NotFound, PreconditionFailed  # type: ignore[import-not-found]
+
+        bucket = await self._get_bucket()
+        generation = storage_ref.get("generation")
+        kwargs: dict[str, Any] = {}
+        if generation:
+            kwargs["if_generation_match"] = int(generation)
+        try:
+            await asyncio.to_thread(bucket.delete_blob, key, **kwargs)
+        except NotFound:
+            pass
+        except PreconditionFailed:
+            logger.warning(
+                "delete_committed_object: object at key %s is a different generation than %s; "
+                "leaving it in place (not this ref's to delete).",
+                key,
+                generation,
+            )
+        await asyncio.to_thread(self._cache_path(key).unlink, True)
+        return True
 
     # ------------------------------------------------------------------
     # Read side

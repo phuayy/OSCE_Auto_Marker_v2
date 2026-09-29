@@ -81,6 +81,12 @@ class ObjectStorage(Protocol):
 
     provider: str
     strategy: str
+    # Whether bytes are relayed through this API's ``put_part`` (local) or land
+    # in the bucket directly from the browser (gcs). ``AsyncUploadService``
+    # reads this rather than hard-coding "does `parts` mean anything here" —
+    # a GCS upload never has parts, so a completeness check keyed on them
+    # would refuse every direct upload before ``verify_received`` ever ran.
+    relays_parts: bool
 
     async def ensure_layout(self) -> None:
         """Create whatever the backend needs before the first upload."""
@@ -104,6 +110,15 @@ class ObjectStorage(Protocol):
     ) -> dict[str, Any]:
         """Accept one chunk relayed through this API."""
 
+    async def verify_received(self, upload: dict[str, Any], file_record: dict[str, Any]) -> None:
+        """The lightweight pre-commit check ``complete`` runs under the upload lock.
+
+        Cheap on purpose — the heavy checksum/assembly work happens in the
+        background via ``complete_file``. Raises ``AppError`` (400) naming what
+        is missing or short; returns normally when the backend is satisfied the
+        object is fully present.
+        """
+
     async def complete_file(self, upload: dict[str, Any], file_record: dict[str, Any]) -> dict[str, Any]:
         """Finalize one file and return its committed storage ref.
 
@@ -112,7 +127,25 @@ class ObjectStorage(Protocol):
         """
 
     async def abort_upload(self, upload: dict[str, Any]) -> None:
-        """Discard partial data for an abandoned upload."""
+        """Discard partial data for an abandoned (never committed) upload."""
+
+    async def release_staging(self, upload: dict[str, Any]) -> None:
+        """Clean up transport-only staging after a SUCCESSFUL commit.
+
+        Distinct from ``abort_upload``: this runs after the objects this
+        upload created are already durable, so it must never delete them —
+        only whatever the transport used to get the bytes there (relayed part
+        files, locally; nothing, on a backend that received the bytes directly).
+        """
+
+    async def delete_committed_object(self, storage_ref: dict[str, Any]) -> bool:
+        """Delete one already-committed object this deployment owns.
+
+        Returns ``True`` once the object is confirmed gone — "already gone"
+        counts. Returns ``False`` when ``storage_ref`` names a provider/key
+        this backend does not own, so the caller can fall back to its own
+        cleanup. Raises on any failure that may leave the object still present.
+        """
 
     def public_url_for_key(self, key: str) -> str:
         """A URL the browser can read the object from."""
