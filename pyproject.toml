@@ -19,7 +19,7 @@ requires-python = ">=3.11,<3.14"
 
 dependencies = [
     # FastAPI application server and request parsing.
-    "fastapi==0.136.3",
+    "fastapi==0.141.1",
     "uvicorn[standard]==0.49.0",
     # Dev-server file watching. Ships with uvicorn[standard], but
     # scripts/run_api.py imports it directly to drive --reload itself:
