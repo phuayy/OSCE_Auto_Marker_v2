@@ -1007,15 +1007,21 @@ running first on the way in and last on the way out):
    never an ambient cookie, so `CORS_ALLOW_ORIGINS="*"` has nothing for a
    cross-origin page to ride.
 3. `MaxBodySizeMiddleware` — added after CORS so it runs before both CORS and
-   `require_auth`, rejecting a request whose declared `Content-Length`
-   exceeds `MAX_REQUEST_BODY_MB` before Starlette ever buffers it. A pure
-   ASGI middleware, not `BaseHTTPMiddleware` (see
-   [core/body_limit.py](fastapi_backend/app/core/body_limit.py)) — it only
-   needs the headers, never the body. Exempts
-   `PUT /api/uploads/{id}/parts/{n}`, the one route built to carry a
-   multi-megabyte body, which already enforces its own larger cap on the
-   bytes actually received (`async_uploads.py::_reject_oversized_part` +
-   `LocalObjectStorageService.put_part`, `UPLOAD_PART_SIZE_MB`).
+   `require_auth`. Two checks: a declared `Content-Length` over the limit is
+   refused before a byte is read, and `receive` is wrapped so the bytes
+   actually arriving are counted — a chunked body (no `Content-Length` at
+   all) or one that understates itself is refused with 413 the moment it
+   passes the limit, instead of being buffered without bound. The limit is
+   `MAX_REQUEST_BODY_MB` everywhere except `PUT /api/uploads/{id}/parts/{n}`,
+   the one route built to carry a multi-megabyte body, which is capped at
+   `UPLOAD_PART_SIZE_MB` instead (and `put_part` still checks the bytes it
+   stored). The overrun is raised as `RequestBodyTooLarge`, a
+   `fastapi.HTTPException` subclass, because FastAPI turns any other
+   exception raised while parsing a body into a 400; for the same reason
+   `http_error` passes an `HTTPException` through unchanged rather than
+   converting it to a 500. A pure ASGI middleware, not `BaseHTTPMiddleware`
+   (see [core/body_limit.py](fastapi_backend/app/core/body_limit.py)), which
+   would buffer the body itself.
 4. `add_security_headers` — added last so it wraps everything above,
    applying [core/security_headers.py](fastapi_backend/app/core/security_headers.py)'s
    baseline headers (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
@@ -1620,7 +1626,7 @@ recording; its Student column the scored subject.
 | `SERVE_FRONTEND` / `FRONTEND_DIST_DIR` | `false` / `<root>/dist` | Serve the built frontend from the API at `/` (same origin as `/api`, so no CORS). `app/api/frontend.py`; a missing build is a startup warning and 404s, not a crash |
 | `DEV_SERVER_HOST` / `DEV_SERVER_PORT` / `PREVIEW_PORT` | `127.0.0.1` / `5173` / `4173` | Vite's own bind. The proxy target follows `API_HOST` / `API_PORT` (`scripts/dev-hosts.mjs` maps `0.0.0.0` to loopback) |
 | `CORS_ALLOW_ORIGINS` | `*` | Browser origins allowed to call `/api`. Moot when the frontend is served from the same origin; set it to that origin to clear the warning. `allow_credentials=False` is explicit alongside it — auth here is a bearer token the caller must already hold, never an ambient cookie, so a wildcard origin has nothing to ride |
-| `MAX_REQUEST_BODY_MB` | `2` | Declared `Content-Length` cap for every route except `PUT /api/uploads/{id}/parts/{n}`, which enforces its own larger cap on the bytes actually received (`UPLOAD_PART_SIZE_MB`). Rejected before Starlette buffers the body — see `app/core/body_limit.py` |
+| `MAX_REQUEST_BODY_MB` | `2` | Body cap for every route except `PUT /api/uploads/{id}/parts/{n}`, which is capped at `UPLOAD_PART_SIZE_MB` instead. Enforced on the declared `Content-Length` and on the bytes actually received, so a chunked body cannot bypass it — see `app/core/body_limit.py` |
 | `TRUSTED_PROXY_COUNT` | `0` | Reverse proxies in front. Must match the hop count or the login rate limit keys on the proxy's address. `scripts/run_api.py` starts uvicorn with `proxy_headers=False` so this app's own resolution (`client_ip()` in `api/dependencies.py`) is the only thing that ever honours `X-Forwarded-For` — uvicorn's own equivalent trusts loopback by default and would otherwise rewrite the client address *before* this setting is even consulted |
 | `TRUSTED_PROXY_IPS` | — (count-only) | The proxy's own address(es)/CIDRs, verified against the immediate TCP peer before `X-Forwarded-For` is trusted at all — hop-counting alone cannot tell a header the proxy added from one forged by a client reaching the API port directly, since both are the same length. Unset with `TRUSTED_PROXY_COUNT > 0`: a startup warning outside production; `ENVIRONMENT=production` refuses to start |
 | `TRUSTED_CLIENT_IP_HEADER` | — (off) | A header a trusted proxy *overwrites* with the real visitor address — `CF-Connecting-IP` behind a Cloudflare Tunnel, where the TCP peer is always loopback. Honoured only when the immediate peer is in `TRUSTED_PROXY_IPS` and the value parses as an IP; otherwise `client_ip()` falls through to the `X-Forwarded-For` logic. Set without `TRUSTED_PROXY_IPS`: a startup warning; `ENVIRONMENT=production` refuses to start. See [docs/deployment-self-hosted-pc.md](docs/deployment-self-hosted-pc.md) |

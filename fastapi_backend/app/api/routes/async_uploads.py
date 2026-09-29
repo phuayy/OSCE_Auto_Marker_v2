@@ -38,13 +38,16 @@ async def put_upload_part(
         # Reject on the declared length *before* reading. `request.body()`
         # buffers the whole payload in memory, so checking the size only after
         # it has been read is no protection at all — a single oversized PUT
-        # would exhaust the process before reaching the check.
+        # would exhaust the process before reaching the check. This is the
+        # fast path; `MaxBodySizeMiddleware` (app/core/body_limit.py) is the
+        # authoritative one — it counts bytes as they stream in, at this
+        # route's own larger `part_max_bytes`, so a client that lies about or
+        # omits Content-Length is caught too, not just one that declares
+        # honestly.
         _reject_oversized_part(request, container.settings.upload_part_size_bytes)
         body = await request.body()
         if not body:
             raise AppError("Upload part body is required.", status_code=400)
-        # A client may lie about (or omit) Content-Length; the authoritative
-        # check is on the bytes actually received, inside put_part.
         return await container.async_uploads.put_part(upload_id, fileId, part_number, body)
     except Exception as error:
         raise http_error(error, fallback_message="Upload part failed.", not_found_message="Upload not found.") from error

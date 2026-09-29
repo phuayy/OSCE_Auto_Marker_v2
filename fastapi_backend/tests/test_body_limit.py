@@ -59,19 +59,29 @@ def test_declared_length_over_the_cap_is_rejected_before_reading() -> None:
     assert "10" in response.json()["error"] or "MB" in response.json()["error"]
 
 
-def test_missing_content_length_is_not_rejected() -> None:
-    """No declared length to check against; the middleware only refuses what
-    it can see up front (see its docstring on the streaming gap this leaves)."""
+def test_missing_content_length_is_still_capped_by_the_streaming_count() -> None:
+    """No declared length to check against, but the body is still counted as
+    it streams in — see test_body_limit_streaming.py for the full pin of this
+    behaviour. A chunked body under the cap still passes."""
 
     def gen():
         yield b"x" * 1000
 
     client = _bare_client(max_bytes=10)
     response = client.post("/echo", content=gen())
-    assert response.status_code == 200
+    assert response.status_code == 413
+
+    client_under_cap = _bare_client(max_bytes=2000)
+    response_under_cap = client_under_cap.post("/echo", content=gen())
+    assert response_under_cap.status_code == 200
 
 
 def test_part_upload_route_is_exempt_even_over_the_generic_cap() -> None:
+    """`_bare_client` wires no part cap (`part_max_bytes=None`), so the part
+    route is uncapped by this middleware entirely — the real app always wires
+    both (see `test_the_real_app_wires_the_part_cap_from_settings` in
+    test_body_limit_streaming.py), but a caller passing only `max_bytes` keeps
+    working exactly as before."""
     client = _bare_client(max_bytes=10)
     response = client.put("/api/uploads/session-1/parts/1", content=b"x" * 1000)
     assert response.status_code == 200
