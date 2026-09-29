@@ -115,6 +115,13 @@ def load_case_study_rubric(
         return _extract(case_study_path, digest=digest, min_criteria=min_criteria)
 
     try:
+        # Look again now that the lock is ours. The miss above was read before
+        # the lock was tried, and a holder can run its whole cycle — extract,
+        # publish, release — inside that gap; the lock being free then means
+        # "finished", not "nobody started", and its entry is already on disk.
+        cached = _read_entry(cache_path, digest=digest, min_criteria=min_criteria)
+        if cached is not None:
+            return cached
         rubric = _extract(case_study_path, digest=digest, min_criteria=min_criteria)
         _write_entry(cache_path, rubric)
         return rubric
