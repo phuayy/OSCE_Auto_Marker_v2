@@ -24,7 +24,7 @@ import {
 const instantSleep = async () => {};
 const noJitter = () => 0;
 
-test('external storage and demo requests do not change API reachability', async () => {
+test('external storage requests do not change API reachability', async () => {
   const initial = getConnectionSnapshot();
   await apiFetch('https://storage.example/upload', {
     reportConnection: false, retries: 0,

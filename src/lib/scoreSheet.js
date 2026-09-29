@@ -17,7 +17,6 @@ export const FEEDBACK_NOT_PROVIDED = 'Not provided by the model.';
 
 export const CRITERIA_STATE = Object.freeze({
   CRITERIA: 'criteria', // real criteria to list
-  DEMO: 'demo',         // demo workspace whose bundle has no sheet (defensive; bundles ship one)
   FAILED: 'failed',     // run failed before a sheet was produced
   EMPTY: 'empty',       // no sheet yet / scorer disabled / not produced
 });
@@ -46,12 +45,10 @@ export function feedbackCsvRows(keepStartStop) {
 }
 
 // What the Content Scores tab's criteria list / empty state should render.
-// Demo wins over failed because demo sessions are synthesised as completed;
-// a failed session that still has criteria lists them (partial artefacts are
+// A failed session that still has criteria lists them (partial artefacts are
 // worth seeing).
-export function contentCriteriaState({ criteriaCount = 0, isDemoFallback = false, sessionStatus = null } = {}) {
+export function contentCriteriaState({ criteriaCount = 0, sessionStatus = null } = {}) {
   if (Number(criteriaCount) > 0) return CRITERIA_STATE.CRITERIA;
-  if (isDemoFallback) return CRITERIA_STATE.DEMO;
   if (String(sessionStatus || '') === SessionStatus.FAILED) return CRITERIA_STATE.FAILED;
   return CRITERIA_STATE.EMPTY;
 }
@@ -70,9 +67,6 @@ export function contentSheetEmptyCopy(state, { error = '', subject = 'scores' } 
         : 'Re-run the session from the session list to score it.',
       detail,
     };
-  }
-  if (state === CRITERIA_STATE.DEMO) {
-    return { title: `Demo workspace: this bundle carries no ${subject === 'feedback' ? 'feedback' : 'content sheet'}.`, hint: '', detail: '' };
   }
   return {
     title: `${noun} appear here after transcription finishes.`,

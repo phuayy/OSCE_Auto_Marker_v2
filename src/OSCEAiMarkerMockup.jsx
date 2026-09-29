@@ -33,9 +33,7 @@ import {
   Loader2,
   LogOut,
   Play,
-  PlayCircle,
   RotateCw,
-  Scissors,
   Settings,
   Trash2,
   UploadCloud,
@@ -239,7 +237,6 @@ export default function OSCEAiMarkerMockup({
   // Session whose transfer this tab is currently driving, so the failure path
   // can mark the right track without threading the id through every throw.
   const activeUploadSessionIdRef = useRef(null);
-  const [isDemoFallback, setIsDemoFallback] = useState(false);
   // The completed run's wall-clock, read off the session payload for the
   // workspace's Runtime row. Never a live clock: a run in progress is not
   // enterable, and an upload's own elapsed time comes from its track.
@@ -249,9 +246,9 @@ export default function OSCEAiMarkerMockup({
   // replaces the current screen with a WorkspaceSkeleton in that layout — the
   // outline the view will have once the payload lands, chosen from what the
   // session list already knows (`workspaceLayoutFor`). Distinct from
-  // `isLoadingWorkspace` on purpose: that flag also covers a fetch that stays
-  // on the current screen (the demo re-run), which must not swap the view
-  // for a placeholder. Deep links and the route restore effect set this too,
+  // `isLoadingWorkspace` on purpose: that flag is the busy state the controls
+  // read, this one decides whether the screen is swapped for a placeholder.
+  // Deep links and the route restore effect set this too,
   // through openExistingSession.
   const [workspaceLoad, setWorkspaceLoad] = useState(null);
   const [error, setError] = useState('');
@@ -281,9 +278,6 @@ export default function OSCEAiMarkerMockup({
   const [isQueueingSelectedClips, setIsQueueingSelectedClips] = useState(false);
   const [clipSummaries, setClipSummaries] = useState(null);
   const [isLoadingClipSummaries, setIsLoadingClipSummaries] = useState(false);
-  // Demo-only override: the long-video demo can pre-load summaries directly
-  // without going through the server, since there is no parent session on disk.
-  const [demoLongVideoSummaries, setDemoLongVideoSummaries] = useState(null);
 
   // The session whose clip export we requested, held from the request until the
   // job settles. The export runs in the queue, so the editor has to keep
@@ -389,15 +383,11 @@ export default function OSCEAiMarkerMockup({
   // regardless of how it was opened (reload, "View progress", deep link, etc.).
   const sessionIsLong = Boolean(session?.workflow === Workflow.LONG || videoClips.length > 0);
   const isLongWorkflow = showWorkspace ? sessionIsLong : uploadFlow === Workflow.LONG;
-  // A clip assessment view is any child session (durable parentSessionId), or —
-  // for the in-memory demo path where children may lack it — a snapshot whose id
-  // differs from the current session. Deriving from parentSessionId means the
-  // "Back to clip list" affordance survives reloads, deep links and browser
-  // forward/back navigation, not just the in-app click that created a snapshot.
-  const isClipAssessmentView = Boolean(
-    (session?.id && session?.parentSessionId) ||
-      (parentSessionSnapshot?.session?.id && session?.id && parentSessionSnapshot.session.id !== session.id)
-  );
+  // A clip assessment view is any child session (durable parentSessionId).
+  // Deriving from parentSessionId means the "Back to clip list" affordance
+  // survives reloads, deep links and browser forward/back navigation, not just
+  // the in-app click that created a snapshot.
+  const isClipAssessmentView = Boolean(session?.id && session?.parentSessionId);
   const allowCropping = isLongWorkflow && !isClipAssessmentView;
 
   const selectedClip = useMemo(() => {
@@ -497,10 +487,6 @@ export default function OSCEAiMarkerMockup({
   }, [clipAssessmentRuns, isClipAssessmentView, session?.id]);
 
   useEffect(() => {
-    if (demoLongVideoSummaries) {
-      // Demo mode already injected a synthetic summary payload.
-      return undefined;
-    }
     if (!session?.id || isClipAssessmentView) {
       return undefined;
     }
@@ -532,7 +518,7 @@ export default function OSCEAiMarkerMockup({
     return () => {
       cancelled = true;
     };
-  }, [completedClipSessionIdsKey, demoLongVideoSummaries, isClipAssessmentView, session?.id]);
+  }, [completedClipSessionIdsKey, isClipAssessmentView, session?.id]);
 
   // Something this tab is driving is in flight: a transfer, or a workspace fetch.
   const isPipelineActive = isUploading || isLoadingWorkspace;
@@ -756,8 +742,8 @@ export default function OSCEAiMarkerMockup({
   );
 
   useEffect(() => {
-    if (showWorkspace && session?.id && !isDemoFallback) refreshSessionIndexInBackground();
-  }, [showWorkspace, session?.id, isDemoFallback, refreshSessionIndexInBackground]);
+    if (showWorkspace && session?.id) refreshSessionIndexInBackground();
+  }, [showWorkspace, session?.id, refreshSessionIndexInBackground]);
 
   useChangeStream(() => {
     refreshSessionIndexInBackground();
@@ -903,7 +889,7 @@ export default function OSCEAiMarkerMockup({
     try {
       const fetchPage = (url) => apiJson(url, { fallbackMessage: 'Failed to load sessions.' });
       const isCurrent = () => requestSeq === sessionIndexRequestSeqRef.current;
-      const parentId = showWorkspace && !isDemoFallback && videoClips.length ? session?.id : null;
+      const parentId = showWorkspace && videoClips.length ? session?.id : null;
       const [body, children] = await Promise.all([
         fetchSessionPages(fetchPage, sessionPageCountRef.current, isCurrent),
         parentId ? fetchSessionPages(fetchPage, Infinity, isCurrent, parentId) : null,
@@ -992,7 +978,6 @@ export default function OSCEAiMarkerMockup({
     const controller = beginWorkspaceLoad();
     setError('');
     setNotice('');
-    setIsDemoFallback(false);
     setIsLoadingWorkspace(true);
     // The skeleton takes the outline of the session about to open. The list
     // projection knows the workflow and whether clips exist (and, for a child
@@ -1208,12 +1193,10 @@ export default function OSCEAiMarkerMockup({
     setClipAssessmentRuns({});
     setSelectedClipAssessmentIds(new Set());
     setClipSummaries(null);
-    setDemoLongVideoSummaries(null);
     setIsLoadingClipSummaries(false);
     setUploadFlow(Workflow.STANDARD);
     setError('');
     setNotice('');
-    setIsDemoFallback(false);
     setIsUploading(false);
     setIsLoadingWorkspace(false);
     setRuntimeSeconds(0);
@@ -1288,109 +1271,6 @@ export default function OSCEAiMarkerMockup({
       return false;
     } finally {
       setDeletingSessionId(null);
-    }
-  }
-
-  async function openDemoWorkspace(reason) {
-    setError('');
-    setIsUploading(false);
-    setIsLoadingWorkspace(true);
-    setWorkspaceLoad({ label: 'Loading bundled demo workspace', layout: WORKSPACE_LAYOUT.STANDARD });
-    setActiveSegmentId(null);
-
-    try {
-      const { loadBundledDemoResources } = await import('@/lib/demoSessions');
-      const demoBundle = await loadBundledDemoResources();
-      setIsDemoFallback(true);
-      setShowWorkspace(true);
-      setUploadFlow(Workflow.STANDARD);
-      setSession(demoBundle.session);
-      setTranscript(demoBundle.transcript);
-      setScoreReport(demoBundle.scores);
-      setAudioProfessionalism(demoBundle.audioProfessionalism);
-      setCommunicationScores(demoBundle.communicationScores);
-      setClipSummaries(null);
-      setDemoLongVideoSummaries(null);
-      setClipAssessmentRuns({});
-      setSelectedClipAssessmentIds(new Set());
-      setRuntimeSeconds(Math.round(demoBundle.session?.pipeline?.runtimeSeconds || 0));
-      setNotice(reason);
-    } catch (loadError) {
-      setError(`Demo workspace failed to load: ${loadError.message || 'unknown error'}`);
-      setNotice('');
-    } finally {
-      setIsUploading(false);
-      setIsLoadingWorkspace(false);
-      setWorkspaceLoad(null);
-    }
-  }
-
-  async function openManualDemoMode() {
-    setError('');
-    setRuntimeSeconds(0);
-    await openDemoWorkspace('Manual demo mode enabled. Model execution skipped.');
-  }
-
-  // ---------------------------------------------------------------------------
-  // Long-video demo
-  // ---------------------------------------------------------------------------
-  // The long demo replicates session 946f0f67... in a 'cropped + all clips
-  // already assessed' state. Clip MP4s ship with the bundle and each child
-  // session ships its own scores/communication-scores/audio-professionalism/
-  // transcript so the user can drill into any student without a backend.
-  async function openLongVideoDemoWorkspace() {
-    setError('');
-    setIsUploading(false);
-    setIsLoadingWorkspace(true);
-    setWorkspaceLoad({ label: 'Loading bundled long-video demo', layout: WORKSPACE_LAYOUT.LONG });
-    setActiveSegmentId(null);
-
-    try {
-      const { LONG_DEMO_CHILD_IDS, buildLongDemoSummaries, loadBundledLongDemoResources } =
-        await import('@/lib/demoSessions');
-      const bundle = await loadBundledLongDemoResources();
-
-      setIsDemoFallback(true);
-      setShowWorkspace(true);
-      setUploadFlow(Workflow.LONG);
-      // Stash the demo bundle on the parent session itself so other handlers
-      // (openClipAssessmentView, runClipAssessment) can locate the demo data
-      // without a network round-trip.
-      setSession({
-        ...bundle.parentSession,
-        _demoChildren: bundle.childById,
-      });
-      setTranscript({ segments: [] });
-      setScoreReport(null);
-      setAudioProfessionalism(null);
-      setCommunicationScores(null);
-      setVideoDurationSeconds(Number(bundle.remappedClips?.[bundle.remappedClips.length - 1]?.end || 0));
-      setRuntimeSeconds(Math.round(bundle.parentSession?.pipeline?.runtimeSeconds || 0));
-
-      // Mark every clip as completed so the panel renders "View / Re-run"
-      // controls and the cohort charts get the trigger they need.
-      const runs = {};
-      LONG_DEMO_CHILD_IDS.forEach((childId) => {
-        const child = bundle.childById[childId];
-        if (!child) return;
-        const clipId = child.session?.clipSource?.clipId;
-        if (clipId) {
-          runs[clipId] = { status: SessionStatus.COMPLETED, sessionId: childId };
-        }
-      });
-      setClipAssessmentRuns(runs);
-
-      setDemoLongVideoSummaries(buildLongDemoSummaries(bundle.childById));
-      setNotice(
-        'Long-video demo mode: clips already exported, every student assessed. Export disabled.',
-      );
-    } catch (loadError) {
-      setError(`Long-video demo failed to load: ${loadError.message || 'unknown error'}`);
-      setNotice('');
-    } finally {
-      setIsUploading(false);
-      setIsLoadingWorkspace(false);
-      setWorkspaceLoad(null);
     }
   }
 
@@ -1597,13 +1477,11 @@ export default function OSCEAiMarkerMockup({
 
     setError('');
     setNotice('');
-    setIsDemoFallback(false);
     setScoreReport(null);
     setAudioProfessionalism(null);
     setCommunicationScores(null);
     setParentSessionSnapshot(null);
     setClipSummaries(null);
-    setDemoLongVideoSummaries(null);
     setRuntimeSeconds(0);
     debugPipeline('[pipeline] started');
     // A new run always opens with the overlay visible, whatever the user did
@@ -1954,7 +1832,7 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
-  // Returns true when the clip's assessment was queued (or demo-completed),
+  // Returns true when the clip's assessment was queued,
   // false otherwise — the batch runner uses this to keep failed clips checked.
   async function runClipAssessment(clip) {
     if (!session?.id || !clip?.id) {
@@ -1970,37 +1848,6 @@ export default function OSCEAiMarkerMockup({
     // A dispatched clip leaves the batch selection so the checkboxes always
     // mirror what "Run Selected Assessments" would actually queue.
     unselectClipForBatch(clip.id);
-
-    // Demo path: simulate the re-run by briefly switching to a "running" state,
-    // then re-loading the pre-bundled child assessment from disk.
-    const demoChildren = session?._demoChildren;
-    const demoChildId = Object.keys(demoChildren || {}).find((id) => {
-      const child = demoChildren[id];
-      return String(child?.session?.clipSource?.clipId || '') === String(clip.id);
-    });
-    if (demoChildren && demoChildId) {
-      setError('');
-      setNotice('');
-      setClipAssessmentRuns((previous) => ({
-        ...previous,
-        [clip.id]: { status: 'running' },
-      }));
-      // Not a navigation — the user stays on the clip list, so this sets the
-      // busy flag (batch controls disable) but no `workspaceLoad`: the row's
-      // own running state is the feedback, as it is for a real re-run.
-      setIsLoadingWorkspace(true);
-      // Brief simulated runtime so the row's running state is visible.
-      await new Promise((resolve) => setTimeout(resolve, 900));
-      setClipAssessmentRuns((previous) => ({
-        ...previous,
-        [clip.id]: { status: SessionStatus.COMPLETED, sessionId: demoChildId },
-      }));
-      setIsLoadingWorkspace(false);
-      setNotice(
-        `Demo mode: a real re-run would call the NVIDIA assessor again. Showing the cached score for "${clip.label || ''}".`,
-      );
-      return true;
-    }
 
     // Non-blocking: queue the child assessment and STAY on the parent clip
     // list. The clip row shows the live stage (driven by the change stream,
@@ -2181,15 +2028,6 @@ export default function OSCEAiMarkerMockup({
     setWorkspaceLoad({ label: `Loading ${clip.label || 'clip'}`, layout: WORKSPACE_LAYOUT.CLIP });
 
     try {
-      // Demo path: pull the child session straight out of the long-demo bundle.
-      const demoChildren = session?._demoChildren;
-      if (demoChildren && demoChildren[clipSessionId]) {
-        const childBundle = demoChildren[clipSessionId];
-        applyWorkspace(childBundle);
-        setNotice(`Demo mode: showing pre-assessed clip "${clip.label || childBundle.session?.name || ''}"`);
-        return;
-      }
-
       const loaded = await loadSessionWorkspace(clipSessionId, { signal: controller.signal });
       if (controller.signal.aborted) return;
       applyWorkspace(loaded);
@@ -2318,7 +2156,6 @@ export default function OSCEAiMarkerMockup({
         backTitle="Return to upload / saved sessions"
       >
         <ConnectionBadge status={connection.status} />
-        {isDemoFallback ? <Badge variant="warning">Demo workspace</Badge> : null}
         {notifications ? (
           <NotificationBell
             items={notifications.items}
@@ -2778,32 +2615,6 @@ export default function OSCEAiMarkerMockup({
                   </span>
                 </div>
 
-                {/* The demos are for a first look, not for marking, so they
-                    sit under the real action at a lower weight. */}
-                <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4 text-sm text-slate-500">
-                  <span>No recording to hand?</span>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="gap-2"
-                    onClick={openManualDemoMode}
-                    disabled={isUploading || isLoadingWorkspace}
-                  >
-                    <PlayCircle className="h-4 w-4" aria-hidden="true" />
-                    Open the one-student demo
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="gap-2 border-violet-300 text-violet-700 hover:bg-violet-50"
-                    onClick={openLongVideoDemoWorkspace}
-                    disabled={isUploading || isLoadingWorkspace}
-                  >
-                    <Scissors className="h-4 w-4" aria-hidden="true" />
-                    Open the multi-student demo
-                  </Button>
-                </div>
-
                 {error && (
                   <div role="alert" className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-sm text-rose-700">
                     {error}
@@ -3066,7 +2877,6 @@ export default function OSCEAiMarkerMockup({
               audioProfLoadError={audioProfLoadError}
               setAudioProfLoadError={setAudioProfLoadError}
               localVideoUrl={localVideoUrl}
-              isDemoFallback={isDemoFallback}
               runtimeSeconds={runtimeSeconds}
               notice={notice}
               isLoadingWorkspace={isLoadingWorkspace}
@@ -3110,7 +2920,6 @@ export default function OSCEAiMarkerMockup({
               sessionIndex={sessionIndex}
               clipSummaries={clipSummaries}
               isLoadingClipSummaries={isLoadingClipSummaries}
-              demoLongVideoSummaries={demoLongVideoSummaries}
             />
           </LazyBoundary>
           )}

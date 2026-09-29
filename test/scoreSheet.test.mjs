@@ -67,33 +67,26 @@ test('FEEDBACK_NOT_PROVIDED is the on-screen wording', () => {
   assert.equal(FEEDBACK_NOT_PROVIDED, 'Not provided by the model.');
 });
 
-test("contentCriteriaState: a real session with zero criteria is 'empty', never 'demo'", () => {
+test("contentCriteriaState: a session with zero criteria that did not fail is 'empty'", () => {
   for (const sessionStatus of ['completed', 'uploaded', 'cropped', null]) {
     assert.equal(
-      contentCriteriaState({ criteriaCount: 0, isDemoFallback: false, sessionStatus }),
+      contentCriteriaState({ criteriaCount: 0, sessionStatus }),
       CRITERIA_STATE.EMPTY,
     );
   }
 });
 
-test("contentCriteriaState: 'demo' only when isDemoFallback, and only without criteria", () => {
-  assert.equal(
-    contentCriteriaState({ criteriaCount: 0, isDemoFallback: true, sessionStatus: 'completed' }),
-    CRITERIA_STATE.DEMO,
-  );
-  assert.equal(
-    contentCriteriaState({ criteriaCount: 8, isDemoFallback: true, sessionStatus: 'completed' }),
-    CRITERIA_STATE.CRITERIA,
-  );
+test('CRITERIA_STATE names exactly the three states a real session can be in', () => {
+  assert.deepEqual(Object.values(CRITERIA_STATE).sort(), ['criteria', 'empty', 'failed']);
 });
 
 test("contentCriteriaState: a failed session without a sheet is 'failed'; with criteria it still lists them", () => {
   assert.equal(
-    contentCriteriaState({ criteriaCount: 0, isDemoFallback: false, sessionStatus: 'failed' }),
+    contentCriteriaState({ criteriaCount: 0, sessionStatus: 'failed' }),
     CRITERIA_STATE.FAILED,
   );
   assert.equal(
-    contentCriteriaState({ criteriaCount: 3, isDemoFallback: false, sessionStatus: 'failed' }),
+    contentCriteriaState({ criteriaCount: 3, sessionStatus: 'failed' }),
     CRITERIA_STATE.CRITERIA,
   );
 });
@@ -105,11 +98,7 @@ test("contentSheetEmptyCopy: failed copy carries the session error; no state's c
   const emptyCopy = contentSheetEmptyCopy(CRITERIA_STATE.EMPTY, { error: 'boom', subject: 'scores' });
   assert.equal(emptyCopy.detail, '');
 
-  const demoCopy = contentSheetEmptyCopy(CRITERIA_STATE.DEMO, { error: 'boom', subject: 'scores' });
-  assert.equal(demoCopy.detail, '');
-  assert.match(demoCopy.title, /Demo/);
-
-  for (const state of [CRITERIA_STATE.FAILED, CRITERIA_STATE.DEMO, CRITERIA_STATE.EMPTY]) {
+  for (const state of [CRITERIA_STATE.FAILED, CRITERIA_STATE.EMPTY]) {
     for (const subject of ['scores', 'feedback']) {
       const copy = contentSheetEmptyCopy(state, { error: 'boom', subject });
       assertNoPlaceholders(`${copy.title} ${copy.hint}`);

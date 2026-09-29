@@ -2,9 +2,8 @@
 //
 // The entry chunk is everything reachable from `src/main.jsx` by *static*
 // import. A login has to render the dashboard, so that is what belongs there;
-// the session workspace (player, crop timeline, score tabs, cohort charts) and
-// the bundled demo fixtures are reached only by a deliberate second click, and
-// each is its own chunk.
+// the session workspace (player, crop timeline, score tabs, cohort charts) is
+// reached only by a deliberate second click, and is its own chunk.
 //
 // The failure mode this guards is silent: adding `import { X } from
 // '@/workspace/…'` anywhere in the dashboard's graph — for a constant, a helper,
@@ -35,7 +34,6 @@ const LAZY_ONLY = [
   ['src/AcceptInviteScreen.jsx', 'an invitation link'],
   ['src/ForgotPasswordScreen.jsx', 'the "Forgot your password?" link'],
   ['src/ResetPasswordScreen.jsx', 'a password-reset link'],
-  ['src/lib/demoSessions.js', 'a demo button'],
 ];
 
 // `import x from 'y'` / `import {a} from 'y'` / `import 'y'` / `export … from 'y'`.
