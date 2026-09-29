@@ -415,6 +415,7 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         jobs,
         notifications,
         videos,
+        storage=storage,
     )
     clips = ClipService(sessions, events, media, pipeline, jobs, notifications, maintenance=session_maintenance)
     jobs.bind_handlers(pipeline=pipeline, clips=clips)

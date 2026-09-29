@@ -766,6 +766,21 @@ def test_video_retention_sweep_disabled_when_retention_days_is_zero(tmp_path) ->
     asyncio.run(_run())
 
 
+def test_container_wires_storage_into_session_maintenance(tmp_path) -> None:
+    """FIX 4: ``SessionMaintenanceService`` needs the container's object
+    storage to delete a purged/deleted video's committed object, not just its
+    local file — see test_session_maintenance_failures.py for the behaviour
+    this wiring enables."""
+
+    async def _run() -> None:
+        container = create_container(_settings(tmp_path))
+        await _init(container)
+        assert container.session_maintenance.storage is container.storage
+        await container.shutdown()
+
+    asyncio.run(_run())
+
+
 def test_artifact_teardown_with_no_session_id_never_touches_a_shared_root(tmp_path) -> None:
     async def _run() -> None:
         container = create_container(_settings(tmp_path))
