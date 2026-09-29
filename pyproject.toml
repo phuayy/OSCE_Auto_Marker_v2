@@ -87,7 +87,7 @@ dependencies = [
     # (scripts/detect_human_segments.py): RT-DETR runs through the transformers
     # stack above; Pillow is required by transformers' image processors at
     # runtime (frames are decoded via ffmpeg, so no OpenCV dependency).
-    "pillow==12.2.0",
+    "pillow==12.3.0",
 
     # Google Cloud Storage upload backend (STORAGE_BACKEND=gcs only). Imported
     # lazily, so a local-storage deployment never touches it.
