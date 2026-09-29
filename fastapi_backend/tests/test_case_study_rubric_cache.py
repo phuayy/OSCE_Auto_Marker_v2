@@ -158,6 +158,34 @@ def test_concurrent_markers_extract_once_between_them(
     assert sum(1 for result in results if result.source == "extracted") == 1
 
 
+def test_a_marker_that_takes_the_lock_after_the_holder_finished_adopts_its_entry(
+    case_study: Path, tmp_path: Path, counted_extraction, monkeypatch
+) -> None:
+    """The interleaving the test above only hits by chance, forced: this marker
+    reads a miss, and before it tries the lock another marker runs its whole
+    cycle — extract, publish, release. The free lock it then takes means
+    "finished", so it must adopt the entry rather than extract a second time."""
+    cache_dir = tmp_path / "cache"
+    original_acquire = case_study_rubric._acquire_lock
+    raced: list[bool] = []
+
+    def acquire_after_another_marker_finished(lock_path: Path) -> bool:
+        if not raced:
+            raced.append(True)
+            load_case_study_rubric(case_study, cache_dir=cache_dir)
+        return original_acquire(lock_path)
+
+    monkeypatch.setattr(case_study_rubric, "_acquire_lock", acquire_after_another_marker_finished)
+
+    result = load_case_study_rubric(case_study, cache_dir=cache_dir)
+
+    assert len(counted_extraction) == 1
+    assert result.source == "cache"
+    assert len(result.criteria) == 3
+    # The lock taken only to find the entry already there is still released.
+    assert not case_study_rubric.entry_path(cache_dir, result.digest).with_suffix(".lock").exists()
+
+
 def test_a_stale_lock_does_not_block_a_run(case_study: Path, tmp_path: Path, monkeypatch) -> None:
     """A process killed while holding the lock must not make every later run
     wait it out — the lock is stolen once it is older than the stale window."""
