@@ -1378,6 +1378,20 @@ wheels = [
 ]
 
 [[package]]
+name = "grpcio-status"
+version = "1.83.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "googleapis-common-protos" },
+    { name = "grpcio" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/db/03/dee41fe15a9657c60397c1f215622a1f146e174367bbbb67911b62ee0629/grpcio_status-1.83.1.tar.gz", hash = "sha256:c08c8d553d6ab96effae1d923839de22926f5a316a942f48a48040e047c517af", size = 13957, upload-time = "2026-08-28T07:12:25.893Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e7/34/b03ec688e5c8c6ce283ec8b214d9c171e97059eb55157465f6fd6db1562c/grpcio_status-1.83.1-py3-none-any.whl", hash = "sha256:2cd328ee62ef2b3eb957dd3b75db7dadcdbb76488fdc9ab3aba1ebfbbdc324a4", size = 14636, upload-time = "2026-08-28T07:12:15.982Z" },
+]
+
+[[package]]
 name = "grpcio-tools"
 version = "1.81.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1431,11 +1445,12 @@ wheels = [
 
 [[package]]
 name = "hatchet-sdk"
-version = "1.33.7"
+version = "1.41.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
     { name = "grpcio" },
+    { name = "grpcio-status" },
     { name = "grpcio-tools" },
     { name = "prometheus-client" },
     { name = "protobuf" },
@@ -1446,9 +1461,9 @@ dependencies = [
     { name = "typing-inspection" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/64/dc/b64d37249669e77e320ca4dae6555979b5955f6237e059b6111426a28968/hatchet_sdk-1.33.7.tar.gz", hash = "sha256:f9f2b2e07b939ac576b714e10d87e1d71fb5a8c6633217612e22fc602a6f0eec", size = 4598, upload-time = "2026-06-09T20:08:45.704Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/50/f7/4c2563e7f450b4d533c35ccb646a185b3d2cf2f8ab03acc2c1a34dabfb2f/hatchet_sdk-1.41.1.tar.gz", hash = "sha256:2b67f0499e90b384724c8fd16fce8a1b55585f259c6b65f2c9c86339c89ed587", size = 5357, upload-time = "2026-09-24T16:40:05.336Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9b/ed/403378b2fb481c1eab1fa263630e375f74475bf19f9a07c7b1ea15850236/hatchet_sdk-1.33.7-py3-none-any.whl", hash = "sha256:e1c7d85315ffabf74a28550dace562e11193c5f1c69db0c07371e6732393bbc8", size = 630761, upload-time = "2026-06-09T20:08:47.264Z" },
+    { url = "https://files.pythonhosted.org/packages/36/dc/5bd3f93d8f9d95e18cec9eea5c95bdd9a78fbc446f14bcb1a1e5db70f9ba/hatchet_sdk-1.41.1-py3-none-any.whl", hash = "sha256:2128eefb4189f6d4c05676140f408fec982f1b62e0cf9412a32c4f9c901a125e", size = 665915, upload-time = "2026-09-24T16:40:06.994Z" },
 ]
 
 [[package]]
@@ -2993,7 +3008,7 @@ requires-dist = [
     { name = "cryptography", specifier = "==50.0.1" },
     { name = "fastapi", specifier = "==0.141.1" },
     { name = "google-cloud-storage", specifier = "==2.19.0" },
-    { name = "hatchet-sdk", specifier = "==1.33.7" },
+    { name = "hatchet-sdk", specifier = "==1.41.1" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "librosa", specifier = "==0.11.0" },
     { name = "numpy", specifier = "==2.4.4" },
