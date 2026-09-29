@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -12,23 +11,11 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from app.core.asyncio_compat import configure_windows_selector_event_loop_policy  # noqa: E402
 from app.core.config import settings  # noqa: E402
+from app.database.db_url import redact_database_url  # noqa: E402, F401 -- re-exported for scripts/deploy_check.py
 from app.database.orm import OrmDatabase  # noqa: E402
 
 
 configure_windows_selector_event_loop_policy()
-
-
-def redact_database_url(url: str) -> str:
-    parsed = urlsplit(url)
-    if not parsed.password:
-        return url
-
-    username = parsed.username or ""
-    hostname = parsed.hostname or ""
-    passwordless_auth = f"{username}:***@" if username else ""
-    port = f":{parsed.port}" if parsed.port else ""
-    netloc = f"{passwordless_auth}{hostname}{port}"
-    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
 async def main() -> None:

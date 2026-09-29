@@ -7,11 +7,11 @@ from contextvars import ContextVar
 
 from sqlalchemy import text
 from pathlib import Path
-from urllib.parse import urlparse
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
+from app.database.db_url import normalize_database_url
 from app.database.migration_runner import migrate_engine, verify_database_revision
 
 
@@ -154,23 +154,13 @@ class OrmDatabase:
 
     @classmethod
     def _normalize_url(cls, database_url_or_path: Path | str) -> str:
-        if isinstance(database_url_or_path, Path):
-            return cls._sqlite_url(database_url_or_path)
-
-        raw = str(database_url_or_path).strip()
-        if not raw:
-            raise ValueError("Database URL must not be empty.")
-
-        parsed = urlparse(raw)
-        if parsed.scheme in {"postgres", "postgresql"}:
-            return raw.replace(f"{parsed.scheme}://", "postgresql+psycopg://", 1)
-        if parsed.scheme == "postgresql+psycopg":
-            return raw
-        if parsed.scheme == "sqlite":
-            return raw.replace("sqlite://", "sqlite+aiosqlite://", 1)
-        if parsed.scheme == "sqlite+aiosqlite":
-            return raw
-        return cls._sqlite_url(Path(raw).expanduser())
+        # Delegates to app.database.db_url, the one normaliser every consumer
+        # of the configured database URL shares (alembic/env.py,
+        # scripts/deploy_check.py, scripts/backup_database.py,
+        # scripts/check_database.py, scripts/reset_db.py) — kept as a
+        # classmethod here rather than removed, since every one of those call
+        # sites (and most of this test suite) spells it OrmDatabase._normalize_url.
+        return normalize_database_url(database_url_or_path)
 
     @staticmethod
     def _connect_args(url: str) -> dict[str, object]:
@@ -179,8 +169,3 @@ class OrmDatabase:
         if url.startswith("sqlite"):
             return {"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS}
         return {}
-
-    @staticmethod
-    def _sqlite_url(path: Path) -> str:
-        resolved = path.expanduser().resolve()
-        return f"sqlite+aiosqlite:///{resolved.as_posix()}"

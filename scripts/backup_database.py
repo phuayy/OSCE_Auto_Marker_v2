@@ -31,6 +31,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from app.core.asyncio_compat import configure_windows_selector_event_loop_policy  # noqa: E402
 from app.core.config import server_bind_from_env, settings  # noqa: E402
+from app.database.db_url import DatabaseUrlError  # noqa: E402
 from app.database.migration_runner import to_sync_url  # noqa: E402
 from app.database.orm import OrmDatabase  # noqa: E402
 
@@ -358,6 +359,13 @@ def main() -> int:
         except BackupError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 2
+        except DatabaseUrlError as exc:
+            # A ValueError subclass, not a RuntimeError one -- caught here
+            # explicitly rather than falling through to an uncaught
+            # traceback. This must never back up (or restore into) a
+            # different database than the app actually uses.
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
         print(json.dumps({"schema": SCHEMA_VERSION, "ok": True, "restored": str(args.restore)}))
         return 0
 
@@ -371,6 +379,9 @@ def main() -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
     except BackupError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    except DatabaseUrlError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
     except RuntimeError as exc:

@@ -53,10 +53,13 @@ PG_TABLES = [
 async def reset_postgres(url: str) -> None:
     from sqlalchemy.ext.asyncio import create_async_engine
     from sqlalchemy import text
+    from app.database.orm import OrmDatabase
 
-    pg_url = url.replace("postgresql://", "postgresql+psycopg://", 1)
-    if not pg_url.startswith("postgresql+psycopg://"):
-        pg_url = "postgresql+psycopg://" + pg_url.split("://", 1)[-1]
+    # The one shared normaliser, not a hand-rolled replace/fallback: this used
+    # to guess at "postgresql://" -> "+psycopg" and otherwise just prepend the
+    # scheme, which could never recognise (or reject) anything this app does
+    # not actually support the way OrmDatabase._normalize_url does.
+    pg_url = OrmDatabase._normalize_url(url)
 
     engine = create_async_engine(pg_url, pool_pre_ping=True, connect_args={"prepare_threshold": None})
     async with engine.begin() as conn:
@@ -103,7 +106,11 @@ async def run(*, clear_all: bool) -> None:
     settings = Settings.load()
     db_source = settings.resolved_database_source
 
-    is_postgres = isinstance(db_source, str) and str(db_source).startswith(("postgres", "postgresql"))
+    # resolved_database_source now guarantees this: a str only for a
+    # validated Postgres scheme, a Path for everything else (SQLite, or the
+    # empty-config default) — anything else already raised DatabaseUrlError
+    # by this point.
+    is_postgres = isinstance(db_source, str)
     sqlite_path = settings.paths.database_path
 
     print()
