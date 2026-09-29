@@ -147,8 +147,8 @@ def test_navigation_paths() -> None:
     assert is_navigation_path("/") is True
     # What Starlette hands over for the root, and on Windows.
     assert is_navigation_path(".") is True
-    assert is_navigation_path("session\abc") is True
-    assert is_navigation_path("assets\index-abc123.js") is False
+    assert is_navigation_path(r"session\abc") is True
+    assert is_navigation_path(r"assets\index-abc123.js") is False
     assert is_navigation_path("session/abc") is True
     assert is_navigation_path("rubric") is True
     assert is_navigation_path("favicon.svg") is False
@@ -159,7 +159,7 @@ def test_navigation_paths() -> None:
 
 def test_cache_policy() -> None:
     assert cache_control_for("assets/index-abc123.js", served_index=False) == IMMUTABLE_CACHE_CONTROL
-    assert cache_control_for("assets\index-abc123.js", served_index=False) == IMMUTABLE_CACHE_CONTROL
+    assert cache_control_for(r"assets\index-abc123.js", served_index=False) == IMMUTABLE_CACHE_CONTROL
     assert cache_control_for("", served_index=True) == REVALIDATE_CACHE_CONTROL
     assert cache_control_for("session/abc", served_index=True) == REVALIDATE_CACHE_CONTROL
     assert cache_control_for("favicon.svg", served_index=False) is None
