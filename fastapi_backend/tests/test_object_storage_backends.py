@@ -118,3 +118,140 @@ def test_local_prepare_session_sources_resolves_both_source_files(tmp_path) -> N
     resolved = asyncio.run(storage.prepare_session_sources(session))
     assert resolved["files"]["video"]["absolutePath"] == str(tmp_path / "v.mp4")
     assert resolved["files"]["caseStudy"]["absolutePath"] == str(tmp_path / "c.pdf")
+
+
+# ----------------------------------------------------------------------
+# delete_committed_object — audit finding 4 (session retention/deletion had
+# no storage operation to delete a committed object, only the local path).
+# ----------------------------------------------------------------------
+
+
+def test_local_delete_committed_object_removes_the_file(tmp_path) -> None:
+    storage = create_storage_service(_settings(tmp_path))
+    stored = storage.settings.object_storage_root / "sessions" / "s1" / "source" / "video" / "station.mp4"
+    stored.parent.mkdir(parents=True, exist_ok=True)
+    stored.write_bytes(b"payload")
+
+    ref = {"provider": "local", "key": "sessions/s1/source/video/station.mp4"}
+    assert asyncio.run(storage.delete_committed_object(ref)) is True
+    assert not stored.exists()
+
+
+def test_local_delete_committed_object_refuses_a_key_escaping_the_root(tmp_path) -> None:
+    storage = create_storage_service(_settings(tmp_path))
+    ref = {"provider": "local", "key": "../../etc/passwd"}
+    with pytest.raises(AppError):
+        asyncio.run(storage.delete_committed_object(ref))
+
+
+def test_local_delete_committed_object_missing_file_is_still_success(tmp_path) -> None:
+    """Already gone counts as gone — the caller must not treat this as a failure."""
+    storage = create_storage_service(_settings(tmp_path))
+    ref = {"provider": "local", "key": "sessions/s1/source/video/never-existed.mp4"}
+    assert asyncio.run(storage.delete_committed_object(ref)) is True
+
+
+def test_local_delete_committed_object_declines_a_foreign_ref(tmp_path) -> None:
+    """A ref this backend did not mint is not this backend's to delete."""
+    storage = create_storage_service(_settings(tmp_path))
+    assert asyncio.run(storage.delete_committed_object({"provider": "gcs", "key": "x"})) is False
+    assert asyncio.run(storage.delete_committed_object({"key": "x"})) is False
+
+
+class _FakeGcsBlob:
+    def __init__(self, name: str, data: bytes = b"payload") -> None:
+        self.name = name
+        self.data = data
+
+    @property
+    def size(self) -> int:
+        return len(self.data)
+
+
+class _FakeGcsBucket:
+    """Minimal double for the calls delete_committed_object makes."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, _FakeGcsBlob] = {}
+        self.deleted: list[tuple[str, object]] = []
+        self.fail_with: Exception | None = None
+
+    def delete_blob(self, name: str, if_generation_match=None, **_kwargs) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
+        if name not in self.objects:
+            from google.api_core.exceptions import NotFound
+
+            raise NotFound(f"no such object: {name}")
+        self.deleted.append((name, if_generation_match))
+        del self.objects[name]
+
+
+def _gcs_storage(tmp_path):
+    storage = create_storage_service(
+        _settings(tmp_path, storage_backend="gcs", gcs_bucket="osce-uploads")
+    )
+    bucket = _FakeGcsBucket()
+    storage._bucket = bucket
+    return storage, bucket
+
+
+def test_gcs_delete_committed_object_passes_the_generation_precondition(tmp_path) -> None:
+    storage, bucket = _gcs_storage(tmp_path)
+    key = "sessions/s1/source/video/station.mp4"
+    bucket.objects[key] = _FakeGcsBlob(key)
+
+    assert asyncio.run(storage.delete_committed_object({"provider": "gcs", "key": key, "generation": "42"})) is True
+    assert bucket.deleted == [(key, 42)]
+    assert not storage._cache_path(key).exists()
+
+
+def test_gcs_delete_committed_object_missing_object_is_success(tmp_path) -> None:
+    storage, bucket = _gcs_storage(tmp_path)
+    key = "sessions/s1/source/video/gone.mp4"
+
+    assert asyncio.run(storage.delete_committed_object({"provider": "gcs", "key": key})) is True
+    assert bucket.deleted == []
+
+
+def test_gcs_delete_committed_object_generation_mismatch_leaves_it_in_place(tmp_path) -> None:
+    """A PreconditionFailed means the object at this key is a different
+    generation than the one this ref committed — not ours to delete."""
+    from google.api_core.exceptions import PreconditionFailed
+
+    storage, bucket = _gcs_storage(tmp_path)
+    key = "sessions/s1/source/video/station.mp4"
+    bucket.objects[key] = _FakeGcsBlob(key)
+    bucket.fail_with = PreconditionFailed("generation mismatch")
+
+    assert asyncio.run(storage.delete_committed_object({"provider": "gcs", "key": key, "generation": "7"})) is True
+    assert key in bucket.objects  # the object itself was not touched
+    assert bucket.deleted == []
+
+
+def test_gcs_delete_committed_object_other_failures_propagate(tmp_path) -> None:
+    storage, bucket = _gcs_storage(tmp_path)
+    key = "sessions/s1/source/video/station.mp4"
+    bucket.objects[key] = _FakeGcsBlob(key)
+    bucket.fail_with = RuntimeError("simulated bucket outage")
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(storage.delete_committed_object({"provider": "gcs", "key": key}))
+
+
+def test_gcs_delete_committed_object_removes_the_cache_copy(tmp_path) -> None:
+    storage, bucket = _gcs_storage(tmp_path)
+    key = "sessions/s1/source/video/station.mp4"
+    bucket.objects[key] = _FakeGcsBlob(key)
+    cache_path = storage._cache_path(key)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(b"cached")
+
+    asyncio.run(storage.delete_committed_object({"provider": "gcs", "key": key}))
+    assert not cache_path.exists()
+
+
+def test_gcs_delete_committed_object_declines_a_foreign_ref(tmp_path) -> None:
+    storage, _bucket = _gcs_storage(tmp_path)
+    assert asyncio.run(storage.delete_committed_object({"provider": "local", "key": "x"})) is False
+    assert asyncio.run(storage.delete_committed_object({"key": "x"})) is False

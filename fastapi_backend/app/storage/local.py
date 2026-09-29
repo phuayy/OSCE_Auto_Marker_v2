@@ -33,6 +33,7 @@ from app.storage.base import (
 class LocalObjectStorageService:
     provider = "local"
     strategy = "local_multipart"
+    relays_parts = True
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -240,9 +241,61 @@ class LocalObjectStorageService:
         mark_file_committed(file_record, storage_ref, expected_size)
         return storage_ref
 
+    async def verify_received(self, upload: dict[str, Any], file_record: dict[str, Any]) -> None:
+        """Today's parts-completeness check, unchanged: exactly what ``complete``
+        used to run inline before every backend needed its own version of it."""
+        expected_size = int(file_record.get("sizeBytes") or 0)
+        parts = file_record.get("parts") or []
+        uploaded_size = sum(int(part.get("sizeBytes") or 0) for part in parts)
+        if not parts:
+            raise AppError(f"{file_record.get('kind')} upload has no parts.", status_code=400)
+        if uploaded_size != expected_size:
+            raise AppError(
+                f"{file_record.get('kind')} upload is incomplete "
+                f"({uploaded_size}/{expected_size} bytes received, {len(parts)} parts).",
+                status_code=400,
+            )
+
     async def abort_upload(self, upload: dict[str, Any]) -> None:
         upload_dir = self.settings.object_storage_staging_root / str(upload["id"])
         await asyncio.to_thread(lambda: shutil.rmtree(upload_dir, ignore_errors=True))
+
+    async def release_staging(self, upload: dict[str, Any]) -> None:
+        """After a successful commit, the relayed part files are pure staging —
+        the final file was already assembled and renamed into place, so this is
+        the same directory cleanup ``abort_upload`` does, just under a name that
+        does not imply the upload itself was abandoned."""
+        await self.abort_upload(upload)
+
+    async def delete_committed_object(self, storage_ref: dict[str, Any]) -> bool:
+        """Delete one committed object's file from ``object_storage_root``.
+
+        Only acts on a ref this backend produced (``provider == "local"``); a
+        foreign ref returns ``False`` so the caller can fall back to unlinking
+        whatever local path it already knows about.
+        """
+        if str(storage_ref.get("provider") or "") != self.provider:
+            return False
+        key = str(storage_ref.get("key") or "")
+        if not key:
+            return False
+        path = self._resolve_key_path(key)
+
+        def _unlink() -> bool:
+            path.unlink(missing_ok=True)
+            return True
+
+        return await asyncio.to_thread(_unlink)
+
+    def _resolve_key_path(self, key: str) -> Path:
+        """Resolve a stored key to a path under ``object_storage_root``, refusing
+        anything that would escape it — the same discipline the GCS backend's
+        ``_safe_key`` applies to its cache, since a doctored key here is just as
+        capable of pointing outside the storage root."""
+        normalized = key.replace("\\", "/").strip("/")
+        if not normalized or ".." in normalized.split("/"):
+            raise AppError("Invalid object key.", status_code=400)
+        return self.settings.object_storage_root / normalized
 
     def public_url_for_key(self, key: str) -> str:
         normalized_key = key.replace("\\", "/")

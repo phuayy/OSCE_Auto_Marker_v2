@@ -592,7 +592,20 @@ is a no-op path fixup on `local` and a checksum-verified, cached download on
 `gcs`, so a job retried on a worker that has never seen the session fetches what
 it needs, and a retry on the same worker reuses the cache.
 
-Assembly runs as background asyncio task tracked by `BackgroundTaskRegistry` so HTTP handler returns in < 1s. Session state: `waiting_for_upload -> assembling -> uploaded -> queued -> processing -> completed`.
+Assembly runs as background asyncio task tracked by `BackgroundTaskRegistry` so HTTP handler returns in < 1s.
+
+**What differs per backend is behind the storage protocol, never an `if` on the
+strategy in the service.** `verify_received` is the pre-commit check `complete`
+runs (local: relayed parts sum to the declared size; GCS: the object exists at
+the declared size — a direct upload has no parts). `relays_parts` tells startup
+recovery whether an interrupted assembly can be judged from its part ledger or
+must simply be resumed (`complete_file` re-verifies the bucket object).
+`release_staging` is what a *successful* commit — or the expiry sweep of a
+committed record — cleans up; `abort_upload` is only for uploads that never
+committed, because on GCS it deletes the objects by key, which after a commit
+are the session's source files. `delete_committed_object(storageRef)` removes
+one committed source (GCS: generation-scoped; `NotFound` counts as done), and
+is what retention and session deletion call. Session state: `waiting_for_upload -> assembling -> uploaded -> queued -> processing -> completed`.
 
 **Parts are serialised per upload, so the client may send them in parallel.**
 The upload record is a JSON file rewritten on every part; without a lock, two

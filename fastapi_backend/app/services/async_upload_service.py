@@ -296,20 +296,14 @@ class AsyncUploadService:
         if upload.get("status") not in {UploadStatus.INITIATED, UploadStatus.UPLOADING, UploadStatus.FAILED}:
             raise AppError("Upload cannot be completed in its current state.", status_code=409)
 
-        # Lightweight completeness check: verify all declared bytes are present before
-        # committing.  The heavy SHA-256 + file-assembly work happens in the background.
+        # Lightweight completeness check: verify the object is actually present
+        # before committing. What "present" means differs by backend — relayed
+        # parts summing to the declared size, locally; the bucket object itself,
+        # on GCS, which never has parts to relay — so this is delegated rather
+        # than assumed here. The heavy SHA-256 + file-assembly work happens in
+        # the background via complete_file.
         for file_record in upload.get("files") or []:
-            expected_size = int(file_record.get("sizeBytes") or 0)
-            parts = file_record.get("parts") or []
-            uploaded_size = sum(int(p.get("sizeBytes") or 0) for p in parts)
-            if not parts:
-                raise AppError(f"{file_record.get('kind')} upload has no parts.", status_code=400)
-            if uploaded_size != expected_size:
-                raise AppError(
-                    f"{file_record.get('kind')} upload is incomplete "
-                    f"({uploaded_size}/{expected_size} bytes received, {len(parts)} parts).",
-                    status_code=400,
-                )
+            await self.storage.verify_received(upload, file_record)
 
         should_process = upload.get("autoProcess")
         if payload.autoProcess is not None:
@@ -397,9 +391,13 @@ class AsyncUploadService:
                 upload, should_process, video_ref, case_study_ref, case_study_asset, case_study_deduplicated,
             )
 
-            # Part files are only deleted once both records are durable.
+            # Staging is only released once both records are durable. This is
+            # release_staging, not abort_upload: on GCS abort_upload deletes the
+            # bucket object itself (it exists to discard an *abandoned* upload's
+            # objects), which would delete the very files _commit_assembled just
+            # made durable — see the module docstring's finding 3b.
             try:
-                await self.storage.abort_upload(upload)
+                await self.storage.release_staging(upload)
             except OSError:
                 logger.warning("Committed upload parts need cleanup: %s", upload_id, exc_info=True)
             await self.events.publish(session_id, "status", {"code": "upload_committed", "message": "Upload committed."})
@@ -578,7 +576,7 @@ class AsyncUploadService:
             upload_id = str(upload.get("id", ""))
             session_id = str(upload.get("sessionId", ""))
 
-            if self._parts_complete(upload):
+            if self._recovery_can_resume(upload):
                 self._background_tasks.spawn(
                     self._assemble_and_dispatch(upload_id, bool(upload.get("autoProcess"))),
                     name=f"assemble-upload:{upload_id}",
@@ -649,6 +647,22 @@ class AsyncUploadService:
                 resumed,
                 failed,
             )
+
+    def _recovery_can_resume(self, upload: dict[str, Any]) -> bool:
+        """Whether ``_assemble_and_dispatch`` should be resumed for this upload.
+
+        On a backend that relays parts, "complete" means the parts on disk sum
+        to the declared size — ``_parts_complete`` below. A backend that does
+        not (GCS: the browser PUT straight at the bucket, there is no `parts`
+        list to sum) has nothing local to check here at all; the resumed
+        ``_assemble_and_dispatch`` -> ``complete_file`` re-reads the bucket
+        object itself, so a killed-and-restarted process still gets an honest
+        answer. Treating "no parts" as "incomplete" for such a backend would
+        fail every direct upload a restart ever interrupted.
+        """
+        if not self.storage.relays_parts:
+            return bool(upload.get("files"))
+        return self._parts_complete(upload)
 
     @staticmethod
     def _parts_complete(upload: dict[str, Any]) -> bool:
@@ -725,7 +739,14 @@ class AsyncUploadService:
             expires = parse_iso(upload.get("expiresAt"))
             if expires is None or expires >= datetime.now(timezone.utc):
                 return 0
-            if upload.get("status") in {UploadStatus.COMMITTED, UploadStatus.ABORTED, UploadStatus.EXPIRED}:
+            if upload.get("status") == UploadStatus.COMMITTED:
+                # A committed upload's objects are the session's source files
+                # now; only its staging is left to reclaim. ``abort_upload``
+                # here deleted them on GCS (same keys) once the TTL passed.
+                await self.storage.release_staging(upload)
+                await self.repository.delete_expired(upload_id)
+                return 1
+            if upload.get("status") in {UploadStatus.ABORTED, UploadStatus.EXPIRED}:
                 await self.storage.abort_upload(upload)
                 await self.repository.delete_expired(upload_id)
                 return 1
