@@ -60,7 +60,7 @@ jobs:
       # Consumed by the release job (push-to-main only); short retention
       # because a PR build is never released and a main build is re-derivable
       # from the commit at any time.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
