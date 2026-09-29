@@ -33,7 +33,7 @@ jobs:
       # promotion never re-derives anything, only verifies and republishes),
       # so this workflow needs no uv sync and pays none of ci.yml's CUDA
       # wheel download.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version-file: .python-version
       - name: Resolve the tag's commit
