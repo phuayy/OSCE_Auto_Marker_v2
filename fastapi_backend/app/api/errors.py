@@ -59,6 +59,14 @@ def http_error(
     and the client receives only that id, so a support request can be tied to
     the stack trace without publishing it.
     """
+    if isinstance(error, HTTPException):
+        # A deliberate HTTP refusal raised inside a route's own try/except —
+        # e.g. ``MaxBodySizeMiddleware``'s ``RequestBodyTooLarge`` surfacing
+        # through a handler that reads the body itself and converts whatever
+        # it catches via this function — must pass through unchanged. Without
+        # this it falls through to the generic 500 branch below and a 413
+        # the caller already decided on turns into "Unexpected server error."
+        return error
     if isinstance(error, AppError):
         response = HTTPException(status_code=error.status_code, detail=error.message)
         # Not an HTTPException field; attached so the generic handler in

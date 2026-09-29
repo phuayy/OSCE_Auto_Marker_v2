@@ -150,7 +150,11 @@ def build_app(app_settings: Settings) -> FastAPI:
     # Added after CORS so it runs before it (and long before require_auth):
     # a body too large to read is rejected before either does any work, and
     # certainly before Starlette buffers it. See app/core/body_limit.py.
-    application.add_middleware(MaxBodySizeMiddleware, max_bytes=app_settings.max_request_body_bytes)
+    application.add_middleware(
+        MaxBodySizeMiddleware,
+        max_bytes=app_settings.max_request_body_bytes,
+        part_max_bytes=app_settings.upload_part_size_bytes,
+    )
 
     # Added last so it wraps everything, including the middlewares above:
     # every response gets these headers, a CORS preflight, a 413 from the
