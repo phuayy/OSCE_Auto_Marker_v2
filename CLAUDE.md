@@ -2175,8 +2175,13 @@ Five properties the design rests on:
   every other provider's, so a custom vendor inherits the AES-256-GCM sealing,
   the write-only API, the `credential_env_for` narrowing and the
   rotation-evicts-every-cache behaviour with no second implementation. The key
-  reaches a subprocess as `OSCE_LLM_KEY_<ID>`, a name generated from the id so two
-  providers can never share a variable.
+  reaches a subprocess as `OSCE_LLM_KEY_<ID>`, a name generated from the id.
+  The encoding is readable, not injective — `clinic-a`, `clinic_a` and
+  `clinic.a` all spell `OSCE_LLM_KEY_CLINIC_A`, and two such providers routed
+  together would each be sent the other's key. `CustomProviderService.save`
+  refuses an id whose variable another stored row (disabled ones included)
+  already spells; `ProviderCatalog.with_custom` drops the later of two
+  colliding definitions (lowest id wins) for rows stored before that check.
 * **Definitions travel with the routing.** `subprocess_env()` serialises them
   into `OSCE_LLM_CUSTOM_PROVIDERS` alongside `OSCE_LLM_ROUTING`, from the same
   resolved snapshot, so a scorer told to call `campus-gateway` can find out what

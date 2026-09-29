@@ -37,7 +37,12 @@ from typing import TYPE_CHECKING, Any
 
 from app.core.snapshot_cache import SnapshotCache
 from app.llm.catalog import ProviderCatalog, builtin_catalog
-from app.llm.custom import CustomProviderError, CustomProviderSpec, validate_provider_endpoint
+from app.llm.custom import (
+    CustomProviderError,
+    CustomProviderSpec,
+    key_env_name,
+    validate_provider_endpoint,
+)
 from app.llm.registry import PROVIDER_FACTORIES
 from app.repositories.custom_provider_repository import CustomProviderRepository
 
@@ -166,6 +171,28 @@ class CustomProviderService:
                 f"'{spec.id}' is the id of a provider this build already ships. "
                 "Choose a different id — redefining a shipped provider is not allowed."
             )
+
+        # key_env_name() is readable but not injective — 'clinic-a', 'clinic_a'
+        # and 'clinic.a' all encode to OSCE_LLM_KEY_CLINIC_A. If two colliding
+        # ids were both stored and routed, a subprocess's environment would end
+        # up with one key under that variable and each vendor would be sent
+        # whichever key loaded last. Checked against every OTHER stored row —
+        # disabled ones included, since a row can be re-enabled without going
+        # through this check again — so the collision is refused before it can
+        # ever be saved rather than only dropped later at catalogue build time
+        # (see ProviderCatalog.with_custom for that second line of defense).
+        wanted_env_name = key_env_name(spec.id)
+        for record in await self.repository.list_all():
+            # The stored id alone decides the variable, so a row whose other
+            # fields no longer parse still reserves it.
+            if record.id == spec.id:
+                continue
+            if key_env_name(record.id) == wanted_env_name:
+                raise CustomProviderError(
+                    f"'{spec.id}' would share the key variable {wanted_env_name} with the "
+                    f"existing provider '{record.id}'; choose an id that differs by more than "
+                    "punctuation."
+                )
 
         existing = await self.repository.get(spec.id)
         if existing is None and not allow_create:
