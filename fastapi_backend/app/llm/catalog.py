@@ -29,7 +29,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from app.llm import registry
 from app.llm.base import LLMProvider, ProviderCredentials, ProviderDescriptor
-from app.llm.custom import CustomProviderError, CustomProviderSpec
+from app.llm.custom import CustomProviderError, CustomProviderSpec, key_env_name
 from app.llm.providers.custom import build_custom_provider
 
 logger = logging.getLogger(__name__)
@@ -97,12 +97,31 @@ class ProviderCatalog:
         Disabled definitions are dropped here rather than filtered by each
         caller: "disabled" has to mean the router cannot reach it, not merely
         that the screen greys it out.
+
+        ``CustomProviderService.save`` refuses a new collision on
+        ``key_env_name`` at write time, but a row saved before that guard
+        existed can still be sitting in the table, and this is the
+        catalogue-construction defense in depth for it: two enabled specs
+        that would share one ``OSCE_LLM_KEY_<...>`` variable can never both be
+        routable, because whichever loaded second would silently overwrite the
+        first vendor's key with its own before either subprocess ran. Specs are
+        walked in id order — not insertion order — so which one wins is
+        deterministic and not an accident of how ``list_all()`` happened to
+        return rows; the loser is dropped with a warning naming both ids and
+        the shared variable, same as the shipped-id collision below.
         """
         factories = dict(self.factories)
         descriptors = dict(self.descriptors)
         custom = dict(self.custom)
 
-        for spec in specs:
+        # Env names already spoken for by a custom provider already in this
+        # catalogue (an earlier with_custom() call), so a second call can still
+        # catch a collision against what is already loaded.
+        claimed_env_names: dict[str, str] = {
+            key_env_name(existing_id): existing_id for existing_id in custom
+        }
+
+        for spec in sorted(specs, key=lambda s: s.id):
             if not spec.enabled:
                 continue
             if spec.id in registry.PROVIDER_FACTORIES:
@@ -112,6 +131,19 @@ class ProviderCatalog:
                     spec.id,
                 )
                 continue
+            env_name = key_env_name(spec.id)
+            holder = claimed_env_names.get(env_name)
+            if holder is not None and holder != spec.id:
+                logger.warning(
+                    "Ignoring the custom provider definition '%s': it would share the key "
+                    "variable %s with '%s', and routing both would hand one vendor the "
+                    "other's credential.",
+                    spec.id,
+                    env_name,
+                    holder,
+                )
+                continue
+            claimed_env_names[env_name] = spec.id
             factories[spec.id] = _factory_for(spec)
             descriptors[spec.id] = spec.to_descriptor()
             custom[spec.id] = spec

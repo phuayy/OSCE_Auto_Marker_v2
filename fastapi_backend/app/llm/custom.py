@@ -112,8 +112,15 @@ class CustomProviderError(ValueError):
 def key_env_name(provider_id: str) -> str:
     """The environment variable a custom provider's key travels to a subprocess in.
 
-    Generated rather than operator-chosen so two custom providers can never be
-    given the same variable name and silently share a credential.
+    Generated rather than operator-chosen so the name is at least readable
+    (``clinic-a`` -> ``OSCE_LLM_KEY_CLINIC_A``) without an operator having to
+    invent one. It is **not** injective: uppercasing and collapsing every
+    non-alphanumeric run to ``_`` means ``clinic-a``, ``clinic_a`` and
+    ``clinic.a`` all land on the same variable, and two ids that valid must
+    never both be routable at once. That is refused at the write boundary
+    (``CustomProviderService.save``) and, for a row stored before the check
+    existed, dropped at catalogue construction
+    (``ProviderCatalog.with_custom``) — see both for the collision rule.
     """
     slug = re.sub(r"[^A-Z0-9]+", "_", str(provider_id or "").upper()).strip("_")
     return f"OSCE_LLM_KEY_{slug or 'CUSTOM'}"
