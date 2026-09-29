@@ -53,7 +53,11 @@ serves the built frontend.
    uploading and processing at once will feel it as queueing latency.
    `ENVIRONMENT=production` on SQLite prints a startup warning for exactly
    this, but the fix is cheapest decided before the first deploy: point
-   `DATABASE_URL` at PostgreSQL instead (`postgresql+asyncpg://...`) — no code
+   `DATABASE_URL` at PostgreSQL instead (`postgresql+psycopg://...` — this repo
+   installs psycopg, not asyncpg; an unrecognised scheme falls through
+   `OrmDatabase._normalize_url` to its SQLite-file-path fallback, so a typo'd
+   driver here boots silently against an empty local SQLite file instead of
+   Postgres) — no code
    change, migrations run the same way at startup. Reserve SQLite for a
    single-marker or evaluation deployment.
 

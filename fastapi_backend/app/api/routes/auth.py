@@ -33,7 +33,12 @@ async def login(
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
     container.login_rate_limiter.check(
-        client_ip(request, container.settings.trusted_proxy_count, container.settings.trusted_proxy_ips)
+        client_ip(
+            request,
+            container.settings.trusted_proxy_count,
+            container.settings.trusted_proxy_ips,
+            container.settings.trusted_client_ip_header,
+        )
     )
     result = await container.auth.authenticate(payload.username, payload.password)
     if not result:
@@ -110,7 +115,12 @@ async def change_password(
 
 def _throttle(request: Request, container: AppContainer) -> None:
     container.token_rate_limiter.check(
-        client_ip(request, container.settings.trusted_proxy_count, container.settings.trusted_proxy_ips)
+        client_ip(
+            request,
+            container.settings.trusted_proxy_count,
+            container.settings.trusted_proxy_ips,
+            container.settings.trusted_client_ip_header,
+        )
     )
 
 

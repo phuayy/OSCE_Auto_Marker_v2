@@ -110,6 +110,7 @@ OSCE-AI-FYP/
 │       │   ├── snapshot_cache.py # One cached value, evicted by the database's own change feed
 │       │   ├── tasks.py        # BackgroundTaskRegistry (strong-ref fire-and-forget)
 │       │   ├── token_revocation.py
+│       │   ├── cache_policy.py # Default Cache-Control: private, no-store on /api and /media (CDN edge-cache guard)
 │       │   ├── webhook_url.py   # SSRF guard: blocks private/loopback/link-local destinations unless overridden
 │       │   └── logging_utils.py # log_context() structured logging helper
 │       ├── database/
@@ -219,9 +220,13 @@ OSCE-AI-FYP/
 │           └── hatchet_tasks.py     # @hatchet.task definitions
 ├── deploy/
 │   ├── nginx/osce-marker.conf.example     # Optional reverse proxy: part-size body limit, SSE unbuffered
-│   └── systemd/osce-marker.service.example
+│   ├── systemd/osce-marker.service.example
+│   ├── windows/                           # Self-hosted Windows PC: WinSW services, boot order, deploy/rollback/backup (docs/deployment-self-hosted-pc.md)
+│   └── cloudflared/                       # Cloudflare Tunnel config example + the dashboard settings this app needs
 ├── scripts/
 │   ├── run_api.py                   # Entry point: uvicorn launcher (API_HOST/API_PORT from config)
+│   ├── deploy_check.py              # Read-only deploy report: DB revision vs heads, in-flight sessions/jobs (drain gate); exit 0/2/3/4
+│   ├── backup_database.py           # Consistent DB backup (SQLite online backup / pg_dump) + --restore --confirm
 │   ├── dev-hosts.mjs                # Pure: Vite bind + proxy target from the same .env the API reads
 │   ├── llm_bootstrap.py             # Puts fastapi_backend on sys.path; re-exports the LLM router
 │   ├── nvidia_osce_assessor.py      # Content scoring subprocess: model call + checkpoint + repair loop
@@ -1618,6 +1623,7 @@ recording; its Student column the scored subject.
 | `MAX_REQUEST_BODY_MB` | `2` | Declared `Content-Length` cap for every route except `PUT /api/uploads/{id}/parts/{n}`, which enforces its own larger cap on the bytes actually received (`UPLOAD_PART_SIZE_MB`). Rejected before Starlette buffers the body — see `app/core/body_limit.py` |
 | `TRUSTED_PROXY_COUNT` | `0` | Reverse proxies in front. Must match the hop count or the login rate limit keys on the proxy's address. `scripts/run_api.py` starts uvicorn with `proxy_headers=False` so this app's own resolution (`client_ip()` in `api/dependencies.py`) is the only thing that ever honours `X-Forwarded-For` — uvicorn's own equivalent trusts loopback by default and would otherwise rewrite the client address *before* this setting is even consulted |
 | `TRUSTED_PROXY_IPS` | — (count-only) | The proxy's own address(es)/CIDRs, verified against the immediate TCP peer before `X-Forwarded-For` is trusted at all — hop-counting alone cannot tell a header the proxy added from one forged by a client reaching the API port directly, since both are the same length. Unset with `TRUSTED_PROXY_COUNT > 0`: a startup warning outside production; `ENVIRONMENT=production` refuses to start |
+| `TRUSTED_CLIENT_IP_HEADER` | — (off) | A header a trusted proxy *overwrites* with the real visitor address — `CF-Connecting-IP` behind a Cloudflare Tunnel, where the TCP peer is always loopback. Honoured only when the immediate peer is in `TRUSTED_PROXY_IPS` and the value parses as an IP; otherwise `client_ip()` falls through to the `X-Forwarded-For` logic. Set without `TRUSTED_PROXY_IPS`: a startup warning; `ENVIRONMENT=production` refuses to start. See [docs/deployment-self-hosted-pc.md](docs/deployment-self-hosted-pc.md) |
 | `TRANSCRIPTION_ENGINE` | `whisperx` | Fallback engine when Settings has no stored selection (`whisperx` \| `canary-qwen`) |
 | `CANARY_MODEL` | `nvidia/canary-qwen-2.5b` | NeMo SALM checkpoint for the Canary engine (`uv sync --group canary`) |
 | `TRANSCRIPTION_PREFETCH_MODELS` | `true` | Download the selected engine's weights in the background at startup; false = fetch on first run |

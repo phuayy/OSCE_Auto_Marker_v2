@@ -218,7 +218,12 @@ async def require_upload_owner(
     return upload
 
 
-def client_ip(request: Request, trusted_proxy_count: int = 0, trusted_proxy_ips: tuple[str, ...] = ()) -> str:
+def client_ip(
+    request: Request,
+    trusted_proxy_count: int = 0,
+    trusted_proxy_ips: tuple[str, ...] = (),
+    client_ip_header: str = "",
+) -> str:
     """The address the rate limiters key on.
 
     With no proxy the socket address is the client. Behind ``n`` trusted
@@ -240,8 +245,30 @@ def client_ip(request: Request, trusted_proxy_count: int = 0, trusted_proxy_ips:
     configured proxy addresses. Left empty (the default), the header is
     trusted by count alone, unchanged from before this parameter existed;
     ``Settings.collect_runtime_warnings`` flags that combination.
+
+    ``client_ip_header`` (``TRUSTED_CLIENT_IP_HEADER``) is a stronger
+    alternative for a proxy known to *overwrite* one header with the real
+    visitor address rather than append to a chain — Cloudflare's
+    ``CF-Connecting-IP`` behind a Cloudflare Tunnel is the motivating case,
+    where the TCP peer is always loopback and there is no X-Forwarded-For
+    chain to hop-count at all. It is honoured only when all three hold: a
+    header name is configured, ``trusted_proxy_ips`` is non-empty, and the
+    immediate peer is one of those addresses — the same proof-of-proxy
+    requirement X-Forwarded-For has, so the header can never be honoured on
+    its own say-so. A present-but-unparseable value (not an IP address once
+    stripped) is ignored rather than trusted; every other case falls straight
+    through to the X-Forwarded-For/socket-address logic below, unchanged.
     """
     socket_host = request.client.host if request.client else "unknown"
+    if client_ip_header and trusted_proxy_ips and _peer_is_trusted(socket_host, trusted_proxy_ips):
+        header_value = str(request.headers.get(client_ip_header) or "").strip()
+        if header_value:
+            try:
+                ip_address(header_value)
+            except ValueError:
+                pass
+            else:
+                return header_value
     if trusted_proxy_count <= 0:
         return socket_host
     if trusted_proxy_ips and not _peer_is_trusted(socket_host, trusted_proxy_ips):
