@@ -53,7 +53,7 @@ dependencies = [
     # head"; the app also applies them at startup unless DB_AUTO_MIGRATE=false.
     # See fastapi_backend/alembic/README.md.
     "alembic==1.19.1",
-    "aiosqlite==0.22.0",
+    "aiosqlite==0.22.1",
     "hatchet-sdk==1.41.1",
     "psycopg[binary,pool]==3.3.4",
 
