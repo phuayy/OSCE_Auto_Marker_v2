@@ -7,6 +7,27 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      # react-dom declares an exact peer on the matching react release, so a
+      # PR that moves only one of the pair cannot even `npm ci` — Dependabot
+      # used to open them separately and both failed CI with ERESOLVE. One PR
+      # for the pair is the only shape that can pass.
+      react:
+        patterns: ["react", "react-dom"]
+    ignore:
+      # Tailwind 4 is a rewrite of the toolchain, not a version bump: the
+      # PostCSS plugin moves to @tailwindcss/postcss, tailwind.config.js stops
+      # being read without an @config directive, the default palette is
+      # oklch() (tailwind.palette.js builds its tonal `rgb(var(--x) /
+      # <alpha-value>)` variables from hex, and test/theme.test.mjs computes
+      # contrast from hex), several utilities change meaning (ring width,
+      # border colour, shadow/rounded scales), and the browser floor rises to
+      # Safari 16.4 / Chrome 111 / Firefox 128. That is a planned migration on
+      # its own branch with a browser pass over every screen, the bar
+      # CLAUDE.md sets for UI changes — not something a Dependabot PR can
+      # carry. Minor and patch releases of 3.x still come through.
+      - dependency-name: "tailwindcss"
+        update-types: ["version-update:semver-major"]
 
   # The workflow files themselves (actions/checkout, astral-sh/setup-uv, ...).
   - package-ecosystem: github-actions
