@@ -12,32 +12,20 @@ These call the real handlers registered on the real `app.main.app`, not a
 reimplementation, but never start it: FastAPI stores exception handlers in a
 plain dict (`app.exception_handlers`) that exists once the module has been
 imported and the object constructed — no lifespan, no container, no I/O.
-test_admin_routes_are_guarded.py already relies on that same fact to walk
-`app.routes` safely.
+The route-guard tests rely on that same fact; tests/fixtures/app_routes.py
+imports the app once for all of them.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import logging
 
 from fastapi import HTTPException
 
 from app.api.errors import http_error
 from app.core.exceptions import AppError, StaleSessionError, TranscriptionResourceError
-
-# Importing app.main runs its logging setup, which stops the "app" logger
-# propagating to the root — and pytest's caplog listens on the root. Save and
-# restore what the import changes, the same guard
-# test_admin_routes_are_guarded.py uses, so tests that run after this module
-# in the same session still see the log lines they assert on.
-_app_logger = logging.getLogger("app")
-_saved_logging = (_app_logger.propagate, list(_app_logger.handlers), _app_logger.level)
-from app.main import app  # noqa: E402
-
-_app_logger.propagate, _app_logger.handlers[:], _ = _saved_logging
-_app_logger.setLevel(_saved_logging[2])
+from tests.fixtures.app_routes import app
 
 
 def _handle(exc_type: type, exc: Exception):

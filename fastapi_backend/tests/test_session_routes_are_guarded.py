@@ -13,18 +13,10 @@ creates the record the other routes gate, so there is nothing yet to own.
 
 from __future__ import annotations
 
-import logging
-
-from fastapi.routing import APIRoute
+from fastapi.routing import RouteContext
 
 from app.api.dependencies import require_job_owner, require_session_owner, require_upload_owner
-
-_app_logger = logging.getLogger("app")
-_saved_logging = (_app_logger.propagate, list(_app_logger.handlers), _app_logger.level)
-from app.main import app  # noqa: E402
-
-_app_logger.propagate, _app_logger.handlers[:], _ = _saved_logging
-_app_logger.setLevel(_saved_logging[2])
+from tests.fixtures.app_routes import api_routes
 
 _GUARDED_PREFIXES = ("/api/sessions/", "/api/jobs/", "/api/uploads/")
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -36,17 +28,15 @@ _OWNERSHIP_GATES = (require_session_owner, require_job_owner, require_upload_own
 _ALLOWLIST = {("POST", "/api/uploads/initiate")}
 
 
-def _mutating_routes() -> list[APIRoute]:
+def _mutating_routes() -> list[RouteContext]:
     return [
         route
-        for route in app.routes
-        if isinstance(route, APIRoute)
-        and route.path.startswith(_GUARDED_PREFIXES)
-        and route.methods & _MUTATING_METHODS
+        for route in api_routes()
+        if route.path.startswith(_GUARDED_PREFIXES) and route.methods & _MUTATING_METHODS
     ]
 
 
-def _has_ownership_gate(route: APIRoute) -> bool:
+def _has_ownership_gate(route: RouteContext) -> bool:
     return any(dependency.call in _OWNERSHIP_GATES for dependency in route.dependant.dependencies)
 
 

@@ -9,29 +9,17 @@ by identity — the same fail-closed idea as ``test_status_vocabulary.py``.
 
 from __future__ import annotations
 
-import logging
-
-from fastapi.routing import APIRoute
+from fastapi.routing import RouteContext
 
 from app.api.dependencies import require_admin
-
-# Importing the application module runs its logging setup, which stops the
-# ``app`` logger propagating to the root — and pytest's ``caplog`` listens on
-# the root. Restore what the import changed so the tests that run after this
-# module still see the log lines they assert on.
-_app_logger = logging.getLogger("app")
-_saved_logging = (_app_logger.propagate, list(_app_logger.handlers), _app_logger.level)
-from app.main import app  # noqa: E402
-
-_app_logger.propagate, _app_logger.handlers[:], _ = _saved_logging
-_app_logger.setLevel(_saved_logging[2])
+from tests.fixtures.app_routes import api_routes
 
 
-def _admin_routes() -> list[APIRoute]:
-    return [route for route in app.routes if isinstance(route, APIRoute) and route.path.startswith("/api/admin/")]
+def _admin_routes() -> list[RouteContext]:
+    return [route for route in api_routes() if route.path.startswith("/api/admin/")]
 
 
-def _has_admin_gate(route: APIRoute) -> bool:
+def _has_admin_gate(route: RouteContext) -> bool:
     return any(dependency.call is require_admin for dependency in route.dependant.dependencies)
 
 
