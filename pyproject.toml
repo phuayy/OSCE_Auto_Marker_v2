@@ -58,7 +58,7 @@ dependencies = [
     "psycopg[binary,pool]==3.3.4",
 
     # OpenAI-compatible client used by NVIDIA/OpenRouter scoring scripts.
-    "openai==2.41.1",
+    "openai==3.19.2",
 
     # Rubric parsing and audio/bell-analysis pipeline scripts.
     "pypdf==6.19.0",
