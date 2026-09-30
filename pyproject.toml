@@ -135,7 +135,7 @@ canary = [
     "nemo_toolkit[asr]==3.0.0",
     # nemo.collections.speechlm2 (the SALM path Canary-Qwen loads through)
     # imports peft at module import time, and the [asr] extra does not pull it in.
-    "peft==0.20.0",
+    "peft==0.21.0",
 ]
 
 [tool.uv]
