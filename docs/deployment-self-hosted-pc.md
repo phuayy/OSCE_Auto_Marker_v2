@@ -188,7 +188,10 @@ Agreed with the CI/CD session (draft until the user confirms the host choice):
 
 ## 6. One-time host build (Phase 1–2)
 
-Follow in order; each step has its check.
+Follow in order; each step has its check. Before a domain exists, the
+step-by-step walkthrough in [deployment-quick-tunnel.md](deployment-quick-tunnel.md)
+builds the same host behind a temporary Cloudflare Quick Tunnel and then
+switches it to the named tunnel with no reinstall.
 
 1. **BIOS/OS:** CPU virtualization **on** (VT-x / SVM — WSL2 needs it for the
    Hatchet containers; the app itself runs natively). Windows Update fully

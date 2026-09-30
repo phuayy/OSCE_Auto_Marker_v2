@@ -121,6 +121,23 @@ def test_production_env_has_hatchet_settings(prod_env_values: dict[str, str]) ->
     assert token_value == "" or "<" in token_value
 
 
+def test_production_env_sets_every_variable_the_hatchet_compose_file_requires(
+    prod_env_values: dict[str, str],
+) -> None:
+    # Compose interpolates the whole file before it selects services, so a
+    # ${VAR:?...} on app-postgres — a service Start-OsceStack.ps1 never
+    # starts — still aborts `up -d hatchet-postgres hatchet-lite` when VAR is
+    # unset. Every required variable must therefore be in the overlay, even
+    # the ones whose container never runs on this host.
+    compose_text = (REPO_ROOT / "docker-compose.hatchet.yml").read_text(encoding="utf-8")
+    required = set(re.findall(r"\$\{([A-Z0-9_]+):\?", compose_text))
+    assert required, "expected docker-compose.hatchet.yml to declare required variables"
+    missing = sorted(key for key in required if not prod_env_values.get(key))
+    assert not missing, (
+        f"production.env.example leaves compose-required variables unset: {missing}"
+    )
+
+
 def test_production_env_no_real_looking_secrets(prod_env_values: dict[str, str]) -> None:
     secret_like_keys = [
         key
