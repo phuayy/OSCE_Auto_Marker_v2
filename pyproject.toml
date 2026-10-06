@@ -52,7 +52,7 @@ dependencies = [
     # jobs tables). Run with "cd fastapi_backend && uv run alembic upgrade
     # head"; the app also applies them at startup unless DB_AUTO_MIGRATE=false.
     # See fastapi_backend/alembic/README.md.
-    "alembic==1.19.1",
+    "alembic==1.20.0",
     "aiosqlite==0.22.1",
     "hatchet-sdk==1.41.1",
     "psycopg[binary,pool]==3.3.4",
