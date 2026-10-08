@@ -537,8 +537,8 @@ npm run db:up|down|logs|ps|check|reset   # PostgreSQL helpers
 
 - All configuration lives in [.env.example](.env.example) (copy → `.env`).
 - Putting it on a VM that other devices upload to: [docs/deployment-vm.md](docs/deployment-vm.md)
-- One Windows desktop with Docker + PostgreSQL + Hatchet: [docs/desktop-technical-guide.md](docs/desktop-technical-guide.md) (installer in `deploy/desktop/`); for the people using it: [docs/desktop-user-guide.md](docs/desktop-user-guide.md)
   (`API_HOST`, `SERVE_FRONTEND`, the reverse-proxy settings that matter).
+- One Windows desktop with Docker + PostgreSQL + Hatchet: [docs/desktop-technical-guide.md](docs/desktop-technical-guide.md) (installer in `deploy/desktop/`); for the people using it: [docs/desktop-user-guide.md](docs/desktop-user-guide.md)
 - Architecture deep-dive for contributors/AI agents: [CLAUDE.md](CLAUDE.md).
 - Extended local setup notes: [LOCAL_SETUP.md](LOCAL_SETUP.md).
 - Multi-model marking design: [docs/multi-model-marking-plan.md](docs/multi-model-marking-plan.md).
