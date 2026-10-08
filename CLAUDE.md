@@ -220,6 +220,7 @@ OSCE-AI-FYP/
 ├── deploy/
 │   ├── nginx/osce-marker.conf.example     # Optional reverse proxy: part-size body limit, SSE unbuffered
 │   ├── systemd/osce-marker.service.example
+│   ├── desktop/                           # One Windows desktop on localhost: Docker (Postgres + Hatchet) + native API/worker; install/start/stop/backup (docs/desktop-technical-guide.md, docs/desktop-user-guide.md)
 │   ├── windows/                           # Self-hosted Windows PC: WinSW services, boot order, deploy/rollback/backup (docs/deployment-self-hosted-pc.md)
 │   └── cloudflared/                       # Cloudflare Tunnel config example + the dashboard settings this app needs
 ├── scripts/
