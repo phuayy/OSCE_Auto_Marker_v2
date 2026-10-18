@@ -23,7 +23,7 @@ from app.database.models import JobEventRecord
 from app.database.orm import OrmDatabase
 from app.repositories.job_repository import JobRepository
 from app.services.event_service import EventService
-from app.services.job_queue_service import JobQueueService, JobRunResult, is_retryable_failure
+from app.services.job_queue_service import FinalJobFailure, JobQueueService, JobRunResult, is_retryable_failure
 from tests.fixtures.session_store import SessionUpdateMixin
 
 
@@ -280,17 +280,87 @@ def test_run_job_reports_the_failure_to_its_caller(tmp_path) -> None:
     assert result.job is not None and result.job["status"] == "failed"
 
 
-def test_hatchet_path_still_raises_and_fails_the_session(tmp_path) -> None:
-    """``raise_on_error`` is how the Hatchet worker learns a run failed; the
-    retry work must not have swallowed it."""
+def run_hatchet_attempts(service: JobQueueService, session_id: str, attempts: int) -> tuple[str, list[BaseException]]:
+    """Drive a job the way the Hatchet worker does: one ``run_job`` per attempt,
+    each preceded by ``prepare_hatchet_retry_attempt``, stopping when an attempt
+    succeeds or raises the non-retryable ``FinalJobFailure``."""
+    raised: list[BaseException] = []
+
+    async def scenario() -> str:
+        await service.repository.initialize()
+        job = await service.enqueue(session_id, "process_session", {}, auto_start=False)
+        job_id = str(job["id"])
+        for retry_count in range(attempts):
+            await service.prepare_hatchet_retry_attempt(job_id, retry_count)
+            try:
+                await service.run_job(job_id, raise_on_error=True)
+                return job_id
+            except FinalJobFailure as error:
+                raised.append(error)
+                return job_id
+            except Exception as error:  # noqa: BLE001 - Hatchet would retry this
+                raised.append(error)
+        return job_id
+
+    return asyncio.run(scenario()), raised
+
+
+def test_hatchet_retryable_failure_keeps_the_job_active_between_attempts(tmp_path) -> None:
+    """A retry Hatchet will run must not fail the session (and notify) first,
+    and the row must stay active so a Re-run cannot start a second run."""
     pipeline = ScriptedPipeline(failures=1)
     service = make_service(tmp_path, pipeline, job_queue_backend="hatchet")
 
-    async def scenario() -> None:
+    async def scenario() -> dict[str, Any]:
         await service.repository.initialize()
         job = await service.enqueue("session-hatchet", "process_session", {}, auto_start=False)
-        await service.run_job(str(job["id"]), raise_on_error=True)
+        with pytest.raises(RuntimeError, match="boom"):
+            await service.run_job(str(job["id"]), raise_on_error=True)
+        return await service.repository.read(str(job["id"]))
 
-    with pytest.raises(RuntimeError, match="boom"):
-        asyncio.run(scenario())
-    assert pipeline.failed_sessions == ["session-hatchet"]
+    job = asyncio.run(scenario())
+
+    assert pipeline.failed_sessions == []
+    assert job["status"] == "queued"
+    assert service.sessions.sessions["session-hatchet"]["status"] != "failed"
+
+
+def test_hatchet_retry_then_success_never_fails_the_session(tmp_path) -> None:
+    pipeline = ScriptedPipeline(failures=1)
+    service = make_service(tmp_path, pipeline, job_queue_backend="hatchet")
+
+    job_id, raised = run_hatchet_attempts(service, "session-recovers", attempts=3)
+    job = asyncio.run(service.repository.read(job_id))
+
+    assert pipeline.attempts == 2
+    assert len(raised) == 1 and not isinstance(raised[0], FinalJobFailure)
+    assert job["status"] == "succeeded"
+    assert pipeline.failed_sessions == []
+
+
+def test_hatchet_exhausted_retries_fail_the_session_once(tmp_path) -> None:
+    pipeline = ScriptedPipeline(failures=10)
+    service = make_service(tmp_path, pipeline, job_queue_backend="hatchet", hatchet_job_retries=2)
+
+    job_id, raised = run_hatchet_attempts(service, "session-exhausted", attempts=5)
+    job = asyncio.run(service.repository.read(job_id))
+
+    assert pipeline.attempts == 3
+    assert isinstance(raised[-1], FinalJobFailure)
+    assert job["status"] == "failed"
+    assert pipeline.failed_sessions == ["session-exhausted"]
+
+
+def test_hatchet_permanent_failure_is_not_retried(tmp_path) -> None:
+    """A 4xx-class failure stops at once, as it does on the local backend."""
+    pipeline = ScriptedPipeline(failures=10, error_factory=lambda _a: EmptyTranscriptError("no speech"))
+    service = make_service(tmp_path, pipeline, job_queue_backend="hatchet")
+
+    job_id, raised = run_hatchet_attempts(service, "session-permanent", attempts=3)
+    job = asyncio.run(service.repository.read(job_id))
+
+    assert pipeline.attempts == 1
+    assert len(raised) == 1 and isinstance(raised[0], FinalJobFailure)
+    assert isinstance(raised[0].__cause__, EmptyTranscriptError)
+    assert job["status"] == "failed"
+    assert pipeline.failed_sessions == ["session-permanent"]

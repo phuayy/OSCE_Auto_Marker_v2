@@ -73,3 +73,25 @@ def test_process_job_propagates_a_genuine_execution_failure() -> None:
         assert "scorer crashed" in str(error)
 
     assert raised
+
+
+def test_process_job_tells_hatchet_not_to_retry_a_final_failure() -> None:
+    """A job already failed for good must not be re-run by Hatchet's policy."""
+    from app.services.job_queue_service import FinalJobFailure
+
+    jobs = FakeJobQueueService(exists=True, run_result=FinalJobFailure("no speech"))
+    container = FakeContainer(jobs)
+
+    try:
+        asyncio.run(_run_process_job("job-4", 0, container))
+        raised: Exception | None = None
+    except Exception as error:  # noqa: BLE001
+        raised = error
+
+    assert raised is not None and "no speech" in str(raised)
+    assert isinstance(raised.__cause__, FinalJobFailure)
+    try:
+        from hatchet_sdk import NonRetryableException
+    except ImportError:
+        return
+    assert isinstance(raised, NonRetryableException)
