@@ -466,3 +466,33 @@ FastAPI creates these folders/files as needed:
 - `storage/objects/...`
 
 These are local runtime artifacts and should not be committed.
+
+## 12. Portable Bundle For A PC Without Admin Rights
+
+To run the app on a Windows PC that has no Python, Node, Git or Docker and
+where you cannot get administrator rights, build a portable bundle on your own
+Windows PC (which has uv, git, Node and internet):
+
+```powershell
+uv run --no-sync python scripts\build_portable.py --zip
+```
+
+This writes `build\OSCE-Marker\` and `build\OSCE-Marker.zip`: the committed
+source, the built frontend, `uv.exe`, a portable ffmpeg, a uv-managed Python
+and every wheel in `uv.lock`. Copy the zip to the target PC, unzip it to a
+folder you own (for example `C:\Users\<you>\OSCE-Marker`), double-click
+`Install.cmd`, fill in `app\.env` when Notepad opens, then double-click
+`Start.cmd`. The app opens at `http://127.0.0.1:8787` from one process
+(`SERVE_FRONTEND=true`), on SQLite and the local job queue.
+
+Nothing is written outside the bundle folder, so no step needs an
+administrator. The exceptions are outside this app's control: an NVIDIA
+driver (without one `Start.cmd` transcribes on the CPU) and an IT policy that
+blocks running programs from your user folder.
+
+Options: `--online` leaves Python and the wheels out (a far smaller bundle whose
+`Install.cmd` downloads them), `--canary` adds the Canary-Qwen engine,
+`--dist dist` reuses an existing frontend build, and `--ffmpeg-zip` pins a
+specific ffmpeg download. An offline bundle with CUDA torch is several GB. The
+first transcription still downloads the speech models into the user profile,
+so that run needs internet.

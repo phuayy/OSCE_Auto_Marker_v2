@@ -3,6 +3,8 @@
 # ============================================================
 node_modules/
 dist/
+# scripts/build_portable.py output
+/build/
 .vite/
 vite-env.d.ts
 

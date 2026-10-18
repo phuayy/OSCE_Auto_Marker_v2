@@ -222,8 +222,10 @@ OSCE-AI-FYP/
 │   ├── systemd/osce-marker.service.example
 │   ├── windows/                           # Self-hosted Windows PC: WinSW services, boot order, deploy/rollback/backup (docs/deployment-self-hosted-pc.md)
 │   └── cloudflared/                       # Cloudflare Tunnel config example + the dashboard settings this app needs
+│   └── portable/                          # Install.cmd / Start.cmd / README.txt for the no-admin Windows bundle (scripts/build_portable.py)
 ├── scripts/
 │   ├── run_api.py                   # Entry point: uvicorn launcher (API_HOST/API_PORT from config)
+│   ├── build_portable.py            # Portable no-admin Windows bundle: uv + Python + wheels + ffmpeg + built frontend, one folder
 │   ├── deploy_check.py              # Read-only deploy report: DB revision vs heads, in-flight sessions/jobs (drain gate); exit 0/2/3/4
 │   ├── backup_database.py           # Consistent DB backup (SQLite online backup / pg_dump) + --restore --confirm
 │   ├── dev-hosts.mjs                # Pure: Vite bind + proxy target from the same .env the API reads
