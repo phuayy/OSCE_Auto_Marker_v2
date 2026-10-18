@@ -134,8 +134,24 @@ async def _run_process_job(job_id: str, retry_count: int, container: "AppContain
         # this retry can still land after the row is gone. There is nothing
         # left to execute and nothing to raise.
         return {"jobId": job_id, "status": "skipped_missing"}
-    await container.jobs.run_job(job_id, raise_on_error=True)
+    from app.services.job_queue_service import FinalJobFailure
+
+    try:
+        await container.jobs.run_job(job_id, raise_on_error=True)
+    except FinalJobFailure as error:
+        # The job is already failed for good (permanent error or attempts used
+        # up). Retrying would only re-run work bound to fail again, or a job the
+        # row no longer offers, so Hatchet is told to stop here.
+        raise _non_retryable(str(error)) from error
     return {"jobId": job_id, "status": "completed"}
+
+
+def _non_retryable(message: str) -> Exception:
+    try:
+        from hatchet_sdk import NonRetryableException
+    except ImportError:  # pragma: no cover - SDK without the type
+        return RuntimeError(message)
+    return NonRetryableException(message)
 
 
 @hatchet.task(

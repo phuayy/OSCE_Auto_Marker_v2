@@ -58,6 +58,13 @@ def compute_retry_backoff_seconds(
     return round(half + random.uniform(0, half), 3)
 
 
+class FinalJobFailure(RuntimeError):
+    """Raised by ``run_job(raise_on_error=True)`` when the job has failed for
+    good: the session is already failed and no further attempt should run.
+    The Hatchet task turns it into a non-retryable error; any other exception
+    that escapes means the row was requeued and Hatchet should retry."""
+
+
 def is_retryable_failure(error: BaseException) -> bool:
     """Whether a failed job execution is worth running again.
 
@@ -753,6 +760,61 @@ class JobQueueService:
         )
         return True
 
+    async def _arm_hatchet_retry(self, job: dict[str, Any], error: Exception, message: str) -> dict[str, Any] | None:
+        """Return a just-failed Hatchet job to ``queued`` for Hatchet's next attempt.
+
+        The counterpart of ``_arm_local_retry`` for the engine that schedules its
+        own retries. Returns the requeued row, or ``None`` when no retry should
+        follow — not the Hatchet backend, a permanent failure, attempts used up,
+        or the row moved on (cancelled) — in which case the caller fails the
+        session and tells Hatchet not to retry.
+        """
+        if self.settings.job_queue_backend != "hatchet":
+            return None
+        job_id = str(job["id"])
+        session_id = str(job.get("sessionId"))
+        attempts = int(job.get("attempts") or 0)
+        max_attempts = int(job.get("maxAttempts") or 1)
+        if not is_retryable_failure(error) or attempts >= max_attempts:
+            reason = (
+                f"Permanent failure ({message}); not retrying."
+                if not is_retryable_failure(error)
+                else f"Retries exhausted after {attempts}/{max_attempts} attempt(s): {message}"
+            )
+            await self.repository.append_event(job_id, "retry_skipped", reason, {"sessionId": session_id})
+            return None
+
+        requeued = await self.repository.prepare_retry_attempt(job_id, f"Retrying after failure: {message}")
+        if str(requeued.get("status")) != JobStatus.QUEUED:
+            return None
+        # The run Hatchet is about to retry is the one already on record; only
+        # its clock restarts, so the redispatch loop does not read a long first
+        # attempt as a stale dispatch and hand the same job to a second run.
+        payload = requeued.get("payload") if isinstance(requeued.get("payload"), dict) else {}
+        dispatch = payload.get(DISPATCH_PAYLOAD_KEY)
+        if isinstance(dispatch, dict) and dispatch:
+            refreshed = await self.repository.record_dispatch(job_id, {**dispatch, "dispatchedAt": utc_now_iso()})
+            if refreshed is not None:
+                requeued = refreshed
+
+        next_attempt = attempts + 1
+        task_type = str(job.get("taskType"))
+        await self.repository.append_event(
+            job_id,
+            "retry_scheduled",
+            f"Attempt {next_attempt}/{max_attempts} scheduled after failure: {message}",
+            {"sessionId": session_id, "attempt": next_attempt},
+        )
+        await self.events.publish(
+            session_id,
+            "status",
+            {
+                "code": JobStatus.QUEUED,
+                "message": f"{task_type} failed; retry {next_attempt}/{max_attempts} queued.",
+            },
+        )
+        return requeued
+
     async def _execute_job(self, job_id: str, *, raise_on_error: bool = False) -> JobRunResult:
         try:
             claim = await self.repository.claim_queued(job_id, self._worker_id)
@@ -780,7 +842,7 @@ class JobQueueService:
             if queue_owns_session_status(exhausted_type):
                 await self._fail_session(exhausted_session, error, message)
             if raise_on_error:
-                raise error
+                raise FinalJobFailure(message) from error
             return JobRunResult(job=failed, error=error)
         if not claim.claimed:
             if raise_on_error:
@@ -855,17 +917,24 @@ class JobQueueService:
             logger.error("Job failed: %s (%s)", task_type, message, extra=job_context)
             failed = await self.repository.mark_failed(job_id, message)
             await self.repository.append_event(job_id, JobStatus.FAILED, message, {"sessionId": session_id})
-            await self._sync_session_job(failed)
+            # Hatchet re-runs a raised task itself. The row goes back to
+            # ``queued`` *now*, not when the next attempt starts, so between
+            # attempts the job is still active: the session is not failed, no
+            # failure notification goes out, and a Re-run in that gap is
+            # refused as in-flight instead of starting a second pipeline run.
+            requeued = await self._arm_hatchet_retry(failed, error, message) if raise_on_error else None
+            await self._sync_session_job(requeued or failed)
             # When the local runner will re-run this job, the session must stay
             # non-terminal — marking it failed here would surface a dead session
             # to the user while a retry is still pending. ``_arm_local_retry``
             # fails the session itself if the requeue does not take.
-            if (raise_on_error or not self._local_retry_available(failed, error)) and queue_owns_session_status(
-                task_type
-            ):
+            retry_pending = requeued is not None if raise_on_error else self._local_retry_available(failed, error)
+            if not retry_pending and queue_owns_session_status(task_type):
                 await self._fail_session(session_id, error, message)
             if raise_on_error:
-                raise
+                if retry_pending:
+                    raise
+                raise FinalJobFailure(message) from error
             return JobRunResult(job=failed, error=error)
         finally:
             heartbeat_task.cancel()
