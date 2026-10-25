@@ -99,6 +99,9 @@ async def diagnostics(response: Response, container: AppContainer = Depends(get_
         # A steady "waiting" above zero says the machine is transcription-bound,
         # not that anything is wrong.
         "leases": {"gpu": container.gpu.stats()},
+        # On-demand hosting: how long this deployment has been quiet, against
+        # the window after which it switches its VM off (disabled = always on).
+        "idleShutdown": (await container.idle_shutdown.state()).as_dict(),
     }
 
 

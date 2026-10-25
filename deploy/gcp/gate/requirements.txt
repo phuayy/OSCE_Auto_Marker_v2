@@ -1,0 +1,8 @@
+# Pinned to the versions the main app's uv.lock resolves, so the gate's tests
+# (run from fastapi_backend/tests in CI) exercise what the image installs.
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+google-auth==2.57.1
+requests==2.34.2
+google-cloud-storage==3.15.0

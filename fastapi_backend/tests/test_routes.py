@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
+from app.core.activity import counts_as_activity
 from app.api.dependencies import authorize_request
 from app.api.errors import error_response_content
 from app.api.routes import (
@@ -73,6 +74,8 @@ def build_test_client(tmp_path: Path, **settings_overrides: object) -> TestClien
             return JSONResponse(status_code=401, content={"error": "Authentication required."})
         if payload is not None:
             request.state.auth_user = payload
+            if counts_as_activity(request.method, request.url.path):
+                container.activity.record()
         return await call_next(request)
 
     @app.exception_handler(AppError)

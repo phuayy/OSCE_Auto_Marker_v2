@@ -4,6 +4,8 @@ import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from app.core.activity import ActivityTracker
+from app.core.boot_stage import BootStage, BootStageReporter
 from app.core.config import Settings
 from app.core.logging_utils import log_context
 from app.core.process import CommandRunner
@@ -48,6 +50,7 @@ from app.services.artifact_service import ArtifactService
 from app.services.auth_service import AuthService
 from app.services.clip_service import ClipService
 from app.services.event_service import EventService
+from app.services.idle_shutdown_service import IdleShutdownService
 from app.services.job_queue_service import JobQueueService
 from app.services.pipeline_service import PipelineService
 from app.services.prompt_registry_service import PromptRegistryService
@@ -137,6 +140,12 @@ class AppContainer:
     read_cache: VersionedCache
     # The one accelerator lease every GPU step in this process contends on.
     gpu: ResourceLease
+    # On-demand hosting (deploy/gcp): when a person last acted, the boot
+    # stage the start gate reads while HTTP is not up yet, and the loop that
+    # switches the VM off once both are quiet.
+    activity: ActivityTracker
+    boot_stage: BootStageReporter
+    idle_shutdown: IdleShutdownService
     # Startup work that must not hold the boot: currently the transcription
     # weight prefetch, which can run for minutes on a cold machine.
     background: BackgroundTaskRegistry = field(default_factory=BackgroundTaskRegistry)
@@ -170,6 +179,8 @@ class AppContainer:
         Whichever role executes jobs prefetches the transcription weights.
         """
         api = role is ContainerRole.API
+        if api:
+            await self.boot_stage.report(BootStage.STARTING)
         if dispatch_queued_jobs is None:
             dispatch_queued_jobs = api
         if recover_interrupted_jobs is None:
@@ -199,6 +210,8 @@ class AppContainer:
         # Alembic owns the schema: it creates it, upgrades it, and adopts a
         # database built by the older create_all path.
         # One process migrates; a worker booting alongside must not race it.
+        if api:
+            await self.boot_stage.report(BootStage.DATABASE)
         if api and self.settings.db_auto_migrate:
             await run_database_migrations(self.orm_database.engine)
         await self.orm_database.initialize(migrate=False)
@@ -206,6 +219,7 @@ class AppContainer:
         await self.changes.start(push_enabled=push_enabled)
         await self.auth.initialize()
         if api:
+            await self.boot_stage.report(BootStage.LOADING)
             # The first administrator, from the legacy credentials file or
             # DEFAULT_ADMIN_*; a no-op once any account exists. API only: one
             # process seeds, and a worker never verifies a token.
@@ -266,6 +280,13 @@ class AppContainer:
                 self.session_maintenance.video_retention_sweep_loop(),
                 name="session-video-retention",
             )
+        if api and self.idle_shutdown.enabled:
+            # API only: it is the process that sees the requests, and the one
+            # whose machine the start gate switched on.
+            self.idle_shutdown.activity.record()
+            self.background.spawn(self.idle_shutdown.loop(), name="idle-shutdown")
+        if api:
+            await self.boot_stage.report(BootStage.READY)
 
     async def shutdown(self) -> None:
         # Cancelled rather than drained: a half-finished weight download is
@@ -310,16 +331,18 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
     changes.add_change_observer(
         lambda table, _version: read_cache.invalidate_tables((table,))
     )
+    session_repository = SessionRepository(orm_database, legacy_sessions_dir=active_settings.paths.sessions_dir)
     sessions = SessionService(
         active_settings,
-        SessionRepository(orm_database, legacy_sessions_dir=active_settings.paths.sessions_dir),
+        session_repository,
         cache=read_cache,
         changes=changes,
     )
     storage = create_storage_service(active_settings)
+    job_repository = JobRepository(orm_database, active_settings.paths.jobs_dir)
     jobs = JobQueueService(
         active_settings,
-        JobRepository(orm_database, active_settings.paths.jobs_dir),
+        job_repository,
         events,
         sessions,
         storage,
@@ -441,6 +464,17 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         videos,
         corpora=corpora,
     )
+    activity = ActivityTracker()
+    boot_stage = BootStageReporter(active_settings.boot_stage_reporting)
+    idle_shutdown = IdleShutdownService(
+        idle_minutes=active_settings.idle_shutdown_minutes,
+        check_interval_seconds=active_settings.idle_shutdown_check_interval_seconds,
+        command=active_settings.idle_shutdown_command,
+        activity=activity,
+        jobs=job_repository,
+        sessions=session_repository,
+        boot_stage=boot_stage,
+    )
     return AppContainer(
         settings=active_settings,
         orm_database=orm_database,
@@ -485,4 +519,7 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         changes=changes,
         read_cache=read_cache,
         gpu=gpu,
+        activity=activity,
+        boot_stage=boot_stage,
+        idle_shutdown=idle_shutdown,
     )

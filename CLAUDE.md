@@ -111,6 +111,8 @@ OSCE-AI-FYP/
 │       │   ├── token_revocation.py
 │       │   ├── cache_policy.py # Default Cache-Control: private, no-store on /api and /media (CDN edge-cache guard)
 │       │   ├── webhook_url.py   # SSRF guard: blocks private/loopback/link-local destinations unless overridden
+│       │   ├── activity.py      # ActivityTracker + counts_as_activity — what keeps an on-demand VM awake
+│       │   ├── boot_stage.py    # Publishes each startup stage as the GCE guest attribute osce/boot (start gate)
 │       │   └── logging_utils.py # log_context() structured logging helper
 │       ├── database/
 │       │   ├── orm.py          # OrmDatabase — the one SQLAlchemy async engine
@@ -223,6 +225,7 @@ OSCE-AI-FYP/
 │   ├── windows/                           # Self-hosted Windows PC: WinSW services, boot order, deploy/rollback/backup (docs/deployment-self-hosted-pc.md)
 │   └── cloudflared/                       # Cloudflare Tunnel config example + the dashboard settings this app needs
 │   └── portable/                          # Install.cmd / Start.cmd / README.txt for the no-admin Windows bundle (scripts/build_portable.py)
+│   └── gcp/                               # On-demand GPU VM: README + gate/ (Cloud Run start page: Google sign-in, start, live boot stages)
 ├── scripts/
 │   ├── run_api.py                   # Entry point: uvicorn launcher (API_HOST/API_PORT from config)
 │   ├── build_portable.py            # Portable no-admin Windows bundle: uv + Python + wheels + ffmpeg + built frontend, one folder
@@ -1692,6 +1695,9 @@ recording; its Student column the scored subject.
 | `JOB_REAPER_INTERVAL_SECONDS` | `300` | How often the reaper scans for stale-running jobs; `0` disables it (startup-only recovery, as before) |
 | `SESSION_VIDEO_RETENTION_DAYS` | `365` | Delete a top-level session's stored video (not its transcript/scores) this many days after it was created. `0` disables the policy outright |
 | `SESSION_RETENTION_SWEEP_INTERVAL_SECONDS` | `21600` (6h) | How often the video-retention sweep runs after the one it always does at startup; `0` disables the periodic timer (startup-only sweep, as before) |
+| `IDLE_SHUTDOWN_MINUTES` | `0` | On-demand hosting ([deploy/gcp/README.md](deploy/gcp/README.md)): after this many minutes with no signed-in user acting and no job queued/running or upload assembling, the API runs `IDLE_SHUTDOWN_COMMAND`. Work in flight restarts the window. `0` = always on. API role only (`services/idle_shutdown_service.py`) |
+| `IDLE_SHUTDOWN_CHECK_INTERVAL_SECONDS` / `IDLE_SHUTDOWN_COMMAND` | `60` / `sudo -n /usr/sbin/shutdown -h now` | How often the idle check runs, and what it runs (shlex-split, no shell; a failure is retried next tick) |
+| `BOOT_STAGE_REPORTING` | `false` | Write `"<stage> <unix seconds>"` to the GCE guest attribute `osce/boot` at each startup step (`app-starting`, `database`, `loading`, `ready`, and `stopping` before an idle shutdown), so the Cloud Run start gate can show the boot while HTTP is not up. Best effort; GCE only |
 | `STORAGE_BACKEND` | `local` | `local` (parts through the API) or `gcs` (direct-to-bucket resumable uploads) |
 | `OBJECT_STORAGE_ROOT` | `storage/objects` | Local backend only: where committed objects live. Served verbatim by the `/media/source` mount |
 | `OBJECT_STORAGE_STAGING_ROOT` | `storage/objects_staging` | Local backend only: where an upload's parts are assembled while still in flight. Deliberately **not** under `OBJECT_STORAGE_ROOT` — that whole tree is public via `/media/source`, and a part on its way there is not something a stream ticket should be able to fetch |

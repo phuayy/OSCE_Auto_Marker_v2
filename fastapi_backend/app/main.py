@@ -30,6 +30,7 @@ from app.api.routes import (
     users as users_routes,
     webhooks,
 )
+from app.core.activity import counts_as_activity
 from app.core.asyncio_compat import configure_windows_selector_event_loop_policy
 from app.core.body_limit import MaxBodySizeMiddleware
 from app.core.cache_policy import default_cache_control
@@ -121,6 +122,10 @@ def build_app(app_settings: Settings) -> FastAPI:
             return JSONResponse(status_code=401, content={"error": "Authentication required."})
         if payload is not None:
             request.state.auth_user = payload
+            # Only a signed-in person acting keeps an on-demand VM awake; an
+            # anonymous caller (a scanner, a probe) must not.
+            if counts_as_activity(request.method, request.url.path):
+                container.activity.record()
         return await call_next(request)
 
     # Added after require_auth so it wraps it (Starlette's user middleware

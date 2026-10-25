@@ -221,6 +221,13 @@ class JobRepository:
             )
             return {str(session_id) for session_id in rows}
 
+    async def count_in_statuses(self, statuses: frozenset[str]) -> int:
+        async with self.database.session() as db:
+            count = await db.scalar(
+                select(func.count()).select_from(JobRecord).where(JobRecord.status.in_(sorted(statuses)))
+            )
+            return int(count or 0)
+
     # --- writes --------------------------------------------------------------
 
     async def write(self, job: dict[str, Any]) -> None:
