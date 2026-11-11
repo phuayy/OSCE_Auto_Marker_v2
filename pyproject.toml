@@ -37,7 +37,7 @@ dependencies = [
     # AES-256-GCM for the provider API keys the settings screen stores.
     # Already present transitively; pinned directly because app/core/secret_box.py
     # imports it and a transitive dependency is free to drop it.
-    "cryptography==50.0.1",
+    "cryptography==50.0.2",
     # HTTP client behind the Anthropic scoring provider and the webhook
     # dispatcher. Same reasoning as cryptography: it arrives transitively via
     # openai today, but both are runtime imports, so it is named here rather
