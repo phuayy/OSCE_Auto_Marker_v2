@@ -55,7 +55,7 @@ dependencies = [
     "alembic==1.19.1",
     "aiosqlite==0.22.1",
     "hatchet-sdk==1.41.1",
-    "psycopg[binary,pool]==3.3.4",
+    "psycopg[binary,pool]==3.3.6",
 
     # OpenAI-compatible client used by NVIDIA/OpenRouter scoring scripts.
     "openai==3.19.2",
