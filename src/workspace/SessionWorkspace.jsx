@@ -16,6 +16,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { ensureStreamTicket, resolveMediaUrl } from '@/auth';
 import { ApiError, ERROR_KIND, apiJson } from '@/lib/apiFetch';
+import { describeMediaError } from '@/lib/mediaError';
 import { SessionStatus } from '@/lib/enums';
 import { CLIP_ASSESSMENTS_ANCHOR_ID } from '@/lib/anchors';
 import { describeProcessingStage, formatProcessingStageLabel } from '@/lib/processingStage';
@@ -711,9 +712,12 @@ export default function SessionWorkspace({
                             setMediaState({ error: null });
                             handleVideoLoadedMetadata(event);
                           }}
-                          onError={() => setMediaState({
-                            error: new ApiError('Media unavailable. Reopen the session to try again.', { kind: ERROR_KIND.CLIENT }),
-                          })}
+                          onError={(event) => {
+                            const message = describeMediaError(event.currentTarget.error, {
+                              local: String(event.currentTarget.currentSrc || '').startsWith('blob:'),
+                            });
+                            if (message) setMediaState({ error: new ApiError(message, { kind: ERROR_KIND.CLIENT }) });
+                          }}
                           onTimeUpdate={handleVideoTimeUpdate}
                           className="aspect-video w-full rounded-2xl border border-slate-200/90 bg-black shadow-inner"
                           src={currentVideoUrl}
