@@ -237,3 +237,40 @@ def test_prepare_media_is_a_side_task_of_the_queue() -> None:
     assert queue_owns_session_status(TaskType.PREPARE_MEDIA) is False
     assert queue_mirrors_session_job(TaskType.PREPARE_MEDIA) is False
     assert queue_mirrors_session_job(TaskType.EXPORT_CLIPS) is True
+
+
+def test_playback_copy_has_frequent_keyframes_for_accurate_stream_copy_cuts(tmp_path: Path) -> None:
+    media, runner = make_media(tmp_path, {"codec_name": "hevc", "pix_fmt": "yuv420p"})
+    asyncio.run(media.ensure_playback_copy(session_with_video(tmp_path)))
+    args = next(args for label, args in runner.calls if "playback" in label)
+    assert args[args.index("-force_key_frames") + 1] == "expr:gte(t,n_forced*2)"
+
+
+def test_concurrent_playback_copy_requests_transcode_once(tmp_path: Path) -> None:
+    media, runner = make_media(tmp_path, {"codec_name": "hevc", "pix_fmt": "yuv420p"})
+    original_run = runner.run
+
+    async def slow_run(binary: str, args: list[str], label: str, **kwargs: Any) -> Any:
+        if "playback" in label:
+            await asyncio.sleep(0.05)
+        return await original_run(binary, args, label, **kwargs)
+
+    runner.run = slow_run  # type: ignore[method-assign]
+    session = session_with_video(tmp_path)
+
+    async def both() -> list[Any]:
+        return await asyncio.gather(media.ensure_playback_copy(session), media.ensure_playback_copy(session))
+
+    first, second = asyncio.run(both())
+    assert first is not None and first == second
+    assert len([1 for label, _ in runner.calls if "playback" in label]) == 1
+
+
+def test_reencode_fallback_never_encodes_above_the_playback_height(tmp_path: Path) -> None:
+    media, runner = make_media(tmp_path, {"codec_name": "hevc", "pix_fmt": "yuv420p"})
+    source = session_with_video(tmp_path)["files"]["video"]["absolutePath"]
+    asyncio.run(media.crop_video_segment(
+        input_path=Path(source), start_seconds=0, end_seconds=10, output_path=tmp_path / "clips" / "clip-1.mp4",
+    ))
+    args = next(args for label, args in runner.calls if "re-encode" in label)
+    assert args[args.index("-vf") + 1] == "scale=-2:'min(720,ih)'"

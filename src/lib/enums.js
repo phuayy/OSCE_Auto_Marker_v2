@@ -51,6 +51,11 @@ export const ClipExportStatus = Object.freeze({
   "FAILED": "failed"
 });
 
+export const ClipExportPhase = Object.freeze({
+  "PREPARING_SOURCE": "preparing_source",
+  "CUTTING": "cutting"
+});
+
 export const ClipExportScope = Object.freeze({
   "PLAN": "plan",
   "CLIP": "clip"
