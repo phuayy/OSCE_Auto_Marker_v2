@@ -201,7 +201,9 @@ export default function SessionWorkspace({
   });
 
   const [mediaState, setMediaState] = useState({ error: null });
-  const serverVideoUrl = session?.files?.video?.url;
+  // A source the browser cannot decode (HEVC, 10-bit H.264) carries an H.264
+  // copy the server made for the player; downloads keep the original.
+  const serverVideoUrl = session?.files?.video?.playback?.url || session?.files?.video?.url;
   const videoPurgedAt = session?.files?.video?.purgedAt || null;
   useEffect(() => {
     if (!serverVideoUrl?.startsWith('/media/')) return;

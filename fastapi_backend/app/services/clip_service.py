@@ -38,6 +38,7 @@ from app.pipeline import region_focus
 from app.pipeline.media import MediaPipeline
 from app.services.event_service import EventService
 from app.services.pipeline_service import PipelineService
+from app.services.playback_copy import record_playback_copy
 from app.services.session_service import SessionMutator, SessionService
 
 logger = logging.getLogger(__name__)
@@ -249,6 +250,9 @@ class ClipService:
             return None
 
         await self._commit(session, finish)
+        # Before "Clips ready": the notification invites the user to open a
+        # player that must be able to play this.
+        await record_playback_copy(self.media, session, self._commit)
         # Counts are session clips only — intermissions are greyed timeline
         # markers, not student clips.
         session_count = sum(1 for clip in clips if clip.get("kind") != ClipKind.INTERMISSION)
@@ -616,6 +620,9 @@ class ClipService:
                 )
         total = len(pending)
         pending_ids = {str(clip.get("id")) for clip in pending}
+        # A session split before playback copies existed gets one here, the
+        # next time its clips are exported. A no-op once the copy is on disk.
+        await record_playback_copy(self.media, session, self._commit)
         started_at = str(export_record.get("startedAt") or self.pipeline.now_iso())
 
         def start(current: dict[str, Any]) -> Any:

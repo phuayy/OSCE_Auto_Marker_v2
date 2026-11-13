@@ -248,6 +248,10 @@ class SessionMaintenanceService:
         if self.storage is not None and isinstance(storage_ref, dict):
             await self.storage.delete_committed_object(storage_ref)
         self._unlink(absolute_path)
+        # The browser playback copy is the same footage; retention covers it.
+        playback = video.get("playback") if isinstance(video, dict) else None
+        if isinstance(playback, dict) and playback.get("absolutePath"):
+            self._unlink(playback["absolutePath"])
         purged_at = utc_now_iso()
 
         def mark_purged(current: dict[str, Any]) -> Any:
@@ -257,6 +261,7 @@ class SessionMaintenanceService:
                 return False
             current_video["absolutePath"] = None
             current_video["url"] = None
+            current_video["playback"] = None
             current_video["purgedAt"] = purged_at
             return None
 

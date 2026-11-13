@@ -35,6 +35,7 @@ from app.pipeline.transcription.base import TranscriptionResult
 from app.pipeline.transcription.registry import EngineDependencies
 from app.services.assessment_service import AssessmentService
 from app.services.event_service import EventService
+from app.services.playback_copy import record_playback_copy
 from app.services.preferences_service import PreferencesService
 from app.services.session_service import SessionMutator, SessionService
 from app.services.transcription_router import TranscriptionRouter
@@ -482,6 +483,9 @@ class PipelineService:
         await self._commit(session, start)
 
         audio_info = await self._ensure_audio_output(session)
+        # A source the browser cannot decode gets an H.264 copy for the player;
+        # best effort, and a no-op for a clip child (its MP4 is already H.264).
+        await record_playback_copy(self.media, session, self._commit)
 
         if self.transcription is None:
             raise AppError("No transcription engine is configured for this pipeline.", status_code=500)
