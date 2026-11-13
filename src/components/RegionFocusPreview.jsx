@@ -2,19 +2,25 @@
 // region focus excludes, over the actual selected video, so the operator can
 // see how much of the frame the detector will ignore before ever uploading.
 //
-// Purely presentational — it owns no state, computes nothing beyond reading
+// Presentational — its only state is the playback-error line; it computes nothing beyond reading
 // `excludedRegionBands` (the same geometry the backend's `boxes_in_region`
 // applies, see src/lib/regionFocus.js), and re-renders whenever `regionFocus`
 // changes. `videoUrl` is optional: before a file is picked (or once the
 // region-focus panel is locked to the full frame under a predefined preset)
 // the component still renders the shading against a neutral placeholder, so
 // the effect of narrowing the zones is visible independent of upload order.
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 
+import { describeMediaError } from '@/lib/mediaError';
 import { excludedRegionBands } from '@/lib/regionFocus';
 
 export default function RegionFocusPreview({ videoUrl, regionFocus }) {
   const bands = excludedRegionBands(regionFocus);
+  // A file the browser cannot decode used to leave a silent black box here.
+  // Say so instead: the same file will show the same failure in the player
+  // after upload, and the upload itself will still process fine.
+  const [errorMessage, setErrorMessage] = useState(null);
+  useEffect(() => setErrorMessage(null), [videoUrl]);
 
   return (
     <figure className="m-0">
@@ -35,6 +41,7 @@ export default function RegionFocusPreview({ videoUrl, regionFocus }) {
                 // Display-only nicety; a decode error here costs nothing else.
               }
             }}
+            onError={(event) => setErrorMessage(describeMediaError(event.currentTarget.error, { local: true }))}
             className="block h-auto w-full"
             aria-label="Preview of the selected recording's frame"
           />
@@ -56,6 +63,9 @@ export default function RegionFocusPreview({ videoUrl, regionFocus }) {
           />
         ))}
       </div>
+      {errorMessage ? (
+        <p role="alert" className="mt-1 text-xs text-rose-600">{errorMessage}</p>
+      ) : null}
       <figcaption className="mt-1 text-[11px] text-slate-500">
         Shaded area is excluded from person detection.
       </figcaption>
