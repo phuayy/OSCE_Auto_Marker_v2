@@ -516,6 +516,26 @@ class Settings:
         "SESSION_RETENTION_SWEEP_INTERVAL_SECONDS", 6 * 60 * 60
     )
 
+    # --- On-demand hosting ------------------------------------------------
+    # For a VM that is switched on by the start gate (deploy/gcp/gate) and
+    # should switch itself off again when nobody is using it. After this many
+    # minutes with no user request and no job queued or running, the API runs
+    # idle_shutdown_command. 0 (the default) disables it: an always-on
+    # deployment must never power itself off because a weekend was quiet.
+    idle_shutdown_minutes: int = read_int_env("IDLE_SHUTDOWN_MINUTES", 0)
+    idle_shutdown_check_interval_seconds: int = read_int_env("IDLE_SHUTDOWN_CHECK_INTERVAL_SECONDS", 60)
+    # Split with shlex and run without a shell. The default needs a sudoers
+    # rule for the service account (see deploy/gcp/README.md); a stopped GCE
+    # VM bills only its disk.
+    idle_shutdown_command: str = (
+        os.getenv("IDLE_SHUTDOWN_COMMAND", "").strip() or "sudo -n /usr/sbin/shutdown -h now"
+    )
+    # Publish each startup stage as a GCE guest attribute (osce/boot), which
+    # the start gate reads to show "Preparing the database", "Loading" and so
+    # on while the app cannot answer HTTP yet. Off outside GCE: the metadata
+    # server does not exist there.
+    boot_stage_reporting: bool = read_bool_env("BOOT_STAGE_REPORTING", False)
+
     # Watchdog for external commands (ffmpeg, WhisperX, the scorers). Generous
     # by design: it exists to end a *hung* child, not to bound a slow one. A CPU
     # WhisperX run on a long recording can legitimately take hours. 0 disables.

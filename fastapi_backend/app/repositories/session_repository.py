@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import and_, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import SessionWriteContractError, StaleSessionError
@@ -206,6 +206,13 @@ class SessionRepository:
                 select(SessionRecord).order_by(SessionRecord.created_at.desc())
             )
             return [SessionEntry(session=_record_to_dict(r)) for r in result.scalars().all()]
+
+    async def count_in_statuses(self, statuses: frozenset[str]) -> int:
+        async with self.database.session() as db_session:
+            count = await db_session.scalar(
+                select(func.count()).select_from(SessionRecord).where(SessionRecord.status.in_(sorted(statuses)))
+            )
+            return int(count or 0)
 
     async def name_keys(self, *, exclude_id: str | None = None) -> set[str]:
         statement = select(SessionRecord.name)
