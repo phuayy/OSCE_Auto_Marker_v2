@@ -41,14 +41,13 @@ from osce_gate.auth import (
     google_token_verifier,
 )
 from osce_gate.compute import ComputeClient, InstanceRef, RestComputeClient
+from osce_gate.hardware import MachineProfile, gpu_label, parse_profiles, start_preferred
 from osce_gate.history import GcsHistory, MemoryHistory, StartHistory
 from osce_gate.stages import Observation, describe, parse_boot_value, parse_timestamp
 
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
-_STOPPED = {"TERMINATED", "STOPPED", "SUSPENDED"}
-
 
 @dataclass(frozen=True)
 class GateConfig:
@@ -64,6 +63,8 @@ class GateConfig:
     expected_start_seconds: int = 240
     app_name: str = "OSCE AI Marker"
     cookie_secure: bool = True
+    # In order of preference; empty = start the VM as it is (see hardware.py).
+    machine_profiles: tuple[MachineProfile, ...] = ()
 
     @classmethod
     def from_env(cls) -> "GateConfig":
@@ -87,6 +88,7 @@ class GateConfig:
             expected_start_seconds=int(os.getenv("GATE_EXPECTED_START_SECONDS", "240") or 240),
             app_name=os.getenv("GATE_APP_NAME", "").strip() or "OSCE AI Marker",
             cookie_secure=os.getenv("GATE_COOKIE_SECURE", "true").strip().lower() not in {"0", "false", "no"},
+            machine_profiles=parse_profiles(os.getenv("GATE_MACHINE_PROFILES", "")),
         )
 
 
@@ -170,6 +172,11 @@ def create_app(
             default_estimate_seconds=config.expected_start_seconds,
         )
         body["appUrl"] = config.app_url
+        body["gpu"] = gpu_label(instance.machine_type, instance.accelerators) or None
+        preferred = config.machine_profiles[0] if config.machine_profiles else None
+        # True when the VM is on a fallback GPU (only meaningful while it is up).
+        body["fallbackGpu"] = bool(preferred and instance.machine_type and not preferred.matches(instance))
+        body["preferredGpu"] = preferred.label if preferred else None
         body["email"] = signed_in(request)
         return body
 
@@ -204,17 +211,25 @@ def create_app(
         if email is None:
             raise HTTPException(status_code=401, detail="Sign in to start the marker.")
         try:
-            instance = compute.get_instance()
-            if instance.status.upper() not in _STOPPED:
-                # Already starting, running or stopping: pressing Start twice,
-                # or two people pressing it at once, is not an error.
-                return {"started": False, "operation": "", "status": instance.status}
-            operation = compute.start_instance()
+            # Already starting, running or stopping: pressing Start twice, or
+            # two people pressing it at once, is not an error (started: False).
+            outcome = start_preferred(compute, config.machine_profiles, zone=config.zone)
         except Exception as error:
             logger.exception("Could not start the instance.")
             raise HTTPException(status_code=502, detail="The machine could not be started. Try again shortly.") from error
-        logger.info("Start requested by %s (operation %s).", email, operation)
-        return {"started": True, "operation": operation, "status": instance.status}
+        if outcome.error:
+            logger.warning("Start requested by %s failed: %s", email, outcome.error)
+            raise HTTPException(status_code=503, detail=outcome.error)
+        if outcome.started:
+            logger.info("Start requested by %s (operation %s, %s).", email, outcome.operation,
+                        outcome.profile.label if outcome.profile else "as configured")
+        return {
+            "started": outcome.started,
+            "operation": outcome.operation,
+            "status": outcome.status,
+            "gpu": outcome.profile.label if outcome.profile else None,
+            "skipped": [{"gpu": label, "reason": reason} for label, reason in outcome.skipped],
+        }
 
     return app
 

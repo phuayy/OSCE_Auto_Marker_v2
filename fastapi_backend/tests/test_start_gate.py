@@ -220,3 +220,154 @@ def test_the_page_is_served() -> None:
     assert "Start the marker" in response.text
     assert response.headers["cache-control"] == "no-store"
     assert COOKIE_NAME == "osce_gate"
+
+
+# --- GPU fallback (GATE_MACHINE_PROFILES) -------------------------------------
+
+from osce_gate.compute import OperationResult  # noqa: E402
+from osce_gate.hardware import MachineProfile, gpu_label, parse_profiles, start_preferred  # noqa: E402
+
+L4_THEN_T4 = parse_profiles("g2-standard-8, n1-standard-8+nvidia-tesla-t4")
+
+
+class ShapeShiftingCompute(FakeCompute):
+    """A VM whose machine type can be changed while stopped, in a zone that
+    has GPUs of some kinds free and not others."""
+
+    def __init__(self, machine_type: str = "g2-standard-8", accelerators=(("nvidia-l4", 1),),
+                 free: set[str] | None = None, quota_out: set[str] | None = None) -> None:
+        super().__init__()
+        self.machine_type = machine_type
+        self.accelerators = tuple(accelerators)
+        self.free = free if free is not None else {"NVIDIA L4", "NVIDIA T4"}
+        self.quota_out = quota_out or set()
+        self.calls: list[str] = []
+        self.results: dict[str, OperationResult] = {}
+
+    def _gpu(self) -> str:
+        return gpu_label(self.machine_type, self.accelerators)
+
+    def get_instance(self) -> InstanceState:
+        return InstanceState(status=self.status, last_start_timestamp=START,
+                             machine_type=self.machine_type, accelerators=self.accelerators)
+
+    def _op(self, name: str, *, codes=frozenset()) -> str:
+        self.results[name] = OperationResult(name=name, done=True, error_codes=frozenset(codes))
+        return name
+
+    def start_instance(self) -> str:
+        assert self.status == "TERMINATED", "started a VM that was not stopped"
+        self.started += 1
+        name = f"start-{self.started}"
+        self.calls.append(f"start:{self._gpu()}")
+        if self._gpu() in self.quota_out:
+            return self._op(name, codes={"QUOTA_EXCEEDED"})
+        if self._gpu() not in self.free:
+            return self._op(name, codes={"ZONE_RESOURCE_POOL_EXHAUSTED"})
+        self.status = "PROVISIONING"
+        return self._op(name)
+
+    def wait_operation(self, operation: str) -> OperationResult:
+        return self.results[operation]
+
+    def set_machine_type(self, machine_type: str) -> str:
+        assert self.status == "TERMINATED"
+        if machine_type.startswith("g2-") and any(kind != "nvidia-l4" for kind, _ in self.accelerators):
+            return self._op(f"type-{len(self.calls)}", codes={"INVALID_FIELD_VALUE"})
+        self.calls.append(f"type:{machine_type}")
+        self.machine_type = machine_type
+        # A G2's L4 comes with the type; leaving G2 drops it.
+        if machine_type.startswith("g2-"):
+            self.accelerators = (("nvidia-l4", 1),)
+        elif any(kind == "nvidia-l4" for kind, _ in self.accelerators):
+            self.accelerators = ()
+        return self._op(f"type-{len(self.calls)}")
+
+    def set_accelerators(self, accelerators) -> str:
+        assert self.status == "TERMINATED"
+        self.calls.append(f"gpu:{','.join(kind for kind, _ in accelerators) or 'none'}")
+        self.accelerators = tuple(accelerators)
+        return self._op(f"gpu-{len(self.calls)}")
+
+
+def test_profiles_parse() -> None:
+    l4, t4 = L4_THEN_T4
+    assert l4 == MachineProfile("g2-standard-8") and l4.label == "NVIDIA L4"
+    assert t4 == MachineProfile("n1-standard-8", (("nvidia-tesla-t4", 1),)) and t4.label == "NVIDIA T4"
+    assert MachineProfile.parse("n1-standard-16+nvidia-tesla-t4x2").accelerators == (("nvidia-tesla-t4", 2),)
+    assert parse_profiles("") == ()
+    with pytest.raises(ValueError):
+        MachineProfile.parse("g2-standard-8+nvidia-tesla-t4")
+
+
+def test_l4_free_starts_on_l4_without_reshaping() -> None:
+    compute = ShapeShiftingCompute()
+    outcome = start_preferred(compute, L4_THEN_T4, sleep=lambda _s: None)
+    assert outcome.started and outcome.profile.label == "NVIDIA L4" and outcome.skipped == []
+    assert compute.calls == ["start:NVIDIA L4"]
+
+
+def test_no_l4_falls_back_to_t4() -> None:
+    compute = ShapeShiftingCompute(free={"NVIDIA T4"})
+    outcome = start_preferred(compute, L4_THEN_T4, sleep=lambda _s: None)
+    assert outcome.started and outcome.profile.label == "NVIDIA T4"
+    assert outcome.skipped == [("NVIDIA L4", "none free")]
+    assert compute.calls == ["start:NVIDIA L4", "type:n1-standard-8", "gpu:nvidia-tesla-t4", "start:NVIDIA T4"]
+
+
+def test_next_start_goes_back_to_l4_first() -> None:
+    compute = ShapeShiftingCompute("n1-standard-8", (("nvidia-tesla-t4", 1),))
+    outcome = start_preferred(compute, L4_THEN_T4, sleep=lambda _s: None)
+    assert outcome.profile.label == "NVIDIA L4"
+    # The T4 is detached before the type change: a G2 cannot carry one.
+    assert compute.calls == ["gpu:none", "type:g2-standard-8", "start:NVIDIA L4"]
+
+
+def test_l4_quota_also_falls_back() -> None:
+    compute = ShapeShiftingCompute(quota_out={"NVIDIA L4"})
+    outcome = start_preferred(compute, L4_THEN_T4, sleep=lambda _s: None)
+    assert outcome.profile.label == "NVIDIA T4"
+    assert outcome.skipped == [("NVIDIA L4", "quota used up")]
+
+
+def test_nothing_free_says_what_was_tried() -> None:
+    compute = ShapeShiftingCompute(free=set())
+    outcome = start_preferred(compute, L4_THEN_T4, zone="asia-southeast1-b", sleep=lambda _s: None)
+    assert not outcome.started
+    assert "no GPU free in asia-southeast1-b" in outcome.error
+    assert "NVIDIA L4, NVIDIA T4" in outcome.error
+
+
+def test_other_failures_do_not_fall_back() -> None:
+    compute = ShapeShiftingCompute()
+    compute.start_instance = lambda: "bad"  # type: ignore[method-assign]
+    compute.results["bad"] = OperationResult(name="bad", done=True, error_codes=frozenset({"RESOURCE_NOT_FOUND"}),
+                                             error_message="The boot disk is missing.")
+    outcome = start_preferred(compute, L4_THEN_T4, sleep=lambda _s: None)
+    assert not outcome.started and outcome.error == "The boot disk is missing."
+
+
+def test_start_endpoint_falls_back_and_status_says_so() -> None:
+    compute = ShapeShiftingCompute(free={"NVIDIA T4"})
+    app = create_app(_config(machine_profiles=L4_THEN_T4), compute=compute,
+                     verify_token=lambda _c: {"email": "dr.m@example.org", "email_verified": True},
+                     history=MemoryHistory(), probe=lambda _u: False, clock=lambda: START_TS + 30)
+    client = TestClient(app)
+    client.post("/api/session", json={"credential": "token"})
+    body = client.post("/api/start").json()
+    assert body["started"] is True and body["gpu"] == "NVIDIA T4"
+    assert body["skipped"] == [{"gpu": "NVIDIA L4", "reason": "none free"}]
+    status = client.get("/api/status", params={"operation": body["operation"]}).json()
+    assert status["gpu"] == "NVIDIA T4" and status["fallbackGpu"] is True and status["preferredGpu"] == "NVIDIA L4"
+
+
+def test_start_endpoint_reports_when_no_gpu_is_free() -> None:
+    compute = ShapeShiftingCompute(free=set())
+    app = create_app(_config(machine_profiles=L4_THEN_T4), compute=compute,
+                     verify_token=lambda _c: {"email": "dr.m@example.org", "email_verified": True},
+                     history=MemoryHistory(), probe=lambda _u: False)
+    client = TestClient(app)
+    client.post("/api/session", json={"credential": "token"})
+    response = client.post("/api/start")
+    assert response.status_code == 503
+    assert "tried NVIDIA L4, NVIDIA T4" in response.json()["detail"]

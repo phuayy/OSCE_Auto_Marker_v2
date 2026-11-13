@@ -92,7 +92,7 @@ ID of type *Web application*. Add the gate's URL (after the first deploy) as an
 
 ```bash
 gcloud iam roles create osceGate --project PROJECT \
-  --permissions=compute.instances.get,compute.instances.start,compute.instances.getGuestAttributes,compute.zoneOperations.get
+  --permissions=compute.instances.get,compute.instances.start,compute.instances.getGuestAttributes,compute.zoneOperations.get,compute.instances.setMachineType,compute.instances.setMachineResources
 gcloud iam service-accounts create osce-gate --project PROJECT
 gcloud compute instances add-iam-policy-binding osce --zone ZONE \
   --member=serviceAccount:osce-gate@PROJECT.iam.gserviceaccount.com \
@@ -133,16 +133,91 @@ starts anything.
 | `GATE_HISTORY_BUCKET` | no | GCS bucket for start durations, so the estimate survives the gate scaling to zero. The service account needs object read/write on it |
 | `GATE_EXPECTED_START_SECONDS` | no | Estimate before any start has been measured (default 240) |
 | `GATE_APP_NAME` | no | Title on the page |
+| `GATE_MACHINE_PROFILES` | no | GPU machines to try, in order (see **GPU fallback** below). Empty: start the VM as it is |
 
 The gate's tests run with the app's suite:
 `cd fastapi_backend && uv run --no-sync pytest tests/test_start_gate.py tests/test_idle_shutdown.py`.
+
+## GPU fallback: L4 first, T4 when no L4 is free
+
+A zone runs out of a GPU model from time to time, and the start then fails
+with `ZONE_RESOURCE_POOL_EXHAUSTED`. Set
+
+```
+GATE_MACHINE_PROFILES=g2-standard-8, n1-standard-8+nvidia-tesla-t4
+```
+
+and every start does this (`gate/osce_gate/hardware.py`):
+
+1. Switch the stopped VM to the first profile if it is not already on it
+   (`g2-standard-8`, which carries one L4), and start it.
+2. If Google Cloud answers "no GPU free" (or "GPU quota used up"), switch the
+   still-stopped VM to the next profile (`n1-standard-8` + one T4) and start
+   that instead.
+3. If none is free, the page says which GPUs it tried and offers *Try again*.
+
+Each start begins at the top of the list again, so a VM that fell back to a T4
+yesterday goes back to an L4 today. Any other start failure is reported as it
+is, without trying the next profile. The page shows which GPU the marker is
+running on, and says so when it is the fallback. Switching takes a few seconds
+per step, so a fallback start costs about a minute more than a normal one.
+
+Only the machine type and GPU change. The disk, its data, the static IP and the
+DNS name stay the same, because all of them stay in the same zone. Profiles in
+another zone are not supported: a disk belongs to one zone, so moving the VM
+means snapshotting and recreating the disk, which is a migration, not a start.
+
+The same logic from a terminal, instead of `gcloud compute instances start`:
+
+```bash
+cd deploy/gcp/gate
+uv run --no-project --with google-auth --with requests \
+  python -m osce_gate.cli --project PROJECT --zone asia-southeast1-b --instance osce-marker
+```
+
+### One-time setup for the fallback
+
+1. **Disk type.** N1 machines cannot boot from Hyperdisk. Check that the boot
+   disk is `pd-balanced` or `pd-ssd`:
+   `gcloud compute disks describe osce-marker --zone ZONE --format='value(type)'`.
+2. **T4 quota.** In *IAM & Admin → Quotas*, check *NVIDIA T4 GPUs* for the
+   region is at least 1 (and *GPUs (all regions)* at least 1). New projects
+   often have 0.
+3. **Gate permissions.** Add `compute.instances.setMachineType` and
+   `compute.instances.setMachineResources` to the gate's role:
+   `gcloud iam roles update osceGate --project PROJECT --add-permissions=compute.instances.setMachineType,compute.instances.setMachineResources`
+4. **Rehearse the T4 once** while the VM is stopped, so a problem shows up
+   now rather than on a busy morning: run the CLI above with
+   `--profiles "n1-standard-8+nvidia-tesla-t4"`, check that the marker
+   transcribes a short video, stop the VM, then run the CLI again without
+   `--profiles` to go back to the L4.
+5. **Deploy the gate** again with `GATE_MACHINE_PROFILES` added to its
+   `--set-env-vars`.
+
+### Running on a T4
+
+The app needs no change. A T4 has 16 GB of video memory (an L4 has 24 GB),
+and one job at a time holds the GPU (`GPU_SLOTS=1`):
+
+| Step | Model | Video memory | On a T4 |
+|---|---|---|---|
+| Transcription | WhisperX `large-v3`, `float16` | about 4-5 GB with alignment and diarisation | fits; about 1.5-2x slower than on an L4 |
+| Person detection | RT-DETRv2 r18 | about 1.5 GB | fits |
+| Canary-Qwen (optional engine) | 2.5B parameters | about 5-6 GB in 16-bit | fits, but set its precision to `float16` in Settings: the T4 has no native bfloat16 (the default), so `auto` is slow or fails |
+
+The CUDA stack carries over: the same NVIDIA driver supports both cards, and
+the PyTorch cu128 wheels and CTranslate2 (WhisperX) include the T4's compute
+capability 7.5. `n1-standard-8` has 30 GB of RAM against 32 GB on
+`g2-standard-8`, which is ample. Keep `WHISPERX_COMPUTE_TYPE=float16`; if you
+raised `WHISPERX_BATCH_SIZE` for the L4, 8 or below is safe on a T4.
 
 ## Limits worth knowing
 
 - **GPU capacity.** A zone can run out of GPUs. The start then fails with
   `ZONE_RESOURCE_POOL_EXHAUSTED`, and the page says so in plain words and
-  offers *Try again*. If it happens often, use a reservation, or move to a
-  zone with more capacity.
+  offers *Try again*. `GATE_MACHINE_PROFILES` (above) falls back to another
+  GPU in the same zone first. If both run out often, use a reservation, or
+  move to a zone with more capacity.
 - **Two accounts.** People sign in twice: once with Google at the gate (it
   costs money to start the machine), then with their marker account in the
   app. The app's accounts live on the VM, which is off when the gate needs

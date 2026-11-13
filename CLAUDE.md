@@ -225,7 +225,7 @@ OSCE-AI-FYP/
 │   ├── windows/                           # Self-hosted Windows PC: WinSW services, boot order, deploy/rollback/backup (docs/deployment-self-hosted-pc.md)
 │   └── cloudflared/                       # Cloudflare Tunnel config example + the dashboard settings this app needs
 │   └── portable/                          # Install.cmd / Start.cmd / README.txt for the no-admin Windows bundle (scripts/build_portable.py)
-│   └── gcp/                               # On-demand GPU VM: README + gate/ (Cloud Run start page: Google sign-in, start, live boot stages)
+│   └── gcp/                               # On-demand GPU VM: README + gate/ (Cloud Run start page: Google sign-in, start with L4 -> T4 fallback, live boot stages; osce_gate.cli does the same start from a terminal)
 ├── scripts/
 │   ├── run_api.py                   # Entry point: uvicorn launcher (API_HOST/API_PORT from config)
 │   ├── build_portable.py            # Portable no-admin Windows bundle: uv + Python + wheels + ffmpeg + built frontend, one folder

@@ -131,6 +131,13 @@
   async function start(button) {
     button.disabled = true;
     message = '';
+    // Finding a free GPU can take a minute when the first choice has none:
+    // the server tries each machine type in turn before it answers.
+    clearTimeout(timer);
+    $('dot').className = 'dot busy';
+    $('headline').textContent = 'Reserving a GPU machine…';
+    $('note').className = 'note';
+    $('note').textContent = 'If the preferred GPU is not free, another one is tried. This can take a minute.';
     try {
       const body = await api('/api/start', { method: 'POST' });
       if (body.operation) storage.set(body.operation);
@@ -139,6 +146,13 @@
       message = error.message;
     }
     await refresh();
+  }
+
+  function gpuNote(s) {
+    if (!s.gpu) return '';
+    return s.fallbackGpu && s.preferredGpu
+      ? `Running on an ${s.gpu} because no ${s.preferredGpu} was free. Transcription is slower on it.`
+      : `Running on an ${s.gpu}.`;
   }
 
   async function signOut() {
@@ -175,10 +189,11 @@
         $('note').textContent = 'Sign in to it with your marker account.';
       }
       actions.append(el('a', { className: 'button', href: s.appUrl }, 'Open the marker'));
+      if (gpuNote(s)) actions.append(el('p', { className: 'note' }, gpuNote(s)));
     } else if (s.starting) {
       $('dot').className = 'dot busy';
       $('headline').textContent = 'Starting the marker';
-      $('note').textContent = 'You can leave this page open; it moves on by itself.';
+      $('note').textContent = `${gpuNote(s)} You can leave this page open; it moves on by itself.`.trim();
       const list = $('steps');
       list.replaceChildren(...s.steps.map((step) => {
         const li = el('li', { className: step.state });
