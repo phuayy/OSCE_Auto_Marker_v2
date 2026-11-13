@@ -6,6 +6,7 @@ from fastapi.responses import StreamingResponse
 from app.api.dependencies import current_actor, get_container, require_expensive_operation, require_session_owner
 from app.api.errors import http_error
 from app.schemas.sessions import (
+    AssessClipsRequest,
     ManualClipsRequest,
     RecropClipRequest,
     RenameClipRequest,
@@ -226,6 +227,31 @@ async def recrop_clip(
         return await container.clips.request_clip_recrop(session_id, clip_id, payload.start, payload.end)
     except Exception as error:
         raise http_error(error, fallback_message="Recrop failed.", not_found_message="Session not found.") from error
+
+
+@router.post("/{session_id}/clips/assess", status_code=202, dependencies=[Depends(require_session_owner), Depends(require_expensive_operation)])
+async def assess_clips(
+    session_id: str,
+    payload: AssessClipsRequest,
+    request: Request,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Queue every named clip's assessment as **one** admission.
+
+    "Run selected" used to send one ``/clips/{clipId}/assess`` per clip, and
+    each was charged against the account's hourly expensive-operation budget
+    (``RATE_LIMIT_RERUN_PER_HOUR``, default 10) — so selecting a 15-student
+    recording queued the first 10 and the rest came back 429. The budget is an
+    abuse guard on *actions*; marking a cohort is one action. The GPU lease and
+    the job queue still decide how many clips actually run at once.
+
+    Each clip is answered on its own (``results[]``, in request order): one
+    clip with a missing file must not stop the rest of the cohort.
+    """
+    try:
+        return await container.clips.assess_clips(session_id, payload.clip_ids, actor=current_actor(request))
+    except Exception as error:
+        raise http_error(error, fallback_message="Clip assessments could not be queued.", not_found_message="Session not found.") from error
 
 
 @router.post("/{session_id}/clips/{clip_id}/assess", status_code=202, dependencies=[Depends(require_session_owner), Depends(require_expensive_operation)])

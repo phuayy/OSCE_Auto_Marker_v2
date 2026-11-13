@@ -489,6 +489,10 @@ correct underneath even while the panel is unmounted.
    in (`_prune_stale_plan_dirs`). Clips recorded before plans existed carry no
    `planId` and keep their flat legacy path.
 4. Each clip individually assessed via `POST /sessions/{id}/clips/{clipId}/assess` (202; always queued).
+   "Run selected" sends one `POST /sessions/{id}/clips/assess` with `{clipIds}` instead
+   (`ClipService.assess_clips`): the same per-clip path for each, answered per clip in
+   `results[]`, and charged **once** against `RATE_LIMIT_RERUN_PER_HOUR` — one call per
+   clip used to spend one unit each, so a 15-student recording queued 10 and got 429 for 5.
 5. Each clip assessment creates a **child** session (`parentSessionId` set), runs full pipeline.
 
 **One clip has one child session, and `assess` maintains that.** The request is

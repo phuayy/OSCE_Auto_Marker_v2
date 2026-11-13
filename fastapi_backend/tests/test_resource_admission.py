@@ -45,6 +45,7 @@ def test_all_expensive_entry_points_share_the_guard():
         '/sessions/{session_id}/rerun', '/sessions/{session_id}/auto-crop',
         '/sessions/{session_id}/process', '/sessions/{session_id}/clips/manual',
         '/sessions/{session_id}/clips/{clip_id}/recrop', '/sessions/{session_id}/clips/{clip_id}/assess',
+        '/sessions/{session_id}/clips/assess',
         '/jobs/{job_id}/rerun', '/uploads/initiate',
     }
     guarded = {

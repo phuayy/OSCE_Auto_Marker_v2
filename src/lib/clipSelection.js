@@ -51,3 +51,42 @@ export function planClipDispatch(runState, indexEntry) {
   }
   return { mode: 'run', childSessionId: null, status };
 }
+
+/**
+ * Fold a `POST /sessions/{id}/clips/assess` response into per-clip run state.
+ *
+ * `results` is the server's per-clip answer; a clip the server did not answer
+ * for (a short or malformed response) counts as failed rather than being left
+ * spinning as "running" forever.
+ */
+export function settleBatchAssessment(clipIds, results) {
+  const byId = new Map(
+    (Array.isArray(results) ? results : [])
+      .filter((item) => item && item.clipId)
+      .map((item) => [String(item.clipId), item])
+  );
+  const runs = {};
+  const failedIds = [];
+  const messages = [];
+  let queuedCount = 0;
+  for (const clipId of clipIds) {
+    const result = byId.get(String(clipId));
+    const childSessionId = result?.session?.id;
+    if (result?.ok && childSessionId) {
+      runs[clipId] = { status: RUN_STATUS.RUNNING, sessionId: childSessionId };
+      queuedCount += 1;
+    } else {
+      const error = result?.error || 'Clip assessment could not be queued.';
+      runs[clipId] = { status: RUN_STATUS.FAILED, error };
+      failedIds.push(clipId);
+      if (!messages.includes(error)) {
+        messages.push(error);
+      }
+    }
+  }
+  const errorMessage =
+    failedIds.length === 0
+      ? ''
+      : `${failedIds.length} clip${failedIds.length === 1 ? '' : 's'} could not be queued: ${messages.join(' ')}`;
+  return { runs, failedIds, queuedCount, errorMessage };
+}
