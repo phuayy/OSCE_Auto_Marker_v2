@@ -862,6 +862,24 @@ one policy question: does the queue drive `session.status`?
 | `process_session` | `PipelineService.process_session_by_id` | yes |
 | `auto_crop` | `ClipService.auto_crop_session_by_id` | yes |
 | `export_clips` | `ClipService.export_clips_by_id` | **no** — the handler reports on `session.clipExport` |
+| `prepare_media` | `PipelineService.prepare_media_by_id` | **no**, and it does not take over `session.job` either (`mirrors_session_job=False`) — a side task beside the main job |
+
+**`prepare_media` is what the player needs, whatever the camera wrote.** Every
+upload queues it at assembly, beside `auto_crop` / `process_session` (and even
+when `autoProcess` is off). It probes the source (duration, frame size,
+codecs), grabs one poster JPEG, and — when no browser can decode the original
+(HEVC, 10-bit H.264, ProRes, G.711 audio) — writes an H.264/AAC copy, each
+recorded on `files.video` (`media`, `poster`, `playback`) by its own
+mutator as it lands ([services/media_preparation.py](fastapi_backend/app/services/media_preparation.py)).
+The split and scoring never wait for the transcode. The browser plays the
+copy when there is one, shows the poster instead of a black box meanwhile, and
+sizes the timeline from `media.durationSeconds` when the player cannot report
+a duration ([lib/videoMedia.js](src/lib/videoMedia.js)) — which is what keeps
+**Export clips** usable for a recording that will not play. A session from
+before this, or one whose copy failed, is (re)queued by
+`POST /api/sessions/{id}/prepare-media` (owner-gated, shares the expensive-
+operation budget), offered as "Make a playable copy" under the player. Failures
+never fail the job: they land on `media.status = failed` / `media.error`.
 
 `export_clips` carries a **scope**: a whole split (`plan`, queued by "Export
 clips") or a re-cut of named clips (`clip`, queued by a recrop). The payload's
@@ -1691,7 +1709,7 @@ recording; its Student column the scored subject.
 | `HUMAN_SEGMENTS_CONFIDENCE` | `0.7` | RT-DETR score threshold. Not the knob for edge limbs — use the height ratio |
 | `HUMAN_SEGMENTS_REGION_LEFT_ENABLED` / `HUMAN_SEGMENTS_REGION_RIGHT_ENABLED` | `true` / `true` | Which horizontal zone(s) of the frame count at all — independent of the occupancy preset above. Standalone-CLI default only; the pipeline always passes an explicit resolved value (see `app/pipeline/region_focus.py`) |
 | `HUMAN_SEGMENTS_REGION_LEFT_RATIO` / `HUMAN_SEGMENTS_REGION_RIGHT_RATIO` | `1.0` / `1.0` | Fraction of frame width, measured from that edge inward, that counts as the enabled zone |
-| `PLAYBACK_COPY_ENABLED` / `PLAYBACK_COPY_MAX_HEIGHT` | `true` / `720` | A source the browser cannot decode (HEVC, 10-bit H.264, ProRes, G.711 audio) gets an H.264/AAC copy at `output/playback/<session>/`, recorded on `files.video.playback` and played by the workspace in place of the original (`app/services/playback_copy.py`); clips cut from such a source are re-encoded rather than stream-copied. Processing always reads the original |
+| `PLAYBACK_COPY_ENABLED` / `PLAYBACK_COPY_MAX_HEIGHT` | `true` / `720` | A source the browser cannot decode (HEVC, 10-bit H.264, ProRes, G.711 audio) gets an H.264/AAC copy at `output/playback/<session>/`, written by the `prepare_media` job, recorded on `files.video.playback` and played by the workspace in place of the original (`app/services/media_preparation.py`); clips cut from such a source are re-encoded rather than stream-copied. The max height also bounds the poster frame. Processing always reads the original |
 | `PARALLEL_SCORING` | `true` | Run content branch parallel to communication branch |
 | `GPU_SLOTS` | `1` | Jobs that may hold the accelerator at once (transcription, person detection). 0 = unbounded. Per process |
 | `JOB_QUEUE_BACKEND` | `local` | `local` or `hatchet` |

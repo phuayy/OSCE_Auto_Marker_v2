@@ -361,6 +361,21 @@ def test_async_upload_complete_commits_local_parts(tmp_path) -> None:
     assert committed_session["status"] == "uploaded"
     assert committed_session["files"]["video"]["storageRef"]["status"] == "committed"
     assert committed_session["files"]["caseStudy"]["rubricAssetId"]
+    # Every upload queues prepare_media, even one that waits to be started:
+    # the player needs a poster, the duration and (for HEVC) a copy as soon
+    # as anyone opens it. It runs beside the main job, so it is not the
+    # session's job record.
+    assert committed_session["files"]["video"]["media"]["status"] == "queued"
+    session_jobs = asyncio.run(container.jobs.list_jobs(complete_body["session"]["id"]))
+    assert "prepare_media" in [job["taskType"] for job in session_jobs]
+    assert (committed_session.get("job") or {}).get("taskType") != "prepare_media"
+
+    # The owner can ask for it again (an older session, or a failed copy);
+    # the answer is the job, and the media record reads queued.
+    prepare = client.post(f"/api/sessions/{complete_body['session']['id']}/prepare-media", headers=headers)
+    assert prepare.status_code == 202, prepare.text
+    assert prepare.json()["job"]["taskType"] == "prepare_media"
+    assert prepare.json()["session"]["files"]["video"]["media"]["status"] == "queued"
 
     # Re-completing an already-committed upload is idempotent.
     retry = client.post(
@@ -370,6 +385,28 @@ def test_async_upload_complete_commits_local_parts(tmp_path) -> None:
     )
     assert retry.status_code == 202, retry.text
     assert retry.json()["upload"]["status"] == "committed"
+
+
+def test_prepare_media_refuses_a_session_without_a_stored_video(tmp_path) -> None:
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    container = client.app.state.container
+    asyncio.run(
+        container.sessions.write(
+            {
+                "id": "s-purged",
+                "name": "Purged",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "status": "completed",
+                "files": {"video": {"absolutePath": None, "url": None, "purgedAt": "2026-06-01T00:00:00Z"}},
+                "outputs": {"videoClips": []},
+            }
+        )
+    )
+    response = client.post("/api/sessions/s-purged/prepare-media", headers=headers)
+    assert response.status_code == 409, response.text
+    assert asyncio.run(container.jobs.list_jobs("s-purged")) == []
 
 
 def test_get_session_does_not_persist_from_read_path(tmp_path) -> None:

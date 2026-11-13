@@ -217,6 +217,17 @@ async def process_session(session_id: str, container: AppContainer = Depends(get
         raise http_error(error, fallback_message="Processing could not be queued.", not_found_message="Session not found.") from error
 
 
+@router.post("/{session_id}/prepare-media", status_code=202, dependencies=[Depends(require_session_owner), Depends(require_expensive_operation)])
+async def prepare_session_media(session_id: str, container: AppContainer = Depends(get_container)) -> dict[str, object]:
+    """Queue the job that gives this session's video a poster frame, its
+    duration and, when the browser cannot decode the original, a playable
+    copy. 202: the copy is written afterwards; poll ``files.video.media``."""
+    try:
+        return await container.session_maintenance.request_media_preparation(session_id)
+    except Exception as error:
+        raise http_error(error, fallback_message="Video preparation could not be queued.", not_found_message="Session not found.") from error
+
+
 @router.post("/{session_id}/clips/manual", status_code=202, dependencies=[Depends(require_session_owner), Depends(require_expensive_operation)])
 async def create_manual_clips(
     session_id: str,

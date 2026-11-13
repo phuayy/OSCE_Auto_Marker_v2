@@ -17,7 +17,7 @@ test("Chrome's unsupported-stream wording is a format failure even from the serv
   const error = { code: 4, message: 'DEMUXER_ERROR_NO_SUPPORTED_STREAMS: FFmpegDemuxer: no supported streams' };
   assert.equal(classifyMediaError(error), MEDIA_FAILURE.FORMAT);
   assert.match(describeMediaError(error), /can't play this video's format/);
-  assert.match(describeMediaError(error), /upload an older one again/);
+  assert.match(describeMediaError(error), /server makes a playable copy/);
 });
 
 test('a bare "source not supported" from the server is an access failure (Chrome reports a 401 that way)', () => {

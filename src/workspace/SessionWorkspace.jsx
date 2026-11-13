@@ -17,6 +17,7 @@ import { motion } from 'framer-motion';
 import { ensureStreamTicket, resolveMediaUrl } from '@/auth';
 import { ApiError, ERROR_KIND, apiJson } from '@/lib/apiFetch';
 import { describeMediaError } from '@/lib/mediaError';
+import { describePreparation } from '@/lib/videoMedia';
 import { SessionStatus } from '@/lib/enums';
 import { CLIP_ASSESSMENTS_ANCHOR_ID } from '@/lib/anchors';
 import { describeProcessingStage, formatProcessingStageLabel } from '@/lib/processingStage';
@@ -90,6 +91,9 @@ export default function SessionWorkspace({
   setActiveSegmentId,
   videoDurationSeconds,
   setVideoDurationSeconds,
+  videoMedia,
+  onPrepareMedia,
+  isRequestingMediaPreparation,
   setCurrentVideoTime,
   durationKnown,
   isLongRecording,
@@ -241,6 +245,16 @@ export default function SessionWorkspace({
   }, [sessionId, hasServerVideo]);
 
   const currentVideoUrl = resolveMediaUrl(serverVideoUrl) || localVideoUrl;
+  // The server's still frame: what the player shows instead of a black box
+  // while a playable copy is made, or when the browser cannot decode the file.
+  const posterUrl = resolveMediaUrl(videoMedia?.posterUrl) || undefined;
+  const preparationNote = describePreparation(session);
+  // Say what the server is doing when the browser could not play the video,
+  // or before it tries, when the server already knows it cannot.
+  const showPreparation =
+    Boolean(mediaState.error) || videoMedia?.browserPlayable === false || Boolean(videoMedia?.failed);
+  const offerPreparation =
+    showPreparation && Boolean(videoMedia?.canRequest) && !videoMedia?.playbackUrl && typeof onPrepareMedia === 'function';
   const currentSubtitleUrl = resolveMediaUrl(session?.outputs?.subtitleTrack?.url) || null;
 
 
@@ -735,6 +749,7 @@ export default function SessionWorkspace({
                           ref={videoPlayerRef}
                           controls
                           preload="metadata"
+                          poster={posterUrl}
                           onLoadedMetadata={(event) => {
                             setMediaState({ error: null });
                             handleVideoLoadedMetadata(event);
@@ -762,6 +777,30 @@ export default function SessionWorkspace({
                         </video>
                         {mediaState.error ? (
                           <p role="alert" className="text-sm text-rose-600">{mediaState.error.message}</p>
+                        ) : null}
+                        {showPreparation && (preparationNote || offerPreparation) ? (
+                          <div
+                            role="status"
+                            className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700"
+                          >
+                            {videoMedia?.preparing ? (
+                              <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin text-slate-500 motion-reduce:animate-none" />
+                            ) : null}
+                            <span className="min-w-0 flex-1">
+                              {preparationNote ||
+                                'This session has no playable copy yet. The server can make one; once it has read the video, the timeline and Export clips work even before the copy is ready.'}
+                            </span>
+                            {offerPreparation ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={onPrepareMedia}
+                                disabled={isRequestingMediaPreparation}
+                              >
+                                {videoMedia?.failed ? 'Try again' : 'Make a playable copy'}
+                              </Button>
+                            ) : null}
+                          </div>
                         ) : null}
 
                         {showCropWorkflow ? (

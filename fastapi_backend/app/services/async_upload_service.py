@@ -13,7 +13,7 @@ from app.core.locks import KeyedLocks
 from app.core.tasks import BackgroundTaskRegistry
 from app.core.utils import parse_iso, utc_now_iso
 from app.domain.actors import PROVENANCE_KEY, Actor
-from app.domain.enums import TaskType, UploadStatus, Workflow
+from app.domain.enums import MediaPreparationStatus, TaskType, UploadStatus, Workflow
 from app.domain.session_lifecycle import fail_session
 from app.domain.sessions import SessionStatus, empty_outputs
 from app.pipeline.media import MediaPipeline
@@ -387,7 +387,7 @@ class AsyncUploadService:
                 public_url=public_url,
             )
             case_study_record["storageRef"] = case_study_ref
-            job = await self._commit_assembled(
+            jobs = await self._commit_assembled(
                 upload, should_process, video_ref, case_study_ref, case_study_asset, case_study_deduplicated,
             )
 
@@ -401,7 +401,7 @@ class AsyncUploadService:
             except OSError:
                 logger.warning("Committed upload parts need cleanup: %s", upload_id, exc_info=True)
             await self.events.publish(session_id, "status", {"code": "upload_committed", "message": "Upload committed."})
-            if job:
+            for job in jobs:
                 await self.jobs.start_job(job)
 
         except Exception as error:
@@ -411,7 +411,12 @@ class AsyncUploadService:
         self, upload: dict[str, Any], should_process: bool,
         video_ref: dict[str, Any], case_study_ref: dict[str, Any],
         case_study_asset: dict[str, Any] | None, case_study_deduplicated: bool,
-    ) -> dict[str, Any] | None:
+    ) -> list[dict[str, Any]]:
+        """Make the upload and its session durable, and queue the jobs that
+        follow: always ``prepare_media`` (what the player needs, whatever the
+        camera wrote), plus the processing job when ``should_process``. The
+        jobs are queued unstarted and returned for the caller to start once
+        staging is released."""
         upload_id = str(upload["id"])
         session_id = str(upload["sessionId"])
         async with self.repository.locked(upload_id):
@@ -456,6 +461,13 @@ class AsyncUploadService:
                     {"uploadId": upload_id, "workflow": upload.get("workflow")},
                     auto_start=False,
                 )
+            # Runs beside the processing job, never instead of it, and is
+            # queued even for an upload that waits to be started: the player
+            # needs it as soon as anyone opens the session.
+            media_job = await self.jobs.enqueue(
+                session_id, TaskType.PREPARE_MEDIA, {"uploadId": upload_id}, auto_start=False,
+            )
+            committed_files["video"]["media"] = {"status": MediaPreparationStatus.QUEUED, "error": None}
             public_job = self.jobs.public_job(job) if job else None
             next_status = SessionStatus.QUEUED if job else SessionStatus.UPLOADED
 
@@ -476,7 +488,7 @@ class AsyncUploadService:
             await self.sessions.update(session_id, commit_session)
 
             # Part files are only deleted once both records are durable.
-            return job
+            return [queued for queued in (job, media_job) if queued]
 
     async def _assembly_failed(self, upload_id: str, session_id: str | None, error: Exception) -> None:
         logger.error("Upload assembly failed: %s", upload_id, exc_info=error)

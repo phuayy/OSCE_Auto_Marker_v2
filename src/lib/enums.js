@@ -56,6 +56,13 @@ export const ClipExportScope = Object.freeze({
   "CLIP": "clip"
 });
 
+export const MediaPreparationStatus = Object.freeze({
+  "QUEUED": "queued",
+  "RUNNING": "running",
+  "READY": "ready",
+  "FAILED": "failed"
+});
+
 export const JobStatus = Object.freeze({
   "WAITING_FOR_UPLOAD": "waiting_for_upload",
   "QUEUED": "queued",
@@ -68,7 +75,8 @@ export const JobStatus = Object.freeze({
 export const TaskType = Object.freeze({
   "PROCESS_SESSION": "process_session",
   "AUTO_CROP": "auto_crop",
-  "EXPORT_CLIPS": "export_clips"
+  "EXPORT_CLIPS": "export_clips",
+  "PREPARE_MEDIA": "prepare_media"
 });
 
 export const Workflow = Object.freeze({

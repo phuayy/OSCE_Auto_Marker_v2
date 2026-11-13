@@ -12,6 +12,11 @@ timeline editor watching clips appear, so flipping the session to ``processing``
 would eject them, and a failed export must not bury a session whose clip list is
 still perfectly good. Those tasks report progress on their own record instead.
 
+``prepare_media`` goes one step further: it runs *beside* the session's main
+job (``auto_crop`` or ``process_session``), so it does not even take over
+``session.job`` — the card's gauge and the Re-run button read that record, and
+a side task finishing first must not replace the job they describe.
+
 Adding a task type means adding one entry here — the executor has no per-type
 branches left to edit.
 """
@@ -36,6 +41,9 @@ class JobTaskSpec:
     # "queued", running -> "processing") and marks the session failed when the
     # job's retries are exhausted. False when the handler owns that itself.
     owns_session_status: bool = True
+    # True when the queue mirrors the job record onto ``session.job``. False
+    # for a side task that runs alongside the session's main job.
+    mirrors_session_job: bool = True
 
 
 async def _run_process_session(pipeline: Any, _clips: Any, session_id: str, _payload: dict[str, Any]) -> None:
@@ -44,6 +52,10 @@ async def _run_process_session(pipeline: Any, _clips: Any, session_id: str, _pay
 
 async def _run_auto_crop(_pipeline: Any, clips: Any, session_id: str, _payload: dict[str, Any]) -> None:
     await clips.auto_crop_session_by_id(session_id, allow_processing=True)
+
+
+async def _run_prepare_media(pipeline: Any, _clips: Any, session_id: str, _payload: dict[str, Any]) -> None:
+    await pipeline.prepare_media_by_id(session_id)
 
 
 async def _run_export_clips(_pipeline: Any, clips: Any, session_id: str, payload: dict[str, Any]) -> None:
@@ -56,6 +68,12 @@ JOB_TASK_TYPES: dict[str, JobTaskSpec] = {
         JobTaskSpec(name=TaskType.PROCESS_SESSION, run=_run_process_session),
         JobTaskSpec(name=TaskType.AUTO_CROP, run=_run_auto_crop),
         JobTaskSpec(name=TaskType.EXPORT_CLIPS, run=_run_export_clips, owns_session_status=False),
+        JobTaskSpec(
+            name=TaskType.PREPARE_MEDIA,
+            run=_run_prepare_media,
+            owns_session_status=False,
+            mirrors_session_job=False,
+        ),
     )
 }
 
@@ -84,3 +102,10 @@ __all__ = [
     "get_task_spec",
     "queue_owns_session_status",
 ]
+
+
+def queue_mirrors_session_job(task_type: str) -> bool:
+    """Whether the queue may write ``session.job`` for this task type. Lenient
+    for an unknown type, like ``queue_owns_session_status``."""
+    spec = JOB_TASK_TYPES.get(str(task_type))
+    return True if spec is None else spec.mirrors_session_job

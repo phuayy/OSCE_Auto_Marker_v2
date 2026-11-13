@@ -55,6 +55,17 @@ class ClipExportScope(StrEnum):
     CLIP = "clip"
 
 
+class MediaPreparationStatus(StrEnum):
+    """Where a session's ``files.video.media`` record is: the ``prepare_media``
+    job that probes the source, grabs a poster frame and writes a
+    browser-playable copy when the source needs one."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    READY = "ready"
+    FAILED = "failed"
+
+
 class AssessmentResultStatus(StrEnum):
     """Status of one scorer's row in ``assessment_results`` — a vocabulary of
     its own, not ``SessionStatus``/``StepStatus``: by the time a scorer's
@@ -68,6 +79,7 @@ class TaskType(StrEnum):
     PROCESS_SESSION = "process_session"
     AUTO_CROP = "auto_crop"
     EXPORT_CLIPS = "export_clips"
+    PREPARE_MEDIA = "prepare_media"
 
 
 class Workflow(StrEnum):
