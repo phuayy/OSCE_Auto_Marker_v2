@@ -17,6 +17,7 @@ from app.repositories.notification_repository import NotificationRepository
 from app.repositories.video_repository import VideoRepository
 from app.services.assessment_service import AssessmentService
 from app.services.job_queue_service import JobQueueService
+from app.services.media_preparation import mark_media_queued
 from app.services.session_service import SessionMutator, SessionService
 from app.services.session_artifacts import SessionArtifacts
 
@@ -248,10 +249,12 @@ class SessionMaintenanceService:
         if self.storage is not None and isinstance(storage_ref, dict):
             await self.storage.delete_committed_object(storage_ref)
         self._unlink(absolute_path)
-        # The browser playback copy is the same footage; retention covers it.
-        playback = video.get("playback") if isinstance(video, dict) else None
-        if isinstance(playback, dict) and playback.get("absolutePath"):
-            self._unlink(playback["absolutePath"])
+        # The browser playback copy and the poster frame are the same footage;
+        # retention covers them.
+        for derived_key in ("playback", "poster"):
+            derived = video.get(derived_key) if isinstance(video, dict) else None
+            if isinstance(derived, dict) and derived.get("absolutePath"):
+                self._unlink(derived["absolutePath"])
         purged_at = utc_now_iso()
 
         def mark_purged(current: dict[str, Any]) -> Any:
@@ -262,6 +265,7 @@ class SessionMaintenanceService:
             current_video["absolutePath"] = None
             current_video["url"] = None
             current_video["playback"] = None
+            current_video["poster"] = None
             current_video["purgedAt"] = purged_at
             return None
 
@@ -284,6 +288,23 @@ class SessionMaintenanceService:
     # session stayed ``processing`` with no job row for startup recovery to
     # find: un-openable, un-rerunnable, only deletable.
     # ------------------------------------------------------------------
+
+    async def request_media_preparation(self, session_id: str) -> dict[str, Any]:
+        """Queue ``prepare_media`` for a session (see app.services.media_preparation).
+
+        Every upload queues it at assembly; this is for a session uploaded
+        before that existed, or one whose copy failed and is worth retrying.
+        Idempotent: a session whose job is still queued or running gets that
+        job back. Never touches ``session.status`` or ``session.job`` — the
+        job runs beside whatever else the session is doing.
+        """
+        session = await self.sessions.read(session_id)
+        video = (session.get("files") or {}).get("video")
+        if not isinstance(video, dict) or not video.get("absolutePath") or video.get("purgedAt"):
+            raise AppError("This session has no stored video to prepare.", status_code=409, retryable=False)
+        session = await self.sessions.update(session_id, mark_media_queued())
+        job = await self.jobs.enqueue(session_id, TaskType.PREPARE_MEDIA, {"requestedAt": utc_now_iso()})
+        return {"session": self.sessions.public_session(session), "job": self.jobs.public_job(job)}
 
     async def start_processing(self, session_id: str) -> dict[str, Any]:
         """Queue the standard pipeline for a session that already has its sources.

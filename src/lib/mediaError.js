@@ -50,16 +50,16 @@ export function classifyMediaError(mediaError, { local = false } = {}) {
 
 // Two places see a format failure, and the advice differs. A local file (the
 // upload form's preview) has not reached the server yet: the upload is fine,
-// and the job makes a browser-playable copy (app/services/playback_copy.py).
-// A server URL that still fails is a session without that copy — one uploaded
-// before copies existed.
+// and the job makes a browser-playable copy (app/services/media_preparation.py).
+// A server URL that still fails is a session whose copy is still being made,
+// failed, or was never asked for; the workspace says which under the player
+// (lib/videoMedia.js) and offers to make one.
 const FORMAT_MESSAGE_LOCAL =
   "This browser can't preview this video's format (often HEVC/H.265 from a phone or camera). " +
   'You can still upload it: the server makes a playable copy while it processes the recording.';
 const FORMAT_MESSAGE_SERVER =
   "This browser can't play this video's format (often HEVC/H.265 from a phone or camera). " +
-  'Processing is unaffected. Recordings uploaded now get a playable copy automatically; ' +
-  'upload an older one again to get one.';
+  'Processing is unaffected: the server makes a playable copy (see below).';
 
 /**
  * The sentence to show, or null when nothing failed (an abort is not a

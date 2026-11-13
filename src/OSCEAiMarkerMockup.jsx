@@ -54,6 +54,7 @@ import OccupancyPresetGlyph from '@/components/OccupancyPresetGlyph.jsx';
 import CorporaManager from './CorporaManager.jsx';
 import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
 import { describeClipExportOutcome } from '@/lib/clipExportOutcome';
+import { MEDIA_POLL_INTERVAL_MS, describeVideoMedia, effectiveVideoDuration, mergeSessionFiles } from '@/lib/videoMedia';
 import { creatorName } from '@/lib/provenance';
 import { canMutateSession } from '@/lib/authz';
 import { indexClipAssessments } from '@/lib/clipAssessments';
@@ -258,7 +259,11 @@ export default function OSCEAiMarkerMockup({
   const [localVideoUrl, setLocalVideoUrl] = useState(null);
   const [activeSegmentId, setActiveSegmentId] = useState(null);
   const [selectedClipId, setSelectedClipId] = useState(null);
-  const [videoDurationSeconds, setVideoDurationSeconds] = useState(0);
+  // What the <video> element reported. The timeline reads
+  // `videoDurationSeconds` below instead, which falls back to the server's
+  // probe for a file the browser cannot open (lib/videoMedia.js).
+  const [playerDurationSeconds, setPlayerDurationSeconds] = useState(0);
+  const [isRequestingMediaPreparation, setIsRequestingMediaPreparation] = useState(false);
   const [isRecropping, setIsRecropping] = useState(false);
   const [cropDraft, setCropDraft] = useState({ start: 0, end: 0 });
   const [manualSegmentCount, setManualSegmentCount] = useState(0);
@@ -306,6 +311,15 @@ export default function OSCEAiMarkerMockup({
   const workspaceLoadRef = useRef(null);
 
   useEffect(() => () => workspaceLoadRef.current?.abort(), []);
+
+  const videoDurationSeconds = effectiveVideoDuration(playerDurationSeconds, session);
+  const videoMedia = useMemo(() => describeVideoMedia(session), [session]);
+
+  // A reading from the previous session's player must not size this one's
+  // timeline; the new player (or the server's probe) answers again.
+  useEffect(() => {
+    setPlayerDurationSeconds(0);
+  }, [session?.id]);
 
   const videoClips = useMemo(() => {
     return Array.isArray(session?.outputs?.videoClips) ? session.outputs.videoClips : [];
@@ -555,6 +569,49 @@ export default function OSCEAiMarkerMockup({
       window.clearInterval(intervalId);
     };
   }, [showWorkspace, session?.id, shouldWatchClipExport]);
+
+  // The prepare_media job (poster, duration, playable copy) writes files.video
+  // while the workspace is open. Re-read only the files, so nothing the user
+  // is editing — the timeline is seeded from outputs.videoClips — is replaced.
+  useEffect(() => {
+    if (!showWorkspace || !session?.id || !videoMedia.preparing) {
+      return undefined;
+    }
+    let cancelled = false;
+    const sessionId = session.id;
+
+    async function pollMediaPreparation() {
+      try {
+        const body = await apiJson(`/api/sessions/${sessionId}`);
+        if (!cancelled) setSession((previous) => mergeSessionFiles(previous, body?.session));
+      } catch {
+        // Transient: the next tick retries.
+      }
+    }
+
+    const intervalId = window.setInterval(pollMediaPreparation, MEDIA_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [showWorkspace, session?.id, videoMedia.preparing]);
+
+  async function requestMediaPreparation() {
+    const sessionId = session?.id;
+    if (!sessionId || isRequestingMediaPreparation) return;
+    setIsRequestingMediaPreparation(true);
+    try {
+      const body = await apiJson(`/api/sessions/${sessionId}/prepare-media`, {
+        method: 'POST',
+        fallbackMessage: 'Could not start preparing this video.',
+      });
+      setSession((previous) => mergeSessionFiles(previous, body?.session));
+    } catch (requestError) {
+      setError(requestError?.message || 'Could not start preparing this video.');
+    } finally {
+      setIsRequestingMediaPreparation(false);
+    }
+  }
 
   // Push, alongside the interval above: every clip the export job cuts is a
   // session write, so the change stream reports it the moment it lands and the
@@ -2913,7 +2970,10 @@ export default function OSCEAiMarkerMockup({
               activeSegmentId={activeSegmentId}
               setActiveSegmentId={setActiveSegmentId}
               videoDurationSeconds={videoDurationSeconds}
-              setVideoDurationSeconds={setVideoDurationSeconds}
+              setVideoDurationSeconds={setPlayerDurationSeconds}
+              videoMedia={videoMedia}
+              onPrepareMedia={requestMediaPreparation}
+              isRequestingMediaPreparation={isRequestingMediaPreparation}
               setCurrentVideoTime={setCurrentVideoTime}
               durationKnown={durationKnown}
               isLongRecording={isLongRecording}

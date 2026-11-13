@@ -400,9 +400,14 @@ class SessionService:
                     # showing "No video loaded" for a recording that is gone
                     # on purpose rather than one that never uploaded.
                     "purgedAt": video.get("purgedAt"),
-                    # The H.264 copy the player uses when the browser cannot
-                    # decode the original (see app/services/playback_copy.py).
+                    # What the prepare_media job wrote (see
+                    # app/services/media_preparation.py): the H.264 copy the
+                    # player uses when the browser cannot decode the original,
+                    # a poster frame, and the probed facts — the duration lets
+                    # the timeline work before any video has loaded.
                     "playback": public_artifact(video.get("playback")),
+                    "poster": public_artifact(video.get("poster")),
+                    "media": public_media_facts(video.get("media")),
                 },
                 "caseStudy": {
                     "originalName": case_study.get("originalName"),
@@ -461,3 +466,26 @@ class SessionService:
     def _parse_date(value: Any) -> float:
         parsed = parse_iso(value)
         return parsed.timestamp() if parsed else 0.0
+
+
+# The keys of ``files.video.media`` a browser may see: facts about the file and
+# the preparation job's status. Named rather than copied, like the rest of
+# ``public_session``, so a field added to the record later is not published by
+# accident.
+PUBLIC_MEDIA_FACT_KEYS = (
+    "status",
+    "error",
+    "durationSeconds",
+    "width",
+    "height",
+    "videoCodec",
+    "audioCodec",
+    "browserPlayable",
+    "updatedAt",
+)
+
+
+def public_media_facts(media: Any) -> dict[str, Any] | None:
+    if not isinstance(media, dict):
+        return None
+    return {key: media.get(key) for key in PUBLIC_MEDIA_FACT_KEYS}

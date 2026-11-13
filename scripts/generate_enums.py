@@ -11,6 +11,7 @@ from app.domain.enums import (
     ClipExportScope,
     ClipExportStatus,
     ClipKind,
+    MediaPreparationStatus,
     OutputKey,
     PipelineStep,
     ScoreDisplay,
@@ -33,6 +34,7 @@ def render() -> str:
     ]
     for enum in (
         SessionStatus, PipelineStep, StepStatus, UploadStatus, ClipExportStatus, ClipExportScope,
+        MediaPreparationStatus,
         JobStatus, TaskType, Workflow, SegmentationMethod, ClipKind, UploadFileKind, OutputKey,
         MarkingMode, TieBreak, UserRole, UserStatus, ScoreDisplay,
     ):

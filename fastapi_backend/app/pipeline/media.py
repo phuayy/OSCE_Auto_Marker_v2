@@ -35,6 +35,10 @@ ENGINE_MARKER_WHISPERX = "whisperx"
 
 logger = logging.getLogger(__name__)
 
+# Where the poster frame is taken from: far enough in to miss the black or
+# fading first frame many cameras record, never past a tenth of the video.
+POSTER_OFFSET_SECONDS = 1.0
+
 
 class MediaPipeline:
     def __init__(
@@ -304,33 +308,50 @@ class MediaPipeline:
     # which no browser plays — the clip would be silent at best.
     BROWSER_AUDIO_CODECS = frozenset({"aac", "mp3", "opus", "vorbis", "flac"})
 
-    async def probe_video_stream(self, video_path: Path) -> dict[str, str]:
-        """The first video stream's codec and pixel format, and the first audio
-        stream's codec ("" when there is none), as ffprobe names them."""
+    async def probe_video_stream(self, video_path: Path) -> dict[str, Any]:
+        """What a player needs to know about a file, as ffprobe reports it.
+
+        The first video stream's codec, pixel format and frame size, the first
+        audio stream's codec ("" when there is none), and the container's
+        duration in seconds (0.0 when it does not say).
+        """
         args = [
             "-v",
             "error",
             "-show_entries",
-            "stream=codec_type,codec_name,pix_fmt",
+            "stream=codec_type,codec_name,pix_fmt,width,height:format=duration",
             "-of",
             "json",
             str(video_path),
         ]
         result = await self.runner.run(self.settings.ffprobe_bin, args, "Video codec (ffprobe)")
         try:
-            streams = json.loads(str(result.stdout or "{}")).get("streams") or []
+            document = json.loads(str(result.stdout or "{}"))
         except json.JSONDecodeError:
-            streams = []
-        streams = [stream for stream in streams if isinstance(stream, dict)]
+            document = {}
+        if not isinstance(document, dict):
+            document = {}
+        streams = [stream for stream in document.get("streams") or [] if isinstance(stream, dict)]
 
         def first(kind: str) -> dict[str, Any]:
             return next((stream for stream in streams if stream.get("codec_type") == kind), {})
 
+        def positive_number(value: Any, cast: Callable[[Any], Any]) -> Any:
+            try:
+                number = cast(value)
+            except (TypeError, ValueError):
+                return cast(0)
+            return number if number > 0 else cast(0)
+
         video, audio = first("video"), first("audio")
+        container = document.get("format") if isinstance(document.get("format"), dict) else {}
         return {
             "codec": str(video.get("codec_name") or "").lower(),
             "pixelFormat": str(video.get("pix_fmt") or "").lower(),
             "audioCodec": str(audio.get("codec_name") or "").lower(),
+            "width": positive_number(video.get("width"), int),
+            "height": positive_number(video.get("height"), int),
+            "durationSeconds": positive_number(container.get("duration"), float),
         }
 
     @classmethod
@@ -397,6 +418,61 @@ class MediaPipeline:
                 return None
             await self._transcode_for_browser(source_path, output_path)
         return artifact_metadata(output_path, f"/media/playback/{session_id}")
+
+    def poster_path(self, session_id: str) -> Path:
+        return self.settings.paths.output_playback_dir / session_id / f"{session_id}-poster.jpg"
+
+    async def ensure_poster(self, session: dict[str, Any], *, duration_seconds: float = 0.0) -> dict[str, Any] | None:
+        """One still frame of the source, for the player to show before (or
+        instead of) the video itself.
+
+        Read by ffmpeg, so it exists for any format the pipeline can process,
+        including ones no browser can decode. Taken a little way in rather
+        than at 0 s, where cameras often record a black or fading frame.
+        Written once; a retried job reuses it. None when there is no source.
+        """
+        video = (session.get("files") or {}).get("video")
+        source = video.get("absolutePath") if isinstance(video, dict) else None
+        if not source or not Path(str(source)).is_file():
+            return None
+        session_id = str(session["id"])
+        output_path = self.poster_path(session_id)
+        if not output_path.is_file() or output_path.stat().st_size <= 0:
+            offset = min(POSTER_OFFSET_SECONDS, max(0.0, float(duration_seconds or 0)) / 10)
+            await self._grab_frame(Path(str(source)), output_path, offset_seconds=offset)
+        return artifact_metadata(output_path, f"/media/playback/{session_id}")
+
+    async def _grab_frame(self, input_path: Path, output_path: Path, *, offset_seconds: float) -> None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path = output_path.with_name(f".{output_path.name}.{uuid4().hex[:8]}.partial{output_path.suffix}")
+        max_height = max(0, int(self.settings.playback_copy_max_height or 0))
+        scale = [] if max_height <= 0 else ["-vf", f"scale=-2:'min({max_height},ih)'"]
+        args = [
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            # Before -i: seek by keyframe instead of decoding up to the offset.
+            "-ss",
+            f"{offset_seconds:.3f}",
+            "-i",
+            str(input_path),
+            "-frames:v",
+            "1",
+            *scale,
+            "-q:v",
+            "4",
+            str(staging_path),
+        ]
+        try:
+            await self.runner.run(self.settings.ffmpeg_bin, args, "Poster frame (ffmpeg)")
+        except Exception:
+            await asyncio.to_thread(staging_path.unlink, True)
+            raise
+        if not staging_path.is_file() or staging_path.stat().st_size <= 0:
+            await asyncio.to_thread(staging_path.unlink, True)
+            raise RuntimeError("ffmpeg wrote no poster frame.")
+        await asyncio.to_thread(atomic_replace, staging_path, output_path)
 
     async def _transcode_for_browser(self, input_path: Path, output_path: Path) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)

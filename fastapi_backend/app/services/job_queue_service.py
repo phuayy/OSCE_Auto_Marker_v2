@@ -27,7 +27,7 @@ from app.domain.session_lifecycle import fail_session
 from app.domain.sessions import JOB_DRIVEN_STATUSES, SessionStatus
 from app.repositories.job_repository import DISPATCH_PAYLOAD_KEY, LEGACY_DISPATCH_RUN_ID_KEY, JobRepository
 from app.services.event_service import EventService
-from app.services.job_tasks import get_task_spec, queue_owns_session_status
+from app.services.job_tasks import get_task_spec, queue_mirrors_session_job, queue_owns_session_status
 from app.services.session_service import SessionService
 from app.storage import ObjectStorage
 
@@ -1062,9 +1062,14 @@ class JobQueueService:
     async def _sync_session_job(self, job: dict[str, Any]) -> None:
         """Mirror the job row onto its session — through ``update``, because the
         pipeline in this or another process may be writing the same document."""
+        task_type = str(job.get("taskType") or "")
+        if not queue_mirrors_session_job(task_type):
+            # A side task (see app.services.job_tasks) reports on its own record
+            # and must not displace the job the session card describes.
+            return
         session_id = str(job.get("sessionId"))
         public_job = self.public_job(job)
-        owns_status = queue_owns_session_status(str(job.get("taskType") or ""))
+        owns_status = queue_owns_session_status(task_type)
         job_status = str(job.get("status") or "")
 
         def mutate(session: dict[str, Any]) -> Any:
