@@ -81,6 +81,7 @@ import {
 } from './lib/manualTimeline.js';
 import {
   areAllSelected,
+  isClipExported,
   planClipDispatch,
   selectableClipIds,
   settleBatchAssessment,
@@ -1894,6 +1895,11 @@ export default function OSCEAiMarkerMockup({
   // false otherwise — the batch runner uses this to keep failed clips checked.
   async function runClipAssessment(clip) {
     if (!session?.id || !clip?.id) {
+      return false;
+    }
+
+    // A draft has no MP4 yet; the server refuses it too, this just spares the round trip.
+    if (!isClipExported(clip)) {
       return false;
     }
 

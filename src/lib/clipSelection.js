@@ -7,15 +7,26 @@ import { RUN_STATUS } from './clipAssessments.js';
 import { INTERMISSION_KIND } from './manualTimeline.js';
 
 /**
+ * True once the export job has cut the clip's MP4. A draft is a range with no
+ * file (`isDraft`, `url: null`), so there is nothing yet to assess.
+ */
+export function isClipExported(clip) {
+  return Boolean(clip) && !clip.isDraft && Boolean(clip.url);
+}
+
+/**
  * Clip ids eligible for batch selection, in clip order. Intermissions are
- * never assessable; a clip whose assessment is already running cannot be
- * queued again.
+ * never assessable; a clip that is not exported yet has no file to score; a
+ * clip whose assessment is already running cannot be queued again.
  */
 export function selectableClipIds(clips, runStates) {
   return (Array.isArray(clips) ? clips : [])
     .filter(
       (clip) =>
-        clip?.id && clip.kind !== INTERMISSION_KIND && runStates?.[clip.id]?.status !== RUN_STATUS.RUNNING
+        clip?.id &&
+        clip.kind !== INTERMISSION_KIND &&
+        isClipExported(clip) &&
+        runStates?.[clip.id]?.status !== RUN_STATUS.RUNNING
     )
     .map((clip) => clip.id);
 }

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 
 import {
   areAllSelected,
+  isClipExported,
   planClipDispatch,
   selectableClipIds,
   settleBatchAssessment,
@@ -12,15 +13,35 @@ import {
 import { INTERMISSION_KIND } from '../src/lib/manualTimeline.js';
 
 const clips = [
-  { id: 'c1', kind: 'session' },
-  { id: 'i1', kind: INTERMISSION_KIND },
-  { id: 'c2' }, // bell-split clips carry no kind — still assessable
-  { id: 'c3', kind: 'session' },
+  { id: 'c1', kind: 'session', url: '/media/c1.mp4' },
+  { id: 'i1', kind: INTERMISSION_KIND, url: '/media/i1.mp4' },
+  { id: 'c2', url: '/media/c2.mp4' }, // bell-split clips carry no kind — still assessable
+  { id: 'c3', kind: 'session', url: '/media/c3.mp4' },
 ];
+
+// --- isClipExported ----------------------------------------------------------
+assert.equal(isClipExported({ id: 'd', isDraft: true, url: null, fileName: null }), false); // draft
+assert.equal(isClipExported({ id: 'n', isDraft: false, url: null }), false); // no file
+assert.equal(isClipExported({ id: 'x', isDraft: true, url: '/media/x.mp4' }), false); // flagged draft wins
+assert.equal(isClipExported({ id: 'e', isDraft: false, url: '/media/e.mp4' }), true);
+assert.equal(isClipExported({ id: 'e', url: '/media/e.mp4' }), true); // isDraft absent = exported
+assert.equal(isClipExported(undefined), false);
 
 // --- selectableClipIds -------------------------------------------------------
 // Intermissions are never selectable; order follows the clip list.
 assert.deepEqual(selectableClipIds(clips, {}), ['c1', 'c2', 'c3']);
+// A draft clip (no MP4 cut yet) is not selectable; exported ones stay.
+assert.deepEqual(
+  selectableClipIds(
+    [
+      { id: 'c1', url: '/media/c1.mp4' },
+      { id: 'd1', isDraft: true, url: null, fileName: null },
+      { id: 'c2', isDraft: false, url: '/media/c2.mp4' },
+    ],
+    {}
+  ),
+  ['c1', 'c2']
+);
 // A running clip drops out; completed/failed clips remain selectable (re-run).
 assert.deepEqual(
   selectableClipIds(clips, {
@@ -32,7 +53,7 @@ assert.deepEqual(
 );
 // Defensive: bad inputs never throw.
 assert.deepEqual(selectableClipIds(undefined, undefined), []);
-assert.deepEqual(selectableClipIds([{ kind: 'session' }], {}), []); // no id → skipped
+assert.deepEqual(selectableClipIds([{ kind: 'session', url: '/media/x.mp4' }], {}), []); // no id → skipped
 
 // --- areAllSelected ----------------------------------------------------------
 assert.equal(areAllSelected(new Set(), []), false); // nothing selectable ≠ "all selected"
