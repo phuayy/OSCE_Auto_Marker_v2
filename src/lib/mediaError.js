@@ -48,9 +48,18 @@ export function classifyMediaError(mediaError, { local = false } = {}) {
   return MEDIA_FAILURE.ACCESS;
 }
 
-const FORMAT_MESSAGE =
+// Two places see a format failure, and the advice differs. A local file (the
+// upload form's preview) has not reached the server yet: the upload is fine,
+// and the job makes a browser-playable copy (app/services/playback_copy.py).
+// A server URL that still fails is a session without that copy — one uploaded
+// before copies existed.
+const FORMAT_MESSAGE_LOCAL =
+  "This browser can't preview this video's format (often HEVC/H.265 from a phone or camera). " +
+  'You can still upload it: the server makes a playable copy while it processes the recording.';
+const FORMAT_MESSAGE_SERVER =
   "This browser can't play this video's format (often HEVC/H.265 from a phone or camera). " +
-  'Processing is unaffected; to watch it here, convert it to H.264 MP4 and upload that.';
+  'Processing is unaffected. Recordings uploaded now get a playable copy automatically; ' +
+  'upload an older one again to get one.';
 
 /**
  * The sentence to show, or null when nothing failed (an abort is not a
@@ -60,7 +69,7 @@ export function describeMediaError(mediaError, { local = false } = {}) {
   const kind = classifyMediaError(mediaError, { local });
   if (kind === MEDIA_FAILURE.NONE) return null;
   const detail = mediaError?.message ? ` (${String(mediaError.message).slice(0, 120)})` : '';
-  if (kind === MEDIA_FAILURE.FORMAT) return `${FORMAT_MESSAGE}${detail}`;
+  if (kind === MEDIA_FAILURE.FORMAT) return `${local ? FORMAT_MESSAGE_LOCAL : FORMAT_MESSAGE_SERVER}${detail}`;
   if (kind === MEDIA_FAILURE.NETWORK) {
     return `The video stopped loading part-way. Check the connection and reopen the session.${detail}`;
   }
