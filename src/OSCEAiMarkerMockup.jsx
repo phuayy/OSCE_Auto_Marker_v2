@@ -82,6 +82,7 @@ import {
   areAllSelected,
   planClipDispatch,
   selectableClipIds,
+  settleBatchAssessment,
   toggleSelection,
 } from './lib/clipSelection.js';
 
@@ -1929,7 +1930,6 @@ export default function OSCEAiMarkerMockup({
       return;
     }
 
-    const clipsById = new Map(videoClips.map((clip) => [clip.id, clip]));
     // Snapshot each clip's dispatch route up front — run state advances as the
     // loop queues clips, and decisions should reflect the pre-batch statuses.
     const plans = selectedRunnableClipIds.map((clipId) => [
@@ -1952,36 +1952,60 @@ export default function OSCEAiMarkerMockup({
     }
 
     setIsQueueingSelectedClips(true);
-    const failedToQueue = new Set();
-    let queuedCount = 0;
-    try {
-      // Sequential on purpose: one POST at a time keeps queue order matching
-      // the clip order and avoids bursting the backend with parallel requests.
-      for (const [clipId, plan] of plans) {
-        const clip = clipsById.get(clipId);
-        const queued =
-          plan.mode === 'rerun'
-            ? await rerunClipAssessment(clip, plan.childSessionId)
-            : await runClipAssessment(clip);
-        if (queued) {
-          queuedCount += 1;
-        } else {
-          failedToQueue.add(clipId);
-        }
-      }
-    } finally {
-      // Queued clips already unchecked themselves; re-check the failures so
-      // the user can fix the issue and retry the batch in one click.
-      if (failedToQueue.size > 0) {
-        setSelectedClipAssessmentIds((previous) => new Set([...previous, ...failedToQueue]));
-      }
-      setIsQueueingSelectedClips(false);
-    }
+    const clipIds = plans.map(([clipId]) => clipId);
+    // Every selected clip shows as queued at once; the batch response settles
+    // each one. Dispatched clips leave the selection, as a single run does.
+    setError('');
+    setSelectedClipAssessmentIds((previous) => {
+      const next = new Set(previous);
+      clipIds.forEach((clipId) => next.delete(clipId));
+      return next;
+    });
+    setClipAssessmentRuns((previous) => {
+      const next = { ...previous };
+      clipIds.forEach((clipId) => {
+        next[clipId] = { status: 'running' };
+      });
+      return next;
+    });
 
-    if (queuedCount > 0) {
-      setNotice(
-        `Queued ${queuedCount} clip assessment${queuedCount === 1 ? '' : 's'} — rows update as they progress.`
-      );
+    try {
+      // One request for the whole selection, charged once against the
+      // account's hourly budget. Sending one `/clips/{id}/assess` per clip
+      // spent one unit each, so with the default budget of 10 a 15-student
+      // recording queued 10 clips and the other 5 came back 429.
+      const body = await apiJson(`/api/sessions/${session.id}/clips/assess`, {
+        method: 'POST',
+        json: { clipIds },
+        fallbackMessage: 'Clip assessments could not be queued.',
+      });
+      const outcome = settleBatchAssessment(clipIds, body?.results);
+      setClipAssessmentRuns((previous) => ({ ...previous, ...outcome.runs }));
+      if (outcome.failedIds.length > 0) {
+        // Re-check the failures so the user can fix the issue and retry the
+        // batch in one click.
+        setSelectedClipAssessmentIds((previous) => new Set([...previous, ...outcome.failedIds]));
+        setError(outcome.errorMessage);
+      }
+      if (outcome.queuedCount > 0) {
+        setNotice(
+          `Queued ${outcome.queuedCount} clip assessment${outcome.queuedCount === 1 ? '' : 's'} — rows update as they progress.`
+        );
+      }
+      refreshSessionIndex();
+    } catch (batchError) {
+      const message = batchError.message || 'Clip assessments could not be queued.';
+      setClipAssessmentRuns((previous) => {
+        const next = { ...previous };
+        clipIds.forEach((clipId) => {
+          next[clipId] = { status: SessionStatus.FAILED, error: message };
+        });
+        return next;
+      });
+      setSelectedClipAssessmentIds((previous) => new Set([...previous, ...clipIds]));
+      setError(message);
+    } finally {
+      setIsQueueingSelectedClips(false);
     }
   }
 

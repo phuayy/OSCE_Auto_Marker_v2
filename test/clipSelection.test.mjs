@@ -6,6 +6,7 @@ import {
   areAllSelected,
   planClipDispatch,
   selectableClipIds,
+  settleBatchAssessment,
   toggleSelection,
 } from '../src/lib/clipSelection.js';
 import { INTERMISSION_KIND } from '../src/lib/manualTimeline.js';
@@ -84,5 +85,32 @@ assert.deepEqual(planClipDispatch(undefined, { status: 'completed', sessionId: '
   childSessionId: 's9',
   status: 'completed',
 });
+
+// --- settleBatchAssessment --------------------------------------------------
+{
+  const outcome = settleBatchAssessment(
+    ['c1', 'c2', 'c3'],
+    [
+      { clipId: 'c1', ok: true, session: { id: 's1' } },
+      { clipId: 'c2', ok: false, error: 'Clip file is missing.' },
+      // c3 not answered at all
+    ]
+  );
+  assert.equal(outcome.queuedCount, 1);
+  assert.deepEqual(outcome.failedIds, ['c2', 'c3']);
+  assert.deepEqual(outcome.runs.c1, { status: 'running', sessionId: 's1' });
+  assert.equal(outcome.runs.c2.status, 'failed');
+  assert.equal(outcome.runs.c3.status, 'failed', 'an unanswered clip must not stay "running"');
+  assert.match(outcome.errorMessage, /^2 clips could not be queued/);
+}
+{
+  const all = settleBatchAssessment(
+    Array.from({ length: 15 }, (_, n) => `c${n}`),
+    Array.from({ length: 15 }, (_, n) => ({ clipId: `c${n}`, ok: true, session: { id: `s${n}` } }))
+  );
+  assert.equal(all.queuedCount, 15);
+  assert.deepEqual(all.failedIds, []);
+  assert.equal(all.errorMessage, '');
+}
 
 console.log('clipSelection.test.mjs: all assertions passed');
