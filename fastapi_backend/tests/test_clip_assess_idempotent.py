@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from app.core.config import Settings
+from app.core.exceptions import AppError
 from app.services.clip_service import ClipService
 
 from tests.fixtures.session_store import SessionUpdateMixin
@@ -256,3 +257,39 @@ def test_without_a_maintenance_service_a_finished_child_reports_the_missing_depe
 
     with pytest.raises(RuntimeError, match="maintenance"):
         asyncio.run(service.assess_clip("parent-1", "clip-a"))
+
+
+def _make_draft(store: MultiSessionStore) -> None:
+    clip = store.sessions["parent-1"]["outputs"]["videoClips"][0]
+    clip.update({"isDraft": True, "absolutePath": None, "fileName": None, "url": None})
+
+
+def test_a_draft_clip_cannot_be_assessed(tmp_path: Path) -> None:
+    """``Path("")`` is ``.`` and exists, so a draft once became a child whose video was ``.``."""
+    service, store, jobs, _maintenance, _tmp = _build(tmp_path)
+    _make_draft(store)
+
+    with pytest.raises(AppError, match="not been exported") as raised:
+        asyncio.run(service.assess_clip("parent-1", "clip-a"))
+
+    assert raised.value.status_code == 400 and raised.value.retryable is False
+    assert _children(store) == [] and store.created == []
+    assert jobs.enqueued == []
+
+
+def test_a_finished_child_is_untouched_when_its_clip_has_become_a_draft(tmp_path: Path) -> None:
+    service, store, jobs, maintenance, _tmp = _build(tmp_path)
+    asyncio.run(service.assess_clip("parent-1", "clip-a"))
+    child_id = _children(store)[0]["id"]
+    store.sessions[child_id]["status"] = "completed"
+    video_before = copy.deepcopy(store.sessions[child_id]["files"]["video"])
+    _make_draft(store)
+
+    with pytest.raises(AppError, match="not been exported"):
+        asyncio.run(service.assess_clip("parent-1", "clip-a"))
+
+    child = store.sessions[child_id]
+    assert child["status"] == "completed"
+    assert child["files"]["video"] == video_before
+    assert maintenance.reruns == []
+    assert len(jobs.enqueued) == 1

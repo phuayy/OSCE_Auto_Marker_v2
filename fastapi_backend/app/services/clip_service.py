@@ -28,6 +28,7 @@ from app.domain.session_lifecycle import fail_session, record_progress, sync_cur
 from app.domain.sessions import (
     IN_FLIGHT_STATUSES,
     SessionStatus,
+    clip_video_path,
     empty_outputs,
     find_clip,
     session_clips,
@@ -1085,12 +1086,10 @@ class ClipService:
         # clip gets the 400 that names it, not a 500 about the queue.
         if self.jobs is None:
             raise RuntimeError("Durable job queue is not configured for clip assessment.")
-        clip_path = Path(str(clip.get("absolutePath") or ""))
-        if not clip_path.exists():
-            raise AppError("Clip file is missing. Export clips before assessment.", status_code=400)
+        clip_path = clip_video_path(clip)
         case_study = (parent_session.get("files") or {}).get("caseStudy") or {}
-        case_study_path = Path(str(case_study.get("absolutePath") or ""))
-        if not case_study_path.exists():
+        case_study_raw = case_study.get("absolutePath")
+        if not case_study_raw or not Path(str(case_study_raw)).is_file():
             raise AppError("Case study file is missing for this session.", status_code=400)
 
         existing = await self._existing_clip_child(session_id, clip_id)
@@ -1235,7 +1234,9 @@ class ClipService:
         if self.maintenance is None:
             raise RuntimeError("Session maintenance is not configured; a finished clip child cannot be re-run.")
 
-        clip_path = Path(str(clip.get("absolutePath") or ""))
+        # Before anything below touches the child: a clip that is a draft again
+        # must not repoint a finished child at a non-file or wipe its results.
+        clip_path = clip_video_path(clip)
         clip_source = self._clip_source(clip)
         video_meta = {
             "originalName": clip.get("fileName") or clip_path.name,

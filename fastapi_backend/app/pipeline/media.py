@@ -16,6 +16,7 @@ from app.core.json_utils import extract_json_object
 from app.core.process import CommandRunner
 from app.core.resources import ResourceLease
 from app.core.utils import atomic_replace, clamp_number, format_timestamp, utc_now_iso
+from app.domain.sessions import session_video_path
 from app.pipeline import person_presets
 from app.pipeline import region_focus
 from app.pipeline.progress_tracker import ProgressTracker
@@ -242,8 +243,11 @@ class MediaPipeline:
         audio_path = self.settings.paths.output_audio_dir / audio_file_name
         args = [
             "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
             "-i",
-            str(session["files"]["video"]["absolutePath"]),
+            str(session_video_path(session)),
             "-vn",
             "-codec:a",
             "libmp3lame",

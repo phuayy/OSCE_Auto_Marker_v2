@@ -16,9 +16,11 @@ from typing import Any
 import pytest
 
 from app.core.config import Settings
+from app.core.exceptions import AppError
 from app.core.resources import ResourceLease
 from app.pipeline.media import MediaPipeline
 from app.domain.enums import MediaPreparationStatus, TaskType
+from app.domain.sessions import session_video_path
 from app.services.job_tasks import get_task_spec, queue_mirrors_session_job, queue_owns_session_status
 from app.services.media_preparation import mark_media_queued, prepare_session_media
 
@@ -237,3 +239,20 @@ def test_prepare_media_is_a_side_task_of_the_queue() -> None:
     assert queue_owns_session_status(TaskType.PREPARE_MEDIA) is False
     assert queue_mirrors_session_job(TaskType.PREPARE_MEDIA) is False
     assert queue_mirrors_session_job(TaskType.EXPORT_CLIPS) is True
+
+
+@pytest.mark.parametrize("raw", [".", ""])
+def test_audio_extraction_refuses_a_video_path_that_is_not_a_file(tmp_path: Path, raw: str) -> None:
+    """A session stored with ``.`` used to cost three ffmpeg attempts at ``-i .``."""
+    media, runner = make_media(tmp_path, {})
+
+    with pytest.raises(AppError, match="Video file is missing") as raised:
+        asyncio.run(media.extract_audio_to_mp3({"id": "s1", "files": {"video": {"absolutePath": raw}}}))
+
+    assert raised.value.retryable is False
+    assert runner.calls == []
+
+
+def test_session_video_path_rejects_a_directory(tmp_path: Path) -> None:
+    with pytest.raises(AppError, match="Video file is missing"):
+        session_video_path({"files": {"video": {"absolutePath": str(tmp_path)}}})

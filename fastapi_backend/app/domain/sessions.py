@@ -105,8 +105,30 @@ def session_video_path(session: dict[str, Any]) -> Path:
     """
     raw = ((session.get("files") or {}).get("video") or {}).get("absolutePath")
     path = Path(str(raw or ""))
-    if not raw or not path.exists():
+    # ``is_file``, not ``exists``: ``Path("")`` is ``.``, which exists and is a
+    # directory ffmpeg cannot read.
+    if not raw or not path.is_file():
         raise AppError("Video file is missing for this session.", status_code=400, retryable=False)
+    return path
+
+
+def clip_video_path(clip: dict[str, Any]) -> Path:
+    """A clip's exported MP4 on local disk, or a 400 when there is none to assess.
+
+    A draft clip is a range with no file until the ``export_clips`` job cuts it,
+    so it has nothing to assess; a recorded path that is gone needs the export
+    redone. Both the create and the re-run-in-place assessment paths ask here.
+    """
+    raw = clip.get("absolutePath")
+    if clip.get("isDraft") or not raw:
+        raise AppError(
+            "This clip has not been exported yet. Export clips, and wait for the export to finish, before assessment.",
+            status_code=400,
+            retryable=False,
+        )
+    path = Path(str(raw))
+    if not path.is_file():
+        raise AppError("Clip file is missing. Export clips before assessment.", status_code=400, retryable=False)
     return path
 
 
@@ -133,6 +155,7 @@ __all__ = [
     "SessionPayload",
     "SessionStatus",
     "TERMINAL_STATUSES",
+    "clip_video_path",
     "empty_outputs",
     "find_clip",
     "session_clips",
