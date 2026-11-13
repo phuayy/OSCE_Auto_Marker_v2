@@ -24,8 +24,33 @@ export default function RegionFocusPreview({ videoUrl, regionFocus }) {
 
   return (
     <figure className="m-0">
-      <div className="relative overflow-hidden rounded-lg border border-slate-200 bg-black">
-        {videoUrl ? (
+      <div
+        className={`relative overflow-hidden rounded-lg border border-slate-200 ${
+          videoUrl && errorMessage ? 'bg-slate-100' : 'bg-black'
+        }`}
+      >
+        {videoUrl && errorMessage ? (
+          // The file cannot be decoded here (an HEVC camera recording, say), so
+          // there is no frame to shade. Draw the frame's width as a ruler
+          // instead: the shading still shows exactly which share of the width
+          // the detector will ignore, which is what the operator is choosing.
+          <div className="relative aspect-video" aria-label="Frame width, from the left edge to the right edge">
+            {[10, 20, 30, 40, 50, 60, 70, 80, 90].map((tick) => (
+              <div
+                key={tick}
+                aria-hidden="true"
+                className="absolute inset-y-0 border-l border-dashed border-slate-300"
+                style={{ left: `${tick}%` }}
+              >
+                {tick % 20 === 0 || tick === 50 ? (
+                  <span className="absolute bottom-1 left-1 text-[11px] text-slate-500">{tick}%</span>
+                ) : null}
+              </div>
+            ))}
+            <span className="absolute left-2 top-2 text-[11px] font-medium text-slate-600">Left edge</span>
+            <span className="absolute right-2 top-2 text-[11px] font-medium text-slate-600">Right edge</span>
+          </div>
+        ) : videoUrl ? (
           <video
             src={videoUrl}
             muted
