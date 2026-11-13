@@ -180,6 +180,13 @@ class StoragePaths:
         return self.storage_root / "output" / "clips"
 
     @property
+    def output_playback_dir(self) -> Path:
+        """Browser-playable H.264 copies of source videos a browser cannot
+        decode (HEVC, 10-bit H.264, ProRes). One directory per session, so
+        ``SessionArtifacts`` cleans it up by convention."""
+        return self.storage_root / "output" / "playback"
+
+    @property
     def auth_dir(self) -> Path:
         return self.storage_root / "auth"
 
@@ -253,6 +260,7 @@ class StoragePaths:
             self.output_llm_preprocess_dir,
             self.output_communication_scores_dir,
             self.output_clips_dir,
+            self.output_playback_dir,
             self.auth_dir,
             self.uploads_dir,
             self.jobs_dir,
@@ -688,6 +696,15 @@ class Settings:
     parallel_scoring: bool = read_bool_env("PARALLEL_SCORING", True)
 
     auto_crop_min_clip_seconds: float = read_float_env("AUTO_CROP_MIN_CLIP_SECONDS", 0.5)
+    # A source video the browser cannot decode (HEVC/H.265 from a phone or
+    # camera, 10-bit H.264, ProRes) processes fine — ffmpeg reads it — but
+    # plays as a black box. When on, the job that first touches such a video
+    # writes an H.264 copy for the player (output/playback/<session>/), and
+    # clips cut from it are re-encoded instead of stream-copied.
+    playback_copy_enabled: bool = read_bool_env("PLAYBACK_COPY_ENABLED", True)
+    # Height of that copy; it is only for watching, so 720p keeps the
+    # transcode of a long recording affordable on a CPU. 0 = source height.
+    playback_copy_max_height: int = read_int_env("PLAYBACK_COPY_MAX_HEIGHT", 720)
     bell_end_offset_seconds: float = read_float_env("BELL_END_OFFSET_SECONDS", 5.0)
     bell_start_offset_seconds: float = read_float_env("BELL_START_OFFSET_SECONDS", 0.0)
     enable_python_bell_detector: bool = read_bool_env("ENABLE_PYTHON_BELL_DETECTOR", True)

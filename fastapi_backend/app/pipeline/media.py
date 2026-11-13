@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,9 @@ ProgressCallback = Callable[[float], Awaitable[None]]
 ENGINE_MARKER_WHISPERX = "whisperx"
 
 
+logger = logging.getLogger(__name__)
+
+
 class MediaPipeline:
     def __init__(
         self,
@@ -48,6 +52,9 @@ class MediaPipeline:
         if not isinstance(gpu, ResourceLease):
             raise TypeError("gpu must be a ResourceLease")
         self.gpu = gpu
+        # (path, size, mtime) -> playable; a clip export probes the same
+        # source once per clip otherwise.
+        self._playability_cache: dict[tuple[str, int, int], bool] = {}
 
     @staticmethod
     def count_usable_segments(payload: Any) -> int:
@@ -282,6 +289,154 @@ class MediaPipeline:
             raise RuntimeError(f"Could not determine video duration for {video_path}")
         return duration
 
+    # ------------------------------------------------------------------
+    # Browser playback
+    # ------------------------------------------------------------------
+
+    # What every current desktop browser decodes without a platform plugin.
+    # H.264 only in 8-bit 4:2:0: Chrome refuses High 10 / 4:2:2 / 4:4:4, and a
+    # camera that records "H.264" in 10-bit is exactly the file that plays
+    # black. HEVC is absent on purpose: Chrome plays it only where the GPU and
+    # OS happen to provide a decoder, which is not something to depend on.
+    BROWSER_VIDEO_CODECS = frozenset({"h264", "vp8", "vp9", "av1"})
+    BROWSER_H264_PIXEL_FORMATS = frozenset({"yuv420p", "yuvj420p"})
+    # Audio too: IP/CCTV cameras record G.711 (pcm_mulaw / pcm_alaw) into MP4,
+    # which no browser plays — the clip would be silent at best.
+    BROWSER_AUDIO_CODECS = frozenset({"aac", "mp3", "opus", "vorbis", "flac"})
+
+    async def probe_video_stream(self, video_path: Path) -> dict[str, str]:
+        """The first video stream's codec and pixel format, and the first audio
+        stream's codec ("" when there is none), as ffprobe names them."""
+        args = [
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,codec_name,pix_fmt",
+            "-of",
+            "json",
+            str(video_path),
+        ]
+        result = await self.runner.run(self.settings.ffprobe_bin, args, "Video codec (ffprobe)")
+        try:
+            streams = json.loads(str(result.stdout or "{}")).get("streams") or []
+        except json.JSONDecodeError:
+            streams = []
+        streams = [stream for stream in streams if isinstance(stream, dict)]
+
+        def first(kind: str) -> dict[str, Any]:
+            return next((stream for stream in streams if stream.get("codec_type") == kind), {})
+
+        video, audio = first("video"), first("audio")
+        return {
+            "codec": str(video.get("codec_name") or "").lower(),
+            "pixelFormat": str(video.get("pix_fmt") or "").lower(),
+            "audioCodec": str(audio.get("codec_name") or "").lower(),
+        }
+
+    @classmethod
+    def is_browser_playable(cls, stream: dict[str, str]) -> bool:
+        codec = str(stream.get("codec") or "")
+        if codec not in cls.BROWSER_VIDEO_CODECS:
+            return False
+        if codec == "h264":
+            pixel_format = str(stream.get("pixelFormat") or "")
+            if pixel_format and pixel_format not in cls.BROWSER_H264_PIXEL_FORMATS:
+                return False
+        audio_codec = str(stream.get("audioCodec") or "")
+        return not audio_codec or audio_codec in cls.BROWSER_AUDIO_CODECS
+
+    async def video_is_browser_playable(self, video_path: Path) -> bool:
+        """Whether a browser can play this file as it is.
+
+        Answers True when the probe itself fails: this only decides whether to
+        spend a transcode, and an unreadable file has bigger problems that the
+        step reading it next will report properly.
+        """
+        cache = self.__dict__.setdefault("_playability_cache", {})
+        key = self._playability_key(video_path)
+        if key is not None and key in cache:
+            return cache[key]
+        try:
+            playable = self.is_browser_playable(await self.probe_video_stream(video_path))
+        except Exception:
+            logger.warning("Could not probe %s for browser playability; assuming playable.", video_path, exc_info=True)
+            return True
+        if key is not None:
+            cache[key] = playable
+        return playable
+
+    @staticmethod
+    def _playability_key(video_path: Path) -> tuple[str, int, int] | None:
+        try:
+            stat = video_path.stat()
+        except OSError:
+            return None
+        return (str(video_path), stat.st_size, stat.st_mtime_ns)
+
+    async def ensure_playback_copy(self, session: dict[str, Any]) -> dict[str, Any] | None:
+        """Make sure a browser can play this session's source video.
+
+        Returns the metadata of an H.264 copy (written once, under
+        ``output/playback/<session>/``) when the source needs one, or None when
+        the source plays as it is, the feature is off, or there is no video.
+        A copy already on disk is reused, so a retried job does not transcode
+        twice. Callers record the result on ``files.video.playback``; the
+        workspace plays that in place of the original.
+        """
+        if not self.settings.playback_copy_enabled:
+            return None
+        video = (session.get("files") or {}).get("video")
+        source = video.get("absolutePath") if isinstance(video, dict) else None
+        if not source or not Path(str(source)).is_file():
+            return None
+        source_path = Path(str(source))
+        session_id = str(session["id"])
+        output_path = self.settings.paths.output_playback_dir / session_id / f"{session_id}-playback.mp4"
+        if not output_path.is_file() or output_path.stat().st_size <= 0:
+            if await self.video_is_browser_playable(source_path):
+                return None
+            await self._transcode_for_browser(source_path, output_path)
+        return artifact_metadata(output_path, f"/media/playback/{session_id}")
+
+    async def _transcode_for_browser(self, input_path: Path, output_path: Path) -> None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path = output_path.with_name(f".{output_path.name}.{uuid4().hex[:8]}.partial{output_path.suffix}")
+        max_height = max(0, int(self.settings.playback_copy_max_height or 0))
+        # Never upscale; keep the width even, which libx264 requires.
+        scale = [] if max_height <= 0 else ["-vf", f"scale=-2:'min({max_height},ih)'"]
+        args = [
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(input_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            *scale,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "26",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            str(staging_path),
+        ]
+        try:
+            await self.runner.run(self.settings.ffmpeg_bin, args, "Browser playback copy (ffmpeg)")
+        except Exception:
+            await asyncio.to_thread(staging_path.unlink, True)
+            raise
+        await asyncio.to_thread(atomic_replace, staging_path, output_path)
+
     async def crop_video_segment(
         self,
         *,
@@ -317,12 +472,16 @@ class MediaPipeline:
             "0",
             str(staging_path),
         ]
-        try:
-            await self.runner.run(self.settings.ffmpeg_bin, args_copy, "Video clip crop (stream copy)")
-            await asyncio.to_thread(atomic_replace, staging_path, output_path)
-            return True
-        except RuntimeError:
-            await asyncio.to_thread(staging_path.unlink, True)
+        # A stream copy keeps the source's codec, so clips of a video the
+        # browser cannot decode would play black too; those are re-encoded.
+        stream_copy = not self.settings.playback_copy_enabled or await self.video_is_browser_playable(input_path)
+        if stream_copy:
+            try:
+                await self.runner.run(self.settings.ffmpeg_bin, args_copy, "Video clip crop (stream copy)")
+                await asyncio.to_thread(atomic_replace, staging_path, output_path)
+                return True
+            except RuntimeError:
+                await asyncio.to_thread(staging_path.unlink, True)
 
         args_reencode = [
             "-y",
@@ -345,6 +504,8 @@ class MediaPipeline:
             "veryfast",
             "-crf",
             "23",
+            "-pix_fmt",
+            "yuv420p",
             "-c:a",
             "aac",
             "-movflags",

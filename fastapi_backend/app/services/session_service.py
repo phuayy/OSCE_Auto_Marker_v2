@@ -400,6 +400,9 @@ class SessionService:
                     # showing "No video loaded" for a recording that is gone
                     # on purpose rather than one that never uploaded.
                     "purgedAt": video.get("purgedAt"),
+                    # The H.264 copy the player uses when the browser cannot
+                    # decode the original (see app/services/playback_copy.py).
+                    "playback": public_artifact(video.get("playback")),
                 },
                 "caseStudy": {
                     "originalName": case_study.get("originalName"),

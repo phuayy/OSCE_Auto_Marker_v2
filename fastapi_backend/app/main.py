@@ -246,6 +246,11 @@ def build_app(app_settings: Settings) -> FastAPI:
         "/media/clips", StaticFiles(directory=str(app_settings.paths.output_clips_dir), check_dir=False), name="media-clips"
     )
     application.mount(
+        "/media/playback",
+        StaticFiles(directory=str(app_settings.paths.output_playback_dir), check_dir=False),
+        name="media-playback",
+    )
+    application.mount(
         "/media/source", StaticFiles(directory=str(app_settings.object_storage_root), check_dir=False), name="media-source"
     )
 
