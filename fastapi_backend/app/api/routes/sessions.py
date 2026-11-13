@@ -5,6 +5,7 @@ from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import current_actor, get_container, require_expensive_operation, require_session_owner
 from app.api.errors import http_error
+from app.domain.sessions import session_video_path
 from app.schemas.sessions import (
     AssessClipsRequest,
     ManualClipsRequest,
@@ -138,6 +139,35 @@ async def get_clip_summaries(session_id: str, container: AppContainer = Depends(
         return await container.clips.clip_summaries(session_id)
     except Exception as error:
         raise http_error(error, fallback_message="Failed to aggregate clip summaries.", not_found_message="Session not found.") from error
+
+
+@router.get("/{session_id}/video-duration")
+async def get_video_duration(session_id: str, container: AppContainer = Depends(get_container)) -> dict[str, object]:
+    """The source video's length in seconds, measured by ffprobe on the server.
+
+    The clip timeline used to learn the duration only from the browser's
+    ``<video>`` element, so a source the browser cannot decode (HEVC video,
+    mu-law audio) left Export clips disabled even though ffmpeg reads the
+    file fine. The workspace asks here as a fallback. A duration already
+    recorded on ``files.video.media`` is answered without running ffprobe.
+    Read-only: nothing is written back to the session.
+    """
+    try:
+        session = await container.sessions.read(session_id)
+        media = ((session.get("files") or {}).get("video") or {}).get("media") or {}
+        recorded = media.get("durationSeconds") if isinstance(media, dict) else None
+        if isinstance(recorded, (int, float)) and recorded > 0:
+            return {"durationSeconds": float(recorded)}
+        session = await container.storage.prepare_session_sources(session)
+        video_path = session_video_path(session)
+        duration = await container.media.get_video_duration_seconds(video_path)
+        return {"durationSeconds": duration}
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Session not found.") from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=422, detail="Could not read the video's duration.") from error
+    except Exception as error:
+        raise http_error(error, fallback_message="Failed to read video duration.", not_found_message="Session not found.") from error
 
 
 @router.get("/{session_id}/events")

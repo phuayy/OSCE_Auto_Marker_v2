@@ -219,6 +219,31 @@ export default function SessionWorkspace({
     return () => { active = false; };
   }, [serverVideoUrl]);
 
+  // The clip timeline and Export clips need the video's length. The player's
+  // loadedmetadata used to be the only source, so a recording the browser
+  // cannot decode (HEVC video, mu-law audio) left the editor disabled even
+  // though the server's ffmpeg reads it fine. Ask the server too; whichever
+  // answers, the value is the same. This also replaces a duration left over
+  // from the previously opened session.
+  const sessionId = session?.id || null;
+  const hasServerVideo = Boolean(session?.files?.video) && !videoPurgedAt;
+  useEffect(() => {
+    if (!sessionId || !hasServerVideo) return;
+    let active = true;
+    apiJson(`/api/sessions/${sessionId}/video-duration`, {
+      fallbackMessage: 'Video duration unavailable.',
+    }).then(
+      (body) => {
+        const duration = Number(body?.durationSeconds || 0);
+        if (active && Number.isFinite(duration) && duration > 0) {
+          setVideoDurationSeconds(duration);
+        }
+      },
+      () => {},
+    );
+    return () => { active = false; };
+  }, [sessionId, hasServerVideo]);
+
   const currentVideoUrl = resolveMediaUrl(serverVideoUrl) || localVideoUrl;
   // The server's still frame: what the player shows instead of a black box
   // while a playable copy is made, or when the browser cannot decode the file.
