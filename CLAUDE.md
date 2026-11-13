@@ -881,6 +881,15 @@ before this, or one whose copy failed, is (re)queued by
 operation budget), offered as "Make a playable copy" under the player. Failures
 never fail the job: they land on `media.status = failed` / `media.error`.
 
+**`prepare_media` runs in its own single-slot lane, not against
+`JOB_WORKER_CONCURRENCY`.** `JobQueueService.run_job` reads the job's task
+type and gives a side task (`mirrors_session_job=False`) a separate
+`asyncio.Semaphore(1)`. A whole-recording CPU transcode once held a scoring
+slot for hours, and every clip assessment queued behind it showed "queued"
+with nothing running; with a concurrency of 1 nothing else ran at all. Two
+transcodes still never overlap. Local backend only — a Hatchet worker's slots
+still count it.
+
 `export_clips` carries a **scope**: a whole split (`plan`, queued by "Export
 clips") or a re-cut of named clips (`clip`, queued by a recrop). The payload's
 `clipIds` decide what one run cuts, so a retry cuts exactly what the request

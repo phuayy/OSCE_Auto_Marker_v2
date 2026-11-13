@@ -280,6 +280,37 @@ def test_run_job_reports_the_failure_to_its_caller(tmp_path) -> None:
     assert result.job is not None and result.job["status"] == "failed"
 
 
+def test_a_long_prepare_media_job_does_not_hold_a_scoring_slot(tmp_path) -> None:
+    """The transcode is a side task with its own lane: with one worker slot, a
+    scoring job for another session still runs while it is blocked."""
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    class BlockingPipeline(ScriptedPipeline):
+        async def prepare_media_by_id(self, _session_id: str) -> None:
+            started.set()
+            await release.wait()
+
+    service = make_service(tmp_path, BlockingPipeline(failures=0), job_worker_concurrency=1)
+
+    async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
+        await service.repository.initialize()
+        media = await service.enqueue("session-media", "prepare_media", {}, auto_start=False)
+        scoring = await service.enqueue("session-scoring", "process_session", {}, auto_start=False)
+        media_run = asyncio.create_task(service.run_job(str(media["id"])))
+        await started.wait()
+        await asyncio.wait_for(service.run_job(str(scoring["id"])), timeout=5)
+        scored = await service.repository.read(str(scoring["id"]))
+        release.set()
+        await media_run
+        return scored, await service.repository.read(str(media["id"]))
+
+    scored, prepared = asyncio.run(scenario())
+
+    assert scored["status"] == "succeeded"
+    assert prepared["status"] == "succeeded"
+
+
 def run_hatchet_attempts(service: JobQueueService, session_id: str, attempts: int) -> tuple[str, list[BaseException]]:
     """Drive a job the way the Hatchet worker does: one ``run_job`` per attempt,
     each preceded by ``prepare_hatchet_retry_attempt``, stopping when an attempt

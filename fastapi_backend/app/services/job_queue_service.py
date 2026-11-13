@@ -119,6 +119,7 @@ class JobQueueService:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._worker_id = f"{socket.gethostname()}:{uuid4()}"
         self._semaphore: asyncio.Semaphore | None = None
+        self._side_semaphore: asyncio.Semaphore | None = None
         # Serialises the find_active -> insert critical section so two concurrent
         # enqueue/create calls for the same session cannot both create a job.
         self._enqueue_lock = asyncio.Lock()
@@ -417,9 +418,22 @@ class JobQueueService:
         return 3
 
     async def run_job(self, job_id: str, *, raise_on_error: bool = False) -> JobRunResult:
-        if self._semaphore is None:
-            self._semaphore = asyncio.Semaphore(max(1, self.settings.job_worker_concurrency))
-        async with self._semaphore:
+        # A side task (prepare_media's hours-long transcode) gets its own single
+        # slot so it can never starve the scoring jobs of theirs.
+        # shortcut: in-process lane only; under JOB_QUEUE_BACKEND=hatchet the engine's worker slots still count prepare_media, give it its own Hatchet workflow if that matters.
+        try:
+            task_type = str((await self.repository.read(job_id)).get("taskType"))
+        except FileNotFoundError:
+            task_type = ""  # _execute_job reports the missing row
+        if queue_mirrors_session_job(task_type):
+            if self._semaphore is None:
+                self._semaphore = asyncio.Semaphore(max(1, self.settings.job_worker_concurrency))
+            lane = self._semaphore
+        else:
+            if self._side_semaphore is None:
+                self._side_semaphore = asyncio.Semaphore(1)
+            lane = self._side_semaphore
+        async with lane:
             return await self._execute_job(job_id, raise_on_error=raise_on_error)
 
     async def prepare_hatchet_retry_attempt(self, job_id: str, retry_count: int) -> bool:
