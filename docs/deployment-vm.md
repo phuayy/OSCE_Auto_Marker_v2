@@ -94,7 +94,9 @@ serves the built frontend.
 
 `RATE_LIMIT_RERUN_PER_HOUR=10` sets one shared hourly attempt budget per signed-in
 account for session rerun/process/auto-crop, clip assessment/export/recrop, job
-rerun, and upload initiation. Administrators have the same budget; changing IP,
+rerun, and upload initiation. "Run selected" on a recording's clip list is one
+`POST /sessions/{id}/clips/assess` for every selected clip and costs one unit, not
+one per clip. Administrators have the same budget; changing IP,
 session, or endpoint does not reset it. Ownership is checked before charging
 session/job operations. Refused attempts return HTTP 429 through the normal API
 error path; mutating requests are not automatically retried by the browser.

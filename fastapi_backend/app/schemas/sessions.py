@@ -54,6 +54,34 @@ class RecropClipRequest(BaseModel):
         return self
 
 
+# Upper bound on one "Run selected" batch. Far above any OSCE circuit (a long
+# recording splits into tens of stations), low enough that one request cannot
+# be used to queue an unbounded amount of work.
+MAX_BATCH_ASSESS_CLIPS = 200
+
+
+class AssessClipsRequest(BaseModel):
+    """``POST /sessions/{id}/clips/assess`` — queue several clips as one action."""
+
+    clip_ids: list[str] = Field(alias="clipIds", min_length=1, max_length=MAX_BATCH_ASSESS_CLIPS)
+
+    model_config = {"populate_by_name": True}
+
+    @field_validator("clip_ids", mode="after")
+    @classmethod
+    def dedupe_non_empty(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            clip_id = str(item or "").strip()
+            if clip_id and clip_id not in seen:
+                seen.add(clip_id)
+                cleaned.append(clip_id)
+        if not cleaned:
+            raise ValueError("`clipIds` must name at least one clip.")
+        return cleaned
+
+
 class RenameClipRequest(BaseModel):
     label: str = Field(min_length=1, max_length=80)
 

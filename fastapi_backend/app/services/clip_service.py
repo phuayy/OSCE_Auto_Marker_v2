@@ -1048,6 +1048,36 @@ class ClipService:
         async with self._assess_locks.hold(f"{session_id}:{clip_id}"):
             return await self._assess_clip_locked(session_id, clip_id, actor=actor)
 
+    async def assess_clips(
+        self, session_id: str, clip_ids: list[str], *, actor: Actor | None = None
+    ) -> dict[str, Any]:
+        """Queue several clips' assessments, answering each clip separately.
+
+        Sequential on purpose, in the order given, so queue order follows clip
+        order. Every clip goes through :meth:`assess_clip`, so the one-child-
+        per-clip rule and its per-clip lock hold exactly as for a single run.
+        A clip that cannot be queued (missing file, intermission, unknown id)
+        is reported in its own result rather than failing the batch; only a
+        missing parent session fails the whole request.
+        """
+        await self.sessions.read(session_id)  # 404 before any work
+        results: list[dict[str, Any]] = []
+        for clip_id in clip_ids:
+            try:
+                outcome = await self.assess_clip(session_id, clip_id, actor=actor)
+            except AppError as error:
+                results.append({"clipId": clip_id, "ok": False, "error": error.message, "statusCode": error.status_code})
+                continue
+            except (FileNotFoundError, ValueError) as error:
+                results.append({"clipId": clip_id, "ok": False, "error": str(error) or "Clip not found.", "statusCode": 404 if isinstance(error, FileNotFoundError) else 400})
+                continue
+            results.append({"clipId": clip_id, "ok": True, **outcome})
+        return {
+            "results": results,
+            "queued": sum(1 for item in results if item["ok"]),
+            "failed": sum(1 for item in results if not item["ok"]),
+        }
+
     async def _assess_clip_locked(
         self, session_id: str, clip_id: str, *, actor: Actor | None = None
     ) -> dict[str, Any]:
