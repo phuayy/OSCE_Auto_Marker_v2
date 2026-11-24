@@ -26,6 +26,26 @@ How long a start takes depends on the machine and the image. Expect a few
 minutes. The gate measures every start (from the VM's start time to the app
 reporting ready) and uses the median of the recent ones as its estimate.
 
+## Automated setup
+
+`bash deploy/gcp/setup.sh` does every step below in a project of your choice,
+from Google Cloud Shell, with no local installs. A non-technical walkthrough
+(with an *Open in Cloud Shell* link) is [QUICKSTART.md](QUICKSTART.md).
+`bash deploy/gcp/teardown.sh` removes it again. The rest of this page is what
+the script does, for anyone setting it up by hand or debugging it.
+
+| Step in this guide | What `setup.sh` does |
+|---|---|
+| Project, billing, APIs | Picks or creates the project, links a billing account, enables Compute, Cloud Run, Cloud Build, Artifact Registry, Secret Manager, IAM and Storage |
+| GPU and zone | Reads the region's L4/T4 quota and picks a zone offering both, so the T4 fallback can work. It sets `GATE_MACHINE_PROFILES` to whichever of `g2-standard-8` and `n1-standard-8+nvidia-tesla-t4` have quota. With no quota it stops and says which quotas to request |
+| 1. The VM | Creates a Deep Learning VM image (NVIDIA driver preinstalled; newest CUDA 12.8+ family) on a `pd-balanced` disk (N1-compatible), with guest attributes on, a static IP and its own service account. Its startup script ([setup/vm-startup.sh](setup/vm-startup.sh)) installs the app on first boot: ffmpeg, PostgreSQL, uv, Node 22, `uv sync`, `npm run build`, the systemd unit from `deploy/systemd/`, the shutdown sudoers rule and the `.env` above. On later boots it does nothing unless setup shipped a new code bundle |
+| HTTPS and DNS | Caddy on the VM gets its own certificate. With no `--domain`, the name is `<ip>.sslip.io`, which resolves to the static IP with no DNS setup. `TRUSTED_PROXY_COUNT=1` and `TRUSTED_PROXY_IPS=127.0.0.1` are set for it |
+| 2. The gate | Creates `osceGate` (bound on the instance only) plus `osceGateOps` (`compute.zoneOperations.get`, on the project), the session secret in Secret Manager and a history bucket. It deploys the gate with `--env-vars-file`, because `--set-env-vars` splits the profile list at its comma |
+| Google sign-in | **Not automatable.** Google has no API for OAuth Web clients. The script prints the clicks and the exact origin (`https://osce-gate-<project-number>.<region>.run.app`, Cloud Run's deterministic URL), then waits for the client ID |
+| Weights | `TRANSCRIPTION_PREFETCH_MODELS` (on by default) downloads them in the background on the first boot |
+
+Settings that are not secret are saved to `gs://<project>-osce-deploy/config.env`, so a run from another computer finds them. Secrets (first admin password, gate cookie key, HuggingFace token) are in Secret Manager. `AUTH_SECRET`, `CREDENTIAL_ENCRYPTION_KEY` and the database password are generated on the VM once, in `/var/lib/osce-marker/secrets.env`, and never leave it. Put your own `.env` overrides in `/var/lib/osce-marker/extra.env`: they are appended last and survive updates. `setup.sh --update` ships the current commit; the VM applies it on its next start.
+
 ## What counts as "in use"
 
 Implemented in `fastapi_backend/app/services/idle_shutdown_service.py` and
