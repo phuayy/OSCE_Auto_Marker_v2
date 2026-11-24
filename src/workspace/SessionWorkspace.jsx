@@ -35,6 +35,7 @@ import {
   buildContentCriteria,
   buildKeepStartStop,
   buildScoringSummary,
+  communicationScale,
 } from '@/lib/resultsModel';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -1167,6 +1168,7 @@ export default function SessionWorkspace({
                   <TabsContent value="communication-scores">
                     <CommunicationScoresTab
                       criteria={communicationCriteria}
+                      scale={communicationScale(communicationPayload)}
                       summary={communicationSummary}
                       overallSummary={communicationPayload?.overall_summary || ''}
                       sessionStatus={session?.status || null}

@@ -99,16 +99,22 @@ class LlmRubricExtraction:
     prompt_version: str = RUBRIC_EXTRACTION_PROMPT_VERSION
     warnings: list[str] = field(default_factory=list)
 
-    def provenance(self, *, deterministic_error: str) -> dict[str, Any]:
-        """The ``extraction`` block recorded on a cache entry / parsed rubric."""
-        return {
+    def provenance(self, *, deterministic_error: str | None) -> dict[str, Any]:
+        """The ``extraction`` block recorded on a cache entry / parsed rubric.
+
+        ``deterministic_error`` is why the parser was bypassed; ``None`` when it
+        never ran (an administrator asked for AI extraction outright), in which
+        case the block carries no such key."""
+        block: dict[str, Any] = {
             "method": "llm",
             "model": self.model,
             "provider": self.provider,
             "prompt_version": self.prompt_version,
-            "deterministic_error": str(deterministic_error),
-            "warnings": list(self.warnings),
         }
+        if deterministic_error is not None:
+            block["deterministic_error"] = str(deterministic_error)
+        block["warnings"] = list(self.warnings)
+        return block
 
 
 def deterministic_provenance() -> dict[str, Any]:

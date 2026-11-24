@@ -302,6 +302,77 @@ def test_main_no_llm_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_ll
     assert no_llm == []
 
 
+# --- --force-llm and shared domain code -------------------------------------
+
+
+def test_parser_uses_domain_functions() -> None:
+    from app.domain import communication_rubric as domain
+
+    assert parser.build_rubric_payload is domain.build_rubric_payload
+    assert parser.rubric_quality_issues is domain.rubric_quality_issues
+    assert parser.normalize_whitespace is domain.normalize_whitespace
+    assert parser.canonicalize_section_name is domain.canonicalize_section_name
+
+
+def test_force_llm_skips_deterministic_parser(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RUBRIC_LLM_FALLBACK", "true")
+    monkeypatch.setattr(parser, "parse_rubric_text", _raise(AssertionError("parser must not run")))
+    extraction = _llm_extraction([{"label": "Rapport", "indicators": ["Greets"], "section": None}])
+    monkeypatch.setattr(parser, "extract_rubric_with_llm", lambda *a, **k: extraction)
+    payload = parser.build_payload(_text(3), force_llm=True)
+    assert payload["extraction"]["method"] == "llm"
+    assert "deterministic_error" not in payload["extraction"]
+    assert payload["criteria"][0]["label"] == "Rapport"
+
+
+def test_force_llm_unavailable_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RUBRIC_LLM_FALLBACK", "true")
+    monkeypatch.setattr(
+        parser, "extract_rubric_with_llm", _raise(fallback.RubricLlmFallbackUnavailable("no key"))
+    )
+    with pytest.raises(RuntimeError, match="not available.*no key"):
+        parser.build_payload(_text(3), force_llm=True)
+
+
+def test_force_llm_failed_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RUBRIC_LLM_FALLBACK", "true")
+    monkeypatch.setattr(
+        parser, "extract_rubric_with_llm", _raise(fallback.RubricLlmFallbackFailed("bad json"))
+    )
+    with pytest.raises(RuntimeError, match="AI extraction failed: bad json"):
+        parser.build_payload(_text(3), force_llm=True)
+
+
+def test_force_llm_refused_when_switch_off(monkeypatch: pytest.MonkeyPatch, no_llm) -> None:
+    monkeypatch.setenv("RUBRIC_LLM_FALLBACK", "false")
+    with pytest.raises(RuntimeError, match="turned off on this server"):
+        parser.build_payload(_text(3), force_llm=True)
+    assert no_llm == []
+
+
+def test_cli_rejects_force_llm_with_no_llm_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys, "argv", ["p", "--pdf", "x.pdf", "--force-llm", "--no-llm-fallback"]
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        parser.parse_args()
+    assert exit_info.value.code == 2
+
+
+def test_main_passes_force_llm_through(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_build(text: str, **kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        return {"extraction": {"method": "llm"}}
+
+    monkeypatch.setattr(parser, "read_pdf_text", lambda p: _text(3))
+    monkeypatch.setattr(parser, "build_payload", fake_build)
+    code, _ = _run_main(monkeypatch, tmp_path, "--force-llm")
+    assert code == 0
+    assert seen["force_llm"] is True and seen["allow_llm"] is True
+
+
 # --- RubricService ----------------------------------------------------------
 
 

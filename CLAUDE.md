@@ -36,6 +36,8 @@ OSCE-AI-FYP/
 │   ├── ResetPasswordScreen.jsx # #/reset-password/<token> — pre-login: choose a new password (lazy)
 │   ├── MarkingModeSettings.jsx # Settings card: single-model vs panel marking
 │   ├── PanelMarkingSummary.jsx # Score tab: how a panel marked (summary + per-criterion votes)
+│   ├── CommunicationRubricPanel.jsx  # #/rubric — the active communication rubric; admins upload, AI-extract, edit (lazy)
+│   ├── CommunicationRubricEditor.jsx # Review/edit a rubric draft or the active rubric: criteria, indicators, points, pass mark
 │   ├── workspace/              # The opened-session view — its own chunk, loaded by the click that opens a session
 │   │   ├── SessionWorkspace.jsx        # Chunk root: results model, player/download handlers, the whole subtree
 │   │   ├── ManualTimelineEditor.jsx    # Manual crop timeline (separators, labels, Export clips)
@@ -124,6 +126,7 @@ OSCE-AI-FYP/
 │       │   ├── actors.py       # Actor (who a request acts as) + the createdBy provenance snapshot
 │       │   ├── access.py       # may_mutate / ensure_may_mutate — creator-or-admin gate on a provenance-bearing record
 │       │   ├── settings_scope.py  # USER_SCOPED_KEYS — which settings keys are per-account vs. deployment-wide
+│       │   ├── communication_rubric.py  # The communication-rubric-v1 document: scale, max, pass mark, validation of an edited rubric
 │       │   └── clip_summaries.py  # Pure cohort-summary rows for a long recording's Analytics view
 │       ├── mail/               # Outbound email: one contract, one backend per deployment
 │       │   ├── base.py             # EmailMessage, EmailSender Protocol, EmailDeliveryError
@@ -2375,6 +2378,58 @@ owns it for both rubric kinds.
   criteria against the PDF. The two extraction prompts are in the prompt-version
   ledger (`rubric_extraction.{content,communication}.{system,user}`,
   `RUBRIC_EXTRACTION_PROMPT_VERSION`).
+
+### Reviewing and editing the communication rubric
+
+An administrator can read the communication rubric back, correct it, and
+choose what scoring runs against — not only replace the PDF. Three routes on
+the admin-only `/api/admin/communication-rubric` router
+([routes/rubrics.py](fastapi_backend/app/api/routes/rubrics.py)):
+
+| Route | What it does |
+|---|---|
+| `POST /drafts?mode=llm\|auto` (multipart `rubric`) | Parses the PDF into a **draft** under `auth/communication_rubric_drafts/<32-hex id>/` and answers 201 `{draft, rubric}`. `llm` (the screen's **Upload for AI extraction**) runs the parser with `--force-llm`: the deterministic parser is skipped and the model reads the PDF; a refusal (`RUBRIC_LLM_FALLBACK=false`, no usable model, an ungrounded reply) is a 422 with the reason. The active rubric is never touched. Drafts expire after 24 h and are swept on the next extraction |
+| `PUT ""` `{rubric, draftId?}` | Saves an edited rubric. With `draftId` it also activates the draft's PDF (registered as a rubric asset, like an upload); without, it edits the active rubric in place and keeps its PDF/asset. 422 `{message, issues[]}` lists every problem at once; 404 for an expired/discarded draft |
+| `DELETE /drafts/{id}` | Discards a draft (204) |
+
+**One module owns the document.**
+[domain/communication_rubric.py](fastapi_backend/app/domain/communication_rubric.py)
+is the only place a `communication-rubric-v1` payload is assembled
+(`build_rubric_payload`) or judged (`rubric_quality_issues`,
+`validate_edited_rubric`); the deterministic parser, the LLM fallback and the
+editor all build through it, and `scripts/parse_communication_rubric.py`
+imports it through `llm_bootstrap` rather than keeping a copy
+(`test_parser_uses_domain_functions` pins that). The browser mirrors the
+rules in [lib/rubricEditor.js](src/lib/rubricEditor.js) so the form can say
+what is wrong before the round trip; the server stays the gate.
+
+**The points per label are part of the rubric.** The labels stay All / Most /
+Some / None — the scorer's prompt is written around them and the model never
+sees a point value, so editing points needs no prompt-version bump. The
+`scoring_scale` (whole numbers 0–100, non-increasing, All > None),
+`max_score` (= criteria × All) and `pass_threshold` (explicit, or the default
+rule: 11 for the canonical 7 × 3, else ⌈max/2⌉) are stored on the rubric; the
+scorer awards `points` from that scale (`rubric_scoring_scale`, falling back to
+3/2/1/0 with a warning for an unreadable one), and the results view reads the
+sheet's own `scoring_scale` (`communicationScale` in `resultsModel.js`).
+
+**Scoring uses what was saved, from the next run.** The communication scorer
+reads `auth/communication_rubric.json` per run, so a save applies to the next
+assessment in every process with no restart; a session already scored keeps
+its sheet until it is re-run. Every write of that file stamps
+`rubric_revision` (`rubric_fingerprint`: SHA-256 over criteria, scale and pass
+mark), which changes on an in-place edit even though the PDF asset does not.
+
+**Provenance.** A saved rubric's `extraction` becomes
+`{method: "edited", edited_by, edited_at, source}` where `source` is how the
+text was first read (`llm` with its model, or `deterministic`) — never a
+nested chain. A human-reviewed rubric no longer shows the amber "extracted by
+AI" notice; the rubric page shows "Reviewed and saved by …" instead
+(`describeRubricEdit`). Saves, uploads, resets and draft activation are
+serialised by one lock on `RubricService`; the (slow) AI extraction itself is
+not, because a draft touches nothing shared.
+
+Verify: `cd fastapi_backend && uv run --no-sync pytest tests/test_communication_rubric_domain.py tests/test_communication_rubric_editing.py tests/test_communication_rubric_flow.py tests/test_communication_scoring_scale.py tests/test_communication_rubric_llm_fallback.py` and `node --test test/rubricEditor.test.mjs test/rubricApi.test.mjs test/communicationRubricEditor.test.mjs test/resultsModel.test.mjs`.
 
 ### Prompt-version audit ledger
 

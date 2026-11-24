@@ -319,6 +319,14 @@ def test_provenance_shape():
     assert fb.deterministic_provenance() == {"method": "deterministic"}
 
 
+def test_provenance_without_a_parser_failure_omits_the_reason():
+    # AI extraction an administrator asked for outright: nothing failed first.
+    result = fb.extract_rubric_with_llm("content", DOC, router=FakeRouter([content_reply(*GOOD_LABELS)]))
+    block = result.provenance(deterministic_error=None)
+    assert "deterministic_error" not in block
+    assert block["method"] == "llm"
+
+
 def test_long_document_is_clipped_before_sending():
     long_doc = DOC + ("filler words here " * 10_000)
     router = FakeRouter([content_reply(*GOOD_LABELS)])

@@ -9,26 +9,32 @@ const COMMUNICATION_LABEL_META = {
   All: {
     color: 'bg-emerald-100 text-emerald-700',
     barColor: 'bg-emerald-500',
-    points: 3,
   },
   Most: {
     color: 'bg-cyan-100 text-cyan-700',
     barColor: 'bg-cyan-500',
-    points: 2,
   },
   Some: {
     color: 'bg-amber-100 text-amber-700',
     barColor: 'bg-amber-500',
-    points: 1,
   },
   None: {
     color: 'bg-rose-100 text-rose-700',
     barColor: 'bg-rose-500',
-    points: 0,
   },
 };
 
-export default function CommunicationScoresTab({ criteria, summary, overallSummary, sessionStatus, onSeek, extractionNotice = null }) {
+const DEFAULT_SCALE = { All: 3, Most: 2, Some: 1, None: 0 };
+
+export default function CommunicationScoresTab({
+  criteria,
+  summary,
+  overallSummary,
+  sessionStatus,
+  onSeek,
+  extractionNotice = null,
+  scale = DEFAULT_SCALE,
+}) {
   const hasCriteria = Array.isArray(criteria) && criteria.length > 0;
   // Percent or raw points — the account's preference. The total leads in the
   // chosen reading; the other reading and the threshold sit beneath it, so a
@@ -41,7 +47,7 @@ export default function CommunicationScoresTab({ criteria, summary, overallSumma
       <CardHeader>
         <CardTitle className="text-base">Communication scores</CardTitle>
         <CardDescription>
-          Communication rubric scoring on a None / Some / Most / All scale. All=3, Most=2, Some=1, None=0.
+          Communication rubric scoring on a None / Some / Most / All scale. All={scale.All}, Most={scale.Most}, Some={scale.Some}, None={scale.None}.
           Pass threshold is {formatScore(summary?.passThreshold ?? 11, summary?.maxScore ?? 21, scoreDisplay)}.
         </CardDescription>
       </CardHeader>
@@ -130,6 +136,7 @@ export default function CommunicationScoresTab({ criteria, summary, overallSumma
           ? criteria.map((criterion) => {
               const meta = COMMUNICATION_LABEL_META[criterion.scoreLabel] || COMMUNICATION_LABEL_META.None;
               const hasEvidence = Number.isFinite(criterion.timestampSeconds);
+              const maxPoints = Number(criterion.maxPoints) > 0 ? Number(criterion.maxPoints) : 3;
               return (
                 <div
                   key={criterion.id}
@@ -153,12 +160,12 @@ export default function CommunicationScoresTab({ criteria, summary, overallSumma
                       <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold uppercase ${meta.color}`}>
                         {criterion.scoreLabel}
                       </span>
-                      <span className="text-[11px] text-slate-500">{criterion.points}/3 marks</span>
+                      <span className="text-[11px] text-slate-500">{criterion.points}/{maxPoints} marks</span>
                     </div>
                   </div>
 
                   <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
-                    <div className={`h-full rounded-full ${meta.barColor}`} style={{ width: `${(criterion.points / 3) * 100}%` }} />
+                    <div className={`h-full rounded-full ${meta.barColor}`} style={{ width: `${(maxPoints > 0 ? Math.min(1, criterion.points / maxPoints) : 0) * 100}%` }} />
                   </div>
 
                   {criterion.evidence ? (

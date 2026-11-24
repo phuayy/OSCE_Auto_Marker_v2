@@ -32,7 +32,29 @@ export function buildContentCriteria(scoreReport) {
   });
 }
 
+const DEFAULT_COMMUNICATION_SCALE = Object.freeze({ All: 3, Most: 2, Some: 1, None: 0 });
+
+// The points each communication label is worth under this sheet's rubric:
+// its own `scoring_scale` when it is four finite non-negative numbers, else
+// the default 3/2/1/0 (a sheet from before editable scales carries none).
+export function communicationScale(communicationPayload) {
+  const raw = communicationPayload?.scoring_scale;
+  if (!raw || typeof raw !== 'object') return { ...DEFAULT_COMMUNICATION_SCALE };
+  const scale = {};
+  for (const label of ['All', 'Most', 'Some', 'None']) {
+    const value = raw[label];
+    if (value === null || value === '' || typeof value === 'boolean') {
+      return { ...DEFAULT_COMMUNICATION_SCALE };
+    }
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) return { ...DEFAULT_COMMUNICATION_SCALE };
+    scale[label] = number;
+  }
+  return scale;
+}
+
 export function buildCommunicationCriteria(communicationPayload) {
+  const scale = communicationScale(communicationPayload);
   const list = Array.isArray(communicationPayload?.criteria) ? communicationPayload.criteria : [];
   return list.map((item, index) => {
     const rawTimestamp = String(item?.timestamp || '').trim();
@@ -40,13 +62,14 @@ export function buildCommunicationCriteria(communicationPayload) {
     const scoreLabel = String(item?.score_label || '').trim();
     const points = Number.isFinite(Number(item?.points))
       ? Number(item.points)
-      : { All: 3, Most: 2, Some: 1, None: 0 }[scoreLabel] ?? 0;
+      : scale[scoreLabel] ?? 0;
     return {
       id: item?.id || index + 1,
       label: String(item?.label || `Criterion ${index + 1}`).trim(),
       section: item?.section || null,
       scoreLabel: ['None', 'Some', 'Most', 'All'].includes(scoreLabel) ? scoreLabel : 'None',
       points,
+      maxPoints: scale.All,
       evidence: String(item?.evidence || '').trim(),
       indicatorsObserved: Array.isArray(item?.indicators_observed) ? item.indicators_observed : [],
       indicatorsMissing: Array.isArray(item?.indicators_missing) ? item.indicators_missing : [],
@@ -84,8 +107,9 @@ export function buildCommunicationSummary(communicationPayload, communicationCri
   }
 
   const totalScore = communicationCriteria.reduce((sum, item) => sum + (Number(item.points) || 0), 0);
-  const maxScore = communicationCriteria.length * 3;
-  const passThreshold = communicationCriteria.length === 7 ? 11 : Math.ceil(maxScore / 2);
+  const maxScore = communicationCriteria.length * communicationScale(communicationPayload).All;
+  const passThreshold =
+    communicationCriteria.length === 7 && maxScore === 21 ? 11 : Math.ceil(maxScore / 2);
 
   return {
     totalScore,

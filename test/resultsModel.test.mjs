@@ -16,6 +16,7 @@ import {
   buildContentCriteria,
   buildKeepStartStop,
   buildScoringSummary,
+  communicationScale,
 } from '../src/lib/resultsModel.js';
 
 test('content criteria normalise the model\'s Yes/No and critical flags', () => {
@@ -155,4 +156,43 @@ test('Keep/Start/Stop distinguishes "no block" from "the model left it blank"', 
     start: '',
     stop: '',
   });
+});
+
+const CUSTOM_SCALE = { All: 4, Most: 2, Some: 1, None: 0 };
+
+test('a custom scoring scale supplies the fallback points and the per-criterion maximum', () => {
+  const criteria = buildCommunicationCriteria({
+    scoring_scale: CUSTOM_SCALE,
+    criteria: [
+      { id: 1, label: 'A', score_label: 'All' },
+      { id: 2, label: 'B', score_label: 'Some', points: 1 },
+    ],
+  });
+  assert.equal(criteria[0].points, 4);
+  assert.equal(criteria[0].maxPoints, 4);
+  assert.equal(criteria[1].points, 1);
+});
+
+test('the communication summary fallback honours a custom scale', () => {
+  const payload = { scoring_scale: CUSTOM_SCALE };
+  const criteria = buildCommunicationCriteria({
+    ...payload,
+    criteria: Array.from({ length: 7 }, (_, i) => ({ id: i + 1, label: `C${i}`, score_label: 'All' })),
+  });
+  const summary = buildCommunicationSummary(payload, criteria);
+  assert.equal(summary.maxScore, 28);
+  assert.equal(summary.totalScore, 28);
+  assert.equal(summary.passThreshold, 14, '7 criteria but not 21 marks: ceil(max / 2)');
+});
+
+test('communicationScale rejects garbage and keeps the default for the default case', () => {
+  const dflt = { All: 3, Most: 2, Some: 1, None: 0 };
+  assert.deepEqual(communicationScale({}), dflt);
+  assert.deepEqual(communicationScale(null), dflt);
+  assert.deepEqual(communicationScale({ scoring_scale: 'x' }), dflt);
+  assert.deepEqual(communicationScale({ scoring_scale: { All: 4, Most: 'a', Some: 1, None: 0 } }), dflt);
+  assert.deepEqual(communicationScale({ scoring_scale: { All: 4, Most: 2, Some: -1, None: 0 } }), dflt);
+  assert.deepEqual(communicationScale({ scoring_scale: { All: 4, Most: 2, Some: 1 } }), dflt);
+  assert.deepEqual(communicationScale({ scoring_scale: CUSTOM_SCALE }), CUSTOM_SCALE);
+  assert.equal(buildCommunicationCriteria({ criteria: [{ score_label: 'All' }] })[0].maxPoints, 3);
 });
