@@ -57,6 +57,27 @@ def split_case_study_context_and_rubric(case_study_text: str) -> tuple[str, str]
     return case_context, rubric_section
 
 
+def extractable_text(text: str) -> str:
+    """The document's real text: the synthetic "[Page N]" markers removed."""
+    return _PAGE_MARKER_RE.sub(" ", str(text or "")).strip()
+
+
+def has_extractable_text(text: str) -> bool:
+    """False for a scanned/image-only PDF: too little text for any parser, or
+    any model, to read a rubric from."""
+    return len(extractable_text(text)) >= MIN_EXTRACTABLE_TEXT_CHARS
+
+
+def locate_phrase(text: str, phrase: str) -> int | None:
+    """Start index of ``phrase`` in ``text``, matched case-insensitively and
+    tolerant of any whitespace (PDF line breaks) between its words."""
+    words = str(phrase or "").split()
+    if not words:
+        return None
+    match = re.search(r"\s+".join(re.escape(word) for word in words), str(text or ""), flags=re.IGNORECASE)
+    return match.start() if match else None
+
+
 def diagnose_missing_rubric_section(case_study_text: str) -> str:
     """Return an actionable explanation for why the rubric could not be located.
 
@@ -64,8 +85,7 @@ def diagnose_missing_rubric_section(case_study_text: str) -> str:
     a scanned/image PDF, a wrong/unrelated PDF, or a present-but-unparseable
     rubric header.
     """
-    full_text = str(case_study_text or "")
-    body = _PAGE_MARKER_RE.sub(" ", full_text).strip()
+    body = extractable_text(case_study_text)
 
     if len(body) < MIN_EXTRACTABLE_TEXT_CHARS:
         return (

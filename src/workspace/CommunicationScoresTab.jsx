@@ -28,7 +28,7 @@ const COMMUNICATION_LABEL_META = {
   },
 };
 
-export default function CommunicationScoresTab({ criteria, summary, overallSummary, sessionStatus, onSeek }) {
+export default function CommunicationScoresTab({ criteria, summary, overallSummary, sessionStatus, onSeek, extractionNotice = null }) {
   const hasCriteria = Array.isArray(criteria) && criteria.length > 0;
   // Percent or raw points — the account's preference. The total leads in the
   // chosen reading; the other reading and the threshold sit beneath it, so a
@@ -46,6 +46,12 @@ export default function CommunicationScoresTab({ criteria, summary, overallSumma
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        {extractionNotice ? (
+          <div role="note" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">
+            <span className="font-semibold">{extractionNotice.title}.</span> The communication rubric was read by{' '}
+            {extractionNotice.model || 'an AI model'} because the standard parser could not. Check it against the rubric PDF.
+          </div>
+        ) : null}
         {summary ? (
           <div
             className={`rounded-xl border p-4 ${

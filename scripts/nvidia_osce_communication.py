@@ -607,6 +607,9 @@ def validate_output(
         "overall_summary": overall_summary,
         "scoring_summary": summary,
     }
+    # How the rubric itself was extracted (deterministic parse or LLM fallback).
+    if rubric.get("extraction"):
+        normalized_payload["rubric_extraction"] = rubric["extraction"]
 
     return normalized_payload, issues
 

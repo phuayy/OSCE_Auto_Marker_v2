@@ -393,6 +393,8 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         credential_store=provider_credentials,
         custom_providers=custom_providers,
     )
+    # Built before llm_settings, so the parser's LLM routing is attached here.
+    rubrics.llm_settings = llm_settings
     scoring = ScoringPipeline(active_settings, runner, events, auth, rubrics, llm_settings=llm_settings)
     webhooks = WebhookRepository(orm_database)
     webhook_dispatcher = WebhookDispatcher(active_settings, webhooks)

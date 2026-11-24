@@ -29,8 +29,21 @@ import json
 import math
 import re
 import sys
+import os
 from pathlib import Path
 from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = SCRIPT_DIR.parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from rubric_llm_fallback import (  # noqa: E402
+    RubricLlmFallbackFailed,
+    RubricLlmFallbackUnavailable,
+    deterministic_provenance,
+    extract_rubric_with_llm,
+)
 
 
 SCORE_LEVELS = {
@@ -57,6 +70,11 @@ def parse_args() -> argparse.Namespace:
         "--stdout-only",
         action="store_true",
         help="Print JSON to stdout and skip writing --output.",
+    )
+    parser.add_argument(
+        "--no-llm-fallback",
+        action="store_true",
+        help="Never fall back to LLM extraction when the deterministic parser fails.",
     )
     return parser.parse_args()
 
@@ -219,13 +237,26 @@ def parse_rubric_text(raw_text: str) -> dict[str, Any]:
     if not criteria:
         raise RuntimeError("Failed to construct any criteria from the parsed rubric.")
 
-    criteria.sort(key=lambda item: int(item.get("id", 0)))
+    return build_rubric_payload(title=title, criteria=criteria, notes=notes_text)
+
+
+def build_rubric_payload(
+    *, title: str, criteria: list[dict[str, Any]], notes: str
+) -> dict[str, Any]:
+    """The one place a rubric payload is assembled: ordering, sections, the
+    0-3 scale, max score and pass threshold. Both the deterministic parser and
+    the LLM fallback build through it, so the scoring rules cannot diverge.
+
+    Each criterion carries ``id``, ``section`` (or None), ``label`` and
+    ``indicators``.
+    """
+    ordered = sorted(criteria, key=lambda item: int(item.get("id", 0)))
 
     # Build a clean list of sections that actually contain criteria.
     sections: list[dict[str, Any]] = []
     section_to_criteria: dict[str, list[int]] = {}
     section_order: list[str] = []
-    for criterion in criteria:
+    for criterion in ordered:
         section_name = criterion.get("section") or "Uncategorized"
         if section_name not in section_to_criteria:
             section_to_criteria[section_name] = []
@@ -240,7 +271,7 @@ def parse_rubric_text(raw_text: str) -> dict[str, Any]:
             }
         )
 
-    criterion_count = len(criteria)
+    criterion_count = len(ordered)
     max_score = criterion_count * 3
     if criterion_count == 7:
         pass_threshold = 11
@@ -255,9 +286,103 @@ def parse_rubric_text(raw_text: str) -> dict[str, Any]:
         "pass_threshold": pass_threshold,
         "criteria_count": criterion_count,
         "sections": sections,
-        "criteria": criteria,
-        "notes": notes_text,
+        "criteria": ordered,
+        "notes": notes,
     }
+
+
+def rubric_quality_issues(payload: dict[str, Any]) -> list[str]:
+    """Reasons a parse that did not raise is still not a usable rubric.
+
+    An empty list means the payload is trustworthy. The checks target the ways
+    the deterministic parser degrades silently on a changed layout: too few
+    criteria, blank labels, numbering that skips or repeats, and bullets that
+    were not recognised (no indicators anywhere).
+    """
+    criteria = payload.get("criteria") or []
+    issues: list[str] = []
+    if len(criteria) < 2:
+        issues.append(f"only {len(criteria)} criterion found (expected at least 2)")
+    ids = [criterion.get("id") for criterion in criteria]
+    if len(set(ids)) != len(ids):
+        issues.append("duplicate criterion numbers")
+    elif sorted(ids) != list(range(1, len(ids) + 1)):
+        issues.append(f"criterion numbers are not contiguous from 1: {sorted(ids)}")
+    for criterion in criteria:
+        if not normalize_whitespace(criterion.get("label", "")):
+            issues.append(f"criterion {criterion.get('id')} has an empty label")
+    if criteria and not any(criterion.get("indicators") for criterion in criteria):
+        issues.append("no performance indicators were recognised on any criterion")
+    return issues
+
+
+def payload_from_llm(extraction_payload: dict[str, Any]) -> dict[str, Any]:
+    """Build the rubric payload from an LLM extraction via the shared builder."""
+    criteria: list[dict[str, Any]] = []
+    for index, item in enumerate(extraction_payload.get("criteria") or [], start=1):
+        raw_section = normalize_whitespace(item.get("section") or "")
+        criteria.append(
+            {
+                "id": index,
+                "section": canonicalize_section_name(raw_section) if raw_section else None,
+                "label": normalize_whitespace(item.get("label", "")),
+                "indicators": [
+                    text
+                    for text in (normalize_whitespace(i) for i in item.get("indicators") or [])
+                    if text
+                ],
+            }
+        )
+    return build_rubric_payload(
+        title=normalize_whitespace(extraction_payload.get("title") or "") or "Communication Rubric",
+        criteria=criteria,
+        notes=normalize_whitespace(extraction_payload.get("notes") or ""),
+    )
+
+
+def build_payload(raw_text: str, *, allow_llm: bool = True) -> dict[str, Any]:
+    """Deterministic parse first; LLM extraction only when it fails the gate."""
+    deterministic_error: str | None = None
+    payload: dict[str, Any] | None = None
+    try:
+        payload = parse_rubric_text(raw_text)
+        issues = rubric_quality_issues(payload)
+        if issues:
+            deterministic_error = "; ".join(issues)
+    except Exception as error:  # noqa: BLE001 - any parser failure triggers the fallback
+        deterministic_error = str(error)
+
+    if deterministic_error is None and payload is not None:
+        payload["extraction"] = deterministic_provenance()
+        return payload
+
+    if not allow_llm:
+        if payload is None:
+            raise RuntimeError(deterministic_error)
+        payload["extraction"] = deterministic_provenance()
+        return payload
+
+    try:
+        extraction = extract_rubric_with_llm("communication", raw_text)
+    except RubricLlmFallbackUnavailable as error:
+        if payload is None:
+            # Unchanged behaviour: the deterministic parser's own message.
+            raise RuntimeError(deterministic_error) from error
+        print(
+            f"Warning: rubric looks incomplete ({deterministic_error}) and the LLM fallback "
+            f"is unavailable ({error}); keeping the deterministic parse.",
+            file=sys.stderr,
+        )
+        payload["extraction"] = deterministic_provenance()
+        return payload
+    except RubricLlmFallbackFailed as error:
+        raise RuntimeError(
+            f"Deterministic parser: {deterministic_error}. LLM extraction fallback: {error}"
+        ) from error
+
+    llm_payload = payload_from_llm(extraction.payload)
+    llm_payload["extraction"] = extraction.provenance(deterministic_error=deterministic_error)
+    return llm_payload
 
 
 def main() -> int:
@@ -266,16 +391,30 @@ def main() -> int:
     if not pdf_path.exists():
         raise FileNotFoundError(f"Rubric PDF does not exist: {pdf_path}")
 
+    # By-hand runs only: a real run already receives its environment from the
+    # server. Restricted to what the fallback's router reads.
+    from env_loader import load_env_file
+    from scorer_env_allowlist import RUBRIC_PARSER_ENV_ALLOWLIST
+
+    load_env_file(ROOT_DIR, allowed_keys=RUBRIC_PARSER_ENV_ALLOWLIST)
+
+    # A PDF with no text at all (scanned) raises here, before any LLM call.
     raw_text = read_pdf_text(pdf_path)
-    payload = parse_rubric_text(raw_text)
+    payload = build_payload(raw_text, allow_llm=not args.no_llm_fallback)
     payload["source_pdf"] = str(pdf_path)
+    print(f"Rubric extraction method: {payload['extraction']['method']}", file=sys.stderr)
 
     output_text = json.dumps(payload, indent=2, ensure_ascii=False)
 
     if args.output and not args.stdout_only:
         output_path = Path(args.output).expanduser().resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(output_text + "\n", encoding="utf-8")
+        temp_path = output_path.with_name(f".{output_path.name}.{os.getpid()}.tmp")
+        try:
+            temp_path.write_text(output_text + "\n", encoding="utf-8")
+            os.replace(temp_path, output_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
         print(f"Saved: {output_path}", file=sys.stderr)
 
     print(output_text)

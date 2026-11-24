@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
+  AlertTriangle,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -18,6 +19,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { LoadingRegion, RubricCriteriaSkeleton, RubricSourceSkeleton } from '@/components/skeletons.jsx';
 import { PageHeader } from '@/components/PageHeader.jsx';
 import { apiJson } from '@/lib/apiFetch';
+import { describeRubricExtraction } from '@/lib/rubricExtraction';
 
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -165,6 +167,7 @@ export default function CommunicationRubricPanel({ onBack }) {
   // Skeletons are for a first load only. A reload with a rubric on screen
   // keeps it (the button spins) rather than replacing it with bone.
   const isFirstLoad = isLoading && !rubric;
+  const extractionNotice = describeRubricExtraction(rubric?.extraction);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
@@ -308,6 +311,34 @@ export default function CommunicationRubricPanel({ onBack }) {
                   }}
                 />
               </div>
+
+              {extractionNotice ? (
+                <div
+                  role="note"
+                  className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700"
+                >
+                  <div className="flex items-center gap-2 font-semibold">
+                    <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+                    {extractionNotice.title}
+                  </div>
+                  <p className="mt-1">{extractionNotice.detail}</p>
+                  {extractionNotice.warnings.length ? (
+                    <ul className="mt-2 list-disc space-y-0.5 pl-5">
+                      {extractionNotice.warnings.map((warning, index) => (
+                        <li key={`${index}-${warning}`}>{warning}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {extractionNotice.reason ? (
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-xs font-medium">
+                        Why the standard parser failed
+                      </summary>
+                      <p className="mt-1 text-xs">{extractionNotice.reason}</p>
+                    </details>
+                  ) : null}
+                </div>
+              ) : null}
 
               <AnimatePresence>
                 {error ? (

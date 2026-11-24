@@ -83,9 +83,20 @@ _PROVIDER_CREDENTIALS = frozenset(
     }
 )
 
+# Switch for the LLM rubric-extraction fallback (rubric_llm_fallback.py), read
+# by any script that parses a rubric out of a PDF when its regexes fail.
+_RUBRIC_FALLBACK = frozenset({"RUBRIC_LLM_FALLBACK"})
+
 # Shared by every script that calls into app.llm (content marking, panel
 # adjudication, communication scoring, transcript preprocessing).
-LLM_SCORER_ENV_ALLOWLIST: frozenset[str] = _ROUTING | _RETRY | _SAMPLING | _PROVIDER_CREDENTIALS
+LLM_SCORER_ENV_ALLOWLIST: frozenset[str] = (
+    _ROUTING | _RETRY | _SAMPLING | _PROVIDER_CREDENTIALS | _RUBRIC_FALLBACK
+)
+
+# parse_communication_rubric.py: no scoring of its own, but its LLM fallback
+# needs exactly what an LLM caller needs (routing, retry, sampling, provider
+# keys) plus the fallback switch.
+RUBRIC_PARSER_ENV_ALLOWLIST: frozenset[str] = LLM_SCORER_ENV_ALLOWLIST | _RUBRIC_FALLBACK
 
 # nvidia_osce_communication.py's own extra knob (nvidia_osce_communication.py
 # reads NVIDIA_REASONING_BUDGET / NVIDIA_REQUEST_TIMEOUT_SECONDS too, both

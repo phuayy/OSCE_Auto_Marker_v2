@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse
 
 from app.api.dependencies import get_container, require_admin
 from app.services.container import AppContainer
+from app.services.rubric_service import RubricParseError
 
 # The communication rubric every score is computed against is deployment-wide
 # (see CLAUDE.md "Two-tier settings") — every marker reads it, only an admin
@@ -44,6 +45,8 @@ async def upload_communication_rubric(
         raise HTTPException(status_code=400, detail='Rubric PDF file is required (field name "rubric").')
     try:
         return await container.rubrics.upload(rubric)
+    except RubricParseError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except RuntimeError as error:
@@ -56,5 +59,7 @@ async def reset_communication_rubric(container: AppContainer = Depends(get_conta
         return await container.rubrics.reset()
     except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+    except RubricParseError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     except RuntimeError as error:
         raise HTTPException(status_code=500, detail=str(error)) from error

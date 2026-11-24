@@ -702,6 +702,12 @@ class Settings:
     # writes an H.264 copy for the player (output/playback/<session>/), and
     # clips cut from it are re-encoded instead of stream-copied.
     playback_copy_enabled: bool = read_bool_env("PLAYBACK_COPY_ENABLED", True)
+
+    # When a deterministic rubric parser (case-study content rubric,
+    # communication rubric PDF) fails, ask the configured scoring LLM to
+    # extract the rubric from the PDF text instead (scripts/rubric_llm_fallback.py).
+    # Forwarded to every child process by subprocess_env().
+    rubric_llm_fallback: bool = read_bool_env("RUBRIC_LLM_FALLBACK", True)
     # Height of that copy; it is only for watching, so 720p keeps the
     # transcode of a long recording affordable on a CPU. 0 = source height.
     playback_copy_max_height: int = read_int_env("PLAYBACK_COPY_MAX_HEIGHT", 720)
@@ -964,7 +970,11 @@ class Settings:
         non-ASCII transcript text does not raise on Windows consoles) plus the
         media-tool PATH. ``extra_env`` wins over both.
         """
-        env = {"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+        env = {
+            "PYTHONUNBUFFERED": "1",
+            "PYTHONIOENCODING": "utf-8",
+            "RUBRIC_LLM_FALLBACK": "true" if self.rubric_llm_fallback else "false",
+        }
         env.update(self.media_tool_path_env())
         env.update(extra_env or {})
         return env

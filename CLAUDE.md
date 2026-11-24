@@ -244,6 +244,7 @@ OSCE-AI-FYP/
 │   ├── detect_human_segments.py     # RT-DETR person-occupancy segmentation
 │   ├── rubric_section.py            # PDF rubric section extractor
 │   ├── case_study_rubric.py         # Extract a case study's rubric once; content-addressed cache
+│   ├── rubric_llm_fallback.py       # LLM rubric extraction when the deterministic parsers fail (grounded, cached, provenance-stamped)
 │   └── parse_communication_rubric.py  # Communication rubric PDF -> JSON
 ├── storage/                         # Runtime artefact store (gitignored)
 │   ├── input/                       # Uploaded videos, case studies
@@ -1710,6 +1711,7 @@ recording; its Student column the scored subject.
 | `HUMAN_SEGMENTS_REGION_LEFT_ENABLED` / `HUMAN_SEGMENTS_REGION_RIGHT_ENABLED` | `true` / `true` | Which horizontal zone(s) of the frame count at all — independent of the occupancy preset above. Standalone-CLI default only; the pipeline always passes an explicit resolved value (see `app/pipeline/region_focus.py`) |
 | `HUMAN_SEGMENTS_REGION_LEFT_RATIO` / `HUMAN_SEGMENTS_REGION_RIGHT_RATIO` | `1.0` / `1.0` | Fraction of frame width, measured from that edge inward, that counts as the enabled zone |
 | `PLAYBACK_COPY_ENABLED` / `PLAYBACK_COPY_MAX_HEIGHT` | `true` / `720` | A source the browser cannot decode (HEVC, 10-bit H.264, ProRes, G.711 audio) gets an H.264/AAC copy at `output/playback/<session>/`, written by the `prepare_media` job, recorded on `files.video.playback` and played by the workspace in place of the original (`app/services/media_preparation.py`); clips cut from such a source are re-encoded rather than stream-copied. The max height also bounds the poster frame. Processing always reads the original |
+| `RUBRIC_LLM_FALLBACK` | `true` | When deterministic rubric extraction fails on a new/changed PDF, let an LLM extract it instead (`scripts/rubric_llm_fallback.py`). `false` = fail as before. See **Rubric extraction LLM fallback** |
 | `PARALLEL_SCORING` | `true` | Run content branch parallel to communication branch |
 | `GPU_SLOTS` | `1` | Jobs that may hold the accelerator at once (transcription, person detection). 0 = unbounded. Per process |
 | `JOB_QUEUE_BACKEND` | `local` | `local` or `hatchet` |
@@ -2324,6 +2326,55 @@ was judged more operator detail than a marker needs) and
 not become the way they leak. `pushActive: false` with a
 high hit rate is the shape worth alerting on: rotations are still arriving, but
 by counter comparison rather than by announcement.
+
+### Rubric extraction LLM fallback
+
+Deterministic (regex) extraction always runs first; the LLM is a fallback for
+a new or reformatted PDF, never the default path (`RUBRIC_LLM_FALLBACK=false`
+turns it off). [scripts/rubric_llm_fallback.py](scripts/rubric_llm_fallback.py)
+owns it for both rubric kinds.
+
+* **Triggers.** Content (`case_study_rubric.py`): no rubric section found, or
+  fewer than 2 criteria. Communication (`parse_communication_rubric.py`): the
+  parser raised, or the quality gate failed — fewer than 2 criteria, empty
+  labels, non-contiguous ids, or no indicators recognised.
+* **Scanned PDFs are never sent.** A PDF with no extractable text layer is
+  refused rather than shipped to a model.
+* **Grounding check.** Every extracted criterion/indicator must be traceable
+  to the document text (≥ 60% of a label's content words appear in it).
+  Ungrounded criteria trigger a repair re-prompt (at most 2), then are
+  dropped with a warning; fewer than 2 surviving criteria fail the fallback,
+  and the error then names both the parser's reason and the fallback's.
+* **Which model.** Content extraction runs inside the content marker, on that
+  marker's routing (the session owner's choice). The communication rubric is
+  deployment-wide, so its parser gets the deployment-default routing. With no
+  usable model, or the switch off, behaviour is exactly as before the
+  fallback existed (a communication parse that only failed the quality gate
+  is then kept, with a warning on stderr).
+* **Prompt-injection guard.** The PDF text is delimited as untrusted data in
+  the user message, and the system prompt tells the model to ignore any
+  instruction inside it; the output is schema-validated, never executed.
+* **One extraction per PDF.** The result is cached by the same SHA-256 digest
+  (+ `EXTRACTOR_VERSION`) as the deterministic one, so every panel marker and
+  every clip child of a recording shares a single extraction. The `O_EXCL`
+  lock holder heartbeats while the LLM call runs, so concurrent markers adopt
+  its result instead of treating a slow call as a dead holder and extracting
+  again. The panel adjudicator never runs its own extraction: it reads the
+  entry the markers wrote, which also keeps it from disagreeing with them.
+* **Communication upload is atomic.** The new PDF is parsed (fallback
+  included) before anything is replaced; a failed parse leaves the previous
+  rubric active.
+* **Provenance.** The communication rubric JSON carries `extraction`
+  (`{"method": "deterministic"}` or `{"method": "llm", model, provider,
+  prompt_version, deterministic_error, warnings}`; absent on older rubrics =
+  deterministic). Content and communication score sheets carry the same shape
+  as `rubric_extraction`. The browser reads them through
+  [lib/rubricExtraction.js](src/lib/rubricExtraction.js) and shows an amber
+  "Rubric extracted by AI" notice on the Communication Rubric page and on the
+  content / communication score tabs, asking the examiner to check the
+  criteria against the PDF. The two extraction prompts are in the prompt-version
+  ledger (`rubric_extraction.{content,communication}.{system,user}`,
+  `RUBRIC_EXTRACTION_PROMPT_VERSION`).
 
 ### Prompt-version audit ledger
 
