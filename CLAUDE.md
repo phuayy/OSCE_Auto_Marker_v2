@@ -1946,8 +1946,10 @@ Content scorer has checkpoint/repair: saves after each LLM call, up to 2 repair 
 Pulling the clinical context, the rubric section and the criteria out of a PDF
 is a pure function of that file's bytes, so `scripts/case_study_rubric.py`
 caches the result under `storage/output/case_study_rubrics/`, keyed by a SHA-256
-of the file plus an `EXTRACTOR_VERSION` covering the parsing itself. Nothing can
-go stale: different bytes are a different key. A panel of N markers used to pay
+of the file plus an `EXTRACTOR_VERSION` covering the parsing itself. A
+deterministic entry cannot go stale: different bytes are a different key. An
+LLM-produced entry has more inputs than the bytes, so it is judged on read
+(see **Rubric extraction LLM fallback**). A panel of N markers used to pay
 N+1 identical pypdf passes (the adjudicator repeats the extraction so its
 criteria align with the markers'), and every clip child of a long recording
 repeated them again against the *same* case study — the cache collapses all of
@@ -2346,9 +2348,17 @@ owns it for both rubric kinds.
   labels, non-contiguous ids, or no indicators recognised.
 * **Scanned PDFs are never sent.** A PDF with no extractable text layer is
   refused rather than shipped to a model.
-* **Grounding check.** Every extracted criterion/indicator must be traceable
-  to the document text (≥ 60% of a label's content words appear in it).
-  Ungrounded criteria trigger a repair re-prompt (at most 2), then are
+* **Grounding check.** Every extracted criterion/indicator must be found in
+  the document as a contiguous, near-verbatim passage (difflib ratio ≥ 0.85
+  over case/whitespace/punctuation-normalised text, so OCR slips and reflowed
+  lines pass but a label stitched from scattered words does not; candidate
+  passages are found from the label's rarest words and capped per label, so the
+  check stays fast and fails closed on adversarial text). A `critical` flag is
+  accepted only when the document carries a critical marker (`critical`,
+  `essential`, `mandatory`, `must-pass`) on the same item; otherwise it is
+  downgraded to non-critical and a warning is recorded in the provenance
+  `warnings` — a critical "No" fails the whole sheet, so the model cannot
+  assert it alone. Ungrounded criteria trigger a repair re-prompt (at most 2), then are
   dropped with a warning; fewer than 2 surviving criteria fail the fallback,
   and the error then names both the parser's reason and the fallback's.
 * **Which model.** Content extraction runs inside the content marker, on that
@@ -2362,7 +2372,18 @@ owns it for both rubric kinds.
   instruction inside it; the output is schema-validated, never executed.
 * **One extraction per PDF.** The result is cached by the same SHA-256 digest
   (+ `EXTRACTOR_VERSION`) as the deterministic one, so every panel marker and
-  every clip child of a recording shares a single extraction. The `O_EXCL`
+  every clip child of a recording shares a single extraction. An LLM entry is
+  valid only while it was produced by the current `RUBRIC_EXTRACTION_PROMPT_VERSION`
+  (which stands for the prompt *and* the validation below) **and**
+  `RUBRIC_LLM_FALLBACK` is not off; otherwise `_read_entry` ignores it, the
+  next marker re-extracts under the same lock and overwrites it atomically, or
+  — fallback off — fails as with no fallback (the entry stays on disk, so
+  switching the fallback back on reuses it). A deterministic entry is always
+  valid. The **model is deliberately not part of validity**: keying by model
+  would make two sessions of one case study use different criteria; it is
+  recorded in the provenance only. The adjudicator's `allow_llm_fallback=False`
+  means "never extract", not "never read an LLM entry" — it still adopts the
+  markers' current entry. The `O_EXCL`
   lock holder heartbeats while the LLM call runs, so concurrent markers adopt
   its result instead of treating a slow call as a dead holder and extracting
   again. The panel adjudicator never runs its own extraction: it reads the

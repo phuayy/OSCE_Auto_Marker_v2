@@ -227,11 +227,16 @@ def test_mostly_hallucinated_rubric_fails():
         fb.extract_rubric_with_llm("content", DOC, router=FakeRouter([fake, fake, fake]))
 
 
+_PARTS = [f"{name}{i}" for i, name in enumerate(["elbow", "knee", "wrist", "ankle", "spine", "hip"] * 11)][:61]
+
+
 def test_too_many_criteria_is_an_issue():
-    many = content_reply(*[f"Asks about duration of the rash variant {i}" for i in range(61)])
+    labels = [f"Examines the patient's {part} thoroughly" for part in _PARTS]
+    document = DOC + "\n".join(f"{i}. {label}" for i, label in enumerate(labels, start=5))
+    many = content_reply(*labels)
     ok = content_reply(*GOOD_LABELS)
     router = FakeRouter([many, ok])
-    result = fb.extract_rubric_with_llm("content", DOC, router=router)
+    result = fb.extract_rubric_with_llm("content", document, router=router)
     assert "at most" in router.requests[1].messages[-1]["content"]
     assert len(result.payload["criteria"]) == 3
 
@@ -253,7 +258,9 @@ def test_is_critical_coerced_to_bool():
         ]
     }
     result = fb.extract_rubric_with_llm("content", DOC, router=FakeRouter([reply]))
-    assert [c["is_critical"] for c in result.payload["criteria"]] == [True, False, True, False]
+    # Only the first item carries a critical marker in DOC: the model's claim
+    # for the third is downgraded (see the grounding tests below).
+    assert [c["is_critical"] for c in result.payload["criteria"]] == [True, False, False, False]
 
 
 def test_leading_numbering_is_stripped():
@@ -358,3 +365,76 @@ def test_settings_subprocess_env_forwards_the_switch(tmp_path, flag, expected):
     settings = make_settings(ffmpeg_bin=str(tmp_path / "ffmpeg"), rubric_llm_fallback=flag)
     assert settings.subprocess_env()["RUBRIC_LLM_FALLBACK"] == expected
     assert settings.subprocess_env({"RUBRIC_LLM_FALLBACK": "x"})["RUBRIC_LLM_FALLBACK"] == "x"
+
+
+# --- grounding is a contiguous near-verbatim match, not a bag of words --------
+
+
+def _labels_kept(*labels, **kwargs):
+    reply = content_reply(*labels, **kwargs)
+    return fb.extract_rubric_with_llm("content", DOC, router=FakeRouter([reply, reply, reply]))
+
+
+def test_a_label_assembled_from_scattered_document_words_is_not_grounded():
+    fabricated = "Counsels the patient about allergies to antifungal medication duration"
+    assert all(word in DOC.lower() for word in fabricated.lower().split())
+    result = _labels_kept(*GOOD_LABELS, fabricated)
+    assert [c["label"] for c in result.payload["criteria"]] == list(GOOD_LABELS)
+    assert any("ungrounded" in w and "Counsels the patient" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Asks about\nduration   of the rash",
+        "Asks about duratlon of the rash",  # an OCR slip
+        "ASKS ABOUT DURATION OF THE RASH.",
+        "Counsels on anti fungal cream application",  # a word split by extraction
+    ],
+)
+def test_a_genuine_label_with_ocr_or_whitespace_noise_is_grounded(label):
+    result = _labels_kept(GOOD_LABELS[0], label, GOOD_LABELS[2])
+    assert len(result.payload["criteria"]) == 3
+    assert not any("ungrounded" in w for w in result.warnings)
+
+
+def test_grounding_is_fast_on_a_full_size_document():
+    import time
+
+    filler = " ".join(f"patient history word{i} examination finding{i} counselling advice" for i in range(1200))
+    document = filler[: fb.MAX_DOCUMENT_CHARS - len(DOC)] + "\n" + DOC
+    # Every anchor word occurs ~1200 times and every label is the filler's own
+    # characters reshuffled: the worst case for the candidate search.
+    words = "patient history examination finding counselling advice".split()
+    labels = [" ".join(words[(i + j * 2) % 6] for j in range(6)) + f" patient {i}" for i in range(60)]
+    started = time.monotonic()
+    payload, _issues, _warnings = fb._validate_payload(
+        "content", content_reply(*labels), document, drop_ungrounded=True
+    )
+    assert time.monotonic() - started < 5.0
+
+
+# --- is_critical must be backed by the document --------------------------------
+
+
+def test_a_critical_claim_without_a_document_marker_is_downgraded_with_a_warning():
+    reply = {
+        "criteria": [
+            {"label": GOOD_LABELS[0], "is_critical": True},  # "(critical)" in DOC
+            {"label": GOOD_LABELS[1], "is_critical": True},  # right under it, but not itself marked
+            {"label": GOOD_LABELS[2], "is_critical": False},
+        ]
+    }
+    result = fb.extract_rubric_with_llm("content", DOC, router=FakeRouter([reply]))
+    assert [c["is_critical"] for c in result.payload["criteria"]] == [True, False, False]
+    assert result.warnings == [f"Downgraded critical flag with no critical marker in the document: {GOOD_LABELS[1]}"]
+    assert result.provenance(deterministic_error=None)["warnings"] == result.warnings
+
+
+@pytest.mark.parametrize("marker", ["[CRITICAL CRITERIA]", "(essential)", "Must-pass", "mandatory"])
+def test_marker_wordings_the_prompt_names_are_accepted(marker):
+    document = DOC.replace("(critical)", "").replace("Asks about duration of the rash", f"Asks about duration of the rash {marker}")
+    reply = {"criteria": [{"label": GOOD_LABELS[1], "is_critical": True}, {"label": GOOD_LABELS[2]}]}
+    result = fb.extract_rubric_with_llm("content", document, router=FakeRouter([reply]))
+    assert result.payload["criteria"][0]["is_critical"] is True
+    assert result.warnings == []

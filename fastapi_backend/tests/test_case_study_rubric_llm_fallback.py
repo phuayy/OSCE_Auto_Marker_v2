@@ -59,7 +59,7 @@ class FakeExtraction:
             "method": "llm",
             "model": self.model,
             "provider": self.provider,
-            "prompt_version": "rubric-extraction-v1",
+            "prompt_version": rubric_llm_fallback.RUBRIC_EXTRACTION_PROMPT_VERSION,
             "deterministic_error": deterministic_error,
             "warnings": list(self.warnings),
         }
@@ -81,6 +81,9 @@ class LlmDouble:
         self.result = FakeExtraction(LLM_PAYLOAD) if result is None else result
 
     def __call__(self, kind: str, document_text: str, *, router: Any = None):
+        # Like the real extractor, which refuses when the operator switched it off.
+        if not rubric_llm_fallback.fallback_enabled():
+            raise rubric_llm_fallback.RubricLlmFallbackUnavailable("disabled")
         self.calls.append((kind, document_text))
         if isinstance(self.result, BaseException):
             raise self.result
@@ -232,6 +235,119 @@ def test_malformed_extraction_makes_the_entry_unusable(tmp_path: Path, bad, llm:
     again = load(path, cache_dir=cache)
     assert again.source == "extracted"
     assert again.extraction == {"method": "deterministic"}
+
+
+# --- an entry is valid only while what produced it still applies --------------
+
+
+def _entry_file(cache: Path, path: Path) -> Path:
+    return case_study_rubric.entry_path(cache, case_study_rubric.file_digest(path))
+
+
+def _edit_entry(entry: Path, **changes: Any) -> None:
+    payload = json.loads(entry.read_text(encoding="utf-8"))
+    payload["extraction"].update(changes)
+    entry.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_llm_entry_from_an_older_prompt_is_re_extracted_and_overwritten(tmp_path: Path, llm: LlmDouble) -> None:
+    path = write_case(tmp_path, UNKNOWN_LAYOUT)
+    cache = tmp_path / "cache"
+    load(path, cache_dir=cache)
+    entry = _entry_file(cache, path)
+    _edit_entry(entry, prompt_version="rubric-extraction-v0")
+
+    again = load(path, cache_dir=cache)
+
+    assert len(llm.calls) == 2
+    assert again.source == "extracted"
+    stored = json.loads(entry.read_text(encoding="utf-8"))
+    assert stored["extraction"]["prompt_version"] == rubric_llm_fallback.RUBRIC_EXTRACTION_PROMPT_VERSION
+    # ...and the refreshed entry is shared again.
+    assert load(path, cache_dir=cache).source == "cache"
+    assert len(llm.calls) == 2
+
+
+def test_llm_entry_without_a_prompt_version_is_distrusted(tmp_path: Path, llm: LlmDouble) -> None:
+    path = write_case(tmp_path, UNKNOWN_LAYOUT)
+    cache = tmp_path / "cache"
+    load(path, cache_dir=cache)
+    entry = _entry_file(cache, path)
+    payload = json.loads(entry.read_text(encoding="utf-8"))
+    del payload["extraction"]["prompt_version"]
+    entry.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert load(path, cache_dir=cache).source == "extracted"
+    assert len(llm.calls) == 2
+
+
+def test_llm_entry_with_the_current_prompt_is_reused(tmp_path: Path, llm: LlmDouble) -> None:
+    path = write_case(tmp_path, UNKNOWN_LAYOUT)
+    cache = tmp_path / "cache"
+    load(path, cache_dir=cache)
+    assert load(path, cache_dir=cache).source == "cache"
+    assert len(llm.calls) == 1
+
+
+def test_disabling_the_fallback_stops_a_cached_llm_entry_being_used(
+    tmp_path: Path, llm: LlmDouble, monkeypatch
+) -> None:
+    path = write_case(tmp_path, UNKNOWN_LAYOUT)
+    cache = tmp_path / "cache"
+    load(path, cache_dir=cache)
+
+    monkeypatch.setenv(rubric_llm_fallback.FALLBACK_ENV_VAR, "false")
+    with pytest.raises(ValueError):
+        load(path, cache_dir=cache)
+    assert len(llm.calls) == 1
+
+    # The refused entry is left alone: switching the fallback back on reuses it.
+    monkeypatch.delenv(rubric_llm_fallback.FALLBACK_ENV_VAR)
+    assert load(path, cache_dir=cache).source == "cache"
+    assert len(llm.calls) == 1
+
+
+def test_adjudicator_read_adopts_the_current_entry_but_not_a_stale_one(tmp_path: Path, llm: LlmDouble) -> None:
+    """``allow_llm_fallback=False`` means "never extract", not "never read an LLM
+    entry": the adjudicator must align with the markers' criteria."""
+    path = write_case(tmp_path, UNKNOWN_LAYOUT)
+    cache = tmp_path / "cache"
+    load(path, cache_dir=cache)
+    assert load(path, cache_dir=cache, allow_llm_fallback=False).source == "cache"
+
+    _edit_entry(_entry_file(cache, path), prompt_version="rubric-extraction-v0")
+    with pytest.raises(ValueError):
+        load(path, cache_dir=cache, allow_llm_fallback=False)
+    assert len(llm.calls) == 1
+
+
+def test_deterministic_entry_is_reused_whatever_the_fallback_setting(
+    tmp_path: Path, llm: LlmDouble, monkeypatch
+) -> None:
+    path = write_case(tmp_path, DETERMINISTIC_TEXT)
+    cache = tmp_path / "cache"
+    load(path, cache_dir=cache)
+    monkeypatch.setenv(rubric_llm_fallback.FALLBACK_ENV_VAR, "false")
+    assert load(path, cache_dir=cache).source == "cache"
+    assert load(path, cache_dir=cache, allow_llm_fallback=False).source == "cache"
+    assert llm.calls == []
+
+
+def test_a_model_change_does_not_re_extract_and_provenance_keeps_the_original(
+    tmp_path: Path, llm: LlmDouble
+) -> None:
+    """The model is provenance, not part of the key: re-extracting per model
+    would let two sessions of one case study be marked on different criteria."""
+    path = write_case(tmp_path, UNKNOWN_LAYOUT)
+    cache = tmp_path / "cache"
+    load(path, cache_dir=cache)
+    llm.result = FakeExtraction(LLM_PAYLOAD, model="another-model", provider="other")
+
+    again = load(path, cache_dir=cache)
+
+    assert again.source == "cache"
+    assert len(llm.calls) == 1
+    assert again.extraction["model"] == "fake-model"
 
 
 # --- concurrency -------------------------------------------------------------

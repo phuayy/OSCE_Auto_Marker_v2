@@ -11,7 +11,10 @@ Safety rails, because a rubric silently invented by a model would corrupt every
 mark scored against it:
 
 * the document is untrusted data (the system prompt says so);
-* every criterion label must be *grounded* in the document's own words;
+* every criterion label must be *grounded*: found in the document as a
+  contiguous, near-verbatim passage (not merely made of words that occur
+  somewhere in it), and a ``critical`` flag must be backed by a critical
+  marker beside that passage in the document;
 * a scanned / empty document is never sent;
 * the answer is repaired (at most ``MAX_REPAIR_PASSES`` times) rather than
   trusted, and the call fails loudly when it cannot be made valid.
@@ -22,8 +25,11 @@ from __future__ import annotations
 
 import re
 import sys
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from typing import Any, Literal
+
+from difflib import SequenceMatcher
 
 from llm_bootstrap import (
     LLMError,
@@ -37,7 +43,12 @@ from llm_bootstrap import (
 )
 from rubric_section import has_extractable_text, locate_phrase
 
-RUBRIC_EXTRACTION_PROMPT_VERSION = "rubric-extraction-v1"
+# Identifies the prompt *and* the validation that decides what is accepted from
+# the model's answer: bump it when either changes what an extraction can return.
+# A cached LLM extraction from another version is never reused
+# (``case_study_rubric._llm_entry_is_current``). v2: grounding became a
+# contiguous near-verbatim match and a critical flag needs a document marker.
+RUBRIC_EXTRACTION_PROMPT_VERSION = "rubric-extraction-v2"
 
 # Environment switch, forwarded to every subprocess by Settings.subprocess_env.
 FALLBACK_ENV_VAR = "RUBRIC_LLM_FALLBACK"
@@ -52,14 +63,35 @@ MIN_CRITERIA = 2
 # More than this is surely garbage (a rubric split per word, a whole page).
 MAX_CRITERIA = 60
 MAX_REPAIR_PASSES = 2
-# Share of a label's content words that must occur in the document.
-GROUNDING_THRESHOLD = 0.6
+# A label is grounded when some passage of the document, of about its length,
+# matches it at least this closely (difflib ratio over normalised text). High
+# enough that a label stitched from scattered words or two merged items fails;
+# low enough to forgive an OCR slip, hyphenation or reflowed whitespace.
+GROUNDING_MIN_RATIO = 0.85
+# Candidate passages come from where the label's rarest words occur. A passage
+# must be supported by at least two of them (one, for a label with a single
+# findable word), and at most this many are compared per label, best-supported
+# first: a quoted label's own passage is supported by all of its anchors, so the
+# cap only ever bites on repetitive or adversarial text, where it fails closed.
+_ANCHOR_WORDS = 4
+_MAX_CANDIDATES = 300
+# A match this close is final; no need to look for a better one.
+_EXACT_ENOUGH_RATIO = 0.95
+_MIN_ANCHOR_CHARS = 4
 EXTRACTION_TEMPERATURE = 0.1
 MAX_QUOTE_CHARS = 120
 
 DEFAULT_COMMUNICATION_TITLE = "Communication Rubric"
 
-_WORD_RE = re.compile(r"[a-z0-9]+")
+_WORD_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
+# A document's own way of flagging a must-pass item, in the wordings the content
+# prompt names. A superset of the deterministic parser's ``[CRITICAL CRITERIA]``,
+# because the fallback exists for layouts that parser does not recognise.
+_CRITICAL_MARKER_RE = re.compile(r"\b(?:critical|essential|mandatory|must[\s-]?pass)\b", re.IGNORECASE)
+# Where the next checklist item starts, so one item's marker is not read off its neighbour.
+_NEXT_ITEM_RE = re.compile(r"\s(?:\d{1,3}[.)]|[•‣●▪*-])\s")
+_MARKER_LOOKBEHIND_CHARS = 40
+_MARKER_LOOKAHEAD_CHARS = 160
 _NUMBERING_RE = re.compile(r"^\s*(?:[-*•‣●▪]\s+|\(?\d{1,3}[.)]\s+|\(?[A-Za-z][.)]\s+)")
 _WS_RE = re.compile(r"\s+")
 
@@ -239,19 +271,95 @@ def _check_kind(kind: str) -> str:
     return kind
 
 
-def _content_words(text: str) -> list[str]:
-    return [w for w in _WORD_RE.findall(text.lower()) if len(w) >= 3]
+class _DocumentIndex:
+    """The document as normalised words, searchable for a passage close to a label."""
 
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self._spans = [(m.start(), m.end()) for m in _WORD_RE.finditer(text)]
+        self._words = [text[a:b].lower() for a, b in self._spans]
+        self._joined = " ".join(self._words)
+        self._offsets: list[int] = []
+        offset = 0
+        for word in self._words:
+            self._offsets.append(offset)
+            offset += len(word) + 1
+        self._occurrences: dict[str, list[int]] = {}
+        for index, word in enumerate(self._words):
+            self._occurrences.setdefault(word, []).append(index)
 
-def _document_words(document_text: str) -> set[str]:
-    return set(_WORD_RE.findall(document_text.lower()))
+    def locate(self, label: str) -> tuple[int, int] | None:
+        """``(start, end)`` in the original text of the passage matching ``label``
+        closely enough to count as quoted from it, else ``None``."""
+        words = [w.lower() for w in _WORD_RE.findall(label)]
+        if not words:
+            return None
+        target = " ".join(words)
+        exact = self._joined.find(target)
+        if exact >= 0:
+            return self._span(self._word_at(exact), self._word_at(exact + len(target) - 1))
+        matcher = SequenceMatcher(None, "", target, autojunk=False)
+        best: tuple[float, int, int] | None = None
+        slack = max(2, len(target) // 8)
+        for first in self._candidate_starts(words):
+            offset = self._offsets[first]
+            for length in (len(target), len(target) + slack):
+                window = self._joined[offset : offset + length]
+                matcher.set_seq1(window)
+                if matcher.real_quick_ratio() < GROUNDING_MIN_RATIO or matcher.quick_ratio() < GROUNDING_MIN_RATIO:
+                    continue
+                ratio = matcher.ratio()
+                if ratio >= GROUNDING_MIN_RATIO and (best is None or ratio > best[0]):
+                    best = (ratio, first, self._word_at(offset + len(window) - 1))
+            if best is not None and best[0] >= _EXACT_ENOUGH_RATIO:
+                break
+        return None if best is None else self._span(best[1], best[2])
 
+    def _candidate_starts(self, words: list[str]) -> list[int]:
+        """Word positions a matching passage could start at, best-supported
+        first, from where the label's rarest words occur: the document is not
+        scanned end to end."""
+        anchors = [
+            (len(self._occurrences[w]), k, w)
+            for k, w in enumerate(words)
+            if len(w) >= _MIN_ANCHOR_CHARS and w in self._occurrences
+        ] or [(len(self._occurrences[w]), k, w) for k, w in enumerate(words) if w in self._occurrences]
+        chosen = sorted(anchors)[:_ANCHOR_WORDS]
+        support: dict[int, int] = {}
+        for _count, k, word in chosen:
+            starts: set[int] = set()
+            for position in self._occurrences[word]:
+                # +-1 for a word the extraction split or joined.
+                starts.update(position - k + drift for drift in (-1, 0, 1))
+            for start in starts:
+                if 0 <= start < len(self._words):
+                    support[start] = support.get(start, 0) + 1
+        needed = min(2, len(chosen))
+        ranked = sorted((s for s, votes in support.items() if votes >= needed), key=lambda s: (-support[s], s))
+        return ranked[:_MAX_CANDIDATES]
 
-def _is_grounded(label: str, doc_words: set[str]) -> bool:
-    words = _content_words(label)
-    if not words:
-        return True  # nothing to check ("Hi", "OK"); the other rules still apply
-    return sum(1 for w in words if w in doc_words) / len(words) >= GROUNDING_THRESHOLD
+    def _word_at(self, joined_offset: int) -> int:
+        return max(0, bisect_right(self._offsets, joined_offset) - 1)
+
+    def _span(self, first_word: int, last_word: int) -> tuple[int, int]:
+        return self._spans[first_word][0], self._spans[max(first_word, last_word)][1]
+
+    def has_critical_marker_near(self, span: tuple[int, int]) -> bool:
+        """A critical marker on the same item as the passage at ``span``: on its
+        line, before the next item starts. The passage itself is excluded, so an
+        item that is merely *about* something critical does not vouch for itself."""
+        start, end = span
+        line_start = self.text.rfind("\n", 0, start) + 1
+        before = self.text[max(line_start, start - _MARKER_LOOKBEHIND_CHARS) : start]
+        tail = self.text[end : end + _MARKER_LOOKAHEAD_CHARS]
+        cut = len(tail)
+        newline = tail.find("\n")
+        if newline >= 0:
+            cut = newline
+        following = _NEXT_ITEM_RE.search(tail)
+        if following is not None:
+            cut = min(cut, following.start())
+        return _CRITICAL_MARKER_RE.search(f"{before} {tail[:cut]}") is not None
 
 
 def _clean_label(value: Any) -> str:
@@ -287,7 +395,7 @@ def _validate_payload(
     """Normalise ``data``; returns ``(payload, issues, warnings)``."""
     issues: list[str] = []
     warnings: list[str] = []
-    doc_words = _document_words(document_text)
+    located = _DocumentIndex(document_text)
 
     raw_criteria = data.get("criteria") if isinstance(data, dict) else None
     if not isinstance(raw_criteria, list):
@@ -309,7 +417,8 @@ def _validate_payload(
         if key in seen:
             warnings.append(f"Dropped duplicate criterion: {label[:80]}")
             continue
-        if not _is_grounded(label, doc_words):
+        span = located.locate(label)
+        if span is None and _WORD_RE.search(label):
             message = f"Criterion not found in the document: {label[:100]}"
             if drop_ungrounded:
                 warnings.append(f"Dropped ungrounded criterion: {label[:80]}")
@@ -318,7 +427,13 @@ def _validate_payload(
             continue
         seen.add(key)
         if kind == "content":
-            criteria.append({"label": label, "is_critical": _as_bool(item.get("is_critical"))})
+            is_critical = _as_bool(item.get("is_critical"))
+            if is_critical and (span is None or not located.has_critical_marker_near(span)):
+                is_critical = False
+                warnings.append(
+                    f"Downgraded critical flag with no critical marker in the document: {label[:80]}"
+                )
+            criteria.append({"label": label, "is_critical": is_critical})
             continue
         raw_section = item.get("section")
         section = _WS_RE.sub(" ", raw_section).strip() if isinstance(raw_section, str) else ""
@@ -328,7 +443,7 @@ def _validate_payload(
             text = _clean_label(raw) if isinstance(raw, str) else ""
             if not text:
                 continue
-            if not _is_grounded(text, doc_words):
+            if _WORD_RE.search(text) and located.locate(text) is None:
                 warnings.append(f"Dropped ungrounded indicator under '{label[:50]}': {text[:60]}")
                 continue
             indicators.append(text)

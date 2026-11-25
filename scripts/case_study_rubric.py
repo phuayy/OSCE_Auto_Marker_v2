@@ -7,12 +7,21 @@ paid N+1 pypdf extractions of the same file — and a long recording, where ever
 exported clip becomes a child session scored against the *same* case study,
 multiplied that again by the number of clips.
 
-The derivation is a pure function of the PDF's bytes, so it is cached by a
-digest of those bytes. A cache entry is therefore never stale: different bytes
-mean a different key, and there is nothing to invalidate. ``EXTRACTOR_VERSION``
-covers the other input — this package's own parsing logic — and must be bumped
-whenever ``rubric_section`` or ``extract_rubric_criteria_from_case_study_rubric``
-changes what they return for unchanged bytes.
+The deterministic derivation is a pure function of the PDF's bytes, so it is
+cached by a digest of those bytes: different bytes, different key.
+``EXTRACTOR_VERSION`` covers the other input of that parse — this package's own
+logic — and must be bumped whenever ``rubric_section`` or
+``extract_rubric_criteria_from_case_study_rubric`` changes what they return for
+unchanged bytes.
+
+An LLM-produced entry has more inputs than the bytes: the extraction prompt and
+its validator (``RUBRIC_EXTRACTION_PROMPT_VERSION``) and whether the operator
+still allows the fallback at all. ``_read_entry`` therefore judges such an entry
+against both, so bumping the prompt version, or switching the fallback off
+because an extraction was wrong, retires it instead of marking every later
+session against it forever. The *model* is deliberately not an input: keying by
+model would give two sessions of one case study different criteria, so it is
+recorded as provenance only.
 
 Concurrency matters here because the markers of a panel start at the same
 moment and would otherwise all miss a cold cache together. One process takes an
@@ -333,6 +342,8 @@ def _read_entry(cache_path: Path, *, digest: str, min_criteria: int) -> CaseStud
         extraction = payload["extraction"]
         if not isinstance(extraction, dict) or not isinstance(extraction.get("method"), str):
             return None
+        if extraction["method"] != "deterministic" and not _llm_entry_is_current(extraction):
+            return None
     else:
         extraction = rubric_llm_fallback.deterministic_provenance()
 
@@ -344,6 +355,21 @@ def _read_entry(cache_path: Path, *, digest: str, min_criteria: int) -> CaseStud
         source="cache",
         extraction=extraction,
     )
+
+
+def _llm_entry_is_current(extraction: dict[str, Any]) -> bool:
+    """Whether an LLM-produced entry may still be used.
+
+    It must come from the current extraction prompt/validator, and the operator
+    must not have switched the fallback off. This is about *using* an LLM entry,
+    not about extracting: the panel adjudicator passes ``allow_llm_fallback=False``
+    and must still read the markers' entry so its criteria align with theirs. A
+    refused entry is left on disk; the caller re-extracts and overwrites it, or
+    fails as it would with no fallback.
+    """
+    if not rubric_llm_fallback.fallback_enabled():
+        return False
+    return extraction.get("prompt_version") == rubric_llm_fallback.RUBRIC_EXTRACTION_PROMPT_VERSION
 
 
 def _write_entry(cache_path: Path, rubric: CaseStudyRubric) -> None:
