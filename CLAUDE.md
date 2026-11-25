@@ -1311,6 +1311,30 @@ repositories are cached `SnapshotCache` snapshots kept fresh by the change
 feed (see **Caching the scoring hot path**) — the merge itself costs nothing
 beyond what resolving the deployment document already cost.
 
+### Engine options a marker may not set
+
+`transcriptionEngineOptions` is user-scoped as a key, but not every parameter
+inside it is. `ParameterSpec.deployment_scoped` (published as `deploymentScoped`
+on `GET /api/settings/transcription-engines`) marks the ones that decide what
+the *server* loads or runs: WhisperX `model` and `audioFilters`, Canary `model`
+(a HuggingFace repo or local path), and the ffmpeg filter chain. One rule, in
+`app/pipeline/transcription/registry.py` (`deployment_scoped_options`,
+`strip_deployment_scoped`), is applied twice: `_reject_deployment_scoped` 403s a
+personal PUT/PATCH that names one (same error shape as a whole deployment key),
+and `PreferencesService.effective_for` drops them from a stored row when
+layering — so a row written before the rule keeps nothing. Engine options are
+layered per engine and per parameter, so a marker tuning `batchSize` no longer
+discards the administrator's `model`. An administrator sets them through
+`PATCH /api/admin/settings`; the settings card renders them read-only ("Set by
+an administrator") for everyone else.
+
+Separately, for everyone, `audioFilters` must be a plain comma-separated chain of
+allow-listed audio filters ([pipeline/audio_filters.py](fastapi_backend/app/pipeline/audio_filters.py):
+no `;`, `[ ]`, quotes, or `movie` / `amovie` / `ladspa`), checked by
+`ParameterSpec.check` at the `validate_options` boundary — a stored invalid
+value degrades to the defaults like any other invalid option. `WHISPERX_AUDIO_FILTERS`
+and `CANARY_AUDIO_FILTERS` are checked at startup and warned about.
+
 ### Score display
 
 `scoreDisplay` is the one user-scoped key the pipeline never reads: it only

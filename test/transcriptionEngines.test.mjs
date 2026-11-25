@@ -5,14 +5,17 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  buildDeploymentOptionsPayload,
   buildEngineOptionsPayload,
   buildTranscriptionPatch,
   coerceParameterValue,
   effectiveValue,
   engineWarnings,
   findEngine,
+  isDeploymentScoped,
   resolveSelectedEngineId,
   splitParameters,
+  userEditableOptions,
   validateEngineOptions,
   validateParameter,
 } from '../src/lib/transcriptionEngines.js';
@@ -177,4 +180,43 @@ test('an engine this build no longer ships is left out of the engine patch', () 
   // still present — with an empty bag, since no overrides were given for it.
   assert.deepEqual(Object.keys(payload.transcriptionEngineOptions).sort(), ['canary-qwen']);
   assert.deepEqual(payload.transcriptionEngineOptions['canary-qwen'], {});
+});
+
+// --- deployment-scoped parameters -------------------------------------------
+
+const SCOPED = {
+  ...WHISPERX,
+  defaults: { ...WHISPERX.defaults, audioFilters: 'highpass=f=80,loudnorm' },
+  parameters: [
+    { ...WHISPERX.parameters[0], deploymentScoped: true },
+    WHISPERX.parameters[1],
+    { name: 'audioFilters', label: 'Filters', type: 'string', default: 'highpass=f=80,loudnorm', deploymentScoped: true },
+  ],
+};
+const SCOPED_DESCRIPTION = { engines: [SCOPED], defaultEngineId: 'whisperx', selected: { engineId: 'whisperx' } };
+
+test('the backend flag decides which parameters are deployment-scoped', () => {
+  assert.equal(isDeploymentScoped(SCOPED.parameters[0]), true);
+  assert.equal(isDeploymentScoped(SCOPED.parameters[1]), false);
+});
+
+test("a marker's patch never carries a deployment-scoped parameter", () => {
+  const patch = buildTranscriptionPatch(SCOPED_DESCRIPTION, 'whisperx', {
+    whisperx: { model: 'evil/repo', audioFilters: 'amovie=/etc/passwd', batchSize: '8' },
+  });
+  assert.deepEqual(patch.transcriptionEngineOptions.whisperx, { batchSize: 8 });
+});
+
+test("a stored personal document is stripped of deployment-scoped parameters on load", () => {
+  assert.deepEqual(
+    userEditableOptions(SCOPED_DESCRIPTION, { whisperx: { model: 'x', batchSize: 4 }, retired: { a: 1 } }),
+    { whisperx: { batchSize: 4 }, retired: { a: 1 } },
+  );
+});
+
+test('the deployment payload keeps an explicit empty chain and other stored defaults', () => {
+  const payload = buildDeploymentOptionsPayload(SCOPED_DESCRIPTION, {
+    whisperx: { audioFilters: '', model: 'large-v3', batchSize: 2 },
+  });
+  assert.deepEqual(payload.transcriptionEngineOptions.whisperx, { batchSize: 2, audioFilters: '' });
 });

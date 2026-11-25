@@ -42,6 +42,7 @@ from app.pipeline.transcription.base import (
     EngineCapabilities,
     EngineDescriptor,
     ParameterSpec,
+    require_text,
     ParameterType,
     PrefetchResult,
     TranscriptionEngine,
@@ -132,6 +133,9 @@ DESCRIPTOR = EngineDescriptor(
             type=ParameterType.STRING,
             default="nvidia/canary-qwen-2.5b",
             help="HuggingFace id of the NeMo SALM checkpoint.",
+            # Names a HuggingFace repo or a local path the server loads.
+            deployment_scoped=True,
+            check=require_text,
         ),
         ParameterSpec(
             name="chunkSeconds",

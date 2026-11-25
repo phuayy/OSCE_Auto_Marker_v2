@@ -46,6 +46,13 @@ class TranscriptionOptionError(AppError):
         super().__init__(message, status_code=422)
 
 
+def require_text(text: str) -> str:
+    """``ParameterSpec.check`` for a string with no meaningful empty value."""
+    if not text:
+        raise ValueError("must not be empty.")
+    return text
+
+
 @dataclass(frozen=True)
 class ParameterSpec:
     """One operator-tunable engine setting, and everything the UI needs to draw
@@ -62,6 +69,15 @@ class ParameterSpec:
     # Advanced parameters are collapsed in the UI: correct defaults matter more
     # than discoverability for these.
     advanced: bool = False
+    # A parameter that decides what this *server* does — a model checkpoint or
+    # path it loads, a filter graph it hands to ffmpeg — rather than how one
+    # marker's transcript is tuned. Deployment-scoped parameters are an
+    # administrator's to set in the deployment document; a marker's personal
+    # overrides never carry them (see ``registry.strip_deployment_scoped``).
+    deployment_scoped: bool = False
+    # Extra validation for a string parameter: returns the accepted text or
+    # raises ``ValueError`` with a message the operator can act on.
+    check: Callable[[str], str] | None = None
 
     def coerce(self, value: Any) -> Any:
         """Validate and convert one submitted value, or raise.
@@ -98,6 +114,11 @@ class ParameterSpec:
             raise TranscriptionOptionError(
                 f"'{self.label}' must be one of {', '.join(self.options)}; got {text!r}."
             )
+        if self.check is not None:
+            try:
+                text = self.check(text)
+            except ValueError as error:
+                raise TranscriptionOptionError(f"'{self.label}': {error}") from None
         return text
 
     def _check_range(self, value: Any) -> Any:
@@ -117,6 +138,7 @@ class ParameterSpec:
             "default": self.default,
             "help": self.help,
             "advanced": self.advanced,
+            "deploymentScoped": self.deployment_scoped,
         }
         if self.minimum is not None:
             payload["minimum"] = self.minimum

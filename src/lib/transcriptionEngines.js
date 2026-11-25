@@ -78,13 +78,39 @@ export function coerceParameterValue(parameter, value) {
   return value === undefined || value === null ? undefined : String(value);
 }
 
+// A deployment-scoped parameter decides what the server loads or runs (a model
+// checkpoint, an ffmpeg filter chain), so only an administrator sets it — in the
+// deployment document. Everyone else sees it read-only. The backend publishes
+// the flag on each parameter (ParameterSpec.deployment_scoped).
+export function isDeploymentScoped(parameter) {
+  return parameter?.deploymentScoped === true;
+}
+
+// A per-engine option map without its deployment-scoped parameters — the part
+// of a stored document a marker's own preferences may hold.
+export function userEditableOptions(description, optionsByEngine) {
+  const result = {};
+  for (const [engineId, bag] of Object.entries(optionsByEngine || {})) {
+    const scoped = new Set(
+      (findEngine(description, engineId)?.parameters || []).filter(isDeploymentScoped).map((p) => p.name),
+    );
+    result[engineId] = Object.fromEntries(Object.entries(bag || {}).filter(([name]) => !scoped.has(name)));
+  }
+  return result;
+}
+
 // Drop overrides equal to the deployment default so the stored settings record
 // only genuine deviations — a default that changes later then still applies.
-export function buildEngineOptionsPayload(engine, overrides) {
+// `deployment: true` builds the administrator's half instead: only the
+// deployment-scoped parameters, where an explicit empty string is a value
+// (an empty filter chain means "unfiltered"), not an absent one.
+export function buildEngineOptionsPayload(engine, overrides, { deployment = false } = {}) {
   const payload = {};
   for (const parameter of engine?.parameters || []) {
+    if (isDeploymentScoped(parameter) !== deployment) continue;
     const raw = overrides?.[parameter.name];
-    if (raw === undefined || raw === null || raw === '') continue;
+    if (raw === undefined || raw === null) continue;
+    if (raw === '' && !(deployment && parameter.type === 'string')) continue;
     const coerced = coerceParameterValue(parameter, raw);
     if (coerced === undefined) continue;
     const deploymentDefault = engine?.defaults?.[parameter.name] ?? parameter.default;
@@ -92,6 +118,22 @@ export function buildEngineOptionsPayload(engine, overrides) {
     payload[parameter.name] = coerced;
   }
   return payload;
+}
+
+// The administrator's patch for the deployment document: every engine's stored
+// deployment options with the deployment-scoped parameters rebuilt from the
+// form. The map is one key on the server, so the whole of it is sent — the
+// user-scoped defaults an administrator may also have stored ride along as they were.
+export function buildDeploymentOptionsPayload(description, deploymentOptions) {
+  const transcriptionEngineOptions = {};
+  for (const engine of description?.engines || []) {
+    const stored = deploymentOptions?.[engine.id] || {};
+    transcriptionEngineOptions[engine.id] = {
+      ...userEditableOptions(description, { [engine.id]: stored })[engine.id],
+      ...buildEngineOptionsPayload(engine, stored, { deployment: true }),
+    };
+  }
+  return { transcriptionEngineOptions };
 }
 
 // Warnings worth showing next to an engine before it is selected: what the
