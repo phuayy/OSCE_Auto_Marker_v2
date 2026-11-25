@@ -317,6 +317,11 @@ Steps tracked in `session.pipeline.steps`. Resumable — cached artifacts reused
 ```
 Step 1: audio_extraction
   ffmpeg: video -> <session_id>.mp3
+  Published atomically (MediaPipeline._run_ffmpeg_atomic: ffmpeg writes
+  .<name>.<id>.partial<ext>, then atomic_replace), as are the 16 kHz WAV, the bell
+  WAV, the poster and the playback copy. A file at the final path is therefore
+  finished, which is what lets resume adopt it by existence; a temp a hard kill
+  left is never adopted and is swept before that artifact is next written.
 
 Step 2: transcription  (engine selected in Settings; step key "transcription",
                         legacy sessions carry "whisperx")
