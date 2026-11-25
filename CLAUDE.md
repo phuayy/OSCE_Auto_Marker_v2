@@ -780,6 +780,25 @@ best-effort) and that run reports success afterwards — without the
 predicate, the late `succeeded` silently replaced `cancelled` and the session
 showed a result the user had asked to abort.
 
+**A duplicate engine run cannot take a job off the worker executing it.** Two
+Hatchet runs can exist for one job id (an overlapping redispatch, two reapers,
+a rerun of a queued row). Three rules keep the second one harmless.
+`claim_queued` answers `held` — not `not_queued` — when the row is `running`
+under another worker, and `_execute_job` returns quietly on it: raising would
+make Hatchet retry, and that retry is what used to requeue the live row.
+`prepare_retry_attempt` (which takes the retrying `worker_id` and the reaper's
+`JOB_STALE_RUNNING_TIMEOUT_SECONDS`) requeues a `failed` row always, but a
+`running` one only when its `locked_by` is the retrying worker itself or its
+`locked_at` heartbeat is stale — in the `UPDATE`'s predicate, so a fresh row
+held by someone else is left alone. And `mark_succeeded` / `mark_failed` take
+the executing worker's id and only transition a `running` row it still owns,
+returning `None` when they did not (`mark_cancelled` stays unfenced: cancel
+comes from the API); `_execute_job` announces nothing and syncs no session for
+a finish that returned `None`, which is also why a late success on a cancelled
+row is no longer reported as `succeeded`. `JobRepository.rerun` closes the
+trigger: only a terminal row may be rerun, and not while another active job
+exists for the same session and task type (409 `AppError` either way).
+
 **Reading an artefact: the file on disk is the document.** Every producer writes
 its JSON to disk and records only metadata (`fileName`, `absolutePath`,
 `sizeBytes`, `url`) on the session, so `read_artifact_payload` reads the file

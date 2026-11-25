@@ -10,13 +10,13 @@ from typing import Any
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import AppError
 from app.core.json_utils import read_json_file
 from app.core.utils import utc_now_iso
 from app.database.models import JobAttemptRecord, JobEventRecord, JobRecord
 from app.database.orm import OrmDatabase
 from app.domain.jobs import (
     ACTIVE_JOB_STATUSES,
-    RECOVERABLE_JOB_STATUSES,
     TERMINAL_JOB_STATUSES,
     JobStatus,
 )
@@ -40,8 +40,11 @@ class JobClaim:
     """Outcome of trying to take a queued job for execution.
 
     ``claimed``    — ``job`` is now ``running`` under this worker.
-    ``not_queued`` — the row is no longer queued (another worker took it, it was
-                     cancelled, or it already finished); ``job`` is the current row.
+    ``not_queued`` — the row is no longer queued (it was cancelled, or it
+                     already finished); ``job`` is the current row.
+    ``held``       — the row is ``running`` under another worker: a second
+                     engine run for the same job lost the claim to the live one.
+                     Not a failure and not retryable — the holder owns the job.
     ``exhausted``  — the row was queued but had no attempts left, so it has just
                      been marked ``failed``; ``job`` is that failed row. The caller
                      owns the consequence: a session waiting on this job must be
@@ -58,6 +61,10 @@ class JobClaim:
     @property
     def exhausted(self) -> bool:
         return self.outcome == "exhausted"
+
+    @property
+    def held(self) -> bool:
+        return self.outcome == "held"
 
 
 class JobRepository:
@@ -334,39 +341,58 @@ class JobRepository:
                 await db.refresh(row)
             return _to_job_dict(row)
 
-    async def prepare_retry_attempt(self, job_id: str, reason: str) -> dict[str, Any]:
+    async def prepare_retry_attempt(
+        self, job_id: str, reason: str, *, worker_id: str, stale_after_seconds: int
+    ) -> dict[str, Any]:
+        """Return a failed job — or a dead worker's ``running`` one — to ``queued``.
+
+        A ``running`` row is only requeued when it is provably not alive: it is
+        locked by ``worker_id`` itself (the retrying worker's own previous
+        attempt is over, or it would not be asking), or its heartbeat is older
+        than ``stale_after_seconds`` (the reaper's own staleness rule, see
+        :meth:`list_stale_running`). A *fresh* row locked by another worker is
+        a live run — a duplicate Hatchet run retrying must not requeue it, or
+        the pipeline executes twice. The rule is part of the ``UPDATE``'s
+        predicate, so it is judged at write time, not on a snapshot.
+        """
         now = utc_now_iso()
+        cutoff = _iso_seconds_ago(stale_after_seconds)
         async with self.database.transaction() as db:
             await self.database.ensure_write_locked(db)
             row = await self._require(db, job_id)
             status = row.status
             attempts = int(row.attempts or 0)
-            if status in RECOVERABLE_JOB_STATUSES and attempts < int(row.max_attempts or 1):
-                await db.execute(
-                    update(JobRecord)
-                    .where(
-                        JobRecord.id == job_id,
-                        JobRecord.status.in_(sorted(RECOVERABLE_JOB_STATUSES)),
-                        JobRecord.attempts < JobRecord.max_attempts,
-                    )
-                    .values(
-                        status=JobStatus.QUEUED,
-                        queued_at=now,
-                        started_at=None,
-                        ended_at=None,
-                        requeued_at=now,
-                        locked_by=None,
-                        locked_at=None,
-                        error=reason,
-                        updated_at=now,
-                    )
-                    .execution_options(synchronize_session=False)
+            result = await db.execute(
+                update(JobRecord)
+                .where(
+                    JobRecord.id == job_id,
+                    JobRecord.attempts < JobRecord.max_attempts,
+                    or_(
+                        JobRecord.status == JobStatus.FAILED,
+                        and_(
+                            JobRecord.status == JobStatus.RUNNING,
+                            or_(JobRecord.locked_by == worker_id, JobRecord.locked_at < cutoff),
+                        ),
+                    ),
                 )
-                if status == JobStatus.RUNNING and attempts > 0:
-                    await self._close_open_attempt(
-                        db, job_id, attempts, status=ATTEMPT_INTERRUPTED, ended_at=now, error=reason
-                    )
-                await db.refresh(row)
+                .values(
+                    status=JobStatus.QUEUED,
+                    queued_at=now,
+                    started_at=None,
+                    ended_at=None,
+                    requeued_at=now,
+                    locked_by=None,
+                    locked_at=None,
+                    error=reason,
+                    updated_at=now,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount == 1 and status == JobStatus.RUNNING and attempts > 0:
+                await self._close_open_attempt(
+                    db, job_id, attempts, status=ATTEMPT_INTERRUPTED, ended_at=now, error=reason
+                )
+            await db.refresh(row)
             return _to_job_dict(row)
 
     async def claim_queued(self, job_id: str, worker_id: str) -> JobClaim:
@@ -375,7 +401,7 @@ class JobRepository:
             await self.database.ensure_write_locked(db)
             row = await self._require(db, job_id)
             if row.status != JobStatus.QUEUED:
-                return JobClaim("not_queued", _to_job_dict(row))
+                return _unclaimed(row)
 
             if int(row.attempts or 0) >= int(row.max_attempts or 1):
                 # Queued with nothing left to try: the row can never run, so it
@@ -420,7 +446,7 @@ class JobRepository:
                 or row.status != JobStatus.RUNNING
                 or str(row.locked_by or "") != worker_id
             ):
-                return JobClaim("not_queued", _to_job_dict(row))
+                return _unclaimed(row)
 
             db.add(
                 JobAttemptRecord(
@@ -543,6 +569,13 @@ class JobRepository:
     async def rerun(self, job_id: str, *, reset_attempts: bool = True) -> dict[str, Any]:
         """Return a finished job to ``queued`` for a fresh start.
 
+        Only a terminal row may be rerun: requeueing a ``queued`` one is what
+        creates a second engine run for a job that already has one, and a
+        ``running`` one is being executed. A different active job for the same
+        session and task type also refuses it — the one-active-job-per-session
+        rule ``enqueue`` keeps. Both checks run under the write lock, in the
+        same transaction as the requeue.
+
         Any dispatch metadata is stripped in the same transaction: a rerun is
         by definition a new engine run, and doing it here (rather than a
         second whole-row write from the caller) leaves no window in which a
@@ -552,8 +585,22 @@ class JobRepository:
         async with self.database.transaction() as db:
             await self.database.ensure_write_locked(db)
             row = await self._require(db, job_id)
-            if row.status == JobStatus.RUNNING:
-                raise ValueError("Running jobs cannot be rerun until they finish or are cancelled.")
+            if row.status in ACTIVE_JOB_STATUSES:
+                raise AppError(f"Job is already {row.status}; only a finished job can be rerun.", status_code=409)
+            sibling = await db.scalar(
+                select(JobRecord.id)
+                .where(
+                    JobRecord.session_id == row.session_id,
+                    JobRecord.task_type == row.task_type,
+                    JobRecord.id != job_id,
+                    JobRecord.status.in_(sorted(ACTIVE_JOB_STATUSES)),
+                )
+                .limit(1)
+            )
+            if sibling is not None:
+                raise AppError(
+                    f"Another {row.task_type} job for this session is already in progress.", status_code=409
+                )
             payload = _load_json(str(row.payload_json or "{}"))
             if _strip_dispatch(payload):
                 row.payload_json = _dump_json(payload)
@@ -569,14 +616,19 @@ class JobRepository:
             row.updated_at = now
             return _to_job_dict(row)
 
-    async def mark_succeeded(self, job_id: str) -> dict[str, Any]:
-        return await self._finish(job_id, JobStatus.SUCCEEDED, None)
+    async def mark_succeeded(self, job_id: str, *, worker_id: str) -> dict[str, Any] | None:
+        """Finish a job its executing worker ran to the end; ``None`` when the
+        worker no longer owns it (see :meth:`_finish`)."""
+        return await self._finish(job_id, JobStatus.SUCCEEDED, None, worker_id=worker_id)
 
-    async def mark_failed(self, job_id: str, error: str) -> dict[str, Any]:
-        return await self._finish(job_id, JobStatus.FAILED, error or "Job failed.")
+    async def mark_failed(self, job_id: str, error: str, *, worker_id: str) -> dict[str, Any] | None:
+        return await self._finish(job_id, JobStatus.FAILED, error or "Job failed.", worker_id=worker_id)
 
     async def mark_cancelled(self, job_id: str, reason: str) -> dict[str, Any]:
-        return await self._finish(job_id, JobStatus.CANCELLED, reason or "Job cancelled.")
+        """Cancel comes from the API, not from a worker, so it is never fenced."""
+        job = await self._finish(job_id, JobStatus.CANCELLED, reason or "Job cancelled.")
+        assert job is not None
+        return job
 
     async def append_event(
         self,
@@ -598,7 +650,9 @@ class JobRepository:
 
     # --- internals -----------------------------------------------------------
 
-    async def _finish(self, job_id: str, status: str, error: str | None) -> dict[str, Any]:
+    async def _finish(
+        self, job_id: str, status: str, error: str | None, *, worker_id: str | None = None
+    ) -> dict[str, Any] | None:
         """Move a job to a terminal status — unless it is already at one.
 
         First writer wins: a job the user cancelled must stay cancelled even if
@@ -608,18 +662,29 @@ class JobRepository:
         predicate on the ``UPDATE`` is what makes that atomic rather than a
         check-then-write race: whichever caller's statement matches a
         non-terminal row is the one whose outcome sticks.
+
+        With ``worker_id`` (an executing worker reporting its own outcome) the
+        predicate also demands ``status = 'running'`` and ``locked_by =
+        worker_id``: a worker whose row was requeued and claimed by another run
+        no longer owns it, and finishing it would end work somebody else is
+        doing. Such a call changes nothing and returns ``None``, so the caller
+        can tell "my outcome was recorded" from "the row is not mine" and avoid
+        announcing one it did not write.
         """
         now = utc_now_iso()
         async with self.database.transaction() as db:
             await self.database.ensure_write_locked(db)
             row = await self._require(db, job_id)
             if row.status in TERMINAL_JOB_STATUSES:
-                return _to_job_dict(row)
+                return None if worker_id is not None else _to_job_dict(row)
 
+            conditions = [JobRecord.id == job_id, JobRecord.status.notin_(sorted(TERMINAL_JOB_STATUSES))]
+            if worker_id is not None:
+                conditions += [JobRecord.status == JobStatus.RUNNING, JobRecord.locked_by == worker_id]
             attempt_number = int(row.attempts or 0)
             result = await db.execute(
                 update(JobRecord)
-                .where(JobRecord.id == job_id, JobRecord.status.notin_(sorted(TERMINAL_JOB_STATUSES)))
+                .where(*conditions)
                 .values(
                     status=status,
                     ended_at=now,
@@ -631,7 +696,9 @@ class JobRepository:
                 .execution_options(synchronize_session=False)
             )
             await db.refresh(row)
-            if result.rowcount == 1 and attempt_number > 0:
+            if result.rowcount != 1:
+                return None if worker_id is not None else _to_job_dict(row)
+            if attempt_number > 0:
                 await self._close_open_attempt(
                     db, job_id, attempt_number, status=status, ended_at=now, error=error
                 )
@@ -669,6 +736,12 @@ class JobRepository:
             .values(status=status, ended_at=ended_at, error=error)
             .execution_options(synchronize_session=False)
         )
+
+
+def _unclaimed(row: JobRecord) -> JobClaim:
+    """The verdict for a claim that did not take: ``held`` when a worker is
+    running the row, ``not_queued`` for every other state."""
+    return JobClaim("held" if row.status == JobStatus.RUNNING else "not_queued", _to_job_dict(row))
 
 
 def _iso_seconds_ago(seconds: int) -> str:
@@ -756,4 +829,9 @@ def _load_json(raw: str) -> dict[str, Any]:
         return {}
 
 
-__all__ = ["DISPATCH_PAYLOAD_KEY", "LEGACY_DISPATCH_RUN_ID_KEY", "JobClaim", "JobRepository"]
+__all__ = [
+    "DISPATCH_PAYLOAD_KEY",
+    "LEGACY_DISPATCH_RUN_ID_KEY",
+    "JobClaim",
+    "JobRepository",
+]
