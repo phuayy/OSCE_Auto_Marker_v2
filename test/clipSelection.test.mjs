@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 
 import {
   areAllSelected,
+  isDraftClip,
   planClipDispatch,
   selectableClipIds,
   settleBatchAssessment,
@@ -30,6 +31,19 @@ assert.deepEqual(
   }),
   ['c2', 'c3']
 );
+// A draft (no cut file yet — auto-crop's proposal or a clip mid re-cut) is never
+// selectable, even with a stale run state; the server refuses it with 409.
+assert.deepEqual(
+  selectableClipIds(
+    [{ id: 'd1', kind: 'session', isDraft: true }, { id: 'c1', kind: 'session', isDraft: false }],
+    { d1: { status: 'completed', sessionId: 's1' } }
+  ),
+  ['c1']
+);
+assert.equal(isDraftClip({ isDraft: true }), true);
+assert.equal(isDraftClip({ isDraft: false }), false);
+assert.equal(isDraftClip({}), false); // bell-split legacy clips carry no flag
+assert.equal(isDraftClip(null), false);
 // Defensive: bad inputs never throw.
 assert.deepEqual(selectableClipIds(undefined, undefined), []);
 assert.deepEqual(selectableClipIds([{ kind: 'session' }], {}), []); // no id → skipped

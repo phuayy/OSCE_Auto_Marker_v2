@@ -29,6 +29,7 @@ from app.domain.sessions import (
     IN_FLIGHT_STATUSES,
     SessionStatus,
     empty_outputs,
+    existing_file,
     find_clip,
     session_clips,
     session_video_path,
@@ -875,7 +876,9 @@ class ClipService:
         (see ``MediaPipeline.materialize_clip``).
 
         Returns as soon as the plan is persisted: the clip becomes a draft with
-        its new range, which the timeline renders immediately.
+        its new range, which the timeline renders immediately. A clip that was
+        never exported has no cut to replace, so only its range moves and the
+        answer carries ``job: None``.
         """
         session = await self.sessions.read(session_id)
         clip = find_clip(session, clip_id)
@@ -888,8 +891,6 @@ class ClipService:
             raise AppError("`end` must be greater than `start`.", status_code=400)
         if session.get("status") == SessionStatus.PROCESSING:
             raise AppError("This session is already being processed.", status_code=409)
-        if self.jobs is None:
-            raise RuntimeError("Durable job queue is not configured for clip export.")
         if await self._has_live_export(session):
             raise AppError(
                 "A clip export is already running for this session. Wait for it to finish before re-cutting.",
@@ -902,6 +903,30 @@ class ClipService:
         end_seconds = max(0.0, min(float(end), video_duration))
         if end_seconds - start_seconds < self.media.settings.auto_crop_min_clip_seconds:
             raise AppError(f"Cropped duration must be at least {self.media.settings.auto_crop_min_clip_seconds}s.", status_code=400)
+
+        if self._never_planned(clip):
+            # Segmentation is planning; export is execution. A range auto-crop
+            # proposed has no file and no place in any plan, so there is nothing
+            # to re-cut — moving the range is the whole change, and the next
+            # "Export clips" cuts it under its own plan and index. Queueing a job
+            # here resolved every such clip to the same file name (see
+            # ``MediaPipeline.materialize_clip``) and one clip adopted another's.
+            def move_draft(current: dict[str, Any]) -> Any:
+                target = find_clip(current, clip_id)
+                target["start"] = start_seconds
+                target["end"] = end_seconds
+                return None
+
+            await self._commit(session, move_draft)
+            return {
+                "session": self.sessions.public_session(session),
+                "clip": self._public_clip(find_clip(session, clip_id)),
+                "clipExport": dict(session.get("clipExport") or {}),
+                "job": None,
+            }
+
+        if self.jobs is None:
+            raise RuntimeError("Durable job queue is not configured for clip export.")
 
         # The recrop stays inside the clip's own plan directory, so the plan
         # remains the unit of ownership for pruning and for child sessions that
@@ -967,6 +992,16 @@ class ClipService:
             "clipExport": dict(session.get("clipExport") or {}),
             "job": self.jobs.public_job(job),
         }
+
+    @staticmethod
+    def _never_planned(clip: dict[str, Any]) -> bool:
+        """A draft that no export plan has ever included: no file, plan or index.
+
+        A clip from before plans existed has an ``exportIndex`` but no
+        ``planId``, and is *not* this — it was cut (or is being re-cut) under
+        its flat legacy name, so a recrop of it is still an export.
+        """
+        return bool(clip.get("isDraft")) and not clip.get("planId") and clip.get("exportIndex") is None
 
     @staticmethod
     def _requested_clip_ids(
@@ -1085,17 +1120,20 @@ class ClipService:
         # clip gets the 400 that names it, not a 500 about the queue.
         if self.jobs is None:
             raise RuntimeError("Durable job queue is not configured for clip assessment.")
-        clip_path = Path(str(clip.get("absolutePath") or ""))
-        if not clip_path.exists():
-            raise AppError("Clip file is missing. Export clips before assessment.", status_code=400)
+        clip_path = existing_file(clip)
+        if clip_path is None:
+            raise AppError(
+                "This clip has not been cut yet, or its file is missing. "
+                "Export clips (or wait for the re-cut) before assessing it.",
+                status_code=409,
+            )
         case_study = (parent_session.get("files") or {}).get("caseStudy") or {}
-        case_study_path = Path(str(case_study.get("absolutePath") or ""))
-        if not case_study_path.exists():
+        if existing_file(case_study) is None:
             raise AppError("Case study file is missing for this session.", status_code=400)
 
         existing = await self._existing_clip_child(session_id, clip_id)
         if existing is not None:
-            return await self._resume_clip_child(parent_session, clip, existing)
+            return await self._resume_clip_child(parent_session, clip, clip_path, existing)
 
         new_session_id = str(uuid4())
         preferred_name = f"{parent_session.get('name') or parent_session.get('id') or 'Session'} - {clip.get('label') or 'Clip'}"
@@ -1204,6 +1242,7 @@ class ClipService:
         self,
         parent_session: dict[str, Any],
         clip: dict[str, Any],
+        clip_path: Path,
         child: dict[str, Any],
     ) -> dict[str, Any]:
         """Answer a repeat assessment request with the child that already exists.
@@ -1235,7 +1274,6 @@ class ClipService:
         if self.maintenance is None:
             raise RuntimeError("Session maintenance is not configured; a finished clip child cannot be re-run.")
 
-        clip_path = Path(str(clip.get("absolutePath") or ""))
         clip_source = self._clip_source(clip)
         video_meta = {
             "originalName": clip.get("fileName") or clip_path.name,

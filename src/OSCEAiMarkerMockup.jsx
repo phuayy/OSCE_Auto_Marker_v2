@@ -1580,7 +1580,9 @@ export default function OSCEAiMarkerMockup({
       // 202: the clip comes back as a draft with its new range and the MP4 is
       // re-cut by the same export job a full split uses. Start the export
       // watch here rather than waiting for the response to carry a running
-      // record — it is queued, not running, at this point.
+      // record — it is queued, not running, at this point. A clip that was
+      // never exported answers 200 with no job: only its range moved, and the
+      // next "Export clips" cuts it, so there is nothing to watch.
       const body = await apiJson(`/api/sessions/${session.id}/clips/${selectedClip.id}/recrop`, {
         method: 'POST',
         json: payload,
@@ -1590,8 +1592,12 @@ export default function OSCEAiMarkerMockup({
       if (body?.session) {
         setSession(body.session);
       }
-      setAwaitingClipExportFor(session.id);
-      setNotice(`Re-cutting ${selectedClip.label || 'clip'} — its row updates when the new crop lands.`);
+      if (body?.job) {
+        setAwaitingClipExportFor(session.id);
+        setNotice(`Re-cutting ${selectedClip.label || 'clip'} — its row updates when the new crop lands.`);
+      } else {
+        setNotice('Crop saved. It will be cut when you export clips.');
+      }
     } catch (error) {
       setError(error.message || 'Recrop failed.');
     } finally {

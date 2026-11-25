@@ -495,6 +495,17 @@ correct underneath even while the panel is unmounted.
    clip used to spend one unit each, so a 15-student recording queued 10 and got 429 for 5.
 5. Each clip assessment creates a **child** session (`parentSessionId` set), runs full pipeline.
 
+**A draft clip cannot be assessed.** `existing_file(meta)` in
+[domain/sessions.py](fastapi_backend/app/domain/sessions.py) is the one answer
+to "does this file-meta dict name a real file": empty path, `isDraft`, or a
+non-regular file is `None` (`Path("")` is `Path(".")`, which *exists*, so the old
+`Path(str(x or "")).exists()` guard accepted a draft and a finished child was
+then repointed at `.` and re-run, deleting its scores). `assess` checks the clip
+and the case study with it *before* any mutation and refuses a draft with 409; in
+`POST /clips/assess` that is that clip's own `results[]` entry. The browser mirrors
+it: `selectableClipIds` excludes drafts and the row buttons are disabled
+(`lib/clipSelection.js`).
+
 **One clip has one child session, and `assess` maintains that.** The request is
 idempotent: a clip whose child is *in flight* gets that child back
 (`reused: true`) rather than a second one, and a clip whose child has *finished*
@@ -509,7 +520,18 @@ clip id extracted from `clip_source`, newest first). The child records
 compares that with the clip's current `fileName` to mark a row
 "Clip re-cut since this assessment" (`src/lib/clipAssessments.js`).
 
-**Re-cropping one clip is an export scoped to that clip.** `POST
+**Re-cropping a clip that was never exported is not an export.** A range
+auto-crop proposed has no file, `planId` or `exportIndex` — nothing to re-cut —
+so `POST /clips/{clipId}/recrop` only moves its `start`/`end` (it stays a
+draft, no `revision` bump), queues no job, answers **200** with `job: null`,
+and the next "Export clips" cuts it under its own plan and index
+(`ClipService._never_planned`). `MediaPipeline.materialize_clip` backs that up
+by refusing a clip with no `exportIndex` outright: the index used to default to
+0, so every such clip resolved to the same `clip-1` name and one clip adopted
+another's finished MP4. A pre-plan clip (an `exportIndex`, no `planId`) is not
+"never planned" and keeps its flat legacy name.
+
+**Re-cropping one clip that has been exported is an export scoped to that clip.** `POST
 /clips/{clipId}/recrop` answers **202**: it moves the clip's boundaries, bumps
 its `revision`, turns it back into a draft (range, no file) and queues the same
 `export_clips` job with `clipExport.scope = "clip"` and `clipIds`. It used to

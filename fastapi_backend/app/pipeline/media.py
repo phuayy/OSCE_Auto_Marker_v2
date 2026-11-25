@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from app.core.artifacts import artifact_metadata
 from app.core.config import Settings
-from app.core.exceptions import EmptyTranscriptError
+from app.core.exceptions import AppError, EmptyTranscriptError
 from app.core.json_utils import extract_json_object
 from app.core.process import CommandRunner
 from app.core.resources import ResourceLease
@@ -991,7 +991,20 @@ class MediaPipeline:
         Revision 0 (every clip a split produces) keeps the historical names
         untouched; a re-cut clip carries ``-r<revision>``.
         """
-        export_index = int(clip.get("exportIndex") or 0)
+        raw_index = clip.get("exportIndex")
+        if raw_index is None:
+            # The index is half of the file's identity. Defaulting it to 0 made
+            # every clip without one resolve to the same ``clip-1`` name, and
+            # the adoption rule below then handed one student's footage to
+            # another. A clip that has never been through an export plan has no
+            # name to cut to; refuse rather than guess a shared one.
+            raise AppError(
+                "This clip is not part of an export plan, so it has no file name to be cut to. "
+                "Export clips to plan it first.",
+                status_code=400,
+                retryable=False,
+            )
+        export_index = int(raw_index)
         revision = int(clip.get("revision") or 0)
         revision_suffix = f"-r{revision}" if revision > 0 else ""
         resolved_plan = str(plan_id or clip.get("planId") or "")
