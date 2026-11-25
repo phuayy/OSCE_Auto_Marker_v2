@@ -1765,7 +1765,7 @@ recording; its Student column the scored subject.
 | `LLM_MAX_ATTEMPTS_PER_MODE` | `3` | Attempts per request shape before the router degrades the shape |
 | `LLM_INITIAL_BACKOFF_SECONDS` / `LLM_MAX_BACKOFF_SECONDS` / `LLM_BACKOFF_JITTER_RATIO` | `1.5` / `8` / `0.25` | Retry backoff. Jitter keeps the parallel content and communication branches from retrying in lockstep |
 | `LLM_CIRCUIT_FAILURE_THRESHOLD` / `LLM_CIRCUIT_COOLDOWN_SECONDS` | `6` / `60` | Consecutive failures before a provider is skipped, and for how long |
-| `LLM_TEMPERATURE` / `LLM_TOP_P` / `LLM_MAX_TOKENS` / `LLM_REQUEST_TIMEOUT_SECONDS` | `0.2` / `0.9` / `24576` / `360` | Sampling, shared by all providers. The `NVIDIA_*` spellings still work |
+| `LLM_TEMPERATURE` / `LLM_TOP_P` / `LLM_MAX_TOKENS` / `LLM_REQUEST_TIMEOUT_SECONDS` | `0.2` / `0.9` / `24576` / `360` | Sampling, shared by all providers — except that `max_tokens` is the *requested* budget: each target clamps it to its model's declared `ModelSpec.max_output_tokens` (`LLMProvider.output_budget`). The `NVIDIA_*` spellings still work |
 | `WHISPERX_HF_TOKEN` | — | HuggingFace token for pyannote diarisation |
 | `ENVIRONMENT` | `development` | Declares the deployment shape rather than any one behaviour. Most insecure config here stays a startup *warning* either way (`collect_runtime_warnings`) so a local checkout is never surprised by a hard crash over a default it did not touch; `production` additionally refuses to **start** with the handful of combinations in `Settings.startup_fatal_errors()` — currently just `PROTECT_MEDIA_ENDPOINTS=false` — where starting anyway would be actively unsafe. Never set this in local development |
 | `PROTECT_MEDIA_ENDPOINTS` | `true` | Auth-gate `/media/*`. `ENVIRONMENT=production` refuses to start with this off |
@@ -2026,6 +2026,22 @@ kind, not just a third copy: a synchronous `time.sleep` loop with no jitter,
 retrying an OS-level sharing violation on an atomic rename rather than
 backing off a remote call, so it is not a candidate to merge with the other
 two.
+
+**A request is shaped for the model it goes to.** `LLMProvider.output_budget`
+is the one place the deployment-wide `LLM_MAX_TOKENS` meets a model's own
+`ModelSpec.max_output_tokens`: the budget is clamped per target (a fallback gets
+*its* limit, not the primary's), an id outside the shortlist or a spec with no
+declared limit keeps the configured value, and a clamp is logged once at INFO.
+Every adapter — OpenAI-compatible, Anthropic, custom — calls it, so a vendor is
+never sent a budget it answers 400 to (terminal for the target; it used to make
+DeepSeek and gpt-4o panel markers always degrade). `ModelSpec.token_parameter`
+and `supports_sampling` carry the o-series' differences (`max_completion_tokens`,
+no `temperature`/`top_p`) as data rather than model-id string matching. The
+Settings **Test** builds its request from `request_defaults_from_env` — the same
+sampling, budget and ladder a scoring run starts from, with only the prompt
+swapped — so a provider that rejects the real shape fails the test; the budget is
+a ceiling, not a spend. The picker shows each model's output limit: a content
+sheet is long, and a low ceiling (8K) can truncate it.
 
 **Selection applies to the next run everywhere, with no restart.**
 `LLMSettingsService.routing()` resolves `llmPrimary` / `llmFallbacks` before

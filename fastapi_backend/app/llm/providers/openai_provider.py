@@ -33,6 +33,8 @@ DESCRIPTOR = ProviderDescriptor(
             context_window=200_000,
             max_output_tokens=100_000,
             supports_reasoning_control=True,
+            token_parameter="max_completion_tokens",
+            supports_sampling=False,
             notes="Reasoning tokens count against the output budget; leave max tokens generous.",
         ),
     ),

@@ -84,13 +84,13 @@ class OpenAICompatibleProvider(LLMProvider):
         return spec.supports_json_mode if spec is not None else True
 
     def build_payload(self, request: ChatRequest, model: str, mode: RequestMode) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": request.messages,
-            "temperature": request.temperature,
-            "top_p": request.top_p,
-            "max_tokens": request.max_tokens,
-        }
+        spec = self.model_spec(model)
+        payload: dict[str, Any] = {"model": model, "messages": request.messages}
+        if spec is None or spec.supports_sampling:
+            payload["temperature"] = request.temperature
+            payload["top_p"] = request.top_p
+        token_parameter = spec.token_parameter if spec is not None else "max_tokens"
+        payload[token_parameter] = self.output_budget(request, model)
         wants_json = request.json_mode and mode in {RequestMode.STRUCTURED, RequestMode.JSON_ONLY}
         if wants_json and self.supports_json_mode(model):
             payload["response_format"] = {"type": "json_object"}
