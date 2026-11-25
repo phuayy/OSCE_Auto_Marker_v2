@@ -548,7 +548,9 @@ and the next "Export clips" cuts it under its own plan and index
 by refusing a clip with no `exportIndex` outright: the index used to default to
 0, so every such clip resolved to the same `clip-1` name and one clip adopted
 another's finished MP4. A pre-plan clip (an `exportIndex`, no `planId`) is not
-"never planned" and keeps its flat legacy name.
+"never planned" and keeps its flat legacy name. A cut clip with no `exportIndex` at all has no name
+the job could resolve, so its recrop is refused with 409 before anything
+changes (rather than turning its cut into a draft the job then cannot re-cut).
 
 **Re-cropping one clip that has been exported is an export scoped to that clip.** `POST
 /clips/{clipId}/recrop` answers **202**: it moves the clip's boundaries, bumps

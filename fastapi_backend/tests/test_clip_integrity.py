@@ -104,6 +104,25 @@ def test_recropping_an_exported_clip_still_queues_the_scoped_export(tmp_path: Pa
     assert [path.parts[-2:] for path in media.crops] == [(sessions.current["clipExport"]["planId"], "clip-2-r1.mp4")]
 
 
+def test_recropping_a_cut_clip_with_no_index_is_refused_before_anything_changes(tmp_path: Path) -> None:
+    service, sessions, media, jobs = _build(tmp_path)
+    clip_file = tmp_path / "old-cut.mp4"
+    clip_file.write_bytes(b"cut")
+    sessions.current["outputs"]["videoClips"] = [
+        {"id": "old", "start": 0.0, "end": 90.0, "kind": "session", "isDraft": False,
+         "fileName": clip_file.name, "absolutePath": str(clip_file), "sizeBytes": 3}
+    ]
+    before = copy.deepcopy(sessions.current["outputs"]["videoClips"])
+
+    with pytest.raises(AppError) as error:
+        asyncio.run(service.request_clip_recrop("sess-1", "old", 10.0, 80.0))
+
+    assert error.value.status_code == 409
+    assert sessions.current["outputs"]["videoClips"] == before, "the existing cut must not be turned into a draft"
+    assert jobs.enqueued == []
+    assert media.crops == []
+
+
 def test_a_legacy_clip_with_an_index_and_no_plan_keeps_its_flat_name(tmp_path: Path) -> None:
     service, sessions, media, _jobs = _build(tmp_path)
     legacy = {"id": "legacy", "start": 0.0, "end": 90.0, "exportIndex": 2, "isDraft": True}

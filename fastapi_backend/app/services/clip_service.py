@@ -925,6 +925,16 @@ class ClipService:
                 "job": None,
             }
 
+        if clip.get("exportIndex") is None:
+            # Cut before clips carried an export index: the job has no file
+            # name to resolve it to (``MediaPipeline.materialize_clip`` refuses
+            # it), and turning it into a draft first would lose the cut it has.
+            # Refuse before anything changes; "Export clips" re-plans it.
+            raise AppError(
+                "This clip was cut before re-cutting was supported. Use Export clips to re-cut the recording's clips.",
+                status_code=409,
+            )
+
         if self.jobs is None:
             raise RuntimeError("Durable job queue is not configured for clip export.")
 
