@@ -319,7 +319,9 @@ class PipelineService:
         if not settings.transcript_hallucination_filter:
             return
         try:
-            kept, flags = screen_segments(
+            # Pure CPU (gzip + n-gram scans over every segment): off the loop.
+            kept, flags = await asyncio.to_thread(
+                screen_segments,
                 transcript.get("segments") or [],
                 drop=settings.transcript_hallucination_drop,
                 min_avg_logprob=settings.transcript_hallucination_min_avg_logprob,
@@ -377,7 +379,12 @@ class PipelineService:
         if not terms:
             return
         try:
-            corrections = correct_segments(
+            # difflib + phonetic matching per window per term: tens of seconds
+            # for a large corpus, so it must not run on the event loop (it
+            # would stall HTTP, the change feed and job heartbeats). The
+            # segments are only touched by this thread until the await returns.
+            corrections = await asyncio.to_thread(
+                correct_segments,
                 transcript.get("segments") or [],
                 terms,
                 self._correction_policy(),

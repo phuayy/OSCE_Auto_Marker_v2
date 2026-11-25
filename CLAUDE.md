@@ -379,6 +379,20 @@ Key files:
 - [pipeline/scoring.py](fastapi_backend/app/pipeline/scoring.py) — scorer subprocess wrappers
 - [scripts/nvidia_osce_assessor.py](scripts/nvidia_osce_assessor.py) — content scorer with checkpoint/repair logic
 
+**Step 3's CPU work never runs on the event loop.** Hallucination screening
+(`screen_segments`) and corpus correction (`correct_segments`: difflib plus
+Double Metaphone per window per term, tens of seconds for a large corpus) are
+pure functions called through `asyncio.to_thread` at the `_screen_hallucinations`
+/ `_apply_corpus_corrections` boundary; the session commits stay on the loop.
+Run inline they froze HTTP, the change feed and job heartbeats for the whole
+process (long enough, and the reaper treats other jobs as stale). The matcher
+itself is cheaper without changing a result: each term pre-indexes its strings
+for difflib once, a window whose `quick_ratio` bound is under every threshold
+that could accept it skips the exact ratio, and the protected-term check is
+remembered per window. `tests/data/transcript_correction_golden.json` is output
+captured from the pre-optimisation code; `test_transcript_postprocessing_offloop.py`
+pins byte-identical results and that the loop keeps ticking meanwhile.
+
 **The corpus step 3 corrects against is DB-backed, not a fixed word list.**
 `corpora` (`CorpusRecord`) holds named term lists an admin manages via
 `POST/PUT/DELETE /api/admin/corpora`; every marker reads `GET /api/corpora` to
