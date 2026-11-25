@@ -214,9 +214,10 @@
       $('dot').className = 'dot warn';
       $('headline').textContent = 'The marker is shutting down';
       $('note').textContent = s.label;
-    } else if (s.stage === 'failed' || s.stage === 'unavailable') {
+    } else if (s.stage === 'failed' || s.stage === 'boot-failed' || s.stage === 'unavailable') {
       $('dot').className = 'dot bad';
-      $('headline').textContent = s.stage === 'failed' ? 'The marker could not start' : 'The machine is unavailable';
+      $('headline').textContent = s.stage === 'unavailable' ? 'The machine is unavailable'
+        : s.stage === 'boot-failed' ? 'The marker did not finish starting' : 'The marker could not start';
       $('note').className = 'note error';
       $('note').textContent = s.error || s.label;
       if (email && s.stage === 'failed') {

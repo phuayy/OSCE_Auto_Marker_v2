@@ -64,6 +64,52 @@ Implemented in `fastapi_backend/app/services/idle_shutdown_service.py` and
 Admins can see the countdown in `GET /api/admin/health/diagnostics` under
 `idleShutdown`.
 
+## When a start or an update goes wrong
+
+Idle shutdown lives inside the app, so a VM whose app never gets healthy would
+bill its GPU until someone noticed. Two host-level safety nets, both in
+[setup/vm-startup.sh](setup/vm-startup.sh) and both independent of the app:
+
+- **Boot watchdog.** Installed on every boot, before any step that can fail,
+  as `osce-boot-watchdog.timer` (checks every 10 minutes). If the marker never
+  answered `/api/health/ready` within `osce-watchdog-minutes` of boot (instance
+  metadata, default 60), it publishes `failed` to the guest attribute
+  `osce/boot` (the start page then says the marker did not finish starting) and
+  runs `shutdown -h now`. Once the app has been ready it stays quiet, because
+  the app's own idle shutdown owns the VM; it only fires again if the app then
+  stops answering for three checks in a row (about 30 minutes: a crash-loop, not
+  a restart).
+- **Delayed power-off after a failed install or update.** The failure is
+  reported (`osce/install`, `failed <step>`) and, unless the previous version is
+  serving again, `shutdown -h +15` is scheduled (`osce-failure-grace-minutes`).
+  The install log prints how to keep the machine up to investigate:
+  `sudo shutdown -c` and `sudo systemctl stop osce-boot-watchdog.timer` (the
+  watchdog would otherwise power it off at its next check).
+  Log: `/var/log/osce-install.log`.
+
+**An update is a transaction.** The old code is not deleted until the new app
+answers ready.
+
+1. The new bundle is downloaded and unpacked beside the old code.
+2. The old app is stopped and the database is backed up with
+   `scripts/backup_database.py` (SQLite online backup or `pg_dump`) into
+   `/var/lib/osce-marker/backups/pre-update-<time>-<old bundle>/`. The three
+   newest are kept. If the backup fails the update is abandoned, the old app is
+   restarted and `osce/install` says `failed backup rolled-back`.
+3. The old tree becomes `/opt/osce-marker.old`; the new one is installed and
+   started (the app runs Alembic at boot).
+4. Ready: `.old` is deleted, the new bundle is recorded, old backups are pruned.
+   Not ready, or any step failing: the new copy is moved to
+   `/opt/osce-marker.failed` (kept for inspection), the old code and its
+   environments are put back, the database is restored from the backup (only if
+   the new app may have started), the old app is restarted, and the install
+   reports `failed <step> rolled-back`. The recorded bundle stays the old one, so
+   the next start tries the update again.
+5. If the rollback itself fails nothing is deleted, `failed <step>
+   rollback-failed` is reported, the delayed power-off applies, and later
+   updates are refused (`/var/lib/osce-marker/update-needs-operator`) until an
+   operator fixes the VM and removes that file.
+
 ## 1. The VM
 
 Create a GPU VM (for example `g2-standard-8` with one L4) from an image with

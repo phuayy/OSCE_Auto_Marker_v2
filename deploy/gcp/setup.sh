@@ -494,6 +494,7 @@ wait_for_install() {
     if [[ -n "$value" && "$ts" =~ ^[0-9]+$ && "$ts" -ge $((since - 30)) ]]; then
       case "$value" in
         done*)   ok "Installed: ${value% *}"; return 0 ;;
+        failed*rolled-back*) die "The update failed at step '$(awk '{print $2}' <<<"$value")'; the VM rolled back and the previous version is serving again. See the log: gcloud compute ssh $INSTANCE --zone $ZONE --project $PROJECT -- sudo tail -n 100 /var/log/osce-install.log" ;;
         failed*) die "The install on the VM failed at step '$(awk '{print $2}' <<<"$value")'. See the log: gcloud compute ssh $INSTANCE --zone $ZONE --project $PROJECT -- sudo tail -n 100 /var/log/osce-install.log   — then run setup again." ;;
       esac
       if [[ "$value" != "$last" ]]; then

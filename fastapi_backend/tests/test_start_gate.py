@@ -100,12 +100,31 @@ def _obs(status: str, **kwargs) -> Observation:
         # Left over from the previous run: ignored.
         (_obs("RUNNING", boot=BootValue("ready", START_TS - 3600)), "booting"),
         (_obs("STOPPING"), "stopping"),
+        # The VM's install script / boot watchdog gave up on the app: shown as
+        # a failure, not "Starting" forever, while the machine powers off.
+        (_obs("RUNNING", boot=BootValue("failed", START_TS + 900)), "boot-failed"),
+        # A "failed" left from the previous run is ignored like any other value.
+        (_obs("RUNNING", boot=BootValue("failed", START_TS - 3600)), "booting"),
+        # If the app did come up after all, ready wins over a reported failure.
+        (_obs("RUNNING", boot=BootValue("failed", START_TS + 900), app_ready=True), "ready"),
         (_obs("REPAIRING"), "unavailable"),
         (_obs("TERMINATED", start_requested=True, start_error="no GPU"), "failed"),
     ],
 )
 def test_derive_stage(observation: Observation, stage: str) -> None:
     assert derive_stage(observation) == stage
+
+
+def test_a_boot_failure_is_not_a_start_in_progress() -> None:
+    body = describe(
+        _obs("RUNNING", boot=BootValue("failed", START_TS + 900)),
+        now=START_TS + 910,
+        history=[],
+        default_estimate_seconds=300,
+    )
+    assert body["stage"] == "boot-failed"
+    assert body["starting"] is False and body["running"] is False
+    assert "switches itself off" in body["label"]
 
 
 def test_checklist_marks_done_current_pending() -> None:

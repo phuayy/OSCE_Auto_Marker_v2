@@ -187,5 +187,8 @@ account on the marker.** You have two other options:
   that zone at the moment. Wait 15 to 60 minutes and try again.
 - **The install failed on the VM.** The script prints a command that shows
   the VM's install log. Send that output to whoever supports you.
+  A failed install switches the machine off by itself after about 15 minutes,
+  so it does not keep costing money. A failed *update* puts the previous
+  version back and keeps your data.
 
 Technical details are in [README.md](README.md).
