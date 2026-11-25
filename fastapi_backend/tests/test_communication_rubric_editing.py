@@ -16,6 +16,7 @@ from app.core.config import Settings
 from app.domain.communication_rubric import RubricValidationError, rubric_fingerprint
 from app.services.artifact_service import ArtifactService
 from app.services.rubric_service import DRAFT_TTL_SECONDS, RubricDraftNotFound, RubricParseError, RubricService
+from tests.fixtures.rubric_versions import InMemoryRubricVersions
 from tests.test_routes import build_test_client
 
 REPO = Path(__file__).resolve().parents[2]
@@ -67,7 +68,7 @@ def _service(tmp_path: Path, runner: FakeRunner) -> RubricService:
     (root / "scripts").symlink_to(REPO / "scripts")
     settings = Settings(root_dir=root, backend_root=root)
     settings.paths.ensure_layout()
-    return RubricService(settings, runner, ArtifactService(settings), FakeAssets())  # type: ignore[arg-type]
+    return RubricService(settings, runner, ArtifactService(settings), FakeAssets(), InMemoryRubricVersions())  # type: ignore[arg-type]
 
 
 def _upload(tmp_path: Path, name: str = "new.pdf", ctype: str = "application/pdf") -> UploadFile:

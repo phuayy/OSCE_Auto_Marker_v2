@@ -362,4 +362,8 @@ class ScoringPipeline:
             # _assign_output inside _commit: a value written onto the caller's
             # working dict instead would be wiped by the very next commit.
             artifact["rubricAssetId"] = str(rubric_asset_id)
+        rubric_version = parsed_rubric.get("rubric_version") if isinstance(parsed_rubric, dict) else None
+        if isinstance(rubric_version, dict) and rubric_version.get("id"):
+            artifact["rubricVersionId"] = str(rubric_version["id"])
+            artifact["rubricVersionNumber"] = rubric_version.get("number")
         return artifact

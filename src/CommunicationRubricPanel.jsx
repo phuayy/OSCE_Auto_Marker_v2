@@ -26,6 +26,7 @@ import { DEFAULT_SCORING_SCALE } from '@/lib/rubricEditor';
 import { AI_DRAFT_ENDPOINT } from '@/lib/rubricApi';
 import { describeRubricEdit, describeRubricExtraction } from '@/lib/rubricExtraction';
 import CommunicationRubricEditor from '@/CommunicationRubricEditor.jsx';
+import RubricVersionHistory from '@/RubricVersionHistory.jsx';
 
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -64,6 +65,11 @@ function pointsLabel(points) {
 export default function CommunicationRubricPanel({ onBack, isAdmin = false }) {
   const [rubric, setRubric] = useState(null);
   const [pdfMeta, setPdfMeta] = useState(null);
+  // The active version's summary ({ id, versionNumber, ... }); null before
+  // the first response or on a server without version history.
+  const [version, setVersion] = useState(null);
+  // Bumped after every change this page makes, so the history card re-reads.
+  const [historyKey, setHistoryKey] = useState(0);
   // True from the first render: the mount effect always fetches, and a first
   // paint that said "No rubric loaded" before that fetch had even started was
   // a false empty state, not a wait.
@@ -79,10 +85,22 @@ export default function CommunicationRubricPanel({ onBack, isAdmin = false }) {
   const [expandedCriteria, setExpandedCriteria] = useState(() => new Set());
   const fileInputRef = useRef(null);
   const aiFileInputRef = useRef(null);
+  const hasLoadedRef = useRef(false);
 
   useEffect(() => {
     loadRubric();
   }, []);
+
+  function applyRubricResponse(body) {
+    setRubric(body.rubric || null);
+    setPdfMeta(body.pdf || null);
+    setVersion(body.version || null);
+  }
+
+  function applyChange(body) {
+    applyRubricResponse(body);
+    setHistoryKey((key) => key + 1);
+  }
 
   async function loadRubric() {
     setIsLoading(true);
@@ -91,8 +109,10 @@ export default function CommunicationRubricPanel({ onBack, isAdmin = false }) {
       const body = await apiJson('/api/communication-rubric', {
         fallbackMessage: 'Failed to load rubric.',
       });
-      setRubric(body.rubric || null);
-      setPdfMeta(body.pdf || null);
+      applyRubricResponse(body);
+      // The history card loads itself on mount; a later Refresh re-reads it too.
+      if (hasLoadedRef.current) setHistoryKey((key) => key + 1);
+      hasLoadedRef.current = true;
     } catch (loadError) {
       setError(loadError.message || 'Failed to load rubric.');
     } finally {
@@ -121,8 +141,7 @@ export default function CommunicationRubricPanel({ onBack, isAdmin = false }) {
         fallbackMessage: 'Rubric upload failed.',
       });
 
-      setRubric(body.rubric);
-      setPdfMeta(body.pdf || null);
+      applyChange(body);
       setNotice('Rubric replaced. Future communication scoring will use the new criteria.');
     } catch (uploadError) {
       setError(uploadError.message || 'Rubric upload failed.');
@@ -161,8 +180,7 @@ export default function CommunicationRubricPanel({ onBack, isAdmin = false }) {
   }
 
   function handleEditorSaved(body) {
-    setRubric(body.rubric || null);
-    setPdfMeta(body.pdf || null);
+    applyChange(body);
     setEditing(null);
     setError('');
     setNotice('Rubric saved. New communication scoring runs will use it.');
@@ -177,14 +195,22 @@ export default function CommunicationRubricPanel({ onBack, isAdmin = false }) {
         method: 'POST',
         fallbackMessage: 'Reset failed.',
       });
-      setRubric(body.rubric);
-      setPdfMeta(body.pdf || null);
+      applyChange(body);
       setNotice('Restored default communication rubric.');
     } catch (resetError) {
       setError(resetError.message || 'Reset failed.');
     } finally {
       setIsResetting(false);
     }
+  }
+
+  function handleVersionRestored(body, restored) {
+    applyChange(body);
+    setError('');
+    setNotice(
+      `Version ${restored.versionNumber} restored. New communication scoring runs will use it.`,
+    );
+    window.scrollTo?.({ top: 0, behavior: 'smooth' });
   }
 
   function toggleCriterion(id) {
@@ -281,6 +307,11 @@ export default function CommunicationRubricPanel({ onBack, isAdmin = false }) {
                   {rubric ? (
                     <span className="text-[11px] text-slate-500">
                       Pass at {rubric.pass_threshold ?? '—'}/{maxScore}
+                    </span>
+                  ) : null}
+                  {version ? (
+                    <span className="text-[11px] text-slate-500">
+                      Version {version.versionNumber} · active
                     </span>
                   ) : null}
                 </div>
@@ -565,6 +596,18 @@ export default function CommunicationRubricPanel({ onBack, isAdmin = false }) {
               )}
             </CardContent>
           </Card>
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, delay: 0.08 }}
+        >
+          <RubricVersionHistory
+            isAdmin={isAdmin}
+            refreshKey={historyKey}
+            onRestored={handleVersionRestored}
+          />
         </motion.div>
 
         <motion.div

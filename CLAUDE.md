@@ -38,6 +38,7 @@ OSCE-AI-FYP/
 │   ├── PanelMarkingSummary.jsx # Score tab: how a panel marked (summary + per-criterion votes)
 │   ├── CommunicationRubricPanel.jsx  # #/rubric — the active communication rubric; admins upload, AI-extract, edit (lazy)
 │   ├── CommunicationRubricEditor.jsx # Review/edit a rubric draft or the active rubric: criteria, indicators, points, pass mark
+│   ├── RubricVersionHistory.jsx # Rubric page card: every rubric version, view one, restore a retired one (admins)
 │   ├── workspace/              # The opened-session view — its own chunk, loaded by the click that opens a session
 │   │   ├── SessionWorkspace.jsx        # Chunk root: results model, player/download handlers, the whole subtree
 │   │   ├── ManualTimelineEditor.jsx    # Manual crop timeline (separators, labels, Export clips)
@@ -99,7 +100,8 @@ OSCE-AI-FYP/
 │   │       ├── 0010_sqlite_wal_and_fk_pragmas.py # SQLite policy + complete migration-owned tracking
 │   │       ├── 0011_user_settings.py            # per-account overrides of the seven user-scoped keys (see Two-tier settings)
 │   │       ├── 0012_upload_records.py           # UploadRecord table (see Session storage lifecycle contracts)
-│   │       └── 0013_upload_admission_index.py   # index behind require_expensive_operation's admission query
+│   │       ├── 0013_upload_admission_index.py   # index behind require_expensive_operation's admission query
+│   │       └── 0017_communication_rubric_versions.py # the communication rubric's version history (one active row)
 │   └── app/
 │       ├── main.py             # FastAPI app, middleware, startup/shutdown
 │       ├── core/
@@ -671,6 +673,7 @@ Defined in [models.py](fastapi_backend/app/database/models.py):
 | `user_settings` | `UserSettingRecord` | One row per account: its overrides of the user-scoped keys, as one JSON document — see **Two-tier settings** |
 | `corpora` | `CorpusRecord` | Named term lists (`terms: list[str]`) that bias WhisperX `--hotwords` and drive deterministic transcript correction; picked per session at upload time and snapshotted into the session payload, so editing or deleting a corpus never affects a session that already used it |
 | `webhook_subscriptions` | `WebhookSubscriptionRecord` | Outbound HTTP endpoints registered for notification events — URL, HMAC secret (plaintext; it is the shared signing key, not a credential *for* this system), subscribed event types, and a denormalised summary of the most recent delivery for the management UI |
+| `communication_rubric_versions` | `CommunicationRubricVersionRecord` | Append-only history of the communication rubric: `version_number`, `status` (`active` \| `retired`; one active row, partial unique index), `change_kind`, the whole rubric document, creator snapshot, optional `rubric_asset_id` — see **Communication rubric versions** |
 | `webhook_deliveries` | `WebhookDeliveryRecord` | One row per delivery attempt, pruned to a bounded number per subscription — a debugging log, not an audit trail — see **Webhooks** |
 
 The queue's tables (`jobs`, `job_attempts`, `job_events`) are models like the
@@ -2429,7 +2432,45 @@ AI" notice; the rubric page shows "Reviewed and saved by …" instead
 serialised by one lock on `RubricService`; the (slow) AI extraction itself is
 not, because a draft touches nothing shared.
 
-Verify: `cd fastapi_backend && uv run --no-sync pytest tests/test_communication_rubric_domain.py tests/test_communication_rubric_editing.py tests/test_communication_rubric_flow.py tests/test_communication_scoring_scale.py tests/test_communication_rubric_llm_fallback.py` and `node --test test/rubricEditor.test.mjs test/rubricApi.test.mjs test/communicationRubricEditor.test.mjs test/resultsModel.test.mjs`.
+Verify: `cd fastapi_backend && uv run --no-sync pytest tests/test_communication_rubric_domain.py tests/test_communication_rubric_editing.py tests/test_communication_rubric_flow.py tests/test_communication_scoring_scale.py tests/test_communication_rubric_llm_fallback.py tests/test_communication_rubric_versions.py tests/test_communication_rubric_provenance.py` and `node --test test/rubricEditor.test.mjs test/rubricApi.test.mjs test/communicationRubricEditor.test.mjs test/resultsModel.test.mjs test/rubricVersions.test.mjs`.
+
+### Communication rubric versions
+
+Every change to the active communication rubric is a row in
+`communication_rubric_versions` (revision `0017`,
+[communication_rubric_version_repository.py](fastapi_backend/app/repositories/communication_rubric_version_repository.py)):
+an upload (`upload`), a reset (`reset`), a saved AI draft (`draft`), an
+in-place edit (`edit`), a restore (`restore`), the shipped PDF parsed on a
+fresh install (`default`), and a pre-history rubric file adopted unchanged on
+an upgraded deployment (`adopted`) — `RubricChangeKind` in
+[domain/communication_rubric.py](fastapi_backend/app/domain/communication_rubric.py).
+`activate` retires the active row and inserts the next number in one
+`unit_of_work`, so there is always exactly one `active` version once there is
+any; a partial unique index is the backstop.
+
+**The database is the authority; the JSON file is its copy.**
+`RubricService._commit_version` is the only write path: it records the
+version, then materialises it to `auth/communication_rubric.json` with a
+`rubric_version: {id, number}` marker (never stored in the row —
+`stored_document`). `ensure_parsed`, which every communication scoring run
+calls, compares that marker with the active row (one small query) and rewrites
+a missing or stale file from the database — so a crash between the commit and
+the file write repairs itself on the next run, and is not a new version. A
+history that cannot be read falls back to the file rather than failing scoring.
+
+**Restoring never rewrites history.** `POST
+/api/admin/communication-rubric/versions/{id}/restore` retires the active
+version and records a new one carrying the old document (`restoredFromVersion`),
+switching the PDF beside it back to that version's asset (or to the shipped
+default). 409 for the active version, 404 for an unknown id. `GET
+/api/communication-rubric/versions` (newest first, no documents, `limit` ≤ 200)
+and `GET …/versions/{id}` (with the document) are open to every marker;
+`GET /api/communication-rubric` adds the active `version` summary. A
+communication sheet records `rubric_version` / `rubric_revision`, and the
+output record `rubricVersionId` / `rubricVersionNumber`, so a score can be
+traced to the version it was marked against; the communication tab says which
+(`sheetRubricVersionLabel` in [lib/rubricVersions.js](src/lib/rubricVersions.js)).
+A session already scored keeps its marks until it is re-run.
 
 ### Prompt-version audit ledger
 

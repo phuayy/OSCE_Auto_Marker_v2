@@ -626,6 +626,12 @@ def validate_output(
     # How the rubric itself was extracted (deterministic parse or LLM fallback).
     if rubric.get("extraction"):
         normalized_payload["rubric_extraction"] = rubric["extraction"]
+    # Which version of the rubric these marks were computed against
+    # ({"id", "number"}), so a sheet can be traced after the rubric changes.
+    if isinstance(rubric.get("rubric_version"), dict):
+        normalized_payload["rubric_version"] = dict(rubric["rubric_version"])
+    if rubric.get("rubric_revision"):
+        normalized_payload["rubric_revision"] = str(rubric["rubric_revision"])
 
     return normalized_payload, issues
 

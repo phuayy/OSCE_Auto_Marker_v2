@@ -217,3 +217,26 @@ def test_no_rubric_id_recorded_when_the_rubric_cannot_be_parsed(tmp_path: Path, 
 
     assert "rubricAssetId" not in result, "an unparsed rubric must not fabricate provenance"
     assert len(runner.calls) == 1, "an unparsed rubric must not stop the communication scorer from running"
+
+
+def test_rubric_version_recorded_on_the_communication_output(tmp_path: Path) -> None:
+    """The artifact record names the rubric version the run scored against."""
+    transcript = tmp_path / "transcript.json"
+    transcript.write_text(TRANSCRIPT_JSON, encoding="utf-8")
+
+    def write_communication_scores(args: list[str]) -> None:
+        output_path = Path(_flag(args, "--output"))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(COMMUNICATION_PAYLOAD), encoding="utf-8")
+
+    pipeline = _pipeline(tmp_path, RecordingRunner(write_communication_scores))
+    pipeline.rubric_service = _RubricService(
+        {"rubric_asset_id": "asset-9", "rubric_version": {"id": "v-uuid", "number": 4}}
+    )
+    session = {"id": "s1", "outputs": {"transcript": {"absolutePath": str(transcript)}}}
+
+    result = asyncio.run(pipeline.run_communication_scoring(session, None))
+
+    assert result["rubricVersionId"] == "v-uuid"
+    assert result["rubricVersionNumber"] == 4
+    assert result["rubricAssetId"] == "asset-9"

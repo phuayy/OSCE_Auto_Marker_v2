@@ -1,9 +1,10 @@
 """The whole communication rubric flow, with the real parser subprocess and the
-real scorer validation: a PDF becomes a draft, an administrator edits it
-(criteria and the points per label), the save activates it, and a scoring run
-marks against exactly what was saved.
+real scorer validation and a real database: a PDF becomes a draft, an
+administrator edits it (criteria and the points per label), the save activates
+it as a version, a scoring run marks against exactly what was saved, and
+restoring the earlier version brings its marks back.
 
-Only the asset registry is faked; the parser runs as the API would run it.
+Nothing is faked; the parser runs as the API would run it.
 """
 from __future__ import annotations
 
@@ -18,20 +19,17 @@ from fastapi import UploadFile
 
 from app.core.config import Settings
 from app.core.process import CommandRunner
+from app.database.orm import OrmDatabase
 from app.domain.communication_rubric import rubric_fingerprint
+from app.repositories.communication_rubric_version_repository import CommunicationRubricVersionRepository
+from app.repositories.rubric_asset_repository import RubricAssetRepository
 from app.services.artifact_service import ArtifactService
+from app.services.rubric_asset_service import RubricAssetService
 from app.services.rubric_service import RubricService
 
 REPO = Path(__file__).resolve().parents[2]
 SHIPPED_PDF = REPO / "rubrics" / "PHR1012 OSCE Rubric.pdf"
 ADMIN = SimpleNamespace(to_provenance=lambda: {"userId": "u1", "username": "admin", "displayName": "Dr A"})
-
-
-class _Assets:
-    async def register_communication_rubric(self, *, path: Path, original_name: str, mime_type: str | None):
-        return SimpleNamespace(
-            asset={"id": "asset-1", "absolutePath": str(path), "contentSha256": "sha-1"}, is_duplicate=False
-        )
 
 
 def _service(tmp_path: Path) -> RubricService:
@@ -40,7 +38,14 @@ def _service(tmp_path: Path) -> RubricService:
     (root / "scripts").symlink_to(REPO / "scripts")
     settings = Settings(root_dir=root, backend_root=root, scorer_python_bin=sys.executable)
     settings.paths.ensure_layout()
-    return RubricService(settings, CommandRunner(root), ArtifactService(settings), _Assets())  # type: ignore[arg-type]
+    database = OrmDatabase(tmp_path / "app.sqlite3")
+    return RubricService(
+        settings,
+        CommandRunner(root),
+        ArtifactService(settings),
+        RubricAssetService(RubricAssetRepository(database)),
+        CommunicationRubricVersionRepository(database),
+    )
 
 
 def _scorer():
@@ -52,13 +57,17 @@ def _scorer():
 
 def test_draft_edit_save_then_score_against_the_saved_rubric(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("RUBRIC_LLM_FALLBACK", "false")  # the shipped PDF parses deterministically
+    asyncio.run(_flow(tmp_path))
+
+
+async def _flow(tmp_path: Path) -> None:
     svc = _service(tmp_path)
     active_json = svc.settings.paths.communication_rubric_json_path
 
     # 1. Extract into a draft (auto: deterministic first). Nothing is active yet.
     with SHIPPED_PDF.open("rb") as handle:
-        draft = asyncio.run(
-            svc.extract_draft(UploadFile(file=handle, filename="rubric.pdf", headers={"content-type": "application/pdf"}),
+        draft = (
+            await svc.extract_draft(UploadFile(file=handle, filename="rubric.pdf", headers={"content-type": "application/pdf"}),
                               mode="auto", actor=ADMIN)
         )
     assert not active_json.exists()
@@ -78,7 +87,7 @@ def test_draft_edit_save_then_score_against_the_saved_rubric(tmp_path: Path, mon
         "pass_threshold": 15,
         "criteria": criteria,
     }
-    saved = asyncio.run(svc.save_edited(edited, draft_id=draft["draft"]["draftId"], actor=ADMIN))["rubric"]
+    saved = (await svc.save_edited(edited, draft_id=draft["draft"]["draftId"], actor=ADMIN))["rubric"]
 
     # 3. What is now active is exactly what was saved, with provenance.
     on_disk = json.loads(active_json.read_text(encoding="utf-8"))
@@ -115,9 +124,32 @@ def test_draft_edit_save_then_score_against_the_saved_rubric(tmp_path: Path, mon
 
     # 5. Editing in place afterwards keeps the PDF and asset, and re-stamps the revision.
     edited["pass_threshold"] = 17
-    again = asyncio.run(svc.save_edited(edited, actor=ADMIN))["rubric"]
+    again = (await svc.save_edited(edited, actor=ADMIN))["rubric"]
     assert again["rubric_asset_id"] == on_disk["rubric_asset_id"]
     assert again["pass_threshold"] == 17 and again["rubric_revision"] != on_disk["rubric_revision"]
     assert again["extraction"]["source"] == {"method": "deterministic"}
     sheet, _ = scorer.validate_output(reply, scorer.read_parsed_rubric(active_json))
     assert sheet["scoring_summary"]["pass_fail"] == "Fail"
+
+    # 6. Both saves are versions in the database; the draft save is retired.
+    versions = await svc.list_versions()
+    assert [(v["versionNumber"], v["status"], v["changeKind"]) for v in versions] == [
+        (2, "active", "edit"),
+        (1, "retired", "draft"),
+    ]
+    assert versions[0]["passThreshold"] == 17 and versions[1]["passThreshold"] == 15
+    assert versions[0]["createdBy"]["username"] == "admin"
+    assert versions[1]["retiredAt"] is not None
+    assert again["rubric_version"] == {"id": versions[0]["id"], "number": 2}
+
+    # 7. Restoring version 1 records version 3 with its rubric, and scoring
+    #    passes again — the restore reached the file the scorer reads.
+    restored = (await svc.restore_version(versions[1]["id"], actor=ADMIN))["rubric"]
+    assert restored["pass_threshold"] == 15 and restored["rubric_revision"] == on_disk["rubric_revision"]
+    assert restored["rubric_version"]["number"] == 3
+    latest = (await svc.list_versions())[0]
+    assert (latest["changeKind"], latest["restoredFromVersion"], latest["status"]) == ("restore", 1, "active")
+    sheet, _ = scorer.validate_output(reply, scorer.read_parsed_rubric(active_json))
+    assert sheet["scoring_summary"]["pass_fail"] == "Pass"
+    assert sheet["scoring_summary"]["pass_threshold"] == 15
+    assert svc.settings.paths.communication_rubric_pdf_path.read_bytes() == SHIPPED_PDF.read_bytes()

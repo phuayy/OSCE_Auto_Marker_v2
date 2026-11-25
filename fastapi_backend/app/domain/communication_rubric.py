@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import re
+from enum import StrEnum
 from typing import Any
 
 SCHEMA = "communication-rubric-v1"
@@ -35,6 +36,37 @@ MAX_TITLE_CHARS = 200
 MAX_SECTION_CHARS = 200
 MAX_NOTES_CHARS = 5000
 UNCATEGORIZED = "Uncategorized"
+
+
+class RubricVersionStatus(StrEnum):
+    """A stored rubric version is the one scoring uses, or it is history.
+    Exactly one version is active once any exists."""
+
+    ACTIVE = "active"
+    RETIRED = "retired"
+
+
+class RubricChangeKind(StrEnum):
+    """What produced a version — the version history's "what happened"."""
+
+    ADOPTED = "adopted"  # the rubric already on disk when versioning began
+    DEFAULT = "default"  # parsed from the bundled PDF on a fresh install
+    UPLOAD = "upload"  # a replacement PDF, parsed and activated at once
+    RESET = "reset"  # back to the bundled PDF
+    DRAFT = "draft"  # an extraction draft reviewed and saved
+    EDIT = "edit"  # the active rubric edited in place
+    RESTORE = "restore"  # an earlier version made active again
+
+
+# Keys that describe where the document is materialised, not what it says. The
+# version store keeps the document without them; they are written onto the
+# active file (``rubric_version``) when it is materialised.
+MATERIALISED_KEYS: tuple[str, ...] = ("rubric_version",)
+
+
+def stored_document(payload: dict[str, Any]) -> dict[str, Any]:
+    """The rubric document as a version row keeps it (materialised keys dropped)."""
+    return {key: value for key, value in payload.items() if key not in MATERIALISED_KEYS}
 
 
 class RubricValidationError(ValueError):

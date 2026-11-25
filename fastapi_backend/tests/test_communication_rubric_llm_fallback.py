@@ -20,6 +20,7 @@ from fastapi import UploadFile
 from app.core.config import Settings
 from app.services.artifact_service import ArtifactService
 from app.services.rubric_service import RubricParseError, RubricService
+from tests.fixtures.rubric_versions import InMemoryRubricVersions
 
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 REPO = SCRIPTS.parent
@@ -423,7 +424,7 @@ def _service(tmp_path: Path, runner: FakeRunner, llm: Any = None, **settings_kw:
         (root / "rubrics").symlink_to(REPO / "rubrics")
     settings = Settings(root_dir=root, backend_root=root, **settings_kw)
     settings.paths.ensure_layout()
-    return RubricService(settings, runner, ArtifactService(settings), FakeAssets(), llm_settings=llm)  # type: ignore[arg-type]
+    return RubricService(settings, runner, ArtifactService(settings), FakeAssets(), InMemoryRubricVersions(), llm_settings=llm)  # type: ignore[arg-type]
 
 
 def _upload(tmp_path: Path, name: str = "new.pdf") -> UploadFile:
@@ -515,18 +516,19 @@ def test_route_maps_parse_error_to_422() -> None:
     from app.api.routes import rubrics as route
 
     class _Rubrics:
-        async def upload(self, _):
+        async def upload(self, _, *, actor=None):
             raise RubricParseError("bad layout")
 
-        async def reset(self):
+        async def reset(self, *, actor=None):
             raise RubricParseError("bad default")
 
     container = SimpleNamespace(rubrics=_Rubrics())
+    request = SimpleNamespace(state=SimpleNamespace())
     with pytest.raises(HTTPException) as e1:
-        asyncio.run(route.upload_communication_rubric(object(), container))  # type: ignore[arg-type]
+        asyncio.run(route.upload_communication_rubric(request, object(), container))  # type: ignore[arg-type]
     assert (e1.value.status_code, e1.value.detail) == (422, "bad layout")
     with pytest.raises(HTTPException) as e2:
-        asyncio.run(route.reset_communication_rubric(container))  # type: ignore[arg-type]
+        asyncio.run(route.reset_communication_rubric(request, container))  # type: ignore[arg-type]
     assert e2.value.status_code == 422
 
 
@@ -568,3 +570,9 @@ def test_communication_scorer_copies_rubric_extraction() -> None:
     prov = {"method": "llm", "model": "m"}
     stamped, _ = scorer.validate_output(payload, {**rubric, "extraction": prov})
     assert stamped["rubric_extraction"] == prov
+    assert "rubric_version" not in plain
+    versioned, _ = scorer.validate_output(
+        payload, {**rubric, "rubric_version": {"id": "v1", "number": 3}, "rubric_revision": "abc"}
+    )
+    assert versioned["rubric_version"] == {"id": "v1", "number": 3}
+    assert versioned["rubric_revision"] == "abc"

@@ -27,6 +27,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from app.domain.communication_rubric import RubricVersionStatus
 from app.domain.enums import ClipExportStatus, StepStatus, UploadStatus
 from app.domain.jobs import JobStatus
 from app.domain.sessions import SessionStatus
@@ -39,7 +40,9 @@ DOMAIN_ROOT = APP_ROOT / "domain"
 
 FORBIDDEN_LITERALS: frozenset[str] = frozenset(
     str(member.value)
-    for enum_cls in (SessionStatus, JobStatus, StepStatus, UploadStatus, ClipExportStatus, UserStatus)
+    for enum_cls in (
+        SessionStatus, JobStatus, StepStatus, UploadStatus, ClipExportStatus, UserStatus, RubricVersionStatus
+    )
     for member in enum_cls
 )
 
@@ -146,6 +149,7 @@ def test_status_vocabulary_is_never_respelled() -> None:
 
     assert not failures, (
         "Bare status-string literal(s) found where an enum from app/domain "
-        "(SessionStatus, JobStatus, StepStatus, UploadStatus, ClipExportStatus, UserStatus) "
+        "(SessionStatus, JobStatus, StepStatus, UploadStatus, ClipExportStatus, UserStatus, "
+        "RubricVersionStatus) "
         "must be imported and used instead:\n" + "\n".join(failures)
     )

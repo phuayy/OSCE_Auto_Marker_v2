@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -675,3 +675,42 @@ class PromptVersionRecord(Base):
     template_text: Mapped[str] = mapped_column(Text, nullable=False)
     source_script: Mapped[str] = mapped_column(String(120), nullable=False)
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class CommunicationRubricVersionRecord(Base):
+    """One version of the deployment's communication rubric.
+
+    Append-only history: every upload, reset, saved draft, in-place edit and
+    restore inserts a row and retires the previously active one, so a version
+    is never rewritten and "revert" is itself a new version that copies an old
+    one's document. The active row is what ``auth/communication_rubric.json``
+    materialises — the scorer subprocess keeps reading that file per run — and
+    ``RubricService`` repairs the file from this table if the two disagree.
+    A partial unique index allows at most one active row.
+    """
+
+    __tablename__ = "communication_rubric_versions"
+    __table_args__ = (
+        UniqueConstraint("version_number", name="uq_communication_rubric_versions_number"),
+        Index(
+            "uq_communication_rubric_versions_one_active",
+            "status",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    change_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    restored_from_version: Mapped[int | None] = mapped_column(Integer)
+    rubric_asset_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("rubric_assets.id", ondelete="SET NULL")
+    )
+    rubric_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    document_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_by_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

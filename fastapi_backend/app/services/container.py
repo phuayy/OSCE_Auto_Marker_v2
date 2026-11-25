@@ -31,6 +31,7 @@ from app.services.provider_credential_service import ProviderCredentialService
 from app.repositories.assessment_repository import AssessmentRepository
 from app.repositories.corpus_repository import CorpusRepository
 from app.repositories.custom_provider_repository import CustomProviderRepository
+from app.repositories.communication_rubric_version_repository import CommunicationRubricVersionRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.notification_repository import NotificationRepository
 from app.repositories.prompt_version_repository import PromptVersionRepository
@@ -349,7 +350,9 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
     )
     rubric_assets = RubricAssetService(RubricAssetRepository(orm_database))
     assessments = AssessmentService(AssessmentRepository(orm_database))
-    rubrics = RubricService(active_settings, runner, artifacts, rubric_assets)
+    rubrics = RubricService(
+        active_settings, runner, artifacts, rubric_assets, CommunicationRubricVersionRepository(orm_database)
+    )
     # One lease per process: transcription (any engine) and person detection
     # both load a model into the same card and must take turns on it.
     gpu = ResourceLease(active_settings.gpu_slots, "gpu")

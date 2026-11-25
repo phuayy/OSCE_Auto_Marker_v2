@@ -34,6 +34,7 @@ export default function CommunicationScoresTab({
   onSeek,
   extractionNotice = null,
   scale = DEFAULT_SCALE,
+  rubricVersionLabel = '',
 }) {
   const hasCriteria = Array.isArray(criteria) && criteria.length > 0;
   // Percent or raw points — the account's preference. The total leads in the
@@ -49,6 +50,7 @@ export default function CommunicationScoresTab({
         <CardDescription>
           Communication rubric scoring on a None / Some / Most / All scale. All={scale.All}, Most={scale.Most}, Some={scale.Some}, None={scale.None}.
           Pass threshold is {formatScore(summary?.passThreshold ?? 11, summary?.maxScore ?? 21, scoreDisplay)}.
+          {rubricVersionLabel ? ` Marked against ${rubricVersionLabel.toLowerCase()}.` : ''}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">

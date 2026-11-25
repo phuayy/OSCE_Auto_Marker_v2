@@ -59,6 +59,7 @@ import {
 import LongVideoSummaryCharts from '@/LongVideoSummaryCharts.jsx';
 import { PanelMarkingSummary, PanelVotes } from '@/PanelMarkingSummary.jsx';
 import { describeRubricExtraction } from '@/lib/rubricExtraction';
+import { sheetRubricVersionLabel } from '@/lib/rubricVersions';
 import CommunicationScoresTab from '@/workspace/CommunicationScoresTab.jsx';
 import ManualTimelineEditor from '@/workspace/ManualTimelineEditor.jsx';
 import StudentClipSplitterCard from '@/workspace/StudentClipSplitterCard.jsx';
@@ -1174,6 +1175,7 @@ export default function SessionWorkspace({
                       sessionStatus={session?.status || null}
                       onSeek={seekToSeconds}
                       extractionNotice={describeRubricExtraction(communicationPayload?.rubric_extraction)}
+                      rubricVersionLabel={sheetRubricVersionLabel(communicationPayload)}
                     />
                   </TabsContent>
 
