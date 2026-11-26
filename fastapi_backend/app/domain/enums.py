@@ -159,6 +159,33 @@ class UploadFileKind(StrEnum):
     CASE_STUDY = "caseStudy"
 
 
+class ScoringBranch(StrEnum):
+    """A scoring branch a re-score may redo (``POST /sessions/{id}/rescore``).
+
+    Audio professionalism is deliberately not a branch: it is a pure function
+    of the audio and the transcript, neither of which a re-score changes (a
+    rubric edit or a different scoring model only affects the two LLM-marked
+    branches), so a re-score always keeps it.
+    """
+
+    CONTENT = "content"
+    COMMUNICATION = "communication"
+
+
+class RescoreCode(StrEnum):
+    """Why one session of a re-score did or did not get queued: the stable
+    ``code`` on each ``results[]`` entry of ``POST /sessions/{id}/clips/rescore``,
+    which the browser summarises by instead of reading the message."""
+
+    OK = "ok"
+    IN_FLIGHT = "in_flight"
+    NO_TRANSCRIPT = "no_transcript"
+    NOT_ASSESSED = "not_assessed"
+    NOT_FOUND = "not_found"
+    NOT_RESCORABLE = "not_rescorable"
+    FAILED = "failed"
+
+
 class ScoreDisplay(StrEnum):
     """How the screens present a score: a share of the maximum, or the points
     themselves. A per-account display preference (see CLAUDE.md "Two-tier

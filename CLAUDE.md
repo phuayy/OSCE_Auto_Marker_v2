@@ -1092,6 +1092,30 @@ job record through `update`). A handler that awaited the pipeline held the
 connection for as long as transcription took, and a restart mid-way left the
 session `processing` with no job row for recovery to find.
 
+**Re-score is the cheap redo; Re-run is the expensive one.** A rubric edit or a
+different scoring model changes what the scorers say about a transcript that is
+still good, so `POST /sessions/{id}/rescore` `{branches: ["content",
+"communication"]}` (`SessionMaintenanceService.rescore_session`, `ScoringBranch`)
+removes just those branches' sheets (content: `scores` + `scores/panel/<id>/`;
+communication: `communicationScores`; each with its checkpoint sidecar, at the
+recorded *and* the conventional path, since the pipeline adopts an unrecorded
+sheet), drops the assessment rows, pops the branches' and the persistence step
+from `pipeline.steps`, and queues `process_session` with `{rescore: true,
+branches}`. The pipeline's cached-transcript path then reuses the transcript, the
+audio, the audio-professionalism sheet (not a branch: it depends only on audio +
+transcript) and any branch not chosen, regenerating only what is missing. It is
+admitted like a re-run — eligibility (409: in flight, a long recording, no
+transcript on disk; 422: no branch) is re-checked inside the admission mutator on
+the fresh row, so racing requests admit one — except that the assessment rows go
+*before* the files, and the file deletion is verified: a sheet (or checkpoint, or panel directory) that survives it would be adopted by output discovery and quietly re-record the old marks, so the session is released as `failed` with a retryable 500 instead of being queued.
+`POST /sessions/{id}/clips/rescore` `{branches, clipIds?}` does the same for each
+clip child of a long recording as one budget charge, answering per clip in
+`results[]` (`{clipId, sessionId, ok, code, error?, statusCode?, job?}`, `code` a `RescoreCode`: the browser summarises by it, never by the message); a child in
+flight or without a transcript is reported, not failed. The browser side is
+[lib/rescoreAction.js](src/lib/rescoreAction.js) + `components/RescoreDialog.jsx`,
+offered on the session card (beside Open), in the workspace header and on the
+Clip Assessments card.
+
 **A session in flight must always have a job row that can move it.** Two
 guarantees keep that true across restarts:
 

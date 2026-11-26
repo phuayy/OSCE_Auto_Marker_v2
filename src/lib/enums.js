@@ -165,6 +165,21 @@ export const ScoreDisplay = Object.freeze({
   "RAW": "raw"
 });
 
+export const ScoringBranch = Object.freeze({
+  "CONTENT": "content",
+  "COMMUNICATION": "communication"
+});
+
+export const RescoreCode = Object.freeze({
+  "OK": "ok",
+  "IN_FLIGHT": "in_flight",
+  "NO_TRANSCRIPT": "no_transcript",
+  "NOT_ASSESSED": "not_assessed",
+  "NOT_FOUND": "not_found",
+  "NOT_RESCORABLE": "not_rescorable",
+  "FAILED": "failed"
+});
+
 export const RubricVersionStatus = Object.freeze({
   "ACTIVE": "active",
   "RETIRED": "retired"

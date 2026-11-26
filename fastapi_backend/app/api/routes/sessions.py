@@ -12,6 +12,8 @@ from app.schemas.sessions import (
     RecropClipRequest,
     RenameClipRequest,
     RenameSessionRequest,
+    RescoreClipsRequest,
+    RescoreRequest,
 )
 from app.services.container import AppContainer
 
@@ -87,6 +89,49 @@ async def rerun_session(session_id: str, container: AppContainer = Depends(get_c
         raise HTTPException(status_code=404, detail="Session not found.") from error
     except Exception as error:
         raise http_error(error, fallback_message="Failed to re-run session.", not_found_message="Session not found.") from error
+
+
+@router.post(
+    "/{session_id}/rescore",
+    status_code=202,
+    dependencies=[Depends(require_session_owner), Depends(require_expensive_operation)],
+)
+async def rescore_session(
+    session_id: str,
+    payload: RescoreRequest,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Redo the chosen scoring branches on the transcript already on disk.
+
+    The cheap alternative to ``/rerun``: no transcription, so it is what to
+    offer after a rubric edit or a change of scoring model. Answers 202 with the
+    session already ``queued`` and its job.
+    """
+    try:
+        return await container.session_maintenance.rescore_session(session_id, frozenset(payload.branches))
+    except Exception as error:
+        raise http_error(error, fallback_message="Failed to re-score session.", not_found_message="Session not found.") from error
+
+
+@router.post(
+    "/{session_id}/clips/rescore",
+    status_code=202,
+    dependencies=[Depends(require_session_owner), Depends(require_expensive_operation)],
+)
+async def rescore_clips(
+    session_id: str,
+    payload: RescoreClipsRequest,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Re-score a long recording's clip assessments as **one** admission, like
+    ``/clips/assess``: marking a cohort is one action against the hourly
+    budget, and each clip is answered on its own in ``results[]``."""
+    try:
+        return await container.session_maintenance.rescore_clips(
+            session_id, frozenset(payload.branches), payload.clip_ids,
+        )
+    except Exception as error:
+        raise http_error(error, fallback_message="Clips could not be re-scored.", not_found_message="Session not found.") from error
 
 
 @router.get("/{session_id}/transcript")
