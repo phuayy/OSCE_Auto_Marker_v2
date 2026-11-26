@@ -272,3 +272,62 @@ def test_options_are_validated_per_action(monkeypatch) -> None:
         SessionBulkService.prepare("demo", ["a"], {"branches": []})
     with pytest.raises(ValueError, match="Invalid options for 'demo'"):
         SessionBulkService.prepare("demo", ["a"], None)
+
+
+# --- re-score ------------------------------------------------------------------------
+
+
+def _rescore_world(tmp_path, monkeypatch, budget: int = 10) -> _World:
+    from tests.test_session_rescore import _hold_jobs, _scored_session
+
+    world = _World(tmp_path, monkeypatch, budget=budget)
+    _hold_jobs(world.container)
+    asyncio.run(_scored_session(world.container, "ok", createdBy=_owner(world.marker_id)))
+    world.seed(
+        _session("busy", status="processing", createdBy=_owner(world.marker_id)),
+        _session("bare", createdBy=_owner(world.marker_id)),  # completed, no transcript on disk
+        _session("theirs", createdBy=_owner("someone-else")),
+    )
+    return world
+
+
+def test_rescore_reports_each_item_with_the_rescore_code(tmp_path, monkeypatch) -> None:
+    world = _rescore_world(tmp_path, monkeypatch)
+    response = world.post("rescore", ["ok", "busy", "bare", "theirs", "missing"], options={"branches": ["content"]})
+    assert response.status_code == 200, response.text
+    results = _by_id(response)
+    assert (results["ok"]["ok"], results["ok"]["status"]) == (True, 200) and "code" not in results["ok"]
+    assert (results["busy"]["status"], results["busy"]["code"]) == (409, "in_flight")
+    assert (results["bare"]["status"], results["bare"]["code"]) == (409, "no_transcript")
+    assert (results["theirs"]["status"], results["theirs"]["code"]) == (403, "forbidden")
+    assert (results["missing"]["status"], results["missing"]["code"]) == (404, "not_found")
+    assert response.json()["summary"] == {"ok": 1, "failed": 4}
+    # Only the eligible session was queued, and only for the chosen branch.
+    jobs = asyncio.run(world.container.jobs.list_jobs("ok"))
+    assert [job["payload"]["branches"] for job in jobs] == [["content"]]
+    assert asyncio.run(world.container.jobs.list_jobs("busy")) == []
+
+
+@pytest.mark.parametrize(
+    "options",
+    [None, {}, {"branches": []}, {"branches": ["content", "content"]}, {"branches": ["audio"]}, {"branches": "content"}],
+)
+def test_rescore_with_missing_or_invalid_branches_is_a_422_that_runs_nothing(tmp_path, monkeypatch, options) -> None:
+    world = _rescore_world(tmp_path, monkeypatch, budget=1)
+    response = world.post("rescore", ["ok"], **({} if options is None else {"options": options}))
+    assert response.status_code == 422, response.text
+    assert asyncio.run(world.container.jobs.list_jobs("ok")) == []
+    # Refused before the budget was consulted: the one unit is still there.
+    assert world.post("rescore", ["ok"], options={"branches": ["content"]}).status_code == 200
+
+
+def test_rescore_spends_the_budget_once_per_request(tmp_path, monkeypatch) -> None:
+    from tests.test_session_rescore import _scored_session
+
+    world = _rescore_world(tmp_path, monkeypatch, budget=1)
+    for name in ("two", "three"):
+        asyncio.run(_scored_session(world.container, name, createdBy=_owner(world.marker_id)))
+    options = {"branches": ["content", "communication"]}
+    first = world.post("rescore", ["ok", "two", "three"], options=options)
+    assert first.status_code == 200 and first.json()["summary"] == {"ok": 3, "failed": 0}
+    assert world.post("rescore", ["ok"], options=options).status_code == 429

@@ -25,8 +25,18 @@ from pydantic import BaseModel, ValidationError
 from app.domain.access import ensure_may_mutate
 from app.core.error_mapping import classify_error
 from app.domain.actors import Actor
-from app.schemas.sessions import BulkSessionResult, BulkSessionsSummary, BulkSessionsResponse
-from app.services.session_maintenance_service import SessionMaintenanceService
+from app.domain.enums import RescoreCode
+from app.schemas.sessions import (
+    BulkSessionResult,
+    BulkSessionsResponse,
+    BulkSessionsSummary,
+    RescoreRequest,
+)
+from app.services.session_maintenance_service import (
+    RescoreRefused,
+    SessionInFlightError,
+    SessionMaintenanceService,
+)
 from app.services.session_service import SessionService
 
 logger = logging.getLogger(__name__)
@@ -54,6 +64,15 @@ async def _rerun(service: SessionBulkService, session_id: str, _options: BaseMod
     return await service.maintenance.rerun_session(session_id)
 
 
+async def _rescore(service: SessionBulkService, session_id: str, options: BaseModel | None) -> object:
+    assert isinstance(options, RescoreRequest)  # `prepare` validated it against the action's options model
+    try:
+        return await service.maintenance.rescore_session(session_id, frozenset(options.branches))
+    except SessionInFlightError as error:
+        # The same code the clip batch reports, so one summary reads both.
+        raise RescoreRefused(error.message, RescoreCode.IN_FLIGHT, error.status_code) from error
+
+
 async def _delete(service: SessionBulkService, session_id: str, _options: BaseModel | None) -> object:
     # Children of a long recording go with it, exactly as the single delete.
     return await service.maintenance.delete_session(session_id)
@@ -61,6 +80,9 @@ async def _delete(service: SessionBulkService, session_id: str, _options: BaseMo
 
 BULK_SESSION_ACTIONS: dict[str, BulkAction] = {
     "rerun": BulkAction(_rerun, charges_budget=True),
+    # One unit of the hourly budget for the whole request, like the single
+    # route; the options are the single route's body (`{branches}`).
+    "rescore": BulkAction(_rescore, charges_budget=True, options_model=RescoreRequest),
     # The single delete charges nothing, so neither does a batch of them.
     "delete": BulkAction(_delete, charges_budget=False, cascades_to_children=True),
 }
@@ -169,8 +191,10 @@ class SessionBulkService:
             outcome = classify_error(
                 error, fallback_message="Failed to complete this action.", not_found_message="Session not found.",
             )
+            # A re-score names why it was refused (`RescoreCode`); every other
+            # failure is told by its HTTP status.
+            code = str(error.code) if isinstance(error, RescoreRefused) else _code_for(outcome.status_code)
             return BulkSessionResult(
-                session_id=session_id, ok=False, status=outcome.status_code,
-                error=outcome.message, code=_code_for(outcome.status_code),
+                session_id=session_id, ok=False, status=outcome.status_code, error=outcome.message, code=code,
             )
         return BulkSessionResult(session_id=session_id, ok=True, status=200)
