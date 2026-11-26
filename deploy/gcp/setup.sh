@@ -133,10 +133,29 @@ enable_apis() {
 # ===========================================================================
 # 2. Settings: region, zone, GPU, name, who may start it
 # ===========================================================================
-gpu_quota() {  # gpu_quota METRIC → limit minus usage, region-level
-  gc compute regions describe "$REGION" --flatten=quotas \
+# GPUs this deployment's own VM holds against the quotas right now: a running
+# (or starting, or still stopping) VM is counted in the quota usage, but it is
+# the one that will use that GPU again, so a re-run must not see it as taken.
+# own_gpus_held [ACCEL] — those of type ACCEL (e.g. nvidia-l4), or all of them.
+own_gpus_held() {
+  local status
+  status="$(gc compute instances describe "$INSTANCE" --zone "${ZONE:-}" --format='value(status)' 2>/dev/null || true)"
+  case "$status" in
+    RUNNING|STAGING|PROVISIONING|STOPPING) ;;
+    *) printf '0'; return ;;
+  esac
+  gc compute instances describe "$INSTANCE" --zone "$ZONE" --flatten=guestAccelerators \
+    --format='value(guestAccelerators.acceleratorType.basename(),guestAccelerators.acceleratorCount)' 2>/dev/null |
+    awk -v want="${1:-}" '(want == "" || $1 == want) {n += $2} END {printf "%d", n}'
+}
+
+gpu_quota() {  # gpu_quota METRIC ACCEL → limit minus usage plus our own VM's share, region-level
+  local free
+  free="$(gc compute regions describe "$REGION" --flatten=quotas \
     --filter="quotas.metric=$1" --format='value(quotas.limit,quotas.usage)' 2>/dev/null |
-    awk '{printf "%d\n", $1 - $2}' | head -n1
+    awk '{printf "%d\n", $1 - $2}' | head -n1)"
+  [[ -n "$free" ]] || return 0   # metric absent: the caller reads that as none
+  printf '%d\n' $(( free + $(own_gpus_held "$2") ))
 }
 
 global_gpu_quota() {
@@ -144,7 +163,8 @@ global_gpu_quota() {
   v="$(gc compute project-info describe --flatten=quotas \
     --filter='quotas.metric=GPUS_ALL_REGIONS' --format='value(quotas.limit,quotas.usage)' 2>/dev/null |
     awk '{printf "%d\n", $1 - $2}' | head -n1)"
-  printf '%s' "${v:-1}"   # metric absent: no all-regions cap on this project
+  if [[ -z "$v" ]]; then printf '1'; return; fi   # metric absent: no all-regions cap on this project
+  printf '%d' $(( v + $(own_gpus_held) ))
 }
 
 zones_with() {  # zones_with ACCEL → zones in $REGION offering it
@@ -181,8 +201,8 @@ choose_region_and_gpu() {
   fi
 
   local l4 t4 all l4_here t4_here
-  l4="$(gpu_quota NVIDIA_L4_GPUS)"; l4="${l4:-0}"
-  t4="$(gpu_quota NVIDIA_T4_GPUS)"; t4="${t4:-0}"
+  l4="$(gpu_quota NVIDIA_L4_GPUS nvidia-l4)"; l4="${l4:-0}"
+  t4="$(gpu_quota NVIDIA_T4_GPUS nvidia-tesla-t4)"; t4="${t4:-0}"
   all="$(global_gpu_quota)"
   l4_here="$(zones_with nvidia-l4 | grep -cx "$ZONE" || true)"
   t4_here="$(zones_with nvidia-tesla-t4 | grep -cx "$ZONE" || true)"
@@ -193,8 +213,8 @@ choose_region_and_gpu() {
   if [[ "$t4_here" -gt 0 && "$t4" -gt 0 ]]; then profiles+=("$OSCE_T4_PROFILE"); fi
 
   if [[ "$all" -lt 1 || ${#profiles[@]} -eq 0 ]]; then
-    # An existing VM already holds its GPU's quota while running; only a
-    # brand-new VM needs free quota.
+    # Only a brand-new VM needs free quota (an existing one's own share is
+    # already counted as free above).
     if gc compute instances describe "$INSTANCE" --zone "$ZONE" >/dev/null 2>&1; then
       warn "No free GPU quota right now (the existing VM may be using it). Keeping the current GPU settings."
       return
@@ -651,4 +671,4 @@ main() {
   summary
 }
 
-main "$@"
+if [[ "${OSCE_SETUP_SOURCE_ONLY:-0}" != 1 ]]; then main "$@"; fi
