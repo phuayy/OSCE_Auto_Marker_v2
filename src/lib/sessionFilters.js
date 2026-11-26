@@ -8,8 +8,8 @@
 import { IN_FLIGHT_STATUSES, SessionStatus, Workflow } from './enums.js';
 
 export const SEARCH_DEBOUNCE_MS = 300;
-/** Longest search text sent; the box has no use for more and the URL does. */
-export const MAX_QUERY_LENGTH = 200;
+/** Longest search text sent; the server answers 422 to anything longer. */
+export const MAX_QUERY_LENGTH = 100;
 export const CHIP_STORAGE_KEY = 'osce-ai-marker:session-filter-chip';
 
 export const FilterChip = Object.freeze({

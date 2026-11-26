@@ -26,6 +26,9 @@ test('every chip maps to its parameters', () => {
 
 test('text is trimmed, collapsed, bounded, and unicode survives the query string', () => {
   assert.deepEqual(toQueryParams(f('all', '  chest   pain ')), [['q', 'chest pain']]);
+  assert.equal(MAX_QUERY_LENGTH, 100);
+  assert.equal(normalizeFilter({ q: 'x'.repeat(100) }).q.length, 100);
+  assert.equal(normalizeFilter({ q: 'x'.repeat(101) }).q.length, 100);
   assert.equal(normalizeFilter({ q: 'x'.repeat(500) }).q.length, MAX_QUERY_LENGTH);
   const query = new URLSearchParams(toQueryParams(f('failed', 'Zoë 患者 & co=1')));
   assert.equal(query.get('q'), 'Zoë 患者 & co=1');
