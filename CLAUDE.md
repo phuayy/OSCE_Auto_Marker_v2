@@ -140,7 +140,8 @@ OSCE-AI-FYP/
 │       │   ├── access.py       # may_mutate / ensure_may_mutate — creator-or-admin gate on a provenance-bearing record
 │       │   ├── settings_scope.py  # USER_SCOPED_KEYS — which settings keys are per-account vs. deployment-wide
 │       │   ├── communication_rubric.py  # The communication-rubric-v1 document: scale, max, pass mark, validation of an edited rubric
-│       │   └── clip_summaries.py  # Pure cohort-summary rows for a long recording's Analytics view
+│       │   ├── clip_summaries.py  # Pure cohort-summary rows for a long recording's Analytics view
+│       │   └── results_export.py  # Whole-exam CSV export: filter, rows, long/wide layouts (pure)
 │       ├── mail/               # Outbound email: one contract, one backend per deployment
 │       │   ├── base.py             # EmailMessage, EmailSender Protocol, EmailDeliveryError
 │       │   ├── smtp.py             # SmtpEmailSender (aiosmtplib)
@@ -1963,6 +1964,38 @@ render against the freshly loaded catalog (a refresh can delete what a stored
 filter names), never in an effect — so no frame is drawn from a selection the
 controls could not show. The results table's Session column names the
 recording; its Student column the scored subject.
+
+**The marks leave the page two ways, and only one asks the server.** "Download
+results (CSV)" is built in the browser from the rows the primary filter keeps
+([lib/analyticsExport.js](src/lib/analyticsExport.js) `resultRowsToCsv`: BOM,
+raw numbers whatever the score-display preference, formula-escaped by the
+existing `csvCell`). "Download per-criterion marks" calls `GET
+/api/analytics/export` (`format=long|wide`, `resultType`, repeatable
+`rootSessionIds` ≤ 500 / `sessionIds` ≤ 2000 / `studentIds` ≤ 2000, `from`/`to` on the assessment's `created_at`, each a date (a whole UTC day) or
+an ISO-8601 instant with an offset such as `2026-11-20T00:00:00+08:00`; both
+ends are inclusive, an instant to the microsecond; any bad value is a 422, open
+to every marker) because `assessment_criteria` is not in the rows the page
+loaded; `criteriaExportParams` maps the page's filter onto those parameters,
+sending `filterWindow` (the window `applyFilter` itself uses) as exact instants,
+so a preset or a custom range in any browser time zone yields exactly the rows
+the page shows. The response is a streamed attachment (BOM once, CRLF,
+`osce-criteria-<day>.csv`): `AssessmentRepository.stream_criterion_export_rows`
+selects columns only (never `payload_json`) with `yield_per`, and
+`AssessmentService.open_results_export` counts first — over `MAX_EXPORT_ROWS`
+(250,000, `app/domain/results_export.py`) is a 422 "Narrow the filter" before a
+byte is sent, since a truncated CSV looks finished. A scored result with no
+criterion rows still appears (blank criterion cells). **Wide** columns are keyed
+by (result type, criterion number, label), never by position, in order of first
+appearance, so a reworded or renumbered rubric gets its own column; the layout
+is learnt by a first pass and written by a second (only the column map is held),
+both inside one `OrmDatabase.read_snapshot()` (SQLite WAL snapshot, PostgreSQL
+REPEATABLE READ; no write lock) so a re-score between them cannot add a row
+under a column the header lacks,
+and a `Rubric` column numbers the criteria sets (`Content 2`) when any result
+type has more than one. Cells are escaped by `app/core/csv_export.py`, the
+server twin of `csvCell`. Only content and communication results are exported
+(`ScoredResultType`). `apiBlob` in `lib/apiFetch.js` is `apiJson` for a file.
+
 
 ---
 

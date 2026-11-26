@@ -1,11 +1,32 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator, Sequence
+from contextlib import aclosing
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.artifacts import read_artifact_payload
+from app.core.csv_export import CSV_BOM, csv_line
+from app.core.exceptions import AppError
 from app.domain.enums import AssessmentResultStatus
+from app.domain.results_export import (
+    LONG_HEADER,
+    MAX_EXPORT_ROWS,
+    CriterionExportRow,
+    ExportLayout,
+    ResultsExportFilter,
+    WideLayout,
+    long_row,
+)
 from app.repositories.assessment_repository import AssessmentRepository
+
+
+# Text handed to the client per chunk of a streamed export. Not a limit on the
+# file — only how many rows are joined before a write — so a monkeypatched
+# smaller value changes chunking and nothing else.
+EXPORT_CHUNK_CHARS = 64 * 1024
 
 
 class AssessmentService:
@@ -30,6 +51,81 @@ class AssessmentService:
 
     async def list_result_rows(self) -> list[dict[str, Any]]:
         return await self.repository.list_result_rows()
+
+    async def open_results_export(
+        self, export_filter: ResultsExportFilter, layout: ExportLayout
+    ) -> AsyncIterator[str]:
+        """Start a per-criterion CSV export and hand back its text, streamed.
+
+        The rows are counted first and an export over ``MAX_EXPORT_ROWS`` is
+        refused here — before any byte exists to be sent — because a file that
+        stops half way looks finished. What is returned is an unstarted
+        generator: the rows are read as the caller consumes it, never held
+        whole. Empty results are a header-only file, not an error.
+        """
+        count = await self.repository.count_criterion_export_rows(export_filter)
+        if count > MAX_EXPORT_ROWS:
+            raise AppError(
+                f"This export would have {count:,} rows; the limit is {MAX_EXPORT_ROWS:,}. "
+                "Narrow the filter (a date range, fewer recordings) and try again.",
+                status_code=422,
+            )
+        lines = self._long_lines(export_filter) if layout is ExportLayout.LONG else self._wide_lines(export_filter)
+        return self._chunked(lines)
+
+    async def _long_lines(self, export_filter: ResultsExportFilter) -> AsyncIterator[str]:
+        yield csv_line(LONG_HEADER)
+        async with aclosing(self.repository.stream_criterion_export_rows(export_filter)) as rows:
+            async for row in rows:
+                yield csv_line(long_row(row))
+
+    async def _wide_lines(self, export_filter: ResultsExportFilter) -> AsyncIterator[str]:
+        # The header needs every column, and a column can first appear on the
+        # last row: so the export reads the rows twice — once to learn the
+        # columns, once to write — holding only the column map, never the rows.
+        # Both passes run in one read transaction, so a result re-scored or
+        # added in between cannot put a row under a column the header lacks.
+        layout = WideLayout()
+        async with self.repository.read_snapshot() as snapshot:
+            async with aclosing(self._results(export_filter, snapshot)) as groups:
+                async for group in groups:
+                    layout.observe(group)
+            yield csv_line(layout.header())
+            async with aclosing(self._results(export_filter, snapshot)) as groups:
+                async for group in groups:
+                    yield csv_line(layout.row(group))
+
+    async def _results(
+        self, export_filter: ResultsExportFilter, snapshot: AsyncSession
+    ) -> AsyncIterator[Sequence[CriterionExportRow]]:
+        """The export's rows regrouped one result at a time (a result's rows are
+        adjacent in export order)."""
+        group: list[CriterionExportRow] = []
+        rows = self.repository.stream_criterion_export_rows(export_filter, snapshot=snapshot)
+        async with aclosing(rows):
+            async for row in rows:
+                if group and group[0].result_id != row.result_id:
+                    yield group
+                    group = []
+                group.append(row)
+        if group:
+            yield group
+
+    @staticmethod
+    async def _chunked(lines: AsyncIterator[str]) -> AsyncIterator[str]:
+        """Join lines into chunks of about ``EXPORT_CHUNK_CHARS``; the byte-order
+        mark leads the first chunk exactly once, even for a header-only file."""
+        buffer = [CSV_BOM]
+        size = len(CSV_BOM)
+        async with aclosing(lines) as source:
+            async for line in source:
+                buffer.append(line)
+                size += len(line)
+                if size >= EXPORT_CHUNK_CHARS:
+                    yield "".join(buffer)
+                    buffer, size = [], 0
+        if buffer:
+            yield "".join(buffer)
 
     async def delete_session_results(self, session_id: str) -> bool:
         return await self.repository.delete_for_session(session_id)

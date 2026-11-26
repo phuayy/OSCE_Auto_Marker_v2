@@ -273,18 +273,35 @@ export async function apiJson(input, options = {}) {
   if (response.ok) {
     return body ?? {};
   }
+  throw refusalError(response, body, fallbackMessage);
+}
 
+/**
+ * `apiJson` for an endpoint that answers with a file: the success body is
+ * returned as a `Blob`, and a refusal — whose body is still JSON — throws the
+ * same `ApiError` `apiJson` would.
+ */
+export async function apiBlob(input, options = {}) {
+  const { fallbackMessage = 'The request failed.', ...rest } = options;
+  const response = await apiFetch(input, rest);
+  if (response.ok) {
+    return response.blob();
+  }
+  throw refusalError(response, await readJsonBody(response), fallbackMessage);
+}
+
+function refusalError(response, body, fallbackMessage) {
   if (GATEWAY_STATUSES.has(response.status)) {
     // The gateway's own body ("Proxy error: backend unavailable") describes
     // infrastructure, not this request. Report the fact that matters instead.
-    throw new ApiError('Cannot reach the server.', {
+    return new ApiError('Cannot reach the server.', {
       kind: ERROR_KIND.NETWORK,
       status: response.status,
       body,
     });
   }
 
-  throw new ApiError(readErrorMessage(body, fallbackMessage), {
+  return new ApiError(readErrorMessage(body, fallbackMessage), {
     kind: response.status >= 500 ? ERROR_KIND.SERVER : ERROR_KIND.CLIENT,
     status: response.status,
     body,

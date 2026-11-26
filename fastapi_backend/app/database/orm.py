@@ -152,6 +152,30 @@ class OrmDatabase:
             finally:
                 await session.close()
 
+    @asynccontextmanager
+    async def read_snapshot(self) -> AsyncIterator[AsyncSession]:
+        """A read-only transaction whose every query sees one consistent
+        snapshot — for a job that reads the same rows more than once (an export
+        that learns its columns, then writes its rows) and must not see a
+        commit land between the passes.
+
+        Unlike ``unit_of_work`` it takes no write lock and is not joined by
+        other repository calls: the session is passed explicitly. SQLite (WAL)
+        pins its snapshot at the first read of an explicit ``BEGIN`` and never
+        blocks a writer for it; PostgreSQL gets ``REPEATABLE READ``. Always
+        rolled back — nothing here writes.
+        """
+        await self.initialize()
+        async with self.session_factory() as session:
+            try:
+                if self.engine.dialect.name == "sqlite":
+                    await session.execute(text("BEGIN"))
+                else:
+                    await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+                yield session
+            finally:
+                await session.rollback()
+
     @classmethod
     def _normalize_url(cls, database_url_or_path: Path | str) -> str:
         # Delegates to app.database.db_url, the one normaliser every consumer
