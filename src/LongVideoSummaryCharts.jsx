@@ -11,6 +11,7 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { groupCriteriaByRubricRevision } from '@/lib/cohortCriteria';
 import { formatScore, isRawScoreDisplay } from '@/lib/scoreDisplay';
 import { useScoreDisplay } from '@/lib/useScoreDisplay';
 
@@ -20,8 +21,6 @@ const SCORE_LABEL_COLORS = {
   Some: '#f59e0b',
   None: '#ef4444',
 };
-
-const SCORE_LABEL_POINTS = { All: 3, Most: 2, Some: 1, None: 0 };
 
 function safeNumber(value, fallback = 0) {
   const numeric = Number(value);
@@ -237,45 +236,33 @@ function StudentScoreComparisonChart({ summaries, mode }) {
   );
 }
 
-/** Stacked criterion rows */
+/** Stacked criterion rows, one block per rubric revision the cohort was marked under. */
 function CommunicationCriteriaChart({ summaries }) {
-  const criteriaMap = new Map();
+  const groups = useMemo(() => groupCriteriaByRubricRevision(summaries), [summaries]);
 
-  summaries.forEach((summary) => {
-    const list = summary.communication?.perCriterionPoints || [];
-    list.forEach((criterion) => {
-      const key = String(criterion.id ?? criterion.label);
-      if (!criteriaMap.has(key)) {
-        criteriaMap.set(key, {
-          id: criterion.id,
-          label: criterion.label,
-          section: criterion.section,
-          counts: { All: 0, Most: 0, Some: 0, None: 0 },
-          totalPoints: 0,
-          studentCount: 0,
-        });
-      }
-      const entry = criteriaMap.get(key);
-      const label = ['All', 'Most', 'Some', 'None'].includes(criterion.scoreLabel)
-        ? criterion.scoreLabel
-        : 'None';
-      entry.counts[label] += 1;
-      entry.totalPoints += safeNumber(criterion.points, SCORE_LABEL_POINTS[label] || 0);
-      entry.studentCount += 1;
-    });
-  });
-
-  const rows = [...criteriaMap.values()].sort((a, b) => {
-    const idA = Number(a.id) || 0;
-    const idB = Number(b.id) || 0;
-    return idA - idB;
-  });
-
-  if (rows.length === 0) {
+  if (groups.length === 0) {
     return null;
   }
 
-  const totalStudents = summaries.length;
+  return (
+    <div className="space-y-6">
+      {groups.map((group) => (
+        <div key={group.revision || 'unversioned'} className="space-y-2">
+          {groups.length > 1 ? (
+            <div className="text-xs font-semibold text-slate-600">
+              {group.versionNumber ? `Rubric version ${group.versionNumber}` : 'Earlier rubric'}
+              {' · '}
+              {group.studentCount} {group.studentCount === 1 ? 'clip' : 'clips'}
+            </div>
+          ) : null}
+          <CriteriaRowsChart rows={group.rows} totalStudents={group.studentCount} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CriteriaRowsChart({ rows, totalStudents }) {
   const rowHeight = 42;
   const margin = { top: 28, right: 220, bottom: 28, left: 248 };
   const width = Math.max(1024, rows.length ? 980 : 400);

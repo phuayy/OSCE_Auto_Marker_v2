@@ -168,3 +168,13 @@ def test_unplaced_clips_sort_after_placed_ones() -> None:
     placed = {"sessionId": "s-placed", "clipOrder": 0, "content": None, "communication": None}
     result = aggregate_clip_summaries(parent_id="p", clips=CLIPS, rows=[unplaced, placed], child_count=2)
     assert [row["sessionId"] for row in result["summaries"]] == ["s-placed", "s-unplaced"]
+
+
+def test_summarize_communication_scores_names_the_rubric_revision_it_was_marked_against() -> None:
+    marked = summarize_communication_scores(
+        {"criteria": [], "rubric_revision": "abc123", "rubric_version": {"id": "v-id", "number": 4}}
+    )
+    assert marked["rubricRevision"] == "abc123" and marked["rubricVersionNumber"] == 4
+    # A sheet from before revisions existed carries neither.
+    legacy = summarize_communication_scores({"criteria": []})
+    assert legacy["rubricRevision"] is None and legacy["rubricVersionNumber"] is None

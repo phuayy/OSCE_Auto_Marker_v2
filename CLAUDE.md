@@ -2629,6 +2629,14 @@ its sheet until it is re-run. Every write of that file stamps
 `rubric_revision` (`rubric_fingerprint`: SHA-256 over criteria, scale and pass
 mark), which changes on an in-place edit even though the PDF asset does not.
 
+**Criterion ids are positions, not identities.** Every save renumbers them, so
+the cohort chart (`lib/cohortCriteria.js`) never merges criteria across rubric
+revisions: `summarize_communication_scores` carries `rubricRevision` /
+`rubricVersionNumber`, and rows merge by id only inside one revision (one block
+per revision when a recording's clips span an edit; sheets with no revision form
+one earlier block). `assessment_criteria.criterion_key` is stored per result and
+never aggregated across results.
+
 **Provenance.** A saved rubric's `extraction` becomes
 `{method: "edited", edited_by, edited_at, source}` where `source` is how the
 text was first read (`llm` with its model, or `deterministic`) — never a

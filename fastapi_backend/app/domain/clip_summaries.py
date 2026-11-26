@@ -82,7 +82,13 @@ def summarize_communication_scores(communication_scores: dict[str, Any] | None) 
     summary = communication_scores.get("scoring_summary") or {}
     criteria = communication_scores.get("criteria")
     criteria = criteria if isinstance(criteria, list) else []
+    # A criterion's id is its position in the rubric and every save of the
+    # rubric renumbers them, so the cohort chart may only merge criteria from
+    # sheets marked against the same revision; these say which that was.
+    version = communication_scores.get("rubric_version")
     return {
+        "rubricRevision": communication_scores.get("rubric_revision") or None,
+        "rubricVersionNumber": version.get("number") if isinstance(version, dict) else None,
         "totalCriteria": int(summary.get("total_criteria") or len(criteria)),
         "totalScore": float(summary.get("total_score") or 0),
         "maxScore": float(summary.get("max_score") or len(criteria) * 3),
