@@ -58,9 +58,12 @@ function toPositiveInteger(value) {
   return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
 }
 
-export function createUploadTrack({ sessionId, totalBytes = 0, startedAtMs = Date.now() }) {
+export function createUploadTrack({ sessionId, totalBytes = 0, startedAtMs = Date.now(), uploadId = null }) {
   return {
     sessionId: String(sessionId),
+    // The server's id for the transfer (`/api/uploads/{id}`), which is not the
+    // session's. Null for a track opened without one.
+    uploadId: uploadId ? String(uploadId) : null,
     phase: UPLOAD_PHASE.PREPARING,
     uploadedBytes: 0,
     totalBytes: toPositiveInteger(totalBytes),
@@ -107,6 +110,11 @@ export function withUploadPhase(track, phase, { error = '', atMs = Date.now() } 
     endedAtMs: terminal ? atMs : null,
     error: phase === UPLOAD_PHASE.FAILED ? String(error || 'Upload failed.') : '',
   };
+}
+
+// The server-side upload id a session's track carries; null when unknown.
+export function uploadIdOf(tracks, sessionId) {
+  return (tracks || {})[String(sessionId)]?.uploadId ?? null;
 }
 
 export function isUploadActive(track) {
@@ -200,12 +208,12 @@ export function useUploadTracker() {
     });
   }, []);
 
-  const begin = useCallback((sessionId, totalBytes) => {
+  const begin = useCallback((sessionId, totalBytes, { uploadId } = {}) => {
     if (!sessionId) return;
     const key = String(sessionId);
     setTracks((previous) => ({
       ...previous,
-      [key]: createUploadTrack({ sessionId: key, totalBytes, startedAtMs: Date.now() }),
+      [key]: createUploadTrack({ sessionId: key, totalBytes, startedAtMs: Date.now(), uploadId }),
     }));
     setNowMs(Date.now());
   }, []);
@@ -251,6 +259,10 @@ export function useUploadTracker() {
 
   const isActive = useCallback((sessionId) => isUploadActive(tracks[String(sessionId)]), [tracks]);
 
+  // The upload a session's transfer belongs to, or null when this tab is not
+  // tracking one for it.
+  const uploadIdFor = useCallback((sessionId) => uploadIdOf(tracks, sessionId), [tracks]);
+
   // The overlay's own gauge: whichever transfer this tab is driving right now.
   const describeActive = useCallback(() => describeUploadStage(activeUploadTrack(tracks), nowMs), [tracks, nowMs]);
 
@@ -267,5 +279,6 @@ export function useUploadTracker() {
     describe,
     describeActive,
     isActive,
+    uploadIdFor,
   };
 }
