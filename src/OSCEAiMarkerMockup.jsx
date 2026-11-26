@@ -63,6 +63,7 @@ import {
   planTimelineReseed,
   seedTimelineFromClips,
 } from '@/lib/timelineSeed';
+import { workspaceBelongsToUpload } from '@/lib/uploadCompletion';
 import { indexClipAssessments } from '@/lib/clipAssessments';
 import { describeRerunAction } from '@/lib/rerunAction';
 import { describeStartAction } from '@/lib/sessionStartAction';
@@ -311,6 +312,10 @@ export default function OSCEAiMarkerMockup({
   // mousemove burst can queue several updates before React re-renders.
   const manualBoundariesRef = useRef([]);
   manualBoundariesRef.current = manualBoundaries;
+  // The open session as of the latest render, for async handlers (an upload
+  // settling minutes later) that must not act on a stale closure.
+  const openSessionIdRef = useRef(null);
+  openSessionIdRef.current = session?.id ?? null;
   const timelineMenuRef = useRef(null);
   const timelineSegmentRefs = useRef(new Map());
   const workspaceLoadRef = useRef(null);
@@ -1494,12 +1499,20 @@ export default function OSCEAiMarkerMockup({
     uploadTracker.setPhase(sessionId, UPLOAD_PHASE.DONE);
     uploadTracker.forget(sessionId);
     activeUploadSessionIdRef.current = null;
-    setSession(null);
+    // Return to the list only if the screen is still this upload's: a session
+    // the user opened while it transferred stays open (the card in the list
+    // tracks the upload either way). Read again after the refresh below,
+    // since another session can be opened while that runs.
+    if (workspaceBelongsToUpload(openSessionIdRef.current, sessionId)) {
+      setSession(null);
+    }
     setIsUploading(false);
     setSessionNameInput('');
     setNotice('Assessment started. Track its stage on the session card — it unlocks when finished.');
     await refreshSessionIndex();
-    setShowWorkspace(false);
+    if (workspaceBelongsToUpload(openSessionIdRef.current, sessionId)) {
+      setShowWorkspace(false);
+    }
   }
 
   // Opens the pre-flight confirmation overlay (after validating the inputs).
@@ -1566,9 +1579,12 @@ export default function OSCEAiMarkerMockup({
       // The overlay may well be dismissed by now, so the failure has to be
       // legible from the session card too: mark the track rather than only
       // raising a banner the user might not be looking at.
-      uploadTracker.fail(activeUploadSessionIdRef.current, message);
+      const failedSessionId = activeUploadSessionIdRef.current;
+      uploadTracker.fail(failedSessionId, message);
       setError(`Upload failed: ${message}`);
-      setShowWorkspace(false);
+      if (workspaceBelongsToUpload(openSessionIdRef.current, failedSessionId)) {
+        setShowWorkspace(false);
+      }
     } finally {
       activeUploadSessionIdRef.current = null;
       setIsUploading(false);
