@@ -100,6 +100,22 @@ class StaleSessionError(AppError):
         self.current_version = current_version
 
 
+class SessionDeletedError(AppError):
+    """A write named a session that no longer exists.
+
+    A document carrying ``_loadedUpdatedAt`` was read from a row; if the row is
+    gone at write time it was deleted in between, and persisting the stale copy
+    would resurrect a session the user removed — ``processing``, with no job and
+    no files. Creation is only for documents that were never read. Not
+    retryable: re-reading would only find the row still missing, and the job
+    that hit it has nothing left to do, so it ends without burning attempts.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(f"Session {session_id} was deleted; the write was not applied.", status_code=404, retryable=False)
+        self.session_id = session_id
+
+
 class SessionWriteContractError(AppError):
     """A caller tried to overwrite an existing session with a document it never read.
 

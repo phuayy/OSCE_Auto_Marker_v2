@@ -886,7 +886,8 @@ browser. The store therefore enforces a contract rather than trusting callers:
 
 | Write | Outcome |
 |---|---|
-| Row does not exist | Created from a validated session document — how uploads and clip children are born |
+| Row does not exist, dict carries **no stamp** | Created from a validated session document — how uploads and clip children are born |
+| Row does not exist, dict carries a stamp | `SessionDeletedError` (404, non-retryable) — it was read from a row since deleted; a pipeline step landing after Delete must not resurrect the session. `SessionService.update` does not retry it, and the job queue treats it as a permanent failure |
 | Row exists, dict carries the `_loadedUpdatedAt` it was `read` with, row unchanged since | Replaced |
 | Row exists, dict carries a stamp, row **changed** since | `StaleSessionError` (409) — the other writer's change is not overwritten |
 | Row exists, dict carries **no stamp** | `SessionWriteContractError` — a projection or hand-built dict can never replace a payload |

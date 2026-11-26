@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import SessionWriteContractError, StaleSessionError
+from app.core.exceptions import SessionDeletedError, SessionWriteContractError, StaleSessionError
 from app.core.json_utils import read_json_file
 from app.core.utils import parse_iso, session_name_key
 from app.database.models import SessionRecord, utc_now
@@ -135,8 +135,11 @@ class SessionRepository:
     async def write(self, session: dict[str, Any], *, allocate_name: Callable[[set[str]], str] | None = None) -> None:
         """Persist ``session`` whole, under the write contract.
 
-        * A row that does not exist yet is created from any dict — that is how
-          uploads and clip children are born.
+        * A row that does not exist yet is created from a dict that was never
+          read (no ``_loadedUpdatedAt``) — that is how uploads and clip
+          children are born. A *stamped* dict aimed at a missing row was read
+          from a row that has since been deleted; it raises
+          :class:`SessionDeletedError` instead of bringing the session back.
         * A row that exists is replaced only by a dict that was ``read`` from it
           (it carries ``_loadedUpdatedAt``) **and** whose stamp still matches
           the row. A mismatch means another writer committed in between, and
@@ -157,6 +160,8 @@ class SessionRepository:
                 names = await db_session.execute(select(SessionRecord.name))
                 session["name"] = allocate_name({session_name_key(name) for name in names.scalars() if name})
             existing = await db_session.get(SessionRecord, session_id)
+            if existing is None and loaded_version is not None:
+                raise SessionDeletedError(session_id)
             if existing is not None:
                 if loaded_version is None:
                     raise SessionWriteContractError(session_id)

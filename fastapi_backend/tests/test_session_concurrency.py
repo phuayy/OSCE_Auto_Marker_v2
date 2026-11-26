@@ -16,7 +16,7 @@ import asyncio
 import pytest
 
 from app.core.config import Settings
-from app.core.exceptions import AppError, SessionWriteContractError, StaleSessionError
+from app.core.exceptions import AppError, SessionDeletedError, SessionWriteContractError, StaleSessionError
 from app.database.orm import OrmDatabase
 from app.repositories.session_repository import LOADED_VERSION_KEY, SessionRepository
 from app.services.session_service import SessionService
@@ -303,3 +303,63 @@ def test_legacy_payload_is_versioned_on_write_and_preserves_nested_data(tmp_path
             assert LOADED_VERSION_KEY not in record.payload
 
     asyncio.run(scenario())
+
+
+def test_a_stamped_write_to_a_deleted_row_does_not_resurrect_it(tmp_path) -> None:
+    """A pipeline holding a document it read before Delete must not recreate the row."""
+    repo = _make_repo(tmp_path)
+
+    async def scenario() -> None:
+        await repo.write(_seed())
+        held = await repo.read("s1")
+        assert await repo.delete("s1") is True
+        held["status"] = "processing"
+        with pytest.raises(SessionDeletedError) as raised:
+            await repo.write(held)
+        assert raised.value.retryable is False
+        with pytest.raises(FileNotFoundError):
+            await repo.read("s1")
+
+    asyncio.run(scenario())
+
+
+def test_a_stamped_write_to_an_unchanged_row_still_replaces(tmp_path) -> None:
+    repo = _make_repo(tmp_path)
+
+    async def scenario() -> None:
+        await repo.write(_seed())
+        held = await repo.read("s1")
+        held["status"] = "queued"
+        await repo.write(held)
+        assert (await repo.read("s1"))["status"] == "queued"
+
+    asyncio.run(scenario())
+
+
+def test_update_on_a_row_deleted_mid_mutation_raises_without_retrying(tmp_path, monkeypatch) -> None:
+    service = _make_service(tmp_path)
+    repo = service.repository
+    original_write = repo.write
+    writes = {"count": 0}
+
+    async def counting_write(session: dict) -> None:
+        writes["count"] += 1
+        await repo.delete(str(session["id"]))
+        await original_write(session)
+
+    async def scenario() -> None:
+        await service.write(_seed())
+        monkeypatch.setattr(repo, "write", counting_write)
+        with pytest.raises(SessionDeletedError):
+            await service.update("s1", lambda s: s.__setitem__("status", "processing"))
+        assert writes["count"] == 1
+        with pytest.raises(FileNotFoundError):
+            await repo.read("s1")
+
+    asyncio.run(scenario())
+
+
+def test_a_job_whose_session_was_deleted_is_not_retried() -> None:
+    from app.services.job_queue_service import is_retryable_failure
+
+    assert is_retryable_failure(SessionDeletedError("s1")) is False
