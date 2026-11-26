@@ -15,6 +15,7 @@ import {
   normalizeUploadLimits,
   readPdfHeaderCheck,
   resetUploadLimitsCache,
+  startBlockingReason,
   shouldReadContainer,
 } from '../src/lib/uploadPreview.js';
 
@@ -258,4 +259,24 @@ test('fetchUploadLimits asks once, shares an in-flight request, and retries afte
   const failing = async () => { throw new Error('404'); };
   assert.equal(await fetchUploadLimits(failing), null);
   assert.equal((await fetchUploadLimits(ok)).maxVideoBytes, 10, 'a failure is not remembered');
+});
+
+test('Start is blocked by a definitely unusable case study, but not by a check that could not run', () => {
+  const pdf = { name: 'case.pdf', type: 'application/pdf', size: 1000 };
+  const goodVideo = assess({ browser: loaded });
+  const reason = (args) => startBlockingReason(goodVideo, assessPdfFile({ limits: LIMITS, file: pdf, ...args }));
+  assert.equal(reason({ headerOk: true }), null);
+  assert.equal(reason({ headerOk: null }), null, 'unreadable header');
+  assert.equal(startBlockingReason(goodVideo, assessPdfFile({ file: { ...pdf, size: 99 * GB }, limits: null, headerOk: true })), null, 'limits unknown');
+  assert.equal(startBlockingReason(goodVideo, null), null, 'no case study yet');
+  assert.match(reason({ headerOk: false }), /does not look like a PDF/);
+  assert.match(reason({ headerOk: true, file: { ...pdf, size: 0 } }), /PDF is empty/);
+  assert.match(reason({ headerOk: true, file: { ...pdf, size: 21 * 1024 * 1024 } }), /over the 20 MB limit/);
+});
+
+test('when both files are bad the reason names the recording first', () => {
+  const badVideo = assess({ file: file({ name: 'a.wmv' }), browser: loaded });
+  const badPdf = assessPdfFile({ file: { name: 'c.pdf', size: 10 }, headerOk: false });
+  assert.match(startBlockingReason(badVideo, badPdf), /\.wmv files cannot be uploaded/);
+  assert.match(startBlockingReason(assess({ browser: loaded }), badPdf), /PDF/);
 });

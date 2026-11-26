@@ -312,6 +312,16 @@ export function blockingReason(assessment) {
   return assessment.warnings.find((item) => item.severity === Severity.ERROR)?.message || null;
 }
 
+/**
+ * The one answer to "why is Start disabled": the recording's reason when it is
+ * refused, else the case study's, else null. A check that could not run (an
+ * unreadable header, unknown limits) never blocks.
+ */
+export function startBlockingReason(videoAssessment, pdfAssessment) {
+  const pdfReason = pdfAssessment?.warnings.find((item) => item.severity === Severity.ERROR)?.message || null;
+  return blockingReason(videoAssessment) || pdfReason;
+}
+
 /** The chip text for a verdict. */
 export function describeVerdict(verdict) {
   switch (verdict) {
@@ -343,7 +353,8 @@ export async function readPdfHeaderCheck(file, { readRange = (start, end) => fil
 
 /**
  * Judge the case-study PDF. `headerOk` is `readPdfHeaderCheck`'s answer.
- * `{ ok, warnings }`; these warn and never block, the server being the judge.
+ * `{ ok, warnings }`; an error-severity warning is a definite refusal (see
+ * `startBlockingReason`), and an unreadable header is no warning at all.
  */
 export function assessPdfFile({ file, limits = null, headerOk = null }) {
   const warnings = [];

@@ -51,7 +51,7 @@ OSCE-AI-FYP/
 │   ├── components/
 │   │   ├── AuthShell.jsx       # The dark pre-login frame + its fields/buttons; every pre-login screen composes it
 │   │   ├── AuthNewPasswordFields.jsx # "New password" + "Confirm" on that frame (invitation and reset screens)
-│   │   ├── upload/UploadFilePreview.jsx # Upload form: player + verdict chip + warnings for the chosen recording, PDF check; reports `rejected` so Start disables
+│   │   ├── upload/UploadFilePreview.jsx # Upload form: player + verdict chip + warnings for the chosen recording, PDF check; reports why Start must be blocked (rejected recording, unusable PDF)
 │   │   ├── TargetPicker.jsx    # One provider+model choice; shared by every settings card that asks for one
 │   │   ├── PageHeader.jsx      # The sticky page bar every route shares (h1, Back, actions, theme toggle) + SkipToContent
 │   │   ├── ThemeToggle.jsx     # One click between light and dark, rendered by PageHeader

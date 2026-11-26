@@ -4,9 +4,9 @@
 // warnings. The rules live in src/lib/uploadPreview.js; this only gathers what
 // the <video> element and the file's own bytes say and renders the answer.
 //
-// It blocks nothing itself. A `rejected` verdict (an extension the server will
-// refuse, a file over its limit, an empty one) is reported through `onVerdict`
-// so the form can disable Start and say why.
+// It blocks nothing itself. When a file is one the server will certainly refuse
+// (a rejected recording, a case study that is not a PDF, empty or over its
+// limit), `onBlockingReason` reports why so the form can disable Start.
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 import { Badge } from '@/components/ui/badge';
@@ -18,13 +18,13 @@ import {
   Verdict,
   assessPdfFile,
   assessVideoFile,
-  blockingReason,
   canPlayTypeFor,
   describeCodecs,
   describeVerdict,
   fetchUploadLimits,
   formatFileSize,
   readPdfHeaderCheck,
+  startBlockingReason,
   shouldReadContainer,
 } from '@/lib/uploadPreview';
 
@@ -49,7 +49,7 @@ function fileFacts(file) {
   return file ? { name: file.name, type: file.type, size: file.size } : null;
 }
 
-export default function UploadFilePreview({ videoFile, videoUrl, caseStudyFile, onVerdict }) {
+export default function UploadFilePreview({ videoFile, videoUrl, caseStudyFile, onBlockingReason }) {
   const [limits, setLimits] = useState(null);
   useEffect(() => {
     let live = true;
@@ -120,14 +120,7 @@ export default function UploadFilePreview({ videoFile, videoUrl, caseStudyFile, 
     });
   }, [videoFile, limits, container, canPlay, player]);
 
-  const reason = assessment ? blockingReason(assessment) : null;
   const verdict = assessment?.verdict ?? null;
-  const onVerdictRef = useRef(onVerdict);
-  onVerdictRef.current = onVerdict;
-  useEffect(() => {
-    onVerdictRef.current?.(verdict, reason);
-  }, [verdict, reason]);
-  useEffect(() => () => onVerdictRef.current?.(null, null), []);
 
   const settled = Boolean(player?.failed)
     || (Boolean(player?.loaded) && (!needsContainer || containerRead))
@@ -151,6 +144,14 @@ export default function UploadFilePreview({ videoFile, videoUrl, caseStudyFile, 
       headerOk: pdfState?.file === caseStudyFile ? pdfState.ok : null,
     })
     : null;
+
+  const blockingText = startBlockingReason(assessment, pdfAssessment);
+  const onBlockingReasonRef = useRef(onBlockingReason);
+  onBlockingReasonRef.current = onBlockingReason;
+  useEffect(() => {
+    onBlockingReasonRef.current?.(blockingText);
+  }, [blockingText]);
+  useEffect(() => () => onBlockingReasonRef.current?.(null), []);
 
   if (!videoFile && !caseStudyFile) return null;
 
