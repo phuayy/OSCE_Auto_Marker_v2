@@ -46,6 +46,7 @@ import { Modal } from '@/components/ui/dialog';
 import { Progress } from '@/components/ui/progress';
 import { PageHeader } from '@/components/PageHeader.jsx';
 import RegionFocusPreview from '@/components/RegionFocusPreview.jsx';
+import UploadFilePreview from '@/components/upload/UploadFilePreview.jsx';
 import OccupancyPresetGlyph from '@/components/OccupancyPresetGlyph.jsx';
 import CorporaManager from './CorporaManager.jsx';
 import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
@@ -146,6 +147,8 @@ export default function OSCEAiMarkerMockup({
   const [videoFile, setVideoFile] = useState(null);
   const [communicationScores, setCommunicationScores] = useState(null);
   const [caseStudyFile, setCaseStudyFile] = useState(null);
+  // The preview's refusal of the chosen recording ({ verdict, reason }), which blocks Start.
+  const [videoCheck, setVideoCheck] = useState({ verdict: null, reason: null });
   const [showWorkspace, setShowWorkspace] = useState(false);
   const [uploadFlow, setUploadFlow] = useState(Workflow.STANDARD);
   // Long-workflow auto-crop method: 'bells' (audio bell detection) or
@@ -394,6 +397,7 @@ export default function OSCEAiMarkerMockup({
   // regardless of how it was opened (reload, "View progress", deep link, etc.).
   const sessionIsLong = Boolean(session?.workflow === Workflow.LONG || videoClips.length > 0);
   const isLongWorkflow = showWorkspace ? sessionIsLong : uploadFlow === Workflow.LONG;
+  const videoRejected = videoCheck.verdict === 'rejected';
   // A clip assessment view is any child session (durable parentSessionId).
   // Deriving from parentSessionId means the "Back to clip list" affordance
   // survives reloads, deep links and browser forward/back navigation, not just
@@ -1286,6 +1290,7 @@ export default function OSCEAiMarkerMockup({
   // Opens the pre-flight confirmation overlay (after validating the inputs).
   // The actual upload/processing only begins once the user confirms.
   function requestStartAssessment() {
+    if (videoRejected) return;
     if (!videoFile) {
       setError('Upload a station video first.');
       return;
@@ -2475,18 +2480,27 @@ export default function OSCEAiMarkerMockup({
                   onChange={(event) => setCaseStudyFile(event.target.files?.[0] || null)}
                 />
 
+                <UploadFilePreview
+                  videoFile={videoFile}
+                  videoUrl={localVideoUrl}
+                  caseStudyFile={caseStudyFile}
+                  onVerdict={(verdict, reason) => setVideoCheck({ verdict, reason })}
+                />
+
                 <div className="flex flex-wrap items-center gap-3 pt-2">
                   <Button
                     size="lg"
                     className="gap-2"
                     onClick={requestStartAssessment}
-                    disabled={!videoFile || !caseStudyFile || isUploading || isLoadingWorkspace}
+                    disabled={!videoFile || !caseStudyFile || videoRejected || isUploading || isLoadingWorkspace}
                   >
                     <Wand2 className="h-4 w-4" aria-hidden="true" />
                     {uploadFlow === Workflow.LONG ? 'Upload and split into clips' : 'Upload and start assessment'}
                   </Button>
                   <span className="text-sm text-slate-500" role="status">
-                    {videoFile && caseStudyFile
+                    {videoRejected
+                      ? videoCheck.reason
+                      : videoFile && caseStudyFile
                       ? 'Both files chosen. Marking runs on this machine.'
                       : 'Choose a recording and a case study PDF to start.'}
                   </span>

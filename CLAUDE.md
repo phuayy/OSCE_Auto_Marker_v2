@@ -51,6 +51,7 @@ OSCE-AI-FYP/
 │   ├── components/
 │   │   ├── AuthShell.jsx       # The dark pre-login frame + its fields/buttons; every pre-login screen composes it
 │   │   ├── AuthNewPasswordFields.jsx # "New password" + "Confirm" on that frame (invitation and reset screens)
+│   │   ├── upload/UploadFilePreview.jsx # Upload form: player + verdict chip + warnings for the chosen recording, PDF check; reports `rejected` so Start disables
 │   │   ├── TargetPicker.jsx    # One provider+model choice; shared by every settings card that asks for one
 │   │   ├── PageHeader.jsx      # The sticky page bar every route shares (h1, Back, actions, theme toggle) + SkipToContent
 │   │   ├── ThemeToggle.jsx     # One click between light and dark, rendered by PageHeader
@@ -59,6 +60,8 @@ OSCE-AI-FYP/
 │   │   ├── ui/dialog.jsx       # Modal: dialog semantics, Escape, focus trap + restore, backdrop
 │   │   └── ui/skeleton.jsx     # The one bone every skeleton is built from
 │   ├── lib/
+│   │   ├── uploadPreview.js    # What the upload form says about a chosen file: verdict (plays / will-convert / unknown / rejected), warnings, limits fetch (pure)
+│   │   ├── isoBmff.js          # Read-only MP4/MOV `moov` reader (duration, tracks, rotation, codecs); never throws (pure)
 │   │   ├── llmProviders.js     # Routing + marking-mode form logic (pure)
 │   │   ├── panelReport.js      # Reads a sheet's `panel` block for the results view (pure)
 │   │   ├── resultsModel.js     # Score sheets -> what the tabs and the CSV both read (pure)
