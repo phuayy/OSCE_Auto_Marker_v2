@@ -11,14 +11,14 @@
 //     (`GET /api/analytics/export`), because the per-criterion marks are not
 //     in the rows the page loaded. The page's filter travels as parameters
 //     (`criteriaExportParams`), so the file covers the same recordings,
-//     student and dates the page is showing.
+//     student and time window the page is showing.
 //
 // Like the CSV behind the workspace's score sheet, the numbers are raw — a
 // score is `total` and `max` and a percentage is derived — whatever the
 // account's score-display preference: a spreadsheet wants numbers, not "82%".
 
 import { apiBlob } from './apiFetch.js';
-import { rootSessionOf, presetRange } from './analyticsFilters.js';
+import { filterWindow, rootSessionOf } from './analyticsFilters.js';
 import { rowsToCsv, toSafeDownloadName } from './download.js';
 import { percentOf } from './scoreDisplay.js';
 
@@ -47,8 +47,6 @@ export const EXPORT_LAYOUTS = Object.freeze([
 ]);
 
 export const DEFAULT_EXPORT_LAYOUT = EXPORT_LAYOUTS[0].value;
-
-const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 /** `YYYY-MM-DD` of an ISO timestamp, '' when there is none. */
 function dayOf(value) {
@@ -111,16 +109,25 @@ export function describeExportBlocker(rowCount) {
   return rowCount > 0 ? '' : 'No rows match this filter, so there is nothing to download.';
 }
 
+// A Date as the server's `from`/`to` text. A `to` is inclusive to the
+// microsecond there, while the page compares millisecond-truncated times, so it
+// is sent as the last microsecond of its millisecond: a row the page keeps is a
+// row the file keeps. An invalid Date (a half-typed range) sends nothing.
+function instantText(date, { endOfMillisecond = false } = {}) {
+  if (!date || Number.isNaN(date.getTime())) return null;
+  const text = date.toISOString();
+  return endOfMillisecond ? text.replace(/Z$/, '999Z') : text;
+}
+
 /**
  * The page's filter as `GET /api/analytics/export` parameters.
  *
  * The page filters over recordings (`sessionIds` on the filter are recording
- * ids), one student and a date window, and the server expresses exactly
- * those: `rootSessionIds`, `studentIds`, `from`, `to`. A preset window
- * ("Last 7 days") is sent as the UTC day it starts on, so the file can include
- * up to a day more than the page's instant-precise window — the server only
- * counts whole days. A custom range sends its two dates as typed, either end
- * optional; a malformed one is left out rather than failing the download.
+ * ids), one student and a time window, and the server expresses exactly those:
+ * `rootSessionIds`, `studentIds`, `from`, `to`. The window is `filterWindow` —
+ * the one `applyFilter` uses — sent as exact UTC instants, so a preset like
+ * "Last 7 days" or a custom range in any time zone yields a file holding
+ * exactly the rows the page shows.
  */
 export function criteriaExportParams(filter, { layout = DEFAULT_EXPORT_LAYOUT, now = new Date() } = {}) {
   const params = new URLSearchParams();
@@ -128,13 +135,11 @@ export function criteriaExportParams(filter, { layout = DEFAULT_EXPORT_LAYOUT, n
   (filter.sessionIds || []).forEach((id) => params.append('rootSessionIds', id));
   if (filter.studentId) params.append('studentIds', filter.studentId);
 
-  if (filter.preset === 'custom') {
-    if (ISO_DAY.test(filter.dateFrom || '')) params.set('from', filter.dateFrom);
-    if (ISO_DAY.test(filter.dateTo || '')) params.set('to', filter.dateTo);
-  } else {
-    const start = presetRange(filter.preset, now);
-    if (start) params.set('from', utcDay(start));
-  }
+  const { from, to } = filterWindow(filter, now);
+  const fromText = instantText(from);
+  const toText = instantText(to, { endOfMillisecond: true });
+  if (fromText) params.set('from', fromText);
+  if (toText) params.set('to', toText);
   return params;
 }
 

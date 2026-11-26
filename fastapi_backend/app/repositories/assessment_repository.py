@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -34,10 +33,6 @@ def _communication_rubric_id(payload: dict[str, Any]) -> str | None:
         return str(output["rubricAssetId"])
     legacy = payload.get("communicationRubricAssetId")
     return str(legacy) if legacy else None
-
-
-def _utc_midnight(day: date) -> datetime:
-    return datetime.combine(day, time.min, tzinfo=UTC)
 
 
 class AssessmentRepository:
@@ -341,8 +336,13 @@ class AssessmentRepository:
         async with self.database.session() as db_session:
             return int(await db_session.scalar(select(func.count()).select_from(counted)) or 0)
 
+    def read_snapshot(self):
+        """One read transaction to run several export queries in, so they all
+        see the same data (see :meth:`OrmDatabase.read_snapshot`)."""
+        return self.database.read_snapshot()
+
     async def stream_criterion_export_rows(
-        self, export_filter: ResultsExportFilter
+        self, export_filter: ResultsExportFilter, *, snapshot: AsyncSession | None = None
     ) -> AsyncIterator[CriterionExportRow]:
         """Every criterion row the filter keeps, in export order — recording
         date, recording, scored session, result type, criterion number — as a
@@ -352,32 +352,43 @@ class AssessmentRepository:
         fields empty (an outer join), so a scored student is never silently
         absent. Like :meth:`list_result_rows` this selects columns only: the
         score-sheet JSON on the result and criterion rows is never loaded.
+
+        Pass the session from :meth:`read_snapshot` as ``snapshot`` to read
+        inside that transaction; without it the query runs on its own session.
         """
-        query = self._criterion_export_query(export_filter)
+        query = self._criterion_export_query(export_filter).execution_options(yield_per=self.EXPORT_FETCH_SIZE)
+        if snapshot is not None:
+            async for item in self._export_rows(snapshot, query):
+                yield item
+            return
         async with self.database.session() as db_session:
-            rows = await db_session.stream(query.execution_options(yield_per=self.EXPORT_FETCH_SIZE))
-            async for row in rows:
-                root = self._root_session_fields(row)
-                yield CriterionExportRow(
-                    result_id=row.result_id,
-                    root_session_id=root["rootSessionId"],
-                    root_session_name=root["rootSessionName"],
-                    root_session_created_at=root["rootSessionCreatedAt"],
-                    session_id=row.id,
-                    student_name=row.student_name,
-                    result_type=row.result_type,
-                    result_total=row.score_total,
-                    result_max=row.score_max,
-                    result_pass_fail=row.pass_fail,
-                    criterion_index=row.criterion_index,
-                    criterion_label=row.label,
-                    score=row.score,
-                    max_score=row.max_score,
-                    passed=row.passed,
-                    is_critical=row.is_critical,
-                    score_label=row.score_label,
-                    timestamp=row.timestamp,
-                )
+            async for item in self._export_rows(db_session, query):
+                yield item
+
+    async def _export_rows(self, db_session: AsyncSession, query: Select[Any]) -> AsyncIterator[CriterionExportRow]:
+        rows = await db_session.stream(query)
+        async for row in rows:
+            root = self._root_session_fields(row)
+            yield CriterionExportRow(
+                result_id=row.result_id,
+                root_session_id=root["rootSessionId"],
+                root_session_name=root["rootSessionName"],
+                root_session_created_at=root["rootSessionCreatedAt"],
+                session_id=row.id,
+                student_name=row.student_name,
+                result_type=row.result_type,
+                result_total=row.score_total,
+                result_max=row.score_max,
+                result_pass_fail=row.pass_fail,
+                criterion_index=row.criterion_index,
+                criterion_label=row.label,
+                score=row.score,
+                max_score=row.max_score,
+                passed=row.passed,
+                is_critical=row.is_critical,
+                score_label=row.score_label,
+                timestamp=row.timestamp,
+            )
 
     @staticmethod
     def _criterion_export_query(export_filter: ResultsExportFilter) -> Select[Any]:
@@ -431,13 +442,10 @@ class AssessmentRepository:
             query = query.where(AssessmentSessionRecord.id.in_(export_filter.session_ids))
         if export_filter.student_ids:
             query = query.where(StudentRecord.id.in_(export_filter.student_ids))
-        if export_filter.date_from is not None:
-            query = query.where(AssessmentSessionRecord.created_at >= _utc_midnight(export_filter.date_from))
-        if export_filter.date_to is not None and export_filter.date_to < date.max:
-            # Inclusive day: everything before the next midnight.
-            query = query.where(
-                AssessmentSessionRecord.created_at < _utc_midnight(export_filter.date_to + timedelta(days=1))
-            )
+        if export_filter.created_from is not None:
+            query = query.where(AssessmentSessionRecord.created_at >= export_filter.created_from)
+        if export_filter.created_until is not None:
+            query = query.where(AssessmentSessionRecord.created_at < export_filter.created_until)
         return query
 
     @staticmethod

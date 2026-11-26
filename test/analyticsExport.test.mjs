@@ -14,7 +14,7 @@ import {
   resultRowsToCsv,
   resultsFileName,
 } from '../src/lib/analyticsExport.js';
-import { emptyFilter } from '../src/lib/analyticsFilters.js';
+import { applyFilter, emptyFilter } from '../src/lib/analyticsFilters.js';
 
 function row(overrides) {
   return {
@@ -108,20 +108,73 @@ test('recordings repeat and the student is one studentIds value', () => {
   assert.equal(params.has('from') || params.has('to'), false);
 });
 
-test('a preset window sends the UTC day it starts on', () => {
-  assert.equal(paramsOf({ ...emptyFilter(), preset: '7d' }).from, '2026-03-03');
-  assert.equal(paramsOf({ ...emptyFilter(), preset: '30d' }).from, '2026-02-08');
+test('a preset window sends its exact starting instant and no end', () => {
+  assert.equal(paramsOf({ ...emptyFilter(), preset: '7d' }).from, '2026-03-03T12:00:00.000Z');
+  assert.equal(paramsOf({ ...emptyFilter(), preset: '30d' }).from, '2026-02-08T12:00:00.000Z');
   assert.equal(paramsOf({ ...emptyFilter(), preset: '7d' }).to, undefined);
 });
 
-test('a custom range sends either end as typed and drops a malformed one', () => {
+test('a custom range sends from as 00:00 UTC and to as the last microsecond of the typed day', () => {
   const custom = { ...emptyFilter(), preset: 'custom' };
+  assert.deepEqual(paramsOf({ ...custom, dateFrom: '2026-01-01', dateTo: '2026-01-31' }), {
+    format: 'long',
+    from: '2026-01-01T00:00:00.000Z',
+    to: new Date('2026-01-31T23:59:59.999').toISOString().replace(/Z$/, '999Z'),
+  });
+  assert.equal(paramsOf({ ...custom, dateTo: '2026-01-31' }).from, undefined);
+  assert.equal(paramsOf({ ...custom, dateFrom: '2026-01-01' }).to, undefined);
+});
+
+test('a half-typed or invalid date sends nothing rather than failing the download', () => {
+  const custom = { ...emptyFilter(), preset: 'custom' };
+  assert.deepEqual(paramsOf({ ...custom, dateFrom: 'not a date', dateTo: '' }), { format: 'long' });
+  assert.deepEqual(paramsOf({ ...custom, dateFrom: 'x', dateTo: 'y' }), { format: 'long' });
+});
+
+// What the server does with `from`/`to`: both inclusive, to the microsecond.
+function microseconds(text) {
+  const [, whole, fraction = ''] = /^(.*?:\d{2})(?:\.(\d+))?Z$/.exec(text);
+  return BigInt(Date.parse(`${whole}Z`)) * 1000n + BigInt(fraction.padEnd(6, '0'));
+}
+function serverKeeps(params, createdAt) {
+  const created = microseconds(createdAt);
+  return (!params.from || created >= microseconds(params.from)) && (!params.to || created <= microseconds(params.to));
+}
+
+test('the sent window keeps exactly the rows the page keeps, in a UTC+8 browser', () => {
+  const previous = process.env.TZ;
+  process.env.TZ = 'Asia/Singapore';
+  try {
+    const filter = { ...emptyFilter(), preset: 'custom', dateFrom: '2026-11-20', dateTo: '2026-11-20' };
+    const params = paramsOf(filter);
+    assert.equal(params.to, '2026-11-20T15:59:59.999999Z');
+    const created = [
+      '2026-11-19T23:59:59.999Z',
+      '2026-11-20T00:00:00.000Z',
+      '2026-11-20T15:59:59.999Z',
+      '2026-11-20T15:59:59.999999Z',
+      '2026-11-20T16:00:00.000Z',
+    ];
+    const rows = created.map((createdAt, index) => row({ sessionId: `s${index}`, rootSessionId: `r${index}`, createdAt }));
+    const page = applyFilter(rows, filter).map((r) => r.createdAt);
+    const server = created.filter((createdAt) => serverKeeps(params, createdAt));
+    assert.deepEqual(page, server);
+    assert.deepEqual(page, created.slice(1, 4));
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
+});
+
+test('a preset window and the page agree on the boundary millisecond', () => {
+  const filter = { ...emptyFilter(), preset: '7d' };
+  const params = paramsOf(filter);
+  const created = ['2026-03-03T11:59:59.999Z', '2026-03-03T12:00:00.000Z', '2026-03-10T12:00:00.000Z'];
+  const rows = created.map((createdAt, index) => row({ sessionId: `s${index}`, rootSessionId: `r${index}`, createdAt }));
   assert.deepEqual(
-    { ...paramsOf({ ...custom, dateFrom: '2026-01-01', dateTo: '2026-01-31' }) },
-    { format: 'long', from: '2026-01-01', to: '2026-01-31' },
+    applyFilter(rows, filter, NOW).map((r) => r.createdAt),
+    created.filter((createdAt) => serverKeeps(params, createdAt)),
   );
-  assert.deepEqual(paramsOf({ ...custom, dateTo: '2026-01-31' }), { format: 'long', to: '2026-01-31' });
-  assert.deepEqual(paramsOf({ ...custom, dateFrom: '01/02/2026', dateTo: '' }), { format: 'long' });
 });
 
 test('every filter shape combined', () => {
@@ -129,7 +182,11 @@ test('every filter shape combined', () => {
     { preset: 'custom', dateFrom: '2026-01-01', dateTo: '2026-01-02', sessionIds: ['r1'], studentId: 's1' },
     { layout: 'wide', now: NOW },
   );
-  assert.equal(params.toString(), 'format=wide&rootSessionIds=r1&studentIds=s1&from=2026-01-01&to=2026-01-02');
+  assert.deepEqual(params.getAll('rootSessionIds'), ['r1']);
+  assert.deepEqual(params.getAll('studentIds'), ['s1']);
+  assert.equal(params.get('format'), 'wide');
+  assert.equal(params.get('from'), '2026-01-01T00:00:00.000Z');
+  assert.match(params.get('to'), /^2026-01-0[23]T\d\d:59:59\.999999Z$/);
 });
 
 function fakeFetch(response, seen) {

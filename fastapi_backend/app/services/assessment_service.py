@@ -5,6 +5,8 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.artifacts import read_artifact_payload
 from app.core.csv_export import CSV_BOM, csv_line
 from app.core.exceptions import AppError
@@ -81,20 +83,26 @@ class AssessmentService:
         # The header needs every column, and a column can first appear on the
         # last row: so the export reads the rows twice — once to learn the
         # columns, once to write — holding only the column map, never the rows.
+        # Both passes run in one read transaction, so a result re-scored or
+        # added in between cannot put a row under a column the header lacks.
         layout = WideLayout()
-        async with aclosing(self._results(export_filter)) as groups:
-            async for group in groups:
-                layout.observe(group)
-        yield csv_line(layout.header())
-        async with aclosing(self._results(export_filter)) as groups:
-            async for group in groups:
-                yield csv_line(layout.row(group))
+        async with self.repository.read_snapshot() as snapshot:
+            async with aclosing(self._results(export_filter, snapshot)) as groups:
+                async for group in groups:
+                    layout.observe(group)
+            yield csv_line(layout.header())
+            async with aclosing(self._results(export_filter, snapshot)) as groups:
+                async for group in groups:
+                    yield csv_line(layout.row(group))
 
-    async def _results(self, export_filter: ResultsExportFilter) -> AsyncIterator[Sequence[CriterionExportRow]]:
+    async def _results(
+        self, export_filter: ResultsExportFilter, snapshot: AsyncSession
+    ) -> AsyncIterator[Sequence[CriterionExportRow]]:
         """The export's rows regrouped one result at a time (a result's rows are
         adjacent in export order)."""
         group: list[CriterionExportRow] = []
-        async with aclosing(self.repository.stream_criterion_export_rows(export_filter)) as rows:
+        rows = self.repository.stream_criterion_export_rows(export_filter, snapshot=snapshot)
+        async with aclosing(rows):
             async for row in rows:
                 if group and group[0].result_id != row.result_id:
                     yield group

@@ -26,7 +26,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+import re
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from typing import Any
 
@@ -37,6 +38,48 @@ MAX_EXPORT_ROWS = 250_000
 MAX_ROOT_SESSION_IDS = 500
 MAX_SESSION_IDS = 2_000
 MAX_STUDENT_IDS = 2_000
+
+
+_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_INSTANT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}:\d{2})$")
+_MICROSECOND = timedelta(microseconds=1)
+
+
+def _parse_instant(text: str) -> datetime:
+    if not _INSTANT.match(text):
+        raise ValueError(text)
+    return datetime.fromisoformat(text).astimezone(UTC)
+
+
+def parse_range_start(text: str) -> datetime:
+    """The inclusive lower bound a ``from`` value names.
+
+    Two spellings, both exact: a date (``2026-11-20``) is the start of that
+    UTC day; an instant with an offset (``2026-11-20T00:00:00+08:00``) is
+    itself. A bare local time with no offset is refused — it would depend on a
+    zone nobody stated. Raises ``ValueError`` for anything else.
+    """
+    if _DAY.match(text):
+        return datetime.combine(date.fromisoformat(text), time.min, tzinfo=UTC)
+    return _parse_instant(text)
+
+
+def parse_range_end(text: str) -> datetime | None:
+    """The *exclusive* upper bound a ``to`` value names — ``None`` when there is
+    no later moment to exclude from.
+
+    A date is the whole UTC day, so the bound is the next midnight; an instant
+    is *inclusive* (a row created at exactly that microsecond is kept), so the
+    bound is one microsecond after it, the column's resolution. The two ends
+    thus agree with the page's own window: ``created >= from`` and
+    ``created <= to``. Raises ``ValueError`` for anything else.
+    """
+    try:
+        if _DAY.match(text):
+            return datetime.combine(date.fromisoformat(text) + timedelta(days=1), time.min, tzinfo=UTC)
+        return _parse_instant(text) + _MICROSECOND
+    except OverflowError:
+        return None
 
 
 class ExportLayout(StrEnum):
@@ -54,16 +97,19 @@ class ScoredResultType(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ResultsExportFilter:
-    """What one export covers. An empty id tuple means "no restriction"; the
-    dates are inclusive whole days (UTC) on the assessment's creation time —
-    the same dimensions ``src/lib/analyticsFilters.js`` can express."""
+    """What one export covers. An empty id tuple means "no restriction". The
+    time window is on the assessment's creation time: ``created_from``
+    inclusive, ``created_until`` exclusive, both UTC instants (see
+    :func:`parse_range_start` / :func:`parse_range_end` for how a caller's text
+    becomes them) — the same dimensions ``src/lib/analyticsFilters.js`` can
+    express."""
 
     result_types: tuple[ScoredResultType, ...] = tuple(ScoredResultType)
     root_session_ids: tuple[str, ...] = ()
     session_ids: tuple[str, ...] = ()
     student_ids: tuple[str, ...] = ()
-    date_from: date | None = None
-    date_to: date | None = None
+    created_from: datetime | None = None
+    created_until: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

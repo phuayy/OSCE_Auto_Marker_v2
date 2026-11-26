@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -33,6 +33,8 @@ from app.domain.results_export import (
     ExportLayout,
     ResultsExportFilter,
     ScoredResultType,
+    parse_range_end,
+    parse_range_start,
 )
 from app.repositories.assessment_repository import AssessmentRepository
 from app.services import assessment_service
@@ -369,7 +371,7 @@ def test_filters_combine_with_and(tmp_path) -> None:
         tmp_path,
         root_session_ids=("rec1", "s3"),
         student_ids=("stu-Ben", "stu-Cara"),
-        date_from=date(2026, 1, 11),
+        created_from=parse_range_start("2026-01-11"),
         result_types=(ScoredResultType.COMMUNICATION,),
     )
     assert scored_sessions(table) == ["c2", "s3"]
@@ -379,13 +381,75 @@ def test_filters_combine_with_and(tmp_path) -> None:
 
 def test_date_bounds_are_inclusive_whole_days(tmp_path) -> None:
     # c2 is assessed at 23:59:59.999999 on the 11th; s3 at exactly midnight on 1 Feb.
-    assert scored_sessions(run_export(tmp_path, date_to=date(2026, 1, 11))) == ["c1", "c2", "o1"]
-    assert scored_sessions(run_export(tmp_path, date_to=date(2026, 1, 10))) == ["c1", "o1"]
-    assert scored_sessions(run_export(tmp_path, date_from=date(2026, 1, 11))) == ["c2", "s3"]
-    assert scored_sessions(run_export(tmp_path, date_from=date(2026, 2, 1))) == ["s3"]
-    assert scored_sessions(run_export(tmp_path, date_to=date(2026, 1, 31), date_from=date(2026, 1, 5))) == ["c1", "c2", "o1"]
-    assert scored_sessions(run_export(tmp_path, date_from=date(2026, 1, 11), date_to=date(2026, 1, 11))) == ["c2"]
-    assert scored_sessions(run_export(tmp_path, date_to=date.max)) == ["c1", "c2", "o1", "s3"]
+    assert scored_sessions(run_export(tmp_path, created_until=parse_range_end("2026-01-11"))) == ["c1", "c2", "o1"]
+    assert scored_sessions(run_export(tmp_path, created_until=parse_range_end("2026-01-10"))) == ["c1", "o1"]
+    assert scored_sessions(run_export(tmp_path, created_from=parse_range_start("2026-01-11"))) == ["c2", "s3"]
+    assert scored_sessions(run_export(tmp_path, created_from=parse_range_start("2026-02-01"))) == ["s3"]
+    assert scored_sessions(run_export(tmp_path, created_until=parse_range_end("2026-01-31"), created_from=parse_range_start("2026-01-05"))) == ["c1", "c2", "o1"]
+    assert scored_sessions(run_export(tmp_path, created_from=parse_range_start("2026-01-11"), created_until=parse_range_end("2026-01-11"))) == ["c2"]
+    assert scored_sessions(run_export(tmp_path, created_until=parse_range_end("9999-12-31"))) == ["c1", "c2", "o1", "s3"]
+
+
+def sessions_between(tmp_path, start: str | None, end: str | None) -> list[str]:
+    return scored_sessions(
+        run_export(
+            tmp_path,
+            created_from=parse_range_start(start) if start else None,
+            created_until=parse_range_end(end) if end else None,
+        )
+    )
+
+
+def test_an_instant_bound_is_exact_to_the_microsecond(tmp_path) -> None:
+    # c2 is created at 2026-01-11 23:59:59.999999, s3 at exactly 2026-02-01 00:00:00.
+    assert sessions_between(tmp_path, None, "2026-01-11T23:59:59.999999Z") == ["c1", "c2", "o1"]
+    assert sessions_between(tmp_path, None, "2026-01-11T23:59:59.999998Z") == ["c1", "o1"]
+    assert sessions_between(tmp_path, "2026-01-11T23:59:59.999999Z", None) == ["c2", "s3"]
+    assert sessions_between(tmp_path, "2026-01-12T00:00:00Z", None) == ["s3"]
+    assert sessions_between(tmp_path, "2026-02-01T00:00:00Z", None) == ["s3"]
+    assert sessions_between(tmp_path, "2026-02-01T00:00:00.000001Z", None) == []
+    assert sessions_between(tmp_path, None, "2026-02-01T00:00:00Z") == ["c1", "c2", "o1", "s3"]
+    assert sessions_between(tmp_path, None, "2026-01-31T23:59:59.999999Z") == ["c1", "c2", "o1"]
+
+
+def test_an_instant_with_a_non_utc_offset_is_converted(tmp_path) -> None:
+    # 2026-02-01T08:00:00+08:00 is s3's exact creation instant.
+    assert sessions_between(tmp_path, "2026-02-01T08:00:00+08:00", None) == ["s3"]
+    assert sessions_between(tmp_path, "2026-02-01T08:00:01+08:00", None) == []
+    assert sessions_between(tmp_path, None, "2026-02-01T08:00:00+08:00") == ["c1", "c2", "o1", "s3"]
+    assert sessions_between(tmp_path, None, "2026-02-01T07:59:59.999999+08:00") == ["c1", "c2", "o1"]
+    assert sessions_between(tmp_path, "2026-01-10T23:00:00-05:00", "2026-01-10T23:00:00-05:00") == []
+    # The same window written in two zones is the same window.
+    assert sessions_between(tmp_path, "2026-01-11T00:00:00+08:00", "2026-01-12T07:59:59.999999+08:00") == ["c2"]
+    assert sessions_between(tmp_path, "2026-01-10T16:00:00Z", "2026-01-11T23:59:59.999999Z") == ["c2"]
+
+
+def test_dates_and_instants_mix(tmp_path) -> None:
+    assert sessions_between(tmp_path, "2026-01-11", "2026-01-11T23:59:59.999999Z") == ["c2"]
+    assert sessions_between(tmp_path, "2026-01-11", "2026-01-11T23:59:59.999998Z") == []
+    assert sessions_between(tmp_path, "2026-01-11T00:00:00+08:00", "2026-01-11") == ["c2"]
+    assert sessions_between(tmp_path, "2026-01-10T08:00:00Z", "2026-01-10") == ["c1"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["2026-01-11T10:00:00", "2026-01-11 10:00:00Z", "2026-01-11T25:00:00Z", "2026-01-11T10:00+0800",
+     "2026-01-11T10:00:00.1234567Z", "2026-01-11T", "tomorrow", "2026-01-11T10:00:00+08"],
+)
+def test_a_malformed_instant_is_rejected(client, value: str) -> None:
+    for name in ("from", "to"):
+        response = client.get("/api/analytics/export", params={name: value})
+        assert response.status_code == 422, (name, value)
+        assert "ISO-8601" in response.json()["error"]
+
+
+def test_the_route_accepts_instants_and_orders_them(client) -> None:
+    ok = client.get("/api/analytics/export", params={"from": "2026-02-01T08:00:00+08:00", "to": "2026-02-01T08:00:00+08:00"})
+    assert ok.status_code == 200 and {row[2] for row in parse(ok.text)[1:]} == {"s3"}
+    reversed_window = client.get(
+        "/api/analytics/export", params={"from": "2026-02-01T00:00:00.000001Z", "to": "2026-02-01T00:00:00Z"}
+    )
+    assert reversed_window.status_code == 422
 
 
 # ------------------------------------------------------------------------- wide
@@ -492,6 +556,54 @@ def test_a_criterion_with_no_label_still_gets_its_own_column(tmp_path) -> None:
 # ----------------------------------------------------- streaming, cap, SQL shape
 
 
+def test_both_wide_passes_read_one_snapshot(tmp_path, monkeypatch) -> None:
+    """A result committed after the header is written must not appear — it would
+    put a row under a column the header does not have."""
+
+    async def _run() -> list[list[str]]:
+        database, service = make_service(tmp_path)
+        await seed_exam(database)
+        try:
+            monkeypatch.setattr(assessment_service, "EXPORT_CHUNK_CHARS", 1)
+            stream = await service.open_results_export(ResultsExportFilter(), ExportLayout.WIDE)
+            first = await anext(stream)  # BOM + header: the column-learning pass is done
+            await add_result(
+                database, assessment_id="late", student="Zed", result_type="content",
+                created="2026-03-01 09:00:00", total=1, maximum=1, criteria=[crit("A criterion nobody had", 1)],
+            )
+            rest = "".join([chunk async for chunk in stream])
+            return parse(first + rest)
+        finally:
+            await database.shutdown()
+
+    table = asyncio.run(_run())
+    assert "Zed" not in column(table, "Student")
+    assert not any("nobody had" in cell for cell in table[0])
+    assert {len(row) for row in table} == {len(table[0])}
+    assert len(table) == 8
+
+
+def test_a_read_snapshot_does_not_see_a_later_commit(tmp_path) -> None:
+    async def _run() -> tuple[int, int]:
+        database, service = make_service(tmp_path)
+        await seed_exam(database)
+        repository = service.repository
+        try:
+            async with repository.read_snapshot() as snapshot:
+                before = [row async for row in repository.stream_criterion_export_rows(ResultsExportFilter(), snapshot=snapshot)]
+                await add_result(database, assessment_id="late", student="Zed", result_type="content",
+                                 created="2026-03-01 09:00:00", criteria=[crit("x", 1)])
+                during = [row async for row in repository.stream_criterion_export_rows(ResultsExportFilter(), snapshot=snapshot)]
+            after = [row async for row in repository.stream_criterion_export_rows(ResultsExportFilter())]
+            assert len(before) == len(during)
+            return len(during), len(after)
+        finally:
+            await database.shutdown()
+
+    during, after = asyncio.run(_run())
+    assert after == during + 1
+
+
 def test_the_export_is_streamed_in_several_chunks(tmp_path, monkeypatch) -> None:
     async def _run() -> tuple[list[str], str]:
         database, service = make_service(tmp_path)
@@ -554,7 +666,7 @@ def test_the_export_never_selects_a_payload_column(tmp_path) -> None:
             event.listen(database.engine.sync_engine, "before_cursor_execute",
                          lambda conn, cursor, statement, *args: statements.append(statement))
             for layout in ExportLayout:
-                await export_text(service, layout, root_session_ids=("rec1",), date_from=date(2026, 1, 1))
+                await export_text(service, layout, root_session_ids=("rec1",), created_from=parse_range_start("2026-01-01"))
             return statements
         finally:
             await database.shutdown()
