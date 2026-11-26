@@ -30,7 +30,7 @@ export function SessionCardMedia({ entry, uploading = false, onWatch, onWatchInt
 
   const chip = CHIP_TONE[media.state] ? media : null;
   return (
-    <div className="flex shrink-0 flex-col gap-2 sm:w-40">
+    <div className="flex w-28 shrink-0 flex-col gap-2 sm:w-40">
       <div className="relative aspect-video w-full overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
         {posterSrc && !posterFailed ? (
           <img

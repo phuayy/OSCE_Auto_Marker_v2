@@ -15,7 +15,7 @@ import { creatorName } from '@/lib/provenance';
 // entry, the stage to gauge (the in-browser upload's when this tab is still
 // sending bytes, else the server-derived one — resolved by the caller, which
 // owns both sources), the rename draft and the delete state, plus the action
-// buttons as a node.
+// buttons and the video's thumbnail as nodes.
 //
 // The row is three regions side by side — leading, body, trailing — so a
 // feature that belongs at an edge (a selection checkbox, a thumbnail) is a new
@@ -33,6 +33,7 @@ export function SessionCard({
   deleting,
   onDelete,
   actions,
+  media,
 }) {
   const failed = Boolean(stage?.failed);
 
@@ -40,7 +41,8 @@ export function SessionCard({
     <li className="rounded-xl border border-slate-200 bg-slate-50 p-3">
       <div className="flex items-start justify-between gap-2">
         {/* Leading region: a selection checkbox goes here, before the body. */}
-        {/* Media region: a thumbnail goes here, between leading and body. */}
+        {/* Media region: the thumbnail, length and Watch button (a node from the caller). */}
+        {media}
         <div className="min-w-0 flex-1">
           <input
             type="text"

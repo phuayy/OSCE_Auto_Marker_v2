@@ -59,6 +59,7 @@ import {
   seedTimelineFromClips,
 } from '@/lib/timelineSeed';
 import { SessionCard } from '@/dashboard/SessionCard.jsx';
+import { SessionCardMedia } from '@/components/video/SessionCardMedia.jsx';
 import { SessionCardActions } from '@/dashboard/SessionCardActions.jsx';
 import { workspaceBelongsToUpload } from '@/lib/uploadCompletion';
 import { indexClipAssessments } from '@/lib/clipAssessments';
@@ -98,6 +99,8 @@ const LONG_VIDEO_THRESHOLD_SECONDS = 300;
 // cohort charts) is its own chunk, warmed the moment a load starts rather than
 // when it renders. Same contract AppShell uses for Settings/Analytics/Rubric.
 const SessionWorkspace = lazyComponent(() => import('@/workspace/SessionWorkspace.jsx'));
+// A read-only look at a video whose session is still processing; loaded by the Watch click.
+const WatchVideoDialog = lazyComponent(() => import('@/components/video/WatchVideoDialog.jsx'));
 
 // How often the open workspace re-reads a session while its clip export runs.
 // Faster than the in-flight heartbeat below because the user is watching this one
@@ -214,6 +217,8 @@ export default function OSCEAiMarkerMockup({
   const connection = useConnectionStatus();
   const [sessionNameDrafts, setSessionNameDrafts] = useState({});
   const [renamingSessionId, setRenamingSessionId] = useState(null);
+  // Which session's video the Watch dialog is showing (read from the index, so it follows the row).
+  const [watchingSessionId, setWatchingSessionId] = useState(null);
   const [deletingSessionId, setDeletingSessionId] = useState(null);
   const [rerunningSessionId, setRerunningSessionId] = useState(null);
   const [startingSessionId, setStartingSessionId] = useState(null);
@@ -334,6 +339,11 @@ export default function OSCEAiMarkerMockup({
   const videoClips = useMemo(() => {
     return Array.isArray(session?.outputs?.videoClips) ? session.outputs.videoClips : [];
   }, [session]);
+
+  const watchedEntry = useMemo(
+    () => (watchingSessionId ? sessionIndex.find((entry) => entry.id === watchingSessionId) || null : null),
+    [sessionIndex, watchingSessionId],
+  );
 
   const visibleSessions = useMemo(
     () => sessionIndex.filter((entry) => !entry.parentSessionId),
@@ -2578,6 +2588,14 @@ export default function OSCEAiMarkerMockup({
                         mayMutate={canMutateSession(authUser, sessionEntry)}
                         deleting={deletingSessionId === sessionEntry.id}
                         onDelete={() => deleteSession(sessionEntry.id)}
+                        media={
+                          <SessionCardMedia
+                            entry={sessionEntry}
+                            uploading={uploadTracker.isActive(sessionEntry.id)}
+                            onWatch={() => setWatchingSessionId(sessionEntry.id)}
+                            onWatchIntent={() => preloadComponent(WatchVideoDialog)}
+                          />
+                        }
                         actions={
                           <SessionCardActions
                             entry={sessionEntry}
@@ -2849,6 +2867,20 @@ export default function OSCEAiMarkerMockup({
               </Card>
           </Modal>
         )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {watchedEntry ? (
+          <LazyBoundary fallback={null}>
+            <WatchVideoDialog
+              key={watchedEntry.id}
+              sessionId={watchedEntry.id}
+              sessionName={watchedEntry.name}
+              entry={watchedEntry}
+              onClose={() => setWatchingSessionId(null)}
+            />
+          </LazyBoundary>
+        ) : null}
       </AnimatePresence>
 
       <AnimatePresence>
