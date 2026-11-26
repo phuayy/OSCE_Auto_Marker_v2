@@ -127,6 +127,20 @@ class ScoringBranch(StrEnum):
     COMMUNICATION = "communication"
 
 
+class RescoreCode(StrEnum):
+    """Why one session of a re-score did or did not get queued: the stable
+    ``code`` on each ``results[]`` entry of ``POST /sessions/{id}/clips/rescore``,
+    which the browser summarises by instead of reading the message."""
+
+    OK = "ok"
+    IN_FLIGHT = "in_flight"
+    NO_TRANSCRIPT = "no_transcript"
+    NOT_ASSESSED = "not_assessed"
+    NOT_FOUND = "not_found"
+    NOT_RESCORABLE = "not_rescorable"
+    FAILED = "failed"
+
+
 class ScoreDisplay(StrEnum):
     """How the screens present a score: a share of the maximum, or the points
     themselves. A per-account display preference (see CLAUDE.md "Two-tier

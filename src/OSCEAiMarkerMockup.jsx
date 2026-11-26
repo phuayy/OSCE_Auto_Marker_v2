@@ -1146,14 +1146,20 @@ export default function OSCEAiMarkerMockup({
   }
 
   // The server accepted a re-score. A single session is now in flight, which
-  // the workspace cannot show, so an open one hands back to the list where its
-  // card gauges the run; a clip batch stays on the clip list, whose rows follow
-  // the session index.
+  // the workspace cannot show: an opened clip child hands back to its
+  // recording's clip list (restoreParentSession: the in-memory snapshot, else a
+  // reopen by id), where the clip's row gauges the run; any other opened
+  // session goes to the list, where its card does. A clip batch stays on the
+  // clip list, whose rows follow the session index.
   function finishRescore(response) {
-    const wasWorkspace = showWorkspace && !rescoreTarget?.clips;
+    const leavesWorkspace = showWorkspace && !rescoreTarget?.clips;
     setRescoreTarget(null);
-    if (wasWorkspace) {
-      goHome();
+    if (leavesWorkspace) {
+      if (session?.parentSessionId) {
+        restoreParentSession();
+      } else {
+        goHome();
+      }
     }
     setNotice(describeRescoreResult(response));
     refreshSessionIndex({ silent: true });

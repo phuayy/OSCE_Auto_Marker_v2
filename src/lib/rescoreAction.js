@@ -9,7 +9,7 @@
 //
 // Pure: no React, no fetch (see test/rescoreAction.test.mjs).
 
-import { PipelineStep, ScoringBranch, SessionStatus, StepStatus } from './enums.js';
+import { PipelineStep, RescoreCode, ScoringBranch, SessionStatus, StepStatus } from './enums.js';
 import { isLongEntry } from './rerunAction.js';
 
 const RESCORABLE_STATUSES = new Set([SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED]);
@@ -80,15 +80,13 @@ export function rescorePayload(choice) {
   return branches.length > 0 ? { branches } : null;
 }
 
-// Words for why the server skipped a clip, from its own message. Anything it
-// does not recognise is counted but not explained.
-function skipReason(result) {
-  const message = String(result?.error || '').toLowerCase();
-  if (message.includes('transcript')) return 'no transcript';
-  if (message.includes('not been assessed')) return 'not assessed yet';
-  if (message.includes('already being processed')) return 'still processing';
-  return null;
-}
+// Words for why a clip was skipped, by the server's stable `code`. A code this
+// build does not know is still counted, just not explained.
+const SKIP_REASONS = Object.freeze({
+  [RescoreCode.NO_TRANSCRIPT]: 'no transcript',
+  [RescoreCode.NOT_ASSESSED]: 'not assessed yet',
+  [RescoreCode.IN_FLIGHT]: 'still processing',
+});
 
 /**
  * The notice for an answer: a single session's `{ session, job }` or a clip
@@ -105,7 +103,7 @@ export function describeRescoreResult(response) {
   }
   const parts = [`${queued} re-scoring`];
   if (skipped.length > 0) {
-    const reasons = [...new Set(skipped.map(skipReason).filter(Boolean))];
+    const reasons = [...new Set(skipped.map((result) => SKIP_REASONS[result.code]).filter(Boolean))];
     parts.push(`${skipped.length} skipped${reasons.length > 0 ? `: ${reasons.join(', ')}` : ''}`);
   }
   return parts.join(', ');

@@ -10,7 +10,7 @@ from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.logging_utils import log_context
 from app.core.utils import utc_now_iso
-from app.domain.enums import ClipKind, OutputKey, PipelineStep, ScoringBranch, TaskType, Workflow
+from app.domain.enums import ClipKind, OutputKey, PipelineStep, RescoreCode, ScoringBranch, TaskType, Workflow
 from app.domain.outputs import OUTPUT_SPECS
 from app.domain.session_lifecycle import sync_current_step
 from app.domain.sessions import (
@@ -65,6 +65,22 @@ _BRANCH_OUTPUT_KEYS = {
     ScoringBranch.CONTENT: OutputKey.SCORES,
     ScoringBranch.COMMUNICATION: OutputKey.COMMUNICATION_SCORES,
 }
+
+
+class SessionInFlightError(AppError):
+    """409: the session is already queued or running, so nothing may claim it."""
+
+    def __init__(self) -> None:
+        super().__init__("This session is already being processed.", status_code=409)
+
+
+class RescoreRefused(AppError):
+    """A re-score the session cannot take, with the stable ``code`` a batch
+    reports for it (see :class:`RescoreCode`)."""
+
+    def __init__(self, message: str, code: RescoreCode, status_code: int = 409) -> None:
+        super().__init__(message, status_code=status_code, retryable=False)
+        self.code = code
 
 
 class SessionMaintenanceService:
@@ -412,7 +428,7 @@ class SessionMaintenanceService:
 
         def admit(current: dict[str, Any]) -> Any:
             if str(current.get("status") or "").lower() in IN_FLIGHT_STATUSES:
-                raise AppError("This session is already being processed.", status_code=409)
+                raise SessionInFlightError()
             if guard_clip_export and clip_list_busy(current, settled_export=settled_export):
                 raise AppError(
                     "A clip export is already running for this session. Wait for it to finish before re-splitting.",
@@ -660,9 +676,14 @@ class SessionMaintenanceService:
         destructive cleanup, then enqueue. The assessment rows are dropped
         *before* any file is deleted, unlike ``rerun_session`` which deletes
         files first: the persistence step re-records every result from the
-        outputs, so a surviving row would be a stale second source of truth, but
-        a failed delete here still leaves the sheets on disk (the session is
-        released as failed and may simply be re-scored).
+        outputs, so a surviving row would be a stale second source of truth.
+        What each failure leaves — always a ``failed`` session that Re-score or
+        Re-run can pick up, never a job:
+
+        * row delete fails: rows and every sheet still on disk (only the
+          session's references to the chosen outputs are gone);
+        * a sheet survives deletion (verified, not assumed): rows gone, the
+          sheets that could be removed are gone; the 500 says to try again.
         """
         if not branches:
             raise AppError("Choose at least one part of the marking to redo.", status_code=422, retryable=False)
@@ -699,7 +720,20 @@ class SessionMaintenanceService:
         except AppError as error:
             await self._release_admission(session_id, error.message)
             raise
-        self._delete_branch_artifacts(session_id, selected, recorded_paths)
+        survivors = self._delete_branch_artifacts(session_id, selected, recorded_paths)
+        if survivors:
+            # A sheet that outlives its deletion (a locked file, a permission)
+            # would be adopted by the pipeline's output discovery and the
+            # "re-score" would quietly re-record the old marks. Never queue it.
+            logger.error(
+                "Re-score of session %s could not remove: %s",
+                session_id,
+                ", ".join(str(path) for path in survivors),
+                extra=log_context(session_id, "session_rescore"),
+            )
+            message = "Could not clear this session's previous marks; try again."
+            await self._release_admission(session_id, message)
+            raise AppError(message, status_code=500, retryable=True)
         return await self._enqueue_and_attach(
             session_id,
             TaskType.PROCESS_SESSION,
@@ -737,52 +771,59 @@ class SessionMaintenanceService:
             else [clip_id for clip_id, clip in by_id.items() if str(clip.get("kind") or "").lower() != ClipKind.INTERMISSION]
         )
         results: list[dict[str, Any]] = []
+
+        def skipped(clip_id: str, code: RescoreCode, message: str, status_code: int, child_id: str | None = None):
+            entry = {"clipId": clip_id, "ok": False, "code": code, "error": message, "statusCode": status_code}
+            if child_id is not None:
+                entry["sessionId"] = child_id
+            results.append(entry)
+
         for clip_id in targets:
             if clip_id not in by_id:
-                results.append({"clipId": clip_id, "ok": False, "error": "Clip not found for this session.", "statusCode": 404})
+                skipped(clip_id, RescoreCode.NOT_FOUND, "Clip not found for this session.", 404)
                 continue
             children = await self.sessions.repository.find_clip_children(parent_id, clip_id)
             if not children:
-                results.append(
-                    {"clipId": clip_id, "ok": False, "error": "This clip has not been assessed yet.", "statusCode": 409},
-                )
+                skipped(clip_id, RescoreCode.NOT_ASSESSED, "This clip has not been assessed yet.", 409)
                 continue
             child_id = str(children[0]["id"])
             try:
                 outcome = await self.rescore_session(child_id, branches)
+            except RescoreRefused as error:
+                skipped(clip_id, error.code, error.message, error.status_code, child_id)
+                continue
+            except SessionInFlightError as error:
+                skipped(clip_id, RescoreCode.IN_FLIGHT, error.message, error.status_code, child_id)
+                continue
             except AppError as error:
-                results.append(
-                    {"clipId": clip_id, "sessionId": child_id, "ok": False, "error": error.message, "statusCode": error.status_code},
-                )
+                skipped(clip_id, RescoreCode.FAILED, error.message, error.status_code, child_id)
                 continue
             except FileNotFoundError:
-                results.append(
-                    {"clipId": clip_id, "sessionId": child_id, "ok": False, "error": "Session not found.", "statusCode": 404},
-                )
+                skipped(clip_id, RescoreCode.NOT_FOUND, "Session not found.", 404, child_id)
                 continue
-            results.append({"clipId": clip_id, "sessionId": child_id, "ok": True, "job": outcome["job"]})
+            results.append(
+                {"clipId": clip_id, "sessionId": child_id, "ok": True, "code": RescoreCode.OK, "job": outcome["job"]},
+            )
         return {"results": results}
 
     def _require_rescorable(self, session: dict[str, Any]) -> None:
         """Refuse (409) a session a re-score cannot work on. Runs inside the
         admission mutator, on the freshly read row."""
         if self._task_type_for(session) == TaskType.AUTO_CROP:
-            raise AppError(
+            raise RescoreRefused(
                 "A long recording is not scored itself. Re-score its clips from the Clip Assessments card instead.",
-                status_code=409,
-                retryable=False,
+                RescoreCode.NOT_RESCORABLE,
             )
         outputs = session.get("outputs")
         if existing_file(outputs.get(OutputKey.TRANSCRIPT) if isinstance(outputs, dict) else None) is None:
-            raise AppError(
+            raise RescoreRefused(
                 "This session has no transcript to re-score from. Use Re-run to transcribe and mark it again.",
-                status_code=409,
-                retryable=False,
+                RescoreCode.NO_TRANSCRIPT,
             )
 
     def _delete_branch_artifacts(
         self, session_id: str, branches: list[ScoringBranch], recorded_paths: dict[str, Any],
-    ) -> None:
+    ) -> list[Path]:
         """Remove the chosen branches' sheets and nothing else: never the
         transcript, WhisperX directory, audio or the other branch.
 
@@ -790,10 +831,13 @@ class SessionMaintenanceService:
         crash-checkpoint sidecar beside each: a sheet on disk but unrecorded is
         adopted by the pipeline's output discovery, which would defeat the
         re-score. Content also owns ``scores/panel/<id>/``. Best-effort like
-        every file removal here.
+        every file removal here, but the caller is told what survived: a sheet
+        left behind must stop the re-score, so the return value is the paths
+        still present afterwards.
         """
         if not SessionArtifacts.valid_id(session_id):
-            return
+            return []
+        doomed: list[Path] = []
         paths = self.settings.paths
         conventional = {
             OutputKey.SCORES: paths.output_scores_dir / f"{session_id}.json",
@@ -802,10 +846,15 @@ class SessionMaintenanceService:
         for branch in branches:
             key = _BRANCH_OUTPUT_KEYS[branch]
             for path_value in {recorded_paths.get(key), str(conventional[key])}:
-                self._unlink(path_value)
-                self._unlink(self._checkpoint_sidecar(path_value))
+                for target in (path_value, self._checkpoint_sidecar(path_value)):
+                    self._unlink(target)
+                    if target:
+                        doomed.append(Path(str(target)))
         if ScoringBranch.CONTENT in branches:
-            self._rmtree(paths.output_scores_panel_dir / session_id)
+            panel_dir = paths.output_scores_panel_dir / session_id
+            self._rmtree(panel_dir)
+            doomed.append(panel_dir)
+        return [path for path in doomed if path.exists() or path.is_symlink()]
 
     def _delete_artifacts(
         self,

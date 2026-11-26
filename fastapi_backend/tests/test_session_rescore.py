@@ -18,7 +18,9 @@ import pytest
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.domain.enums import ScoringBranch
+from app.domain.enums import RescoreCode
 from app.services.container import create_container
+from app.services.session_maintenance_service import SessionMaintenanceService
 from tests.fixtures.scoring_doubles import ContentMarkingSeam
 from tests.test_routes import build_test_client
 from tests.test_session_ownership import _owned_session, _second_marker_token
@@ -441,6 +443,52 @@ def test_an_assessment_row_delete_failure_releases_the_admission_and_keeps_the_s
     run(_run)
 
 
+def test_a_sheet_that_survives_deletion_stops_the_rescore_instead_of_being_adopted(tmp_path, monkeypatch) -> None:
+    async def _run() -> None:
+        container = await _container(tmp_path)
+        _, files = await _scored_session(container)
+        real_unlink = SessionMaintenanceService._unlink
+
+        def _locked(path_value) -> None:  # a locked file: the unlink silently fails
+            if path_value and Path(str(path_value)) == files.communication:
+                return
+            real_unlink(path_value)
+
+        monkeypatch.setattr(SessionMaintenanceService, "_unlink", staticmethod(_locked))
+        with pytest.raises(AppError) as failed:
+            await container.session_maintenance.rescore_session("s1", BOTH)
+        assert failed.value.status_code == 500 and failed.value.retryable
+        assert failed.value.message == "Could not clear this session's previous marks; try again."
+
+        assert (await container.sessions.read("s1"))["status"] == "failed"
+        assert files.communication.exists()
+        assert await container.jobs.list_jobs("s1") == []
+        assert await container.assessments.list_result_rows() == []  # rows go first, by design
+
+        monkeypatch.undo()
+        retry = await container.session_maintenance.rescore_session("s1", BOTH)
+        assert retry["session"]["status"] == "queued"
+        assert not files.communication.exists()
+        await container.shutdown()
+
+    run(_run)
+
+
+def test_a_surviving_checkpoint_or_panel_directory_also_stops_it(tmp_path, monkeypatch) -> None:
+    async def _run() -> None:
+        container = await _container(tmp_path)
+        _, files = await _scored_session(container)
+        monkeypatch.setattr(SessionMaintenanceService, "_rmtree", staticmethod(lambda _path: None))
+        with pytest.raises(AppError) as failed:
+            await container.session_maintenance.rescore_session("s1", CONTENT)
+        assert failed.value.status_code == 500
+        assert files.panel_dir.exists()
+        assert await container.jobs.list_jobs("s1") == []
+        await container.shutdown()
+
+    run(_run)
+
+
 # --- the pipeline reuses what was kept ---------------------------------------------
 
 
@@ -557,8 +605,13 @@ def test_rescore_clips_reports_each_child_and_never_fails_the_batch(tmp_path) ->
         assert by_clip["a"]["job"]["taskType"] == "process_session"
         assert (by_clip["b"]["ok"], by_clip["b"]["statusCode"]) == (False, 409)
         assert (by_clip["c"]["ok"], by_clip["c"]["statusCode"]) == (False, 409)
-        assert "transcript" in by_clip["c"]["error"].lower()
         assert (by_clip["d"]["ok"], by_clip["d"]["statusCode"]) == (False, 409)
+        assert {clip_id: item["code"] for clip_id, item in by_clip.items()} == {
+            "a": RescoreCode.OK,
+            "b": RescoreCode.IN_FLIGHT,
+            "c": RescoreCode.NO_TRANSCRIPT,
+            "d": RescoreCode.NOT_ASSESSED,
+        }
         assert not ok_files.content.exists()
         assert no_transcript.content.exists()
         await container.shutdown()
@@ -577,6 +630,7 @@ def test_rescore_clips_clip_ids_filter_and_unknown_ids(tmp_path) -> None:
 
         assert [(item["clipId"], item["ok"]) for item in outcome["results"]] == [("b", True), ("nope", False)]
         assert outcome["results"][1]["statusCode"] == 404
+        assert [item["code"] for item in outcome["results"]] == [RescoreCode.OK, RescoreCode.NOT_FOUND]
         assert not b_files.content.exists()
         assert (await container.sessions.read("child-a"))["status"] == "completed"
         await container.shutdown()

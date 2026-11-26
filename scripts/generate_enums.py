@@ -15,6 +15,7 @@ from app.domain.enums import (
     MediaPreparationStatus,
     OutputKey,
     PipelineStep,
+    RescoreCode,
     ScoreDisplay,
     ScoringBranch,
     SegmentationMethod,
@@ -39,7 +40,7 @@ def render() -> str:
         SessionStatus, PipelineStep, StepStatus, UploadStatus, ClipExportStatus, ClipExportPhase, ClipExportScope,
         MediaPreparationStatus,
         JobStatus, TaskType, Workflow, SegmentationMethod, ClipKind, UploadFileKind, OutputKey,
-        MarkingMode, TieBreak, UserRole, UserStatus, ScoreDisplay, ScoringBranch,
+        MarkingMode, TieBreak, UserRole, UserStatus, ScoreDisplay, ScoringBranch, RescoreCode,
         RubricVersionStatus, RubricChangeKind,
     ):
         values = {item.name: item.value for item in enum}
