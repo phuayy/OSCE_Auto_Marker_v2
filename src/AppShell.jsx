@@ -209,7 +209,7 @@ export default function AppShell() {
           transition={{ duration: 0.25 }}
         >
           <LazyBoundary fallback={<RubricSkeleton onBack={() => navigate({ view: 'dashboard' })} />}>
-            <CommunicationRubricPanel onBack={() => navigate({ view: 'dashboard' })} />
+            <CommunicationRubricPanel onBack={() => navigate({ view: 'dashboard' })} isAdmin={isAdmin} />
           </LazyBoundary>
         </motion.div>
       ) : view === 'analytics' ? (

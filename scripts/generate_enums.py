@@ -23,6 +23,7 @@ from app.domain.enums import (
     UploadStatus,
     Workflow,
 )
+from app.domain.communication_rubric import RubricChangeKind, RubricVersionStatus
 from app.domain.jobs import JobStatus
 from app.domain.sessions import IN_FLIGHT_STATUSES, SessionStatus
 from app.domain.users import UserRole, UserStatus
@@ -38,6 +39,7 @@ def render() -> str:
         MediaPreparationStatus,
         JobStatus, TaskType, Workflow, SegmentationMethod, ClipKind, UploadFileKind, OutputKey,
         MarkingMode, TieBreak, UserRole, UserStatus, ScoreDisplay,
+        RubricVersionStatus, RubricChangeKind,
     ):
         values = {item.name: item.value for item in enum}
         definitions.append(

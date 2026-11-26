@@ -5,12 +5,9 @@ This scorer takes the parsed communication rubric JSON (produced by
 scripts/parse_communication_rubric.py) and asks the model to assign each
 criterion one of {"None", "Some", "Most", "All"} based on transcript evidence.
 
-The model never sees raw point values. The mapping
-    All  = 3 marks
-    Most = 2 marks
-    Some = 1 mark
-    None = 0 marks
-is applied server-side after the model returns its qualitative label, so the
+The model never sees raw point values. The points each label is worth come
+from the rubric's ``scoring_scale`` (default All = 3, Most = 2, Some = 1,
+None = 0 marks) and are applied server-side after the model returns its qualitative label, so the
 scoring stays loyal to the rubric's intent and so future criteria (e.g. #2
 using openSMILE prosody features) can be plugged into the same pipeline.
 """
@@ -18,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from datetime import datetime
 from functools import partial
@@ -70,13 +66,30 @@ MAX_OPEN_SMILE_CONTEXT_CHARS = 24_000
 # See nvidia_osce_assessor.py — same defensive minimum, same reasoning limits.
 MIN_VALID_CONTENT_CHARS = 40
 
-SCORE_LABEL_TO_POINTS = {
-    "All": 3,
-    "Most": 2,
-    "Some": 1,
-    "None": 0,
-}
-ALLOWED_SCORE_LABELS = list(SCORE_LABEL_TO_POINTS.keys())
+from app.domain.communication_rubric import (  # noqa: E402
+    DEFAULT_SCORING_SCALE,
+    SCORE_LABELS,
+    RubricValidationError,
+    default_pass_threshold,
+    normalize_scoring_scale,
+    points_for_label,
+)
+
+# Default scale only; a rubric's own ``scoring_scale`` wins (rubric_scoring_scale).
+SCORE_LABEL_TO_POINTS = dict(DEFAULT_SCORING_SCALE)
+ALLOWED_SCORE_LABELS = list(SCORE_LABELS)
+
+
+def rubric_scoring_scale(rubric: dict[str, Any]) -> dict[str, int]:
+    """The rubric's points per label; an invalid one falls back to the default."""
+    try:
+        return normalize_scoring_scale(rubric.get("scoring_scale"))
+    except RubricValidationError as exc:
+        print(
+            f"WARNING: rubric scoring_scale is invalid ({exc}); using the default scale.",
+            file=sys.stderr,
+        )
+        return dict(DEFAULT_SCORING_SCALE)
 
 # Bump on any change to build_system_prompt / build_user_prompt / build_repair_prompt
 # wording. Stamped on every sheet, same contract as content_marking.PROMPT_VERSION:
@@ -521,8 +534,11 @@ def validate_output(
 
     rubric_criteria = rubric.get("criteria", [])
     expected_count = len(rubric_criteria)
-    max_score = int(rubric.get("max_score", expected_count * 3))
-    pass_threshold = int(rubric.get("pass_threshold", math.ceil(max_score / 2)))
+    scale = rubric_scoring_scale(rubric)
+    max_score = int(rubric.get("max_score", expected_count * scale["All"]))
+    pass_threshold = int(
+        rubric.get("pass_threshold", default_pass_threshold(expected_count, max_score))
+    )
 
     incoming_criteria = payload.get("criteria")
     if not isinstance(incoming_criteria, list) or not incoming_criteria:
@@ -584,7 +600,7 @@ def validate_output(
                     str(item).strip() for item in indicators_not_observable if str(item).strip()
                 ],
                 "score_label": score_label,
-                "points": SCORE_LABEL_TO_POINTS[score_label],
+                "points": points_for_label(scale, score_label),
                 "evidence": evidence,
                 "timestamp": timestamp,
             }
@@ -602,11 +618,20 @@ def validate_output(
         "session_id": str(payload.get("session_id", "")).strip(),
         "rubric_title": str(rubric.get("title", "Communication Rubric")).strip(),
         "rubric_schema": str(rubric.get("schema", "communication-rubric-v1")).strip(),
-        "scoring_scale": SCORE_LABEL_TO_POINTS,
+        "scoring_scale": dict(scale),
         "criteria": normalized_criteria,
         "overall_summary": overall_summary,
         "scoring_summary": summary,
     }
+    # How the rubric itself was extracted (deterministic parse or LLM fallback).
+    if rubric.get("extraction"):
+        normalized_payload["rubric_extraction"] = rubric["extraction"]
+    # Which version of the rubric these marks were computed against
+    # ({"id", "number"}), so a sheet can be traced after the rubric changes.
+    if isinstance(rubric.get("rubric_version"), dict):
+        normalized_payload["rubric_version"] = dict(rubric["rubric_version"])
+    if rubric.get("rubric_revision"):
+        normalized_payload["rubric_revision"] = str(rubric["rubric_revision"])
 
     return normalized_payload, issues
 

@@ -29,6 +29,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 import content_marking as cm  # noqa: E402
 import nemotron_transcript_preprocessor as preprocessor  # noqa: E402
 import nvidia_osce_communication as comm  # noqa: E402
+import rubric_llm_fallback as rubric_fallback  # noqa: E402
 
 _PLACEHOLDER_RUBRIC_CRITERIA = [{"label": "<rubric criterion label>", "is_critical": False}]
 _PLACEHOLDER_COMMUNICATION_RUBRIC = {
@@ -130,17 +131,35 @@ def _preprocessor_entries() -> list[dict[str, str]]:
     ]
 
 
+def _rubric_extraction_entries() -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    for kind in ("content", "communication"):
+        messages = rubric_fallback.build_extraction_messages(kind, "<document text>")
+        by_role = {message["role"]: message["content"] for message in messages}
+        for role in ("system", "user"):
+            entries.append(
+                {
+                    "key": f"rubric_extraction.{kind}.{role}",
+                    "version": rubric_fallback.RUBRIC_EXTRACTION_PROMPT_VERSION,
+                    "text": by_role[role],
+                }
+            )
+    return entries
+
+
 def build_catalog() -> list[dict[str, str]]:
     entries = [
         *_content_marking_entries(),
         *_communication_entries(),
         *_preprocessor_entries(),
+        *_rubric_extraction_entries(),
     ]
     for entry in entries:
         entry["sourceScript"] = {
             "content_marking": "content_marking.py",
             "communication": "nvidia_osce_communication.py",
             "preprocessor": "nemotron_transcript_preprocessor.py",
+            "rubric_extraction": "rubric_llm_fallback.py",
         }[entry["key"].split(".", 1)[0]]
     return entries
 

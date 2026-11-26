@@ -39,8 +39,8 @@ def test_catalog_has_one_entry_per_declared_version_pair() -> None:
     entries = _load_catalog()
     by_key = {entry["key"]: entry for entry in entries}
 
-    assert len(entries) == 11
-    assert len(by_key) == 11  # every key unique
+    assert len(entries) == 15
+    assert len(by_key) == 15  # every key unique
 
     content_marking_keys = {
         "content_marking.system",
@@ -69,6 +69,14 @@ def test_catalog_has_one_entry_per_declared_version_pair() -> None:
     assert by_key["preprocessor.system"]["sourceScript"] == "nemotron_transcript_preprocessor.py"
     assert by_key["preprocessor.system"]["text"] == preprocessor["SYSTEM_PROMPT"]
 
+    rubric_fallback = runpy.run_path(str(SCRIPTS / "rubric_llm_fallback.py"), run_name="rubric_llm_fallback")
+    for kind in ("content", "communication"):
+        for role in ("system", "user"):
+            entry = by_key[f"rubric_extraction.{kind}.{role}"]
+            assert entry["version"] == rubric_fallback["RUBRIC_EXTRACTION_PROMPT_VERSION"]
+            assert entry["sourceScript"] == "rubric_llm_fallback.py"
+            assert "<document text>" in entry["text"] or role == "system"
+
     for entry in entries:
         assert isinstance(entry["text"], str) and entry["text"]
 
@@ -85,4 +93,4 @@ def test_main_prints_one_line_of_valid_json_to_stdout(capsys) -> None:
     lines = [line for line in captured.out.splitlines() if line.strip()]
     assert len(lines) == 1
     payload = json.loads(lines[0])
-    assert len(payload["entries"]) == 11
+    assert len(payload["entries"]) == 15

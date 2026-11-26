@@ -36,6 +36,7 @@ import {
   buildContentCriteria,
   buildKeepStartStop,
   buildScoringSummary,
+  communicationScale,
 } from '@/lib/resultsModel';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -58,6 +59,8 @@ import {
 } from 'lucide-react';
 import LongVideoSummaryCharts from '@/LongVideoSummaryCharts.jsx';
 import { PanelMarkingSummary, PanelVotes } from '@/PanelMarkingSummary.jsx';
+import { describeRubricExtraction } from '@/lib/rubricExtraction';
+import { sheetRubricVersionLabel } from '@/lib/rubricVersions';
 import CommunicationScoresTab from '@/workspace/CommunicationScoresTab.jsx';
 import ManualTimelineEditor from '@/workspace/ManualTimelineEditor.jsx';
 import StudentClipSplitterCard from '@/workspace/StudentClipSplitterCard.jsx';
@@ -166,6 +169,10 @@ export default function SessionWorkspace({
   const audioProfFeatures = audioProfPayload?.audio_features || null;
   const audioProfWarnings = Array.isArray(audioProfPayload?.warnings) ? audioProfPayload.warnings : [];
 
+  const contentExtractionNotice = useMemo(
+    () => describeRubricExtraction(scoreReport?.rubric_extraction),
+    [scoreReport],
+  );
   const aiCriteria = useMemo(() => buildContentCriteria(scoreReport), [scoreReport]);
 
   // How a panel marked this sheet, or null for a single-model sheet.
@@ -1036,6 +1043,14 @@ export default function SessionWorkspace({
                           </Button>
                         </div>
 
+                        {contentExtractionNotice ? (
+                          <div role="note" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">
+                            <span className="font-semibold">{contentExtractionNotice.title}.</span>{' '}
+                            This case study&apos;s rubric was read by {contentExtractionNotice.model || 'an AI model'} because
+                            the standard parser could not. Check the criteria against the case-study PDF before relying on the marks.
+                          </div>
+                        ) : null}
+
                         {!scoringSummary && session?.status === SessionStatus.COMPLETED && !aiCriteria.length ? (
                           <div className="rounded-xl border border-amber-200 bg-gradient-to-br from-amber-50 to-white p-4 text-sm leading-relaxed text-amber-950 shadow-sm">
                             <p className="font-semibold text-amber-900">No rubric JSON attached to this session.</p>
@@ -1155,10 +1170,13 @@ export default function SessionWorkspace({
                   <TabsContent value="communication-scores">
                     <CommunicationScoresTab
                       criteria={communicationCriteria}
+                      scale={communicationScale(communicationPayload)}
                       summary={communicationSummary}
                       overallSummary={communicationPayload?.overall_summary || ''}
                       sessionStatus={session?.status || null}
                       onSeek={seekToSeconds}
+                      extractionNotice={describeRubricExtraction(communicationPayload?.rubric_extraction)}
+                      rubricVersionLabel={sheetRubricVersionLabel(communicationPayload)}
                     />
                   </TabsContent>
 

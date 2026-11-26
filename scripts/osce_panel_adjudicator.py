@@ -51,7 +51,7 @@ from content_marking import (
     validate_feedback_output,
     validate_output,
 )
-from case_study_rubric import load_case_study_rubric
+from case_study_rubric import load_case_study_rubric, rubric_source_anchor
 from env_loader import load_env_file
 from llm_bootstrap import (
     MIN_PANEL_MARKERS,
@@ -145,8 +145,22 @@ def load_rubric_criteria(case_study_path: Path, cache_dir: Path | None = None) -
     Literally the same: both go through ``case_study_rubric``, so when the
     markers have already parsed this PDF the adjudicator adopts their result
     rather than repeating the parse — and the two can never diverge.
+
+    The LLM fallback is off here: the markers' entry is the only LLM extraction
+    this run may use. Running another one (possibly on a different model) would
+    produce a different criteria list than the sheets were marked against.
     """
-    return load_case_study_rubric(case_study_path, cache_dir=cache_dir).criteria
+    return load_case_study_rubric(case_study_path, cache_dir=cache_dir, allow_llm_fallback=False).criteria
+
+
+def marker_rubric_extraction(payloads: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The rubric provenance the markers recorded. They share one rubric, so
+    the first sheet that carries it speaks for all of them."""
+    for payload in payloads:
+        extraction = payload.get("rubric_extraction") if isinstance(payload, dict) else None
+        if isinstance(extraction, dict) and extraction:
+            return extraction
+    return None
 
 
 def load_transcript(transcript_path: Path) -> dict[str, Any]:
@@ -185,7 +199,7 @@ def load_marker_sheet(
         raise ValueError(f"Marker sheet {path} fails validation: " + "; ".join(issues[:5]))
     # Provenance and the summary are outside the validator's remit; carry them
     # from the raw sheet.
-    for key in ("model", "model_provider", "prompt_version", "scoring_summary", "warnings"):
+    for key in ("model", "model_provider", "prompt_version", "scoring_summary", "warnings", "rubric_extraction"):
         if key in payload:
             normalised[key] = payload[key]
     return reconciliation.MarkerSheet.from_payload(path.stem, normalised), normalised
@@ -496,6 +510,7 @@ def run_panel(args: argparse.Namespace, router: LLMRouter | None) -> int:
     transcript = load_transcript(transcript_path)
     loaded = [load_marker_sheet(path, rubric_criteria) for path in marker_paths]
     sheets = [sheet for sheet, _payload in loaded]
+    rubric_extraction = marker_rubric_extraction([payload for _sheet, payload in loaded])
 
     aligned = reconciliation.align_sheets(sheets, rubric_criteria)
     reconciled = reconciliation.reconcile(aligned)
@@ -587,7 +602,8 @@ def run_panel(args: argparse.Namespace, router: LLMRouter | None) -> int:
         "transcript_file": to_repo_relative(transcript_path),
         "case_study_file": to_repo_relative(case_study_path),
         "rubric_file": "embedded_in_case_study_pdf",
-        "rubric_source": f"{to_repo_relative(case_study_path)}#rubric-section",
+        "rubric_source": to_repo_relative(case_study_path)
+        + rubric_source_anchor((rubric_extraction or {}).get("method")),
         "criteria": final_criteria,
         "keep_start_stop": feedback["keep_start_stop"],
         "overall_summary": feedback["overall_summary"],
@@ -600,6 +616,8 @@ def run_panel(args: argparse.Namespace, router: LLMRouter | None) -> int:
             "transcript_folder_matches_file_stem": transcript_path.parent.name == transcript_path.stem
         },
     }
+    if rubric_extraction:
+        final_sheet["rubric_extraction"] = rubric_extraction
     if warnings:
         final_sheet["warnings"] = warnings
     final_sheet["scoring_summary"] = compute_scoring_summary(final_criteria)

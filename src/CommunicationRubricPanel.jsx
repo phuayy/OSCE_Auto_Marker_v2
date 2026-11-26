@@ -1,15 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
+  AlertTriangle,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   FileText,
+  Info,
+  Pencil,
   Layers,
   Loader2,
   RefreshCcw,
   RotateCcw,
   Sparkles,
+  Wand2,
   UploadCloud,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
@@ -18,6 +22,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { LoadingRegion, RubricCriteriaSkeleton, RubricSourceSkeleton } from '@/components/skeletons.jsx';
 import { PageHeader } from '@/components/PageHeader.jsx';
 import { apiJson } from '@/lib/apiFetch';
+import { DEFAULT_SCORING_SCALE } from '@/lib/rubricEditor';
+import { AI_DRAFT_ENDPOINT } from '@/lib/rubricApi';
+import { describeRubricEdit, describeRubricExtraction } from '@/lib/rubricExtraction';
+import CommunicationRubricEditor from '@/CommunicationRubricEditor.jsx';
+import RubricVersionHistory from '@/RubricVersionHistory.jsx';
 
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -40,23 +49,58 @@ function formatDate(value) {
   }
 }
 
-export default function CommunicationRubricPanel({ onBack }) {
+const SCALE_STYLES = [
+  ['All', 'text-emerald-700'],
+  ['Most', 'text-cyan-700'],
+  ['Some', 'text-amber-700'],
+  ['None', 'text-rose-700'],
+];
+
+function pointsLabel(points) {
+  return `${points} ${points === 1 ? 'pt' : 'pts'}`;
+}
+
+// `isAdmin` comes from the shell, which owns the identity (as for Settings).
+// The API refuses every admin action with a 403 either way.
+export default function CommunicationRubricPanel({ onBack, isAdmin = false }) {
   const [rubric, setRubric] = useState(null);
   const [pdfMeta, setPdfMeta] = useState(null);
+  // The active version's summary ({ id, versionNumber, ... }); null before
+  // the first response or on a server without version history.
+  const [version, setVersion] = useState(null);
+  // Bumped after every change this page makes, so the history card re-reads.
+  const [historyKey, setHistoryKey] = useState(0);
   // True from the first render: the mount effect always fetches, and a first
   // paint that said "No rubric loaded" before that fetch had even started was
   // a false empty state, not a wait.
   const [isLoading, setIsLoading] = useState(true);
   const [isUploading, setIsUploading] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
+  const [isExtracting, setIsExtracting] = useState(false);
+  // null, or { draft, rubric } for an AI draft under review, or
+  // { draft: null, rubric } for the active rubric being edited in place.
+  const [editing, setEditing] = useState(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [expandedCriteria, setExpandedCriteria] = useState(() => new Set());
   const fileInputRef = useRef(null);
+  const aiFileInputRef = useRef(null);
+  const hasLoadedRef = useRef(false);
 
   useEffect(() => {
     loadRubric();
   }, []);
+
+  function applyRubricResponse(body) {
+    setRubric(body.rubric || null);
+    setPdfMeta(body.pdf || null);
+    setVersion(body.version || null);
+  }
+
+  function applyChange(body) {
+    applyRubricResponse(body);
+    setHistoryKey((key) => key + 1);
+  }
 
   async function loadRubric() {
     setIsLoading(true);
@@ -65,8 +109,10 @@ export default function CommunicationRubricPanel({ onBack }) {
       const body = await apiJson('/api/communication-rubric', {
         fallbackMessage: 'Failed to load rubric.',
       });
-      setRubric(body.rubric || null);
-      setPdfMeta(body.pdf || null);
+      applyRubricResponse(body);
+      // The history card loads itself on mount; a later Refresh re-reads it too.
+      if (hasLoadedRef.current) setHistoryKey((key) => key + 1);
+      hasLoadedRef.current = true;
     } catch (loadError) {
       setError(loadError.message || 'Failed to load rubric.');
     } finally {
@@ -95,8 +141,7 @@ export default function CommunicationRubricPanel({ onBack }) {
         fallbackMessage: 'Rubric upload failed.',
       });
 
-      setRubric(body.rubric);
-      setPdfMeta(body.pdf || null);
+      applyChange(body);
       setNotice('Rubric replaced. Future communication scoring will use the new criteria.');
     } catch (uploadError) {
       setError(uploadError.message || 'Rubric upload failed.');
@@ -108,6 +153,39 @@ export default function CommunicationRubricPanel({ onBack }) {
     }
   }
 
+  async function handleAiUpload(file) {
+    if (!file) {
+      return;
+    }
+    setIsExtracting(true);
+    setError('');
+    setNotice('');
+    try {
+      const formData = new FormData();
+      formData.append('rubric', file);
+      const body = await apiJson(AI_DRAFT_ENDPOINT, {
+        method: 'POST',
+        body: formData,
+        fallbackMessage: 'The AI could not extract a rubric from that PDF.',
+      });
+      setEditing({ draft: body.draft || null, rubric: body.rubric || null });
+    } catch (extractError) {
+      setError(extractError.message || 'The AI could not extract a rubric from that PDF.');
+    } finally {
+      setIsExtracting(false);
+      if (aiFileInputRef.current) {
+        aiFileInputRef.current.value = '';
+      }
+    }
+  }
+
+  function handleEditorSaved(body) {
+    applyChange(body);
+    setEditing(null);
+    setError('');
+    setNotice('Rubric saved. New communication scoring runs will use it.');
+  }
+
   async function handleReset() {
     setIsResetting(true);
     setError('');
@@ -117,14 +195,22 @@ export default function CommunicationRubricPanel({ onBack }) {
         method: 'POST',
         fallbackMessage: 'Reset failed.',
       });
-      setRubric(body.rubric);
-      setPdfMeta(body.pdf || null);
+      applyChange(body);
       setNotice('Restored default communication rubric.');
     } catch (resetError) {
       setError(resetError.message || 'Reset failed.');
     } finally {
       setIsResetting(false);
     }
+  }
+
+  function handleVersionRestored(body, restored) {
+    applyChange(body);
+    setError('');
+    setNotice(
+      `Version ${restored.versionNumber} restored. New communication scoring runs will use it.`,
+    );
+    window.scrollTo?.({ top: 0, behavior: 'smooth' });
   }
 
   function toggleCriterion(id) {
@@ -165,6 +251,11 @@ export default function CommunicationRubricPanel({ onBack }) {
   // Skeletons are for a first load only. A reload with a rubric on screen
   // keeps it (the button spins) rather than replacing it with bone.
   const isFirstLoad = isLoading && !rubric;
+  const extractionNotice = describeRubricExtraction(rubric?.extraction);
+  const editNote = describeRubricEdit(rubric?.extraction);
+  const scale = { ...DEFAULT_SCORING_SCALE, ...(rubric?.scoring_scale || {}) };
+  const maxScore = rubric?.max_score ?? (rubric?.criteria?.length || 0) * scale.All;
+  const busyAny = isUploading || isResetting || isExtracting;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
@@ -179,6 +270,16 @@ export default function CommunicationRubricPanel({ onBack }) {
       </PageHeader>
 
       <main id="main" className="mx-auto max-w-5xl space-y-6 px-6 py-8">
+        {editing ? (
+          <CommunicationRubricEditor
+            key={editing.draft?.draftId || 'in-place'}
+            rubric={editing.rubric}
+            draft={editing.draft}
+            onSaved={handleEditorSaved}
+            onClose={() => setEditing(null)}
+          />
+        ) : (
+        <>
         <motion.div
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
@@ -205,7 +306,12 @@ export default function CommunicationRubricPanel({ onBack }) {
                   ) : null}
                   {rubric ? (
                     <span className="text-[11px] text-slate-500">
-                      Pass at {rubric.pass_threshold || 11}/{rubric.max_score || 21}
+                      Pass at {rubric.pass_threshold ?? '—'}/{maxScore}
+                    </span>
+                  ) : null}
+                  {version ? (
+                    <span className="text-[11px] text-slate-500">
+                      Version {version.versionNumber} · active
                     </span>
                   ) : null}
                 </div>
@@ -246,47 +352,53 @@ export default function CommunicationRubricPanel({ onBack }) {
                     Scoring scale
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-1 text-xs">
-                    <div className="flex items-center justify-between rounded-md bg-white px-2 py-1 text-slate-700">
-                      <span>All</span>
-                      <span className="font-semibold text-emerald-700">3 pts</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-md bg-white px-2 py-1 text-slate-700">
-                      <span>Most</span>
-                      <span className="font-semibold text-cyan-700">2 pts</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-md bg-white px-2 py-1 text-slate-700">
-                      <span>Some</span>
-                      <span className="font-semibold text-amber-700">1 pt</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-md bg-white px-2 py-1 text-slate-700">
-                      <span>None</span>
-                      <span className="font-semibold text-rose-700">0 pts</span>
-                    </div>
+                    {SCALE_STYLES.map(([label, tone]) => (
+                      <div
+                        key={label}
+                        className="flex items-center justify-between rounded-md bg-white px-2 py-1 text-slate-700"
+                      >
+                        <span>{label}</span>
+                        <span className={`font-semibold ${tone}`}>{pointsLabel(scale[label])}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  className="gap-2"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isUploading}
-                >
-                  {isUploading ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <UploadCloud className="h-4 w-4" />
-                  )}
-                  {isUploading ? 'Parsing PDF…' : 'Upload replacement PDF'}
-                </Button>
-                <Button variant="outline" className="gap-2" onClick={handleReset} disabled={isResetting}>
-                  {isResetting ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <RotateCcw className="h-4 w-4" />
-                  )}
-                  Reset to bundled default
-                </Button>
+                {isAdmin ? (
+                  <>
+                    <Button
+                      className="gap-2"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={busyAny}
+                    >
+                      {isUploading ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <UploadCloud className="h-4 w-4" />
+                      )}
+                      {isUploading ? 'Parsing PDF…' : 'Upload replacement PDF'}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="gap-2"
+                      onClick={() => setEditing({ draft: null, rubric })}
+                      disabled={busyAny || !rubric?.criteria?.length}
+                    >
+                      <Pencil className="h-4 w-4" aria-hidden="true" />
+                      Edit rubric
+                    </Button>
+                    <Button variant="outline" className="gap-2" onClick={handleReset} disabled={busyAny}>
+                      {isResetting ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <RotateCcw className="h-4 w-4" />
+                      )}
+                      Reset to bundled default
+                    </Button>
+                  </>
+                ) : null}
                 <Button variant="ghost" className="gap-2" onClick={loadRubric} disabled={isLoading}>
                   {isLoading ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
@@ -300,6 +412,7 @@ export default function CommunicationRubricPanel({ onBack }) {
                   type="file"
                   accept="application/pdf"
                   className="hidden"
+                  aria-label="Choose a rubric PDF"
                   onChange={(event) => {
                     const file = event.target.files?.[0];
                     if (file) {
@@ -308,6 +421,83 @@ export default function CommunicationRubricPanel({ onBack }) {
                   }}
                 />
               </div>
+
+              {isAdmin ? (
+                <div className="flex flex-wrap items-center gap-3 rounded-xl border border-dashed border-slate-300 p-3">
+                  <Button
+                    variant="secondary"
+                    className="gap-2"
+                    onClick={() => aiFileInputRef.current?.click()}
+                    disabled={busyAny}
+                  >
+                    {isExtracting ? (
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Wand2 className="h-4 w-4" aria-hidden="true" />
+                    )}
+                    {isExtracting ? 'Extracting with AI…' : 'Upload for AI extraction'}
+                  </Button>
+                  <p className="min-w-0 flex-1 text-xs text-slate-500" role={isExtracting ? 'status' : undefined}>
+                    {isExtracting
+                      ? 'An AI model is reading the PDF. This can take a minute or more; please keep this page open.'
+                      : 'For a PDF the standard parser cannot read. An AI model drafts the rubric and you review and edit it before anything is used.'}
+                  </p>
+                  <input
+                    ref={aiFileInputRef}
+                    type="file"
+                    accept="application/pdf"
+                    className="hidden"
+                    aria-label="Choose a rubric PDF for AI extraction"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) {
+                        handleAiUpload(file);
+                      }
+                    }}
+                  />
+                </div>
+              ) : null}
+
+              {editNote ? (
+                <div
+                  role="note"
+                  className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700"
+                >
+                  <Info className="mt-0.5 h-4 w-4 flex-shrink-0 text-slate-500" aria-hidden="true" />
+                  <p>
+                    {editNote.text}
+                    {editNote.editedAt ? ` Edited ${formatDate(editNote.editedAt)}.` : ''}
+                  </p>
+                </div>
+              ) : null}
+
+              {extractionNotice ? (
+                <div
+                  role="note"
+                  className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700"
+                >
+                  <div className="flex items-center gap-2 font-semibold">
+                    <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+                    {extractionNotice.title}
+                  </div>
+                  <p className="mt-1">{extractionNotice.detail}</p>
+                  {extractionNotice.warnings.length ? (
+                    <ul className="mt-2 list-disc space-y-0.5 pl-5">
+                      {extractionNotice.warnings.map((warning, index) => (
+                        <li key={`${index}-${warning}`}>{warning}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {extractionNotice.reason ? (
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-xs font-medium">
+                        Why the standard parser failed
+                      </summary>
+                      <p className="mt-1 text-xs">{extractionNotice.reason}</p>
+                    </details>
+                  ) : null}
+                </div>
+              ) : null}
 
               <AnimatePresence>
                 {error ? (
@@ -411,6 +601,18 @@ export default function CommunicationRubricPanel({ onBack }) {
         <motion.div
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, delay: 0.08 }}
+        >
+          <RubricVersionHistory
+            isAdmin={isAdmin}
+            refreshKey={historyKey}
+            onRestored={handleVersionRestored}
+          />
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4, delay: 0.1 }}
           className="rounded-xl border border-slate-200 bg-white/70 p-4 text-xs text-slate-600"
         >
@@ -424,6 +626,8 @@ export default function CommunicationRubricPanel({ onBack }) {
             </p>
           </div>
         </motion.div>
+        </>
+        )}
       </main>
     </div>
   );

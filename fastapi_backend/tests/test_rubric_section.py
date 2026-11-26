@@ -66,3 +66,28 @@ def test_partial_rubric_wording_is_distinguished() -> None:
     assert split(partial)[1] == ""  # no full header -> no rubric
     message = diagnose(partial)
     assert "rubric-like wording" in message.lower()
+
+
+# --- helpers shared with the LLM rubric fallback ----------------------------
+
+
+def test_extractable_text_strips_page_markers():
+    assert rubric_section.extractable_text("[Page 1]\n  [page 2] hello ") == "hello"
+
+
+def test_has_extractable_text_rejects_marker_only_and_short_text():
+    assert not rubric_section.has_extractable_text("[Page 1]\n[Page 2]\n")
+    assert not rubric_section.has_extractable_text("x" * (rubric_section.MIN_EXTRACTABLE_TEXT_CHARS - 1))
+    assert rubric_section.has_extractable_text("x" * rubric_section.MIN_EXTRACTABLE_TEXT_CHARS)
+
+
+def test_locate_phrase_is_case_and_whitespace_insensitive():
+    text = "Scenario text.\nMARKING\n   checklist begins here"
+    assert rubric_section.locate_phrase(text, "marking checklist") == text.index("MARKING")
+
+
+def test_locate_phrase_missing_or_empty_returns_none():
+    assert rubric_section.locate_phrase("abc", "xyz") is None
+    assert rubric_section.locate_phrase("abc", "   ") is None
+    # Regex metacharacters in the phrase are literal, not a pattern.
+    assert rubric_section.locate_phrase("cost (approx.) 5", "(approx.)") == 5

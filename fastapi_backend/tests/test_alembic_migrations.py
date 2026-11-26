@@ -39,6 +39,19 @@ def _head_revision() -> str:
 HEAD_REVISION = _head_revision()
 
 
+def _comparable_indexes(inspector, table: str) -> list[dict]:
+    """Reflected indexes with a partial index's WHERE clause as text.
+
+    Reflection returns that clause as a ``TextClause`` object, which compares
+    (and reprs) by identity, so two identical schemas would never match.
+    """
+    indexes = []
+    for index in inspector.get_indexes(table):
+        options = {key: str(value) for key, value in (index.get("dialect_options") or {}).items()}
+        indexes.append({**index, "dialect_options": options} if options else index)
+    return indexes
+
+
 def _sync_url(path) -> str:
     return to_sync_url(OrmDatabase._normalize_url(path))
 
@@ -244,7 +257,7 @@ def test_bootstrap_and_cli_produce_identical_schema(tmp_path) -> None:
         return {
             table: {
                 "columns": [tuple(row) for row in connection.exec_driver_sql(f'PRAGMA table_info("{table}")')],
-                "indexes": inspector.get_indexes(table),
+                "indexes": _comparable_indexes(inspector, table),
                 "foreign_keys": inspector.get_foreign_keys(table),
             }
             for table in inspector.get_table_names()
@@ -436,7 +449,7 @@ def test_postgres_bootstrap_matches_cli_and_tracking_is_enforced() -> None:
             "WHERE n.nspname = current_schema() AND c.relkind = 'r' "
             "AND a.attnum > 0 AND NOT a.attisdropped ORDER BY c.relname, a.attnum"
         ).all()
-        indexes = {table: inspector.get_indexes(table) for table in inspector.get_table_names()}
+        indexes = {table: _comparable_indexes(inspector, table) for table in inspector.get_table_names()}
         foreign_keys = {table: inspector.get_foreign_keys(table) for table in inspector.get_table_names()}
         return repr((columns, indexes, foreign_keys)).replace(schema, "test_schema")
 

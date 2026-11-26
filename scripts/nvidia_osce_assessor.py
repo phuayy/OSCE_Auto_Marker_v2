@@ -28,7 +28,7 @@ from content_marking import (
     to_repo_relative,
     validate_output,
 )
-from case_study_rubric import load_case_study_rubric
+from case_study_rubric import load_case_study_rubric, rubric_source_anchor
 from env_loader import load_env_file
 from llm_bootstrap import (
     build_router_from_env,
@@ -155,7 +155,7 @@ def main() -> int:
     )
     print(
         f"[nvidia_osce_assessor] case-study rubric: {len(case_study_rubric.criteria)} criteria "
-        f"({case_study_rubric.source})",
+        f"({case_study_rubric.source}, {case_study_rubric.method} extraction)",
         file=sys.stderr,
     )
     case_study_context_text = case_study_rubric.context_text
@@ -171,6 +171,9 @@ def main() -> int:
         "transcript": checkpoint_file_signature(transcript_path),
         "case_study": checkpoint_file_signature(case_study_path),
         "rubric_criteria_count": len(rubric_criteria),
+        # An LLM-extracted rubric is a different input from a parsed one, even
+        # with the same criteria count; a checkpoint must not cross the two.
+        "rubric_extraction": case_study_rubric.method,
         "prompt_version": PROMPT_VERSION,
     }
     checkpoint_payload = read_checkpoint(checkpoint_path)
@@ -366,7 +369,12 @@ def main() -> int:
     normalized_payload["transcript_file"] = to_repo_relative(transcript_path)
     normalized_payload["case_study_file"] = to_repo_relative(case_study_path)
     normalized_payload["rubric_file"] = "embedded_in_case_study_pdf"
-    normalized_payload["rubric_source"] = f"{to_repo_relative(case_study_path)}#rubric-section"
+    normalized_payload["rubric_source"] = to_repo_relative(case_study_path) + rubric_source_anchor(
+        case_study_rubric.method
+    )
+    # How the rubric was obtained (deterministic parse, or the LLM fallback and
+    # which model); the adjudicator carries it onto a panel's final sheet.
+    normalized_payload["rubric_extraction"] = case_study_rubric.extraction
     # The model that actually produced these marks, which after a fallback is
     # not necessarily the configured primary.
     normalized_payload["model"] = getattr(last_message, "model", "") or routing_summary

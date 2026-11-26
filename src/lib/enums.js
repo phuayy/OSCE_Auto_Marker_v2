@@ -143,4 +143,19 @@ export const ScoreDisplay = Object.freeze({
   "RAW": "raw"
 });
 
+export const RubricVersionStatus = Object.freeze({
+  "ACTIVE": "active",
+  "RETIRED": "retired"
+});
+
+export const RubricChangeKind = Object.freeze({
+  "ADOPTED": "adopted",
+  "DEFAULT": "default",
+  "UPLOAD": "upload",
+  "RESET": "reset",
+  "DRAFT": "draft",
+  "EDIT": "edit",
+  "RESTORE": "restore"
+});
+
 export const IN_FLIGHT_STATUSES = new Set(["assembling", "processing", "queued"]);

@@ -36,6 +36,9 @@ OSCE-AI-FYP/
 │   ├── ResetPasswordScreen.jsx # #/reset-password/<token> — pre-login: choose a new password (lazy)
 │   ├── MarkingModeSettings.jsx # Settings card: single-model vs panel marking
 │   ├── PanelMarkingSummary.jsx # Score tab: how a panel marked (summary + per-criterion votes)
+│   ├── CommunicationRubricPanel.jsx  # #/rubric — the active communication rubric; admins upload, AI-extract, edit (lazy)
+│   ├── CommunicationRubricEditor.jsx # Review/edit a rubric draft or the active rubric: criteria, indicators, points, pass mark
+│   ├── RubricVersionHistory.jsx # Rubric page card: every rubric version, view one, restore a retired one (admins)
 │   ├── workspace/              # The opened-session view — its own chunk, loaded by the click that opens a session
 │   │   ├── SessionWorkspace.jsx        # Chunk root: results model, player/download handlers, the whole subtree
 │   │   ├── ManualTimelineEditor.jsx    # Manual crop timeline (separators, labels, Export clips)
@@ -97,7 +100,8 @@ OSCE-AI-FYP/
 │   │       ├── 0010_sqlite_wal_and_fk_pragmas.py # SQLite policy + complete migration-owned tracking
 │   │       ├── 0011_user_settings.py            # per-account overrides of the seven user-scoped keys (see Two-tier settings)
 │   │       ├── 0012_upload_records.py           # UploadRecord table (see Session storage lifecycle contracts)
-│   │       └── 0013_upload_admission_index.py   # index behind require_expensive_operation's admission query
+│   │       ├── 0013_upload_admission_index.py   # index behind require_expensive_operation's admission query
+│   │       └── 0017_communication_rubric_versions.py # the communication rubric's version history (one active row)
 │   └── app/
 │       ├── main.py             # FastAPI app, middleware, startup/shutdown
 │       ├── core/
@@ -124,6 +128,7 @@ OSCE-AI-FYP/
 │       │   ├── actors.py       # Actor (who a request acts as) + the createdBy provenance snapshot
 │       │   ├── access.py       # may_mutate / ensure_may_mutate — creator-or-admin gate on a provenance-bearing record
 │       │   ├── settings_scope.py  # USER_SCOPED_KEYS — which settings keys are per-account vs. deployment-wide
+│       │   ├── communication_rubric.py  # The communication-rubric-v1 document: scale, max, pass mark, validation of an edited rubric
 │       │   └── clip_summaries.py  # Pure cohort-summary rows for a long recording's Analytics view
 │       ├── mail/               # Outbound email: one contract, one backend per deployment
 │       │   ├── base.py             # EmailMessage, EmailSender Protocol, EmailDeliveryError
@@ -244,6 +249,7 @@ OSCE-AI-FYP/
 │   ├── detect_human_segments.py     # RT-DETR person-occupancy segmentation
 │   ├── rubric_section.py            # PDF rubric section extractor
 │   ├── case_study_rubric.py         # Extract a case study's rubric once; content-addressed cache
+│   ├── rubric_llm_fallback.py       # LLM rubric extraction when the deterministic parsers fail (grounded, cached, provenance-stamped)
 │   └── parse_communication_rubric.py  # Communication rubric PDF -> JSON
 ├── storage/                         # Runtime artefact store (gitignored)
 │   ├── input/                       # Uploaded videos, case studies
@@ -733,6 +739,7 @@ Defined in [models.py](fastapi_backend/app/database/models.py):
 | `user_settings` | `UserSettingRecord` | One row per account: its overrides of the user-scoped keys, as one JSON document — see **Two-tier settings** |
 | `corpora` | `CorpusRecord` | Named term lists (`terms: list[str]`) that bias WhisperX `--hotwords` and drive deterministic transcript correction; picked per session at upload time and snapshotted into the session payload, so editing or deleting a corpus never affects a session that already used it |
 | `webhook_subscriptions` | `WebhookSubscriptionRecord` | Outbound HTTP endpoints registered for notification events — URL, HMAC secret (plaintext; it is the shared signing key, not a credential *for* this system), subscribed event types, and a denormalised summary of the most recent delivery for the management UI |
+| `communication_rubric_versions` | `CommunicationRubricVersionRecord` | Append-only history of the communication rubric: `version_number`, `status` (`active` \| `retired`; one active row, partial unique index), `change_kind`, the whole rubric document, creator snapshot, optional `rubric_asset_id` — see **Communication rubric versions** |
 | `webhook_deliveries` | `WebhookDeliveryRecord` | One row per delivery attempt, pruned to a bounded number per subscription — a debugging log, not an audit trail — see **Webhooks** |
 
 The queue's tables (`jobs`, `job_attempts`, `job_events`) are models like the
@@ -1819,6 +1826,7 @@ recording; its Student column the scored subject.
 | `HUMAN_SEGMENTS_REGION_LEFT_ENABLED` / `HUMAN_SEGMENTS_REGION_RIGHT_ENABLED` | `true` / `true` | Which horizontal zone(s) of the frame count at all — independent of the occupancy preset above. Standalone-CLI default only; the pipeline always passes an explicit resolved value (see `app/pipeline/region_focus.py`) |
 | `HUMAN_SEGMENTS_REGION_LEFT_RATIO` / `HUMAN_SEGMENTS_REGION_RIGHT_RATIO` | `1.0` / `1.0` | Fraction of frame width, measured from that edge inward, that counts as the enabled zone |
 | `PLAYBACK_COPY_ENABLED` / `PLAYBACK_COPY_MAX_HEIGHT` | `true` / `720` | A source the browser cannot decode (HEVC, 10-bit H.264, ProRes, G.711 audio) gets an H.264/AAC copy at `output/playback/<session>/`, written by the `prepare_media` job, recorded on `files.video.playback` and played by the workspace in place of the original (`app/services/media_preparation.py`); clips of such a source are stream-copied from that copy (one transcode per recording; the copy has a keyframe every 2 s), and the re-encode fallback is capped at the same height. The max height also bounds the poster frame. Processing always reads the original |
+| `RUBRIC_LLM_FALLBACK` | `true` | When deterministic rubric extraction fails on a new/changed PDF, let an LLM extract it instead (`scripts/rubric_llm_fallback.py`). `false` = fail as before. See **Rubric extraction LLM fallback** |
 | `PARALLEL_SCORING` | `true` | Run content branch parallel to communication branch |
 | `GPU_SLOTS` | `1` | Jobs that may hold the accelerator at once (transcription, person detection). 0 = unbounded. Per process |
 | `JOB_QUEUE_BACKEND` | `local` | `local` or `hatchet` |
@@ -2047,8 +2055,10 @@ Content scorer has checkpoint/repair: saves after each LLM call, up to 2 repair 
 Pulling the clinical context, the rubric section and the criteria out of a PDF
 is a pure function of that file's bytes, so `scripts/case_study_rubric.py`
 caches the result under `storage/output/case_study_rubrics/`, keyed by a SHA-256
-of the file plus an `EXTRACTOR_VERSION` covering the parsing itself. Nothing can
-go stale: different bytes are a different key. A panel of N markers used to pay
+of the file plus an `EXTRACTOR_VERSION` covering the parsing itself. A
+deterministic entry cannot go stale: different bytes are a different key. An
+LLM-produced entry has more inputs than the bytes, so it is judged on read
+(see **Rubric extraction LLM fallback**). A panel of N markers used to pay
 N+1 identical pypdf passes (the adjudicator repeats the extraction so its
 criteria align with the markers'), and every clip child of a long recording
 repeated them again against the *same* case study — the cache collapses all of
@@ -2449,6 +2459,164 @@ was judged more operator detail than a marker needs) and
 not become the way they leak. `pushActive: false` with a
 high hit rate is the shape worth alerting on: rotations are still arriving, but
 by counter comparison rather than by announcement.
+
+### Rubric extraction LLM fallback
+
+Deterministic (regex) extraction always runs first; the LLM is a fallback for
+a new or reformatted PDF, never the default path (`RUBRIC_LLM_FALLBACK=false`
+turns it off). [scripts/rubric_llm_fallback.py](scripts/rubric_llm_fallback.py)
+owns it for both rubric kinds.
+
+* **Triggers.** Content (`case_study_rubric.py`): no rubric section found, or
+  fewer than 2 criteria. Communication (`parse_communication_rubric.py`): the
+  parser raised, or the quality gate failed — fewer than 2 criteria, empty
+  labels, non-contiguous ids, or no indicators recognised.
+* **Scanned PDFs are never sent.** A PDF with no extractable text layer is
+  refused rather than shipped to a model.
+* **Grounding check.** Every extracted criterion/indicator must be found in
+  the document as a contiguous, near-verbatim passage (difflib ratio ≥ 0.85
+  over case/whitespace/punctuation-normalised text, so OCR slips and reflowed
+  lines pass but a label stitched from scattered words does not; candidate
+  passages are found from the label's rarest words and capped per label, so the
+  check stays fast and fails closed on adversarial text). A `critical` flag is
+  accepted only when the document carries a critical marker (`critical`,
+  `essential`, `mandatory`, `must-pass`) on the same item; otherwise it is
+  downgraded to non-critical and a warning is recorded in the provenance
+  `warnings` — a critical "No" fails the whole sheet, so the model cannot
+  assert it alone. Ungrounded criteria trigger a repair re-prompt (at most 2), then are
+  dropped with a warning; fewer than 2 surviving criteria fail the fallback,
+  and the error then names both the parser's reason and the fallback's.
+* **Which model.** Content extraction runs inside the content marker, on that
+  marker's routing (the session owner's choice). The communication rubric is
+  deployment-wide, so its parser gets the deployment-default routing. With no
+  usable model, or the switch off, behaviour is exactly as before the
+  fallback existed (a communication parse that only failed the quality gate
+  is then kept, with a warning on stderr).
+* **Prompt-injection guard.** The PDF text is delimited as untrusted data in
+  the user message, and the system prompt tells the model to ignore any
+  instruction inside it; the output is schema-validated, never executed.
+* **One extraction per PDF.** The result is cached by the same SHA-256 digest
+  (+ `EXTRACTOR_VERSION`) as the deterministic one, so every panel marker and
+  every clip child of a recording shares a single extraction. An LLM entry is
+  valid only while it was produced by the current `RUBRIC_EXTRACTION_PROMPT_VERSION`
+  (which stands for the prompt *and* the validation below) **and**
+  `RUBRIC_LLM_FALLBACK` is not off; otherwise `_read_entry` ignores it, the
+  next marker re-extracts under the same lock and overwrites it atomically, or
+  — fallback off — fails as with no fallback (the entry stays on disk, so
+  switching the fallback back on reuses it). A deterministic entry is always
+  valid. The **model is deliberately not part of validity**: keying by model
+  would make two sessions of one case study use different criteria; it is
+  recorded in the provenance only. The adjudicator's `allow_llm_fallback=False`
+  means "never extract", not "never read an LLM entry" — it still adopts the
+  markers' current entry. The `O_EXCL`
+  lock holder heartbeats while the LLM call runs, so concurrent markers adopt
+  its result instead of treating a slow call as a dead holder and extracting
+  again. The panel adjudicator never runs its own extraction: it reads the
+  entry the markers wrote, which also keeps it from disagreeing with them.
+* **Communication upload is atomic.** The new PDF is parsed (fallback
+  included) before anything is replaced; a failed parse leaves the previous
+  rubric active.
+* **Provenance.** The communication rubric JSON carries `extraction`
+  (`{"method": "deterministic"}` or `{"method": "llm", model, provider,
+  prompt_version, deterministic_error, warnings}`; absent on older rubrics =
+  deterministic). Content and communication score sheets carry the same shape
+  as `rubric_extraction`. The browser reads them through
+  [lib/rubricExtraction.js](src/lib/rubricExtraction.js) and shows an amber
+  "Rubric extracted by AI" notice on the Communication Rubric page and on the
+  content / communication score tabs, asking the examiner to check the
+  criteria against the PDF. The two extraction prompts are in the prompt-version
+  ledger (`rubric_extraction.{content,communication}.{system,user}`,
+  `RUBRIC_EXTRACTION_PROMPT_VERSION`).
+
+### Reviewing and editing the communication rubric
+
+An administrator can read the communication rubric back, correct it, and
+choose what scoring runs against — not only replace the PDF. Three routes on
+the admin-only `/api/admin/communication-rubric` router
+([routes/rubrics.py](fastapi_backend/app/api/routes/rubrics.py)):
+
+| Route | What it does |
+|---|---|
+| `POST /drafts?mode=llm\|auto` (multipart `rubric`) | Parses the PDF into a **draft** under `auth/communication_rubric_drafts/<32-hex id>/` and answers 201 `{draft, rubric}`. `llm` (the screen's **Upload for AI extraction**) runs the parser with `--force-llm`: the deterministic parser is skipped and the model reads the PDF; a refusal (`RUBRIC_LLM_FALLBACK=false`, no usable model, an ungrounded reply) is a 422 with the reason. The active rubric is never touched. Drafts expire after 24 h and are swept on the next extraction |
+| `PUT ""` `{rubric, draftId?}` | Saves an edited rubric. With `draftId` it also activates the draft's PDF (registered as a rubric asset, like an upload); without, it edits the active rubric in place and keeps its PDF/asset. 422 `{message, issues[]}` lists every problem at once; 404 for an expired/discarded draft |
+| `DELETE /drafts/{id}` | Discards a draft (204) |
+
+**One module owns the document.**
+[domain/communication_rubric.py](fastapi_backend/app/domain/communication_rubric.py)
+is the only place a `communication-rubric-v1` payload is assembled
+(`build_rubric_payload`) or judged (`rubric_quality_issues`,
+`validate_edited_rubric`); the deterministic parser, the LLM fallback and the
+editor all build through it, and `scripts/parse_communication_rubric.py`
+imports it through `llm_bootstrap` rather than keeping a copy
+(`test_parser_uses_domain_functions` pins that). The browser mirrors the
+rules in [lib/rubricEditor.js](src/lib/rubricEditor.js) so the form can say
+what is wrong before the round trip; the server stays the gate.
+
+**The points per label are part of the rubric.** The labels stay All / Most /
+Some / None — the scorer's prompt is written around them and the model never
+sees a point value, so editing points needs no prompt-version bump. The
+`scoring_scale` (whole numbers 0–100, non-increasing, All > None),
+`max_score` (= criteria × All) and `pass_threshold` (explicit, or the default
+rule: 11 for the canonical 7 × 3, else ⌈max/2⌉) are stored on the rubric; the
+scorer awards `points` from that scale (`rubric_scoring_scale`, falling back to
+3/2/1/0 with a warning for an unreadable one), and the results view reads the
+sheet's own `scoring_scale` (`communicationScale` in `resultsModel.js`).
+
+**Scoring uses what was saved, from the next run.** The communication scorer
+reads `auth/communication_rubric.json` per run, so a save applies to the next
+assessment in every process with no restart; a session already scored keeps
+its sheet until it is re-run. Every write of that file stamps
+`rubric_revision` (`rubric_fingerprint`: SHA-256 over criteria, scale and pass
+mark), which changes on an in-place edit even though the PDF asset does not.
+
+**Provenance.** A saved rubric's `extraction` becomes
+`{method: "edited", edited_by, edited_at, source}` where `source` is how the
+text was first read (`llm` with its model, or `deterministic`) — never a
+nested chain. A human-reviewed rubric no longer shows the amber "extracted by
+AI" notice; the rubric page shows "Reviewed and saved by …" instead
+(`describeRubricEdit`). Saves, uploads, resets and draft activation are
+serialised by one lock on `RubricService`; the (slow) AI extraction itself is
+not, because a draft touches nothing shared.
+
+Verify: `cd fastapi_backend && uv run --no-sync pytest tests/test_communication_rubric_domain.py tests/test_communication_rubric_editing.py tests/test_communication_rubric_flow.py tests/test_communication_scoring_scale.py tests/test_communication_rubric_llm_fallback.py tests/test_communication_rubric_versions.py tests/test_communication_rubric_provenance.py` and `node --test test/rubricEditor.test.mjs test/rubricApi.test.mjs test/communicationRubricEditor.test.mjs test/resultsModel.test.mjs test/rubricVersions.test.mjs`.
+
+### Communication rubric versions
+
+Every change to the active communication rubric is a row in
+`communication_rubric_versions` (revision `0017`,
+[communication_rubric_version_repository.py](fastapi_backend/app/repositories/communication_rubric_version_repository.py)):
+an upload (`upload`), a reset (`reset`), a saved AI draft (`draft`), an
+in-place edit (`edit`), a restore (`restore`), the shipped PDF parsed on a
+fresh install (`default`), and a pre-history rubric file adopted unchanged on
+an upgraded deployment (`adopted`) — `RubricChangeKind` in
+[domain/communication_rubric.py](fastapi_backend/app/domain/communication_rubric.py).
+`activate` retires the active row and inserts the next number in one
+`unit_of_work`, so there is always exactly one `active` version once there is
+any; a partial unique index is the backstop.
+
+**The database is the authority; the JSON file is its copy.**
+`RubricService._commit_version` is the only write path: it records the
+version, then materialises it to `auth/communication_rubric.json` with a
+`rubric_version: {id, number}` marker (never stored in the row —
+`stored_document`). `ensure_parsed`, which every communication scoring run
+calls, compares that marker with the active row (one small query) and rewrites
+a missing or stale file from the database — so a crash between the commit and
+the file write repairs itself on the next run, and is not a new version. A
+history that cannot be read falls back to the file rather than failing scoring.
+
+**Restoring never rewrites history.** `POST
+/api/admin/communication-rubric/versions/{id}/restore` retires the active
+version and records a new one carrying the old document (`restoredFromVersion`),
+switching the PDF beside it back to that version's asset (or to the shipped
+default). 409 for the active version, 404 for an unknown id. `GET
+/api/communication-rubric/versions` (newest first, no documents, `limit` ≤ 200)
+and `GET …/versions/{id}` (with the document) are open to every marker;
+`GET /api/communication-rubric` adds the active `version` summary. A
+communication sheet records `rubric_version` / `rubric_revision`, and the
+output record `rubricVersionId` / `rubricVersionNumber`, so a score can be
+traced to the version it was marked against; the communication tab says which
+(`sheetRubricVersionLabel` in [lib/rubricVersions.js](src/lib/rubricVersions.js)).
+A session already scored keeps its marks until it is re-run.
 
 ### Prompt-version audit ledger
 
