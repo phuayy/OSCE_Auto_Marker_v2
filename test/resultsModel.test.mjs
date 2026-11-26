@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   buildCommunicationCriteria,
+  buildCommunicationCsvRows,
   buildCommunicationSummary,
   buildContentCriteria,
   buildKeepStartStop,
@@ -195,4 +196,70 @@ test('communicationScale rejects garbage and keeps the default for the default c
   assert.deepEqual(communicationScale({ scoring_scale: { All: 4, Most: 2, Some: 1 } }), dflt);
   assert.deepEqual(communicationScale({ scoring_scale: CUSTOM_SCALE }), CUSTOM_SCALE);
   assert.equal(buildCommunicationCriteria({ criteria: [{ score_label: 'All' }] })[0].maxPoints, 3);
+});
+
+// --- the CSV reads what the tab reads -----------------------------------------
+
+function csvFor(payload) {
+  const criteria = buildCommunicationCriteria(payload);
+  const summary = buildCommunicationSummary(payload, criteria);
+  const rows = buildCommunicationCsvRows({ sessionId: 's1', payload, criteria, summary });
+  const at = (title) => rows.findIndex((row) => row[0] === title);
+  const marksOf = rows
+    .slice(at('Communication Criteria') + 2)
+    .filter((row) => row.length === 6 && typeof row[4] === 'number');
+  return { rows, criteria, summary, marksOf, at };
+}
+
+test('under the default scale the CSV keeps the 3/2/1/0 scale table and marks', () => {
+  const { rows, marksOf, at } = csvFor({
+    criteria: [
+      { id: 1, label: 'A', score_label: 'All' },
+      { id: 2, label: 'B', score_label: 'Most' },
+      { id: 3, label: 'C', score_label: 'Some' },
+      { id: 4, label: 'D', score_label: 'None' },
+    ],
+  });
+  const scaleRows = rows.slice(at('Label'), at('Label') + 5).map((row) => row.slice(0, 2));
+  assert.deepEqual(scaleRows, [['Label', 'Marks'], ['All', 3], ['Most', 2], ['Some', 1], ['None', 0]]);
+  assert.deepEqual(marksOf.map((row) => row[4]), [3, 2, 1, 0]);
+});
+
+test('under an edited scale the CSV marks and scale table equal the tab', () => {
+  const payload = {
+    scoring_scale: { All: 4, Most: 3, Some: 1, None: 0 },
+    criteria: [
+      { id: 1, label: 'A', score_label: 'All' },
+      { id: 2, label: 'B', score_label: 'Most' },
+      { id: 3, label: 'C', score_label: 'Some', points: 1 },
+    ],
+  };
+  const { rows, criteria, marksOf, at } = csvFor(payload);
+  assert.deepEqual(marksOf.map((row) => row[4]), criteria.map((criterion) => criterion.points));
+  assert.deepEqual(marksOf.map((row) => row[4]), [4, 3, 1]);
+  const scaleRows = rows.slice(at('Label') + 1, at('Label') + 5).map((row) => row.slice(0, 2));
+  assert.deepEqual(scaleRows, [['All', 4], ['Most', 3], ['Some', 1], ['None', 0]]);
+});
+
+test('an unknown label scores zero in the CSV, as it does in the tab', () => {
+  const { criteria, marksOf } = csvFor({
+    scoring_scale: { All: 4, Most: 3, Some: 1, None: 0 },
+    criteria: [{ id: 1, label: 'A', score_label: 'Partially' }],
+  });
+  assert.equal(criteria[0].points, 0);
+  assert.equal(marksOf[0][3], 'None');
+  assert.equal(marksOf[0][4], 0);
+});
+
+test('the CSV summary row reports the sheet\'s own max and pass mark', () => {
+  const { rows, at } = csvFor({
+    scoring_scale: { All: 4, Most: 3, Some: 1, None: 0 },
+    scoring_summary: { total_score: 9, max_score: 12, pass_threshold: 7, pass_fail: 'Pass', label_counts: { All: 1, Most: 1, Some: 1, None: 0 } },
+    criteria: [
+      { id: 1, label: 'A', score_label: 'All' },
+      { id: 2, label: 'B', score_label: 'Most' },
+      { id: 3, label: 'C', score_label: 'Some' },
+    ],
+  });
+  assert.deepEqual(rows[at('Result') + 1], ['Pass', 9, 12, 7, '1 / 1 / 1 / 0']);
 });

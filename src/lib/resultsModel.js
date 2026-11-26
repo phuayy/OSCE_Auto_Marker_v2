@@ -123,6 +123,88 @@ export function buildCommunicationSummary(communicationPayload, communicationCri
   };
 }
 
+const COMMUNICATION_LABEL_MEANINGS = Object.freeze({
+  All: 'Student consistently demonstrated EVERY observable indicator',
+  Most: 'Student consistently demonstrated MOST observable indicators',
+  Some: 'Student demonstrated ONLY SOME observable indicators',
+  None: 'Student demonstrated NONE of the observable indicators',
+});
+
+// The communication block of the CSV score sheet. It reads the marks from the
+// same values the Communication tab renders — the criteria's `points` and the
+// sheet's own scale — so an edited scale reads the same in both places.
+export function buildCommunicationCsvRows({ sessionId, payload, criteria, summary }) {
+  const scale = communicationScale(payload);
+  const labelCounts = summary?.labelCounts || {};
+  const labelDistribution = ['All', 'Most', 'Some', 'None']
+    .map((label) => labelCounts[label] ?? 0)
+    .join(' / ');
+  const joinIndicators = (items) => (Array.isArray(items) && items.length ? `- ${items.join('\n- ')}` : '');
+
+  const rows = [
+    ['OSCE Rubric Score Sheet - Communication'],
+    [],
+    ['Student Name', ''],
+    ['Student ID', ''],
+    ['Session ID', sessionId || ''],
+    [],
+    ['Scoring Scale'],
+    ['Label', 'Marks', 'Meaning'],
+    ...['All', 'Most', 'Some', 'None'].map((label) => [
+      label,
+      scale[label],
+      COMMUNICATION_LABEL_MEANINGS[label],
+    ]),
+    [],
+    ['Communication Scoring Summary'],
+    ['Result', 'Total', 'Max', 'Pass threshold', 'All / Most / Some / None'],
+    [
+      summary?.passFail || (criteria.length ? 'Pending' : 'N/A'),
+      summary?.totalScore ?? 0,
+      summary?.maxScore ?? 0,
+      summary?.passThreshold ?? 0,
+      labelDistribution,
+    ],
+    [],
+    ['Communication Criteria'],
+    ['ID', 'Criterion', 'Section', 'Score Label', 'Marks', 'Timestamp'],
+  ];
+
+  criteria.forEach((criterion) => {
+    rows.push([
+      criterion.id || '',
+      criterion.label || '',
+      criterion.section || '',
+      criterion.scoreLabel || 'None',
+      criterion.points,
+      criterion.timestamp || '',
+    ]);
+  });
+
+  rows.push(
+    [],
+    ['Evidence & Indicators'],
+    ['ID', 'Criterion', 'Evidence', 'Indicators observed', 'Indicators missing', 'Not observable'],
+  );
+
+  criteria.forEach((criterion) => {
+    rows.push([
+      criterion.id || '',
+      criterion.label || '',
+      criterion.evidence || '',
+      joinIndicators(criterion.indicatorsObserved),
+      joinIndicators(criterion.indicatorsMissing),
+      joinIndicators(criterion.indicatorsNotObservable),
+    ]);
+  });
+
+  if (payload?.overall_summary) {
+    rows.push([], ['Overall Communication Summary'], ['Summary', payload.overall_summary]);
+  }
+
+  return rows;
+}
+
 // The sheet's own summary when it has one; otherwise recomputed from the
 // criteria under the rubric's rule — a critical No fails, and fewer than half
 // Yes fails.

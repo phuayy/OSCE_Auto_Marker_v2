@@ -37,6 +37,7 @@ import {
   buildKeepStartStop,
   buildScoringSummary,
   communicationScale,
+  buildCommunicationCsvRows,
 } from '@/lib/resultsModel';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -530,82 +531,18 @@ export default function SessionWorkspace({
       return contentRows;
     };
 
-    const buildCommunicationRows = () => {
-      const labelCounts = communicationSummary?.labelCounts || {};
-      const labelDistribution = `${labelCounts.All ?? 0} / ${labelCounts.Most ?? 0} / ${labelCounts.Some ?? 0} / ${labelCounts.None ?? 0}`;
-      const labelToPoints = { All: 3, Most: 2, Some: 1, None: 0 };
-      const joinIndicators = (items) => (
-        Array.isArray(items) && items.length ? `- ${items.join('\n- ')}` : ''
-      );
-      const communicationRows = [
-        ['OSCE Rubric Score Sheet - Communication'],
-        [],
-        ['Student Name', ''],
-        ['Student ID', ''],
-        ['Session ID', communicationScores?.session_id || session?.id || ''],
-        [],
-        ['Scoring Scale'],
-        ['Label', 'Marks', 'Meaning'],
-        ['All', 3, 'Student consistently demonstrated EVERY observable indicator'],
-        ['Most', 2, 'Student consistently demonstrated MOST observable indicators'],
-        ['Some', 1, 'Student demonstrated ONLY SOME observable indicators'],
-        ['None', 0, 'Student demonstrated NONE of the observable indicators'],
-        [],
-        ['Communication Scoring Summary'],
-        ['Result', 'Total', 'Max', 'Pass threshold', 'All / Most / Some / None'],
-        [
-          communicationSummary?.passFail || (communicationCriteria.length ? 'Pending' : 'N/A'),
-          communicationSummary?.totalScore ?? 0,
-          communicationSummary?.maxScore ?? communicationCriteria.length * 3,
-          communicationSummary?.passThreshold
-            ?? (communicationCriteria.length === 7 ? 11 : Math.ceil((communicationCriteria.length * 3) / 2)),
-          labelDistribution,
-        ],
-        [],
-        ['Communication Criteria'],
-        ['ID', 'Criterion', 'Section', 'Score Label', 'Marks', 'Timestamp'],
-      ];
-
-      communicationCriteria.forEach((criterion) => {
-        communicationRows.push([
-          criterion.id || '',
-          criterion.label || '',
-          criterion.section || '',
-          criterion.scoreLabel || 'None',
-          labelToPoints[criterion.scoreLabel] ?? 0,
-          criterion.timestamp || '',
-        ]);
-      });
-
-      communicationRows.push(
-        [],
-        ['Evidence & Indicators'],
-        ['ID', 'Criterion', 'Evidence', 'Indicators observed', 'Indicators missing', 'Not observable'],
-      );
-
-      communicationCriteria.forEach((criterion) => {
-        communicationRows.push([
-          criterion.id || '',
-          criterion.label || '',
-          criterion.evidence || '',
-          joinIndicators(criterion.indicatorsObserved),
-          joinIndicators(criterion.indicatorsMissing),
-          joinIndicators(criterion.indicatorsNotObservable),
-        ]);
-      });
-
-      if (communicationPayload?.overall_summary) {
-        communicationRows.push([], ['Overall Communication Summary'], ['Summary', communicationPayload.overall_summary]);
-      }
-
-      return communicationRows;
-    };
-
     if (aiCriteria.length > 0 || keepStartStop) {
       appendSection(buildContentRows());
     }
     if (communicationCriteria.length > 0) {
-      appendSection(buildCommunicationRows());
+      appendSection(
+        buildCommunicationCsvRows({
+          sessionId: communicationScores?.session_id || session?.id || '',
+          payload: communicationPayload,
+          criteria: communicationCriteria,
+          summary: communicationSummary,
+        }),
+      );
     }
 
     const blob = new Blob([`\uFEFF${rowsToCsv(rows)}\r\n`], { type: 'text/csv;charset=utf-8' });
