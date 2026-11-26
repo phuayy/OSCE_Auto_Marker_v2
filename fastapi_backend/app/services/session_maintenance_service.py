@@ -15,6 +15,7 @@ from app.domain.sessions import (
     IN_FLIGHT_STATUSES,
     SOURCE_IN_USE_STATUSES,
     SessionStatus,
+    active_clip_export,
     clip_list_busy,
     session_clips,
     session_video_path,
@@ -219,7 +220,7 @@ class SessionMaintenanceService:
         disk, one already purged, or a clip-assessment child (whose
         ``files.video`` is its parent's exported clip, not its own) is a
         no-op that returns ``False`` — as is one a run or an upload is still
-        using (``SOURCE_IN_USE_STATUSES``).
+        using (``SOURCE_IN_USE_STATUSES``) or a clip export is cutting from it.
         """
         session = await self.sessions.read(session_id)
         if session.get("parentSessionId"):
@@ -228,6 +229,11 @@ class SessionMaintenanceService:
         # this call, and a session that was re-run or is still uploading since
         # then is reading this very file.
         if str(session.get("status") or "") in SOURCE_IN_USE_STATUSES:
+            return False
+        # An ``export_clips`` job cuts the clips from this very file but does not
+        # own ``session.status`` (a ``cropped`` session stays ``cropped``), so the
+        # status guard above cannot see it; the export record can.
+        if active_clip_export(session) is not None:
             return False
         video = (session.get("files") or {}).get("video")
         absolute_path = video.get("absolutePath") if isinstance(video, dict) else None

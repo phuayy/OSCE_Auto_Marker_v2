@@ -96,6 +96,42 @@ def test_retention_still_purges_old_finished_sessions(tmp_path, status) -> None:
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("export_status", ["queued", "running"])
+def test_retention_never_purges_a_recording_with_a_live_clip_export(tmp_path, export_status) -> None:
+    async def _run() -> None:
+        container = create_container(_settings(tmp_path))
+        await _init(container)
+        video = await _old_session(
+            container, tmp_path, "cutting", "cropped", clipExport={"status": export_status, "planId": "p1"}
+        )
+
+        assert await container.session_maintenance.run_video_retention_sweep() == 0
+        assert video.exists()
+        assert await container.session_maintenance.purge_expired_video("cutting") is False
+        assert video.exists()
+        current = await container.sessions.read("cutting")
+        assert not (current["files"]["video"] or {}).get("purgedAt")
+        await container.shutdown()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("export_status", ["completed", "failed"])
+def test_retention_purges_a_cropped_recording_whose_clip_export_has_settled(tmp_path, export_status) -> None:
+    async def _run() -> None:
+        container = create_container(_settings(tmp_path))
+        await _init(container)
+        video = await _old_session(
+            container, tmp_path, "settled", "cropped", clipExport={"status": export_status, "planId": "p1"}
+        )
+
+        assert await container.session_maintenance.run_video_retention_sweep() == 1
+        assert not video.exists()
+        await container.shutdown()
+
+    asyncio.run(_run())
+
+
 def test_a_session_that_goes_in_flight_between_listing_and_purge_is_skipped(tmp_path, monkeypatch) -> None:
     async def _run() -> None:
         container = create_container(_settings(tmp_path))
