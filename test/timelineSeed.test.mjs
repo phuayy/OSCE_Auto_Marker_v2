@@ -86,24 +86,18 @@ test('an unusable duration seeds nothing', () => {
   assert.equal(seedTimelineFromClips({ clips: [clip(1, 0, 1)], duration: 0 }), null);
 });
 
-test('the export payload carries kinds whenever an intermission exists', () => {
-  const kinds = ['session', 'intermission', 'session'];
-  const labels = ['Student 1', 'Intermission', 'Student 2'];
-  assert.deepEqual(
-    buildManualSplitPayload({ boundaries: [2, 1], labels, kinds, includeKinds: false }).kinds,
-    kinds
-  );
-  const allSessions = buildManualSplitPayload({
-    boundaries: [1],
-    labels: ['a', 'b'],
-    kinds: ['session', 'session'],
-    includeKinds: false,
+test('the export payload always carries kinds, sorted boundaries and normalised labels', () => {
+  const withGap = buildManualSplitPayload({
+    boundaries: [2, 1],
+    labels: ['Student 1', '', 'Student 2'],
+    kinds: ['session', 'intermission', 'session'],
   });
-  assert.equal('kinds' in allSessions, false);
-  assert.deepEqual(allSessions.boundaries, [1]);
-  assert.equal(
-    'kinds' in
-      buildManualSplitPayload({ boundaries: [1], labels: ['a', 'b'], kinds: ['session', 'session'], includeKinds: true }),
-    true
-  );
+  assert.deepEqual(withGap.boundaries, [1, 2]);
+  assert.deepEqual(withGap.kinds, ['session', 'intermission', 'session']);
+  assert.deepEqual(withGap.labels, ['Student 1', 'Intermission', 'Student 2']);
+
+  const plain = buildManualSplitPayload({ boundaries: [1], labels: ['a', 'b'], kinds: ['session', 'session'] });
+  assert.deepEqual(plain.kinds, ['session', 'session']);
+  // Missing kinds default to session rather than being omitted.
+  assert.deepEqual(buildManualSplitPayload({ boundaries: [1], labels: [], kinds: [] }).kinds, ['session', 'session']);
 });

@@ -387,20 +387,6 @@ export default function OSCEAiMarkerMockup({
     [videoClips]
   );
   const intermissionClipCount = videoClips.length - sessionClipCount;
-  // The session/intermission distinction exists only for human-detection
-  // segmentation. Bell detection splits AT bells (its constraint) — every
-  // segment is a student clip, so the toggle is not offered there.
-  const isPersonSegmentedSession = useMemo(
-    () =>
-      Boolean(
-        session?.segmentation === SegmentationMethod.PERSON ||
-          videoClips.some(
-            (clip) =>
-              clip?.kind === INTERMISSION_KIND || clip?.source?.type === 'person_detection_rtdetr'
-          )
-      ),
-    [session?.segmentation, videoClips]
-  );
   // While viewing a session, the session's own workflow (or the presence of
   // detected clips) is the source of truth — NOT the transient upload-form tab,
   // which is only correct right after picking it. This guarantees a long session
@@ -1784,10 +1770,6 @@ export default function OSCEAiMarkerMockup({
     }
 
     if (action === 'toggle' && hit.segmentIndex !== null) {
-      if (!isPersonSegmentedSession) {
-        // Bell-segmented sessions split at bells only — no intermission concept.
-        return;
-      }
       const next = toggleSegmentKind({
         labels: manualLabels,
         kinds: manualSegmentKinds,
@@ -1891,10 +1873,8 @@ export default function OSCEAiMarkerMockup({
         boundaries: manualBoundaries,
         labels: manualLabels,
         kinds: manualSegmentKinds,
-        // Kinds are a human-detection concept: intermission segments export as
-        // greyed markers — no MP4 is cut, no downstream compute is spent. A
-        // bell split sends them only once a gap has been seeded as one.
-        includeKinds: isPersonSegmentedSession,
+        // Intermission segments export as greyed markers — no MP4 is cut, no
+        // downstream compute is spent — on any split, bell or person.
       });
       const body = await apiJson(`/api/sessions/${session.id}/clips/manual`, {
         method: 'POST',
@@ -2222,7 +2202,6 @@ export default function OSCEAiMarkerMockup({
     hasDraftClips,
     intermissionClipCount,
     isClipExportRunning,
-    isPersonSegmentedSession,
     isSavingManualSegments,
     manualBoundaries,
     manualLabels,

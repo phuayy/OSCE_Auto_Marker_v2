@@ -74,18 +74,18 @@ export function seedTimelineFromClips({ clips, duration }) {
 }
 
 /**
- * The body of `POST /clips/manual`. Kinds are sent when the session is
- * person-segmented (the editor offers the toggle) or when any segment is an
- * intermission — a bell split seeded with gaps needs them, or the server would
- * cut every gap as a student. Otherwise the field is omitted (all sessions).
+ * The body of `POST /clips/manual`. Kinds always travel with it: an
+ * intermission is a segment that is not cut, valid on any split (bell
+ * detection now seeds one for every gap), and the server reads them
+ * positionally for every session.
  */
-export function buildManualSplitPayload({ boundaries, labels, kinds, includeKinds }) {
+export function buildManualSplitPayload({ boundaries, labels, kinds }) {
   const sortedBoundaries = [...boundaries].map(Number).sort((a, b) => a - b);
   const safeKinds = ensureKinds(kinds, sortedBoundaries.length + 1);
   return {
     boundaries: sortedBoundaries,
     labels: normalizeLabels(labels, safeKinds),
-    ...(includeKinds || safeKinds.includes(INTERMISSION_KIND) ? { kinds: safeKinds } : {}),
+    kinds: safeKinds,
   };
 }
 
