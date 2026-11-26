@@ -37,6 +37,16 @@ ENGINE_MARKER_WHISPERX = "whisperx"
 
 logger = logging.getLogger(__name__)
 
+
+def _rotation_degrees(value: Any) -> int:
+    """A rotate tag or display-matrix angle as 0-359 degrees; 0 for anything
+    that is not a number (the tag is free text in some containers)."""
+    try:
+        return int(float(value)) % 360
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 # Where the poster frame is taken from: far enough in to miss the black or
 # fading first frame many cameras record, never past a tenth of the video.
 POSTER_OFFSET_SECONDS = 1.0
@@ -350,23 +360,28 @@ class MediaPipeline:
     # which no browser plays — the clip would be silent at best.
     BROWSER_AUDIO_CODECS = frozenset({"aac", "mp3", "opus", "vorbis", "flac"})
 
-    async def probe_video_stream(self, video_path: Path) -> dict[str, Any]:
+    async def probe_video_stream(self, video_path: Path, *, timeout_seconds: float | None = None) -> dict[str, Any]:
         """What a player needs to know about a file, as ffprobe reports it.
 
         The first video stream's codec, pixel format and frame size, the first
-        audio stream's codec ("" when there is none), and the container's
-        duration in seconds (0.0 when it does not say).
+        audio stream's codec ("" when there is none), how many audio streams
+        there are, the video's display rotation in degrees (0-359, from the
+        rotate tag or the display matrix) and the container's duration in
+        seconds (0.0 when it does not say). ``timeout_seconds`` replaces the
+        runner's default watchdog for a caller that wants a quick answer.
         """
         args = [
             "-v",
             "error",
             "-show_entries",
-            "stream=codec_type,codec_name,pix_fmt,width,height:format=duration",
+            "stream=codec_type,codec_name,pix_fmt,width,height:stream_tags=rotate"
+            ":stream_side_data=rotation:format=duration",
             "-of",
             "json",
             str(video_path),
         ]
-        result = await self.runner.run(self.settings.ffprobe_bin, args, "Video codec (ffprobe)")
+        run_options = {} if timeout_seconds is None else {"timeout_seconds": timeout_seconds}
+        result = await self.runner.run(self.settings.ffprobe_bin, args, "Video codec (ffprobe)", **run_options)
         try:
             document = json.loads(str(result.stdout or "{}"))
         except json.JSONDecodeError:
@@ -386,11 +401,16 @@ class MediaPipeline:
             return number if number > 0 else cast(0)
 
         video, audio = first("video"), first("audio")
+        rotation_sources = [(video.get("tags") or {}).get("rotate")] + [
+            side.get("rotation") for side in video.get("side_data_list") or [] if isinstance(side, dict)
+        ]
         container = document.get("format") if isinstance(document.get("format"), dict) else {}
         return {
             "codec": str(video.get("codec_name") or "").lower(),
             "pixelFormat": str(video.get("pix_fmt") or "").lower(),
             "audioCodec": str(audio.get("codec_name") or "").lower(),
+            "audioStreams": sum(1 for stream in streams if stream.get("codec_type") == "audio"),
+            "rotation": next((degrees for degrees in map(_rotation_degrees, rotation_sources) if degrees), 0),
             "width": positive_number(video.get("width"), int),
             "height": positive_number(video.get("height"), int),
             "durationSeconds": positive_number(container.get("duration"), float),

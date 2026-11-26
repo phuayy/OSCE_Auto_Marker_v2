@@ -14,7 +14,7 @@ from app.core.locks import KeyedLocks
 from app.core.tasks import BackgroundTaskRegistry
 from app.core.utils import parse_iso, utc_now_iso
 from app.domain.actors import PROVENANCE_KEY, Actor
-from app.domain.enums import MediaPreparationStatus, TaskType, UploadStatus, Workflow
+from app.domain.enums import MediaPreparationStatus, TaskType, UploadFileKind, UploadProbeStatus, UploadStatus, Workflow
 from app.domain.session_lifecycle import fail_session
 from app.domain.sessions import SessionStatus, empty_outputs
 from app.pipeline.media import MediaPipeline
@@ -27,6 +27,7 @@ from app.services.event_service import EventService
 from app.services.job_queue_service import JobQueueService
 from app.services.rubric_asset_service import RubricAssetService
 from app.services.session_service import SessionService
+from app.services.upload_probe import HEAD_MAX_BYTES, ProbeVerdict, UploadHeadProber, facts_from_media
 from app.storage import ObjectStorage
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,7 @@ class AsyncUploadService:
         # Holds strong references to background assembly tasks so the event loop
         # cannot garbage-collect them mid-execution (see BackgroundTaskRegistry).
         self._background_tasks = BackgroundTaskRegistry()
+        self._head_prober = UploadHeadProber(media)
 
     async def initiate(self, payload: InitiateUploadRequest, *, actor: Actor | None = None) -> dict[str, Any]:
         if actor is not None:
@@ -1065,3 +1067,54 @@ class AsyncUploadService:
         if self._is_expired(upload):
             upload["status"] = UploadStatus.EXPIRED
             raise AppError("Upload session has expired.", status_code=410)
+
+    async def probe_upload(self, upload_id: str) -> dict[str, Any]:
+        """What ffprobe makes of the video's first bytes while it is still arriving.
+
+        Advisory and read-only: it never takes the upload's part lock, so a
+        probe cannot slow a transfer down, and an answer it cannot give is
+        ``pending`` / ``inconclusive`` / ``unavailable``, not an error. A
+        committed upload is ``complete`` — the session's own ``files.video.media``
+        is the place to look from then on.
+        """
+        upload = await self.repository.read(upload_id)
+        if upload.get("status") in {UploadStatus.ABORTED, UploadStatus.EXPIRED}:
+            raise AppError("Upload is no longer active.", status_code=409)
+        self._assert_not_expired(upload)
+        video = self._file_by_kind(upload.get("files") or [], UploadFileKind.VIDEO)
+        if not video:
+            raise AppError("Upload has no video file.", status_code=404)
+        received = int(video.get("uploadedBytes") or 0)
+
+        if upload.get("status") == UploadStatus.COMMITTED:
+            return await self._committed_probe(upload, received)
+        if not self.storage.relays_parts:
+            return self._probe_response(ProbeVerdict(UploadProbeStatus.UNAVAILABLE), received)
+        head = await self.storage.read_received_head(upload, str(video["fileId"]), HEAD_MAX_BYTES)
+        if head is None:
+            # Part 1 has not arrived — or the upload committed and released its
+            # staging between the read above and this one.
+            if (await self.repository.read(upload_id)).get("status") == UploadStatus.COMMITTED:
+                return await self._committed_probe(upload, received)
+            return self._probe_response(ProbeVerdict(UploadProbeStatus.PENDING), received)
+        verdict = await self._head_prober.inspect(
+            upload_id, str(video["fileId"]), str(video.get("originalName") or ""), head
+        )
+        return self._probe_response(verdict, received)
+
+    async def _committed_probe(self, upload: dict[str, Any], received: int) -> dict[str, Any]:
+        try:
+            session = await self.sessions.read(str(upload["sessionId"]))
+        except FileNotFoundError:
+            session = {}
+        media = ((session.get("files") or {}).get("video") or {}).get("media")
+        return self._probe_response(ProbeVerdict(UploadProbeStatus.COMPLETE, facts_from_media(media)), received)
+
+    @staticmethod
+    def _probe_response(verdict: ProbeVerdict, received_bytes: int) -> dict[str, Any]:
+        return {
+            "status": verdict.status,
+            "receivedBytes": received_bytes,
+            "facts": verdict.facts,
+            "warnings": [str(code) for code in verdict.warnings],
+        }
