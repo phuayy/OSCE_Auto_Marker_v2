@@ -33,13 +33,25 @@ export function SessionCard({
   deleting,
   onDelete,
   actions,
+  selected = false,
+  onToggleSelected,
 }) {
   const failed = Boolean(stage?.failed);
 
   return (
     <li className="rounded-xl border border-slate-200 bg-slate-50 p-3">
       <div className="flex items-start justify-between gap-2">
-        {/* Leading region: a selection checkbox goes here, before the body. */}
+        {/* Leading region. No checkbox for a session still uploading from
+            this tab: it has no server row to act on yet. */}
+        {onToggleSelected && !uploading ? (
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={onToggleSelected}
+            aria-label={`Select ${entry.name || entry.id}`}
+            className="mt-2 h-4 w-4 shrink-0 rounded border-slate-300 text-cyan-600 focus-visible:ring-2 focus-visible:ring-cyan-500"
+          />
+        ) : null}
         {/* Media region: a thumbnail goes here, between leading and body. */}
         <div className="min-w-0 flex-1">
           <input
