@@ -47,6 +47,7 @@ from app.services.change_feed_service import ChangeFeedService
 from app.services.notification_service import NotificationService
 from app.services.webhook_dispatcher import WebhookDispatcher
 from app.services.async_upload_service import AsyncUploadService
+from app.services.upload_batches import UploadBatchAllowances
 from app.services.artifact_service import ArtifactService
 from app.services.auth_service import AuthService
 from app.services.clip_service import ClipService
@@ -126,6 +127,8 @@ class AppContainer:
     session_maintenance: SessionMaintenanceService
     login_rate_limiter: FixedWindowRateLimiter
     expensive_operation_rate_limiter: FixedWindowRateLimiter
+    # Batch-upload allowances, in process like the limiters above.
+    upload_batches: UploadBatchAllowances
     # Accounts: the store, the per-request cached view AuthService verifies
     # against, the administration service, and the mail backend invitations
     # and resets go out through.
@@ -537,6 +540,11 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         login_rate_limiter=login_rate_limiter,
         expensive_operation_rate_limiter=FixedWindowRateLimiter(
             max_attempts=active_settings.rate_limit_rerun_per_hour, window_seconds=3600,
+        ),
+        upload_batches=UploadBatchAllowances(
+            max_size=active_settings.max_upload_batch_size,
+            ttl_seconds=active_settings.upload_batch_ttl_seconds,
+            max_open_per_user=active_settings.max_open_upload_batches_per_user,
         ),
         users=users,
         user_directory=user_directory,

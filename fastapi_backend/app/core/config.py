@@ -386,6 +386,12 @@ class Settings:
     login_rate_limit_window_seconds: int = read_int_env("LOGIN_RATE_LIMIT_WINDOW_SECONDS", 60)
     rate_limit_rerun_per_hour: int = read_int_env("RATE_LIMIT_RERUN_PER_HOUR", 10)
     max_concurrent_uploads_per_user: int = read_int_env("MAX_CONCURRENT_UPLOADS_PER_USER", 3)
+    # Batch upload (POST /api/uploads/batches): one hourly-budget charge buys a
+    # bounded number of initiates, so an exam day's recordings are not each
+    # charged. In-process like the rate limiters, hence the short TTL.
+    max_upload_batch_size: int = read_int_env("MAX_UPLOAD_BATCH_SIZE", 50)
+    upload_batch_ttl_seconds: int = read_int_env("UPLOAD_BATCH_TTL_SECONDS", 6 * 60 * 60)
+    max_open_upload_batches_per_user: int = read_int_env("MAX_OPEN_UPLOAD_BATCHES_PER_USER", 2)
     cors_allow_origins: tuple[str, ...] = read_csv_env("CORS_ALLOW_ORIGINS", ("*",))
     # Every JSON endpoint (login, settings, session mutations, ...) carries at
     # most a few kilobytes; the one route built for megabyte-sized bodies

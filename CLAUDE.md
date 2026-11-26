@@ -49,6 +49,7 @@ OSCE-AI-FYP/
 │   │   ├── StudentClipSplitterCard.jsx # Auto-split clip list + per-clip trim
 │   │   └── primitives.jsx              # StatusRow / Metric / FeedbackBlock / ContentSheetEmptyState / IndicatorList
 │   ├── components/
+│   │   ├── upload/BatchUploadPanel.jsx # "Several recordings": multi-select/drop zone, per-row name/status/progress, Start / Cancel / Retry failed
 │   │   ├── AuthShell.jsx       # The dark pre-login frame + its fields/buttons; every pre-login screen composes it
 │   │   ├── AuthNewPasswordFields.jsx # "New password" + "Confirm" on that frame (invitation and reset screens)
 │   │   ├── upload/UploadFilePreview.jsx # Upload form: player + verdict chip + warnings for the chosen recording, PDF check; reports why Start must be blocked (rejected recording, unusable PDF)
@@ -71,6 +72,8 @@ OSCE-AI-FYP/
 │   │   ├── download.js         # downloadBlob + the CSV encoder behind the score sheet (pure)
 │   │   ├── anchors.js          # DOM ids the dashboard scrolls to and the workspace renders
 │   │   ├── uploadSubmission.js # submitUpload: initiate -> per-file transfer (one resume) -> complete, all dependencies injected, no module state (pure)
+│   │   ├── batchUpload.js      # Batch upload queue: planBatch / runBatch / resetFailed / summarizeBatch (pure, DI; reserves one allowance, 2 recordings at a time, waits out the in-flight 429)
+│   │   ├── useBatchUpload.js   # React binding the dashboard calls, so a running batch outlives the upload form
 │   │   ├── clipAssessments.js  # Clip -> its newest child session, run status, stale-cut flag (pure)
 │   │   ├── coalesce.js         # Single-flight wrapper: a burst of refresh triggers = one run + one catch-up (pure)
 │   │   ├── clipExportOutcome.js # What the editor does when an export/recrop job lands (pure)
@@ -169,6 +172,7 @@ OSCE-AI-FYP/
 │       │   ├── pipeline_service.py      # Orchestrates full assessment pipeline
 │       │   ├── clip_service.py          # Auto-crop, clip export planning/execution, clip assessment
 │       │   ├── async_upload_service.py  # Chunked multipart upload + assembly
+│       │   ├── upload_batches.py        # Per-account batch-upload allowances (one hourly-budget charge for N initiates)
 │       │   ├── job_queue_service.py     # Local asyncio + Hatchet dispatch
 │       │   ├── job_tasks.py             # Job task-type registry (handler + status ownership)
 │       │   ├── event_service.py         # In-process SSE pub/sub
@@ -741,6 +745,36 @@ length), LRU-bounded. It reuses `MediaPipeline.probe_video_stream`, which now
 also reports `audioStreams` and `rotation`. The browser side is
 [lib/uploadProbe.js](src/lib/uploadProbe.js) (describe + poll schedule) and
 `components/upload/UploadProbeNotice.jsx` in the upload overlay.
+
+**Many recordings: limits and batches.** `GET /api/uploads/limits` (any signed-in
+user) publishes what the server will accept — `maxVideoBytes`, `maxPdfBytes`,
+`videoExtensions` (read from `VIDEO_EXTENSIONS`, never copied), `maxConcurrentUploads`,
+`maxBatchSize` — so the browser vets files before sending any. An exam day is 10-60
+recordings, and a loop of initiates dies on the hourly expensive-operation budget
+(`RATE_LIMIT_RERUN_PER_HOUR`) after ten. `POST /api/uploads/batches {count}` charges
+that budget **once** and returns `{batchId, count, remaining, expiresAt}`
+([upload_batches.py](fastapi_backend/app/services/upload_batches.py)); each initiate then
+carries `X-Upload-Batch: <batchId>` and `require_upload_admission` spends one unit of
+the caller's batch instead of the hourly budget. A batch that cannot be spent (unknown,
+another account's, expired, used up) is a 409 — never silently charged to the hourly
+budget — and the unit is handed back when the initiate fails (the
+`MAX_CONCURRENT_UPLOADS_PER_USER` 429, a rejected file), so waiting out "uploads in
+flight" costs nothing. The concurrent-uploads cap applies to batched initiates too. The
+store is in process and keyed by account id, the same single-process scope as the rate
+limiters; ids are 128-bit random and compared in constant time among the account's own
+batches; expired and spent batches are pruned on access.
+
+The browser side is `lib/batchUpload.js` (see its header): the dashboard's
+"Several recordings" toggle shows one shared case-study picker and a
+`BatchUploadPanel`; the workflow / segmentation / corpus options are the form's own
+(`buildUploadRequest`), and each recording goes through `submitUpload` with
+`initiateHeaders: {X-Upload-Batch}`, at most two at a time. A recording refused
+with "uploads in flight" waits and retries with bounded backoff; any other failure
+marks that row failed and aborts its upload (a failed upload otherwise keeps
+holding a concurrent-upload slot) without stopping the rest. Cancel stops
+*starting* recordings; a transfer already under way finishes. A lone recording
+takes no allowance (the server refuses a batch of one). Each rubric asset is
+deduplicated by content hash server-side, so one PDF per session costs one asset.
 
 **Parts are serialised per upload, so the client may send them in parallel.**
 The upload record is a JSON file rewritten on every part; without a lock, two
@@ -1958,6 +1992,7 @@ recording; its Student column the scored subject.
 | `PLAYBACK_COPY_ENABLED` / `PLAYBACK_COPY_MAX_HEIGHT` | `true` / `720` | A source the browser cannot decode (HEVC, 10-bit H.264, ProRes, G.711 audio) gets an H.264/AAC copy at `output/playback/<session>/`, written by the `prepare_media` job, recorded on `files.video.playback` and played by the workspace in place of the original (`app/services/media_preparation.py`); clips of such a source are stream-copied from that copy (one transcode per recording; the copy has a keyframe every 2 s), and the re-encode fallback is capped at the same height. The max height also bounds the poster frame. Processing always reads the original |
 | `RUBRIC_LLM_FALLBACK` | `true` | When deterministic rubric extraction fails on a new/changed PDF, let an LLM extract it instead (`scripts/rubric_llm_fallback.py`). `false` = fail as before. See **Rubric extraction LLM fallback** |
 | `PARALLEL_SCORING` | `true` | Run content branch parallel to communication branch |
+| `MAX_UPLOAD_BATCH_SIZE` / `UPLOAD_BATCH_TTL_SECONDS` / `MAX_OPEN_UPLOAD_BATCHES_PER_USER` | `50` / `21600` / `2` | Batch upload allowances: most recordings one `POST /api/uploads/batches` may reserve, how long it stays spendable, and unspent batches an account may hold at once. See **Upload Flow** |
 | `GPU_SLOTS` | `1` | Jobs that may hold the accelerator at once (transcription, person detection). 0 = unbounded. Per process |
 | `JOB_QUEUE_BACKEND` | `local` | `local` or `hatchet` |
 | `MEDIA_JOB_CONCURRENCY` | `1` | Local backend: slots of the separate lane `prepare_media` runs in, so a transcode never waits behind scoring runs or takes their `JOB_WORKER_CONCURRENCY` slots. Below 1 reads as 1 |

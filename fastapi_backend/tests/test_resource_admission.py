@@ -6,7 +6,7 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from app.api.dependencies import require_expensive_operation
+from app.api.dependencies import require_expensive_operation, require_upload_admission
 from app.api.routes import async_uploads, jobs, sessions
 from app.core.exceptions import AppError
 from app.core.rate_limit import FixedWindowRateLimiter
@@ -47,7 +47,7 @@ def test_all_expensive_entry_points_share_the_guard():
         '/sessions/{session_id}/clips/{clip_id}/recrop', '/sessions/{session_id}/clips/{clip_id}/assess',
         '/sessions/{session_id}/clips/assess', '/sessions/{session_id}/prepare-media',
         '/sessions/{session_id}/rescore', '/sessions/{session_id}/clips/rescore',
-        '/jobs/{job_id}/rerun', '/uploads/initiate',
+        '/jobs/{job_id}/rerun', '/uploads/batches',
     }
     guarded = {
         route.path for router in (sessions.router, jobs.router, async_uploads.router)
@@ -55,6 +55,12 @@ def test_all_expensive_entry_points_share_the_guard():
         if any(dependency.call is require_expensive_operation for dependency in route.dependant.dependencies)
     }
     assert guarded == expected
+
+
+def test_upload_initiate_is_admitted_by_the_batch_aware_guard():
+    initiate = next(route for route in async_uploads.router.routes if route.path == '/uploads/initiate')
+    assert any(dependency.call is require_upload_admission for dependency in initiate.dependant.dependencies)
+    assert not any(dependency.call is require_expensive_operation for dependency in initiate.dependant.dependencies)
 
 
 def test_http_budget_rejects_before_dispatch(tmp_path, monkeypatch):

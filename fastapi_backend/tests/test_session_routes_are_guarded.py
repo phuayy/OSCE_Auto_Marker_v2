@@ -22,10 +22,10 @@ _GUARDED_PREFIXES = ("/api/sessions/", "/api/jobs/", "/api/uploads/")
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _OWNERSHIP_GATES = (require_session_owner, require_job_owner, require_upload_owner)
 
-# Creates the record every other route in this module guards; there is no
-# owner yet to check. Every other mutating route under the three prefixes
+# Creates the record every other route in this module guards (or, for batches,
+# an allowance scoped to the caller's own account id); there is no owner yet to check. Every other mutating route under the three prefixes
 # above must carry one of _OWNERSHIP_GATES.
-_ALLOWLIST = {("POST", "/api/uploads/initiate")}
+_ALLOWLIST = {("POST", "/api/uploads/initiate"), ("POST", "/api/uploads/batches")}
 
 
 def _mutating_routes() -> list[RouteContext]:
