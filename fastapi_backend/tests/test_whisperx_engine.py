@@ -82,16 +82,56 @@ def test_operator_options_reach_the_cli(tmp_path: Path) -> None:
     assert flag(args, "--compute_type") == "int8"
 
 
-def test_request_speaker_bounds_win_over_the_engine_option(tmp_path: Path) -> None:
-    # The station's cast is one source of truth for every engine; an engine
-    # option must not quietly diverge from it.
+def test_the_account_speaker_option_wins_over_the_environment_default(tmp_path: Path) -> None:
+    # The request carries the deployment's WHISPERX_* defaults; an account's own
+    # minSpeakers/maxSpeakers must not be overwritten by them.
     engine, runner = build(tmp_path)
 
-    transcribe(engine, tmp_path, options={"minSpeakers": 1, "maxSpeakers": 5}, min_speakers=2, max_speakers=2)
+    transcribe(engine, tmp_path, options={"minSpeakers": 1, "maxSpeakers": 3}, min_speakers=2, max_speakers=2)
+
+    args = runner.whisperx_args()
+    assert flag(args, "--min_speakers") == "1"
+    assert flag(args, "--max_speakers") == "3"
+
+
+def test_unset_speaker_options_keep_the_environment_default(tmp_path: Path) -> None:
+    engine, runner = build(tmp_path, whisperx_min_speakers=2, whisperx_max_speakers=3)
+
+    transcribe(engine, tmp_path, min_speakers=2, max_speakers=3)
 
     args = runner.whisperx_args()
     assert flag(args, "--min_speakers") == "2"
-    assert flag(args, "--max_speakers") == "2"
+    assert flag(args, "--max_speakers") == "3"
+
+
+def test_a_zero_speaker_option_lets_clustering_estimate(tmp_path: Path) -> None:
+    engine, runner = build(tmp_path)
+
+    transcribe(engine, tmp_path, options={"minSpeakers": 0, "maxSpeakers": 0}, min_speakers=2, max_speakers=2)
+
+    args = runner.whisperx_args()
+    assert "--min_speakers" not in args
+    assert "--max_speakers" not in args
+
+
+def test_an_inverted_speaker_pair_degrades_to_the_deployment_default(tmp_path: Path) -> None:
+    engine, runner = build(tmp_path, whisperx_min_speakers=2, whisperx_max_speakers=3)
+
+    transcribe(engine, tmp_path, options={"minSpeakers": 5, "maxSpeakers": 2}, min_speakers=2, max_speakers=3)
+
+    args = runner.whisperx_args()
+    assert flag(args, "--min_speakers") == "2"
+    assert flag(args, "--max_speakers") == "3"
+
+
+def test_a_minimum_with_an_unbounded_maximum_is_valid(tmp_path: Path) -> None:
+    engine, runner = build(tmp_path)
+
+    transcribe(engine, tmp_path, options={"minSpeakers": 3, "maxSpeakers": 0})
+
+    args = runner.whisperx_args()
+    assert flag(args, "--min_speakers") == "3"
+    assert "--max_speakers" not in args
 
 
 def test_corpus_terms_become_hotwords(tmp_path: Path) -> None:
