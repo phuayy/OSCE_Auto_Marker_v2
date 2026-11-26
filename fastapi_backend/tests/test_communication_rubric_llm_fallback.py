@@ -228,6 +228,20 @@ def test_unavailable_after_gate_failure_keeps_deterministic_parse(monkeypatch: p
     assert payload["criteria_count"] == 3
 
 
+def test_failed_after_gate_failure_keeps_deterministic_parse_with_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        parser, "extract_rubric_with_llm", _raise(fallback.RubricLlmFallbackFailed("provider down"))
+    )
+    payload = parser.build_payload(_text(3, bullets=False))
+    assert payload["criteria_count"] == 3
+    extraction = payload["extraction"]
+    assert extraction["method"] == "deterministic"
+    assert len(extraction["warnings"]) == 1 and "provider down" in extraction["warnings"][0]
+    assert "no performance indicators" in extraction["warnings"][0]
+
+
 def test_failed_reports_both_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         parser, "extract_rubric_with_llm", _raise(fallback.RubricLlmFallbackFailed("bad json"))
@@ -274,6 +288,19 @@ def test_main_unavailable_writes_no_file(monkeypatch: pytest.MonkeyPatch, tmp_pa
     with pytest.raises(RuntimeError, match="Could not extract any numbered"):
         _run_main(monkeypatch, tmp_path)
     assert not (tmp_path / "out.json").exists()
+
+
+def test_main_failed_with_deterministic_parse_writes_the_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(parser, "read_pdf_text", lambda p: _text(3, bullets=False))
+    monkeypatch.setattr(
+        parser, "extract_rubric_with_llm", _raise(fallback.RubricLlmFallbackFailed("nope"))
+    )
+    code, out = _run_main(monkeypatch, tmp_path)
+    assert code == 0
+    written = json.loads(out.read_text())
+    assert written["extraction"]["method"] == "deterministic" and written["extraction"]["warnings"]
 
 
 def test_main_failed_writes_no_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

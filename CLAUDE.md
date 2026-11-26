@@ -2551,7 +2551,10 @@ owns it for both rubric kinds.
   deployment-wide, so its parser gets the deployment-default routing. With no
   usable model, or the switch off, behaviour is exactly as before the
   fallback existed (a communication parse that only failed the quality gate
-  is then kept, with a warning on stderr).
+  is then kept, with a warning on stderr). The fallback only augments: when the
+  parser produced a rubric that merely failed the gate and the LLM call then
+  *fails*, the deterministic rubric is kept with the failure recorded in
+  `extraction.warnings`; the upload errors only when there is nothing usable.
 * **Prompt-injection guard.** The PDF text is delimited as untrusted data in
   the user message, and the system prompt tells the model to ignore any
   instruction inside it; the output is schema-validated, never executed.
