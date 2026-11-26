@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { ITEM_STATUS } from '@/lib/batchUpload';
 import { formatFileSize } from '@/lib/uploadPreview';
+import UploadProbeNotice from '@/components/upload/UploadProbeNotice.jsx';
 
 const STATUS_LABEL = {
   [ITEM_STATUS.WAITING]: 'Waiting',
@@ -52,6 +53,13 @@ function BatchRow({ item, caseStudySize, locked, onRename, onRemove }) {
       </div>
       <div className="mt-1 truncate text-xs text-slate-500">{item.file.name}</div>
       {active ? <Progress className="mt-2" value={total > 0 ? (item.bytes / total) * 100 : 0} label={`Upload progress for ${item.file.name}`} /> : null}
+      {active && item.uploadId ? (
+        // The same early look at the video's head the single upload shows; it
+        // says nothing unless it finds something (no audio, will be converted).
+        <div className="mt-2">
+          <UploadProbeNotice uploadId={item.uploadId} />
+        </div>
+      ) : null}
       {item.note ? <p className="mt-1 text-xs text-slate-500" role="status">{item.note}</p> : null}
       {item.error ? <p className="mt-1 text-xs text-rose-700">{item.error}</p> : null}
     </li>

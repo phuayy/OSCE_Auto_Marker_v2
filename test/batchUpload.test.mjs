@@ -387,3 +387,13 @@ test('the case study is checked by its content, as the form does', async () => {
   assert.match(await caseStudyProblem({ name: 'case.pdf', size: 0 }, limits), /empty/);
   assert.match(await caseStudyProblem({ name: 'case.pdf', size: 6 * MB }, limits), /over the 5 MB limit/);
 });
+
+test('an item exposes its upload id while it transfers, which is what the row\'s probe notice watches', async () => {
+  const h = harness();
+  const { changes, promise } = h.run(plan(2));
+  await promise;
+  const sending = changes.flat().filter((item) => item.status === ITEM_STATUS.UPLOADING || item.status === ITEM_STATUS.FINALIZING);
+  const named = sending.filter((item) => item.uploadId);
+  assert.ok(named.length > 0, 'a transferring row names its upload');
+  assert.ok(named.every((item) => item.uploadId === `u-s-${item.name}`));
+});
