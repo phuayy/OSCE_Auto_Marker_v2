@@ -76,6 +76,17 @@ async def get_upload_status(upload_id: str, container: AppContainer = Depends(ge
         raise http_error(error, fallback_message="Failed to load upload status.", not_found_message="Upload not found.") from error
 
 
+@router.get("/{upload_id}/probe", dependencies=[Depends(require_upload_owner)])
+async def probe_upload(upload_id: str, container: AppContainer = Depends(get_container)) -> dict[str, object]:
+    """An early read of the video's head while it uploads (advisory; see
+    ``AsyncUploadService.probe_upload``). Bounded and cached, so it is not an
+    expensive operation."""
+    try:
+        return await container.async_uploads.probe_upload(upload_id)
+    except Exception as error:
+        raise http_error(error, fallback_message="Upload probe failed.", not_found_message="Upload not found.") from error
+
+
 @router.post("/{upload_id}/complete", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_upload_owner)])
 async def complete_upload(
     upload_id: str,

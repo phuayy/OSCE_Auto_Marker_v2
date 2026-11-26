@@ -719,6 +719,26 @@ are the session's source files. `delete_committed_object(storageRef)` removes
 one committed source (GCS: generation-scoped; `NotFound` counts as done), and
 is what retention and session deletion call. Session state: `waiting_for_upload -> assembling -> uploaded -> queued -> processing -> completed`.
 
+**An early look at the video while it uploads.** `GET /api/uploads/{id}/probe`
+(owner-gated like its siblings, not an expensive operation) runs ffprobe over
+the first `HEAD_MAX_BYTES` (16 MiB) of the video as the local backend already
+holds it: `ObjectStorage.read_received_head` returns the contiguous parts from
+part 1 and stops at the first gap (`None` before part 1; always `None` on GCS,
+whose resumable object is unreadable until finalised). The answer is
+`{status, receivedBytes, facts, warnings}` with `status` one of
+`UploadProbeStatus` (`pending`, `ready`, `inconclusive` — ffprobe could not read
+the head, typically an MP4 index at the end —, `unavailable` — GCS —, `complete`
+— committed; read `files.video.media`) and `warnings` from `UploadProbeWarning`
+(`no_video_stream`, `no_audio_stream`, `multiple_audio_streams`, `will_convert`,
+`rotated`). It is advisory: the full check at assembly is unchanged. It never
+takes the part lock, so a probe cannot slow a transfer; `UploadHeadProber`
+([services/upload_probe.py](fastapi_backend/app/services/upload_probe.py))
+serialises probes per upload and caches verdicts per (upload, file, head
+length), LRU-bounded. It reuses `MediaPipeline.probe_video_stream`, which now
+also reports `audioStreams` and `rotation`. The browser side is
+[lib/uploadProbe.js](src/lib/uploadProbe.js) (describe + poll schedule) and
+`components/upload/UploadProbeNotice.jsx` in the upload overlay.
+
 **Parts are serialised per upload, so the client may send them in parallel.**
 The upload record is a JSON file rewritten on every part; without a lock, two
 parts in flight for the same upload each read the record, each appended

@@ -148,6 +148,8 @@ def test_probe_reports_duration_and_frame_size(tmp_path: Path) -> None:
         "codec": "hevc",
         "pixelFormat": "yuvj420p",
         "audioCodec": "pcm_mulaw",
+        "audioStreams": 1,
+        "rotation": 0,
         "width": 2560,
         "height": 1440,
         "durationSeconds": 3605.5,

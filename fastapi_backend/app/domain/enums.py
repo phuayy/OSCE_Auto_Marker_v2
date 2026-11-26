@@ -78,6 +78,29 @@ class MediaPreparationStatus(StrEnum):
     FAILED = "failed"
 
 
+class UploadProbeStatus(StrEnum):
+    """What ``GET /api/uploads/{id}/probe`` can say about a video that is still
+    arriving: nothing yet, a verdict, no verdict (the head alone is not enough,
+    or this backend cannot read one), or that the upload has since committed."""
+
+    PENDING = "pending"
+    READY = "ready"
+    INCONCLUSIVE = "inconclusive"
+    UNAVAILABLE = "unavailable"
+    COMPLETE = "complete"
+
+
+class UploadProbeWarning(StrEnum):
+    """Findings the early probe raises about a video's head, as codes the
+    browser words itself."""
+
+    NO_VIDEO_STREAM = "no_video_stream"
+    NO_AUDIO_STREAM = "no_audio_stream"
+    MULTIPLE_AUDIO_STREAMS = "multiple_audio_streams"
+    WILL_CONVERT = "will_convert"
+    ROTATED = "rotated"
+
+
 class AssessmentResultStatus(StrEnum):
     """Status of one scorer's row in ``assessment_results`` — a vocabulary of
     its own, not ``SessionStatus``/``StepStatus``: by the time a scorer's

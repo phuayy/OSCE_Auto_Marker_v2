@@ -20,6 +20,8 @@ from app.domain.enums import (
     StepStatus,
     TaskType,
     UploadFileKind,
+    UploadProbeStatus,
+    UploadProbeWarning,
     UploadStatus,
     Workflow,
 )
@@ -36,7 +38,7 @@ def render() -> str:
     ]
     for enum in (
         SessionStatus, PipelineStep, StepStatus, UploadStatus, ClipExportStatus, ClipExportPhase, ClipExportScope,
-        MediaPreparationStatus,
+        MediaPreparationStatus, UploadProbeStatus, UploadProbeWarning,
         JobStatus, TaskType, Workflow, SegmentationMethod, ClipKind, UploadFileKind, OutputKey,
         MarkingMode, TieBreak, UserRole, UserStatus, ScoreDisplay,
         RubricVersionStatus, RubricChangeKind,
