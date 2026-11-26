@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from app.core.config import Settings
+from app.core.tasks import periodic_loop
 from app.services import container as container_module
 from app.services.container import ContainerRole, create_container
 from app.services.session_artifacts import SessionArtifacts
@@ -265,3 +266,82 @@ def test_a_session_with_no_playback_copy_is_unaffected_by_rerun(tmp_path) -> Non
     asyncio.run(_run())
 
 
+# --- M28 --------------------------------------------------------------------
+
+
+def test_periodic_loop_repeats_and_survives_a_failing_sweep() -> None:
+    async def _run() -> None:
+        calls = 0
+        ticked = asyncio.Event()
+
+        async def sweep() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("one bad sweep")
+            if calls >= 3:
+                ticked.set()
+
+        task = asyncio.create_task(periodic_loop(0.001, sweep, description="Test sweep"))
+        await asyncio.wait_for(ticked.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert calls >= 3
+
+    asyncio.run(_run())
+
+
+def _boot_with_expiry_counter(tmp_path, monkeypatch, role: ContainerRole, **overrides: Any):
+    container = create_container(_settings(tmp_path, job_queue_backend="hatchet", **overrides))
+    calls = {"expiry": 0}
+
+    async def expiry() -> None:
+        calls["expiry"] += 1
+
+    async def noop(*_a: Any, **_k: Any) -> None:
+        return None
+
+    monkeypatch.setattr(container_module, "run_database_migrations", noop)
+    monkeypatch.setattr(container.async_uploads, "recover_stale_assembling_uploads", noop)
+    monkeypatch.setattr(container.async_uploads, "recover_expired_uploads", expiry)
+    monkeypatch.setattr(container.transcription, "prefetch_selected_engine", noop)
+
+    async def boot() -> int:
+        await container.artifacts.ensure_storage_layout()
+        await container.orm_database.initialize()
+        try:
+            await container.startup(role=role)
+            startup_calls = calls["expiry"]
+            await asyncio.sleep(0.2)
+            return startup_calls
+        finally:
+            await container.shutdown()
+
+    return container, calls, boot
+
+
+def test_api_role_sweeps_expired_uploads_on_a_timer(tmp_path, monkeypatch) -> None:
+    container, calls, boot = _boot_with_expiry_counter(
+        tmp_path, monkeypatch, ContainerRole.API, upload_expiry_sweep_interval_seconds=0.02,
+    )
+    startup_calls = asyncio.run(boot())
+    assert startup_calls == 1, "the startup sweep stays"
+    assert calls["expiry"] >= startup_calls + 2, "the timer never repeated the sweep"
+    assert container.background.active_count == 0, "shutdown left the timer running"
+
+
+def test_a_zero_interval_disables_the_upload_expiry_timer(tmp_path, monkeypatch) -> None:
+    _, calls, boot = _boot_with_expiry_counter(
+        tmp_path, monkeypatch, ContainerRole.API, upload_expiry_sweep_interval_seconds=0,
+    )
+    assert asyncio.run(boot()) == 1
+    assert calls["expiry"] == 1
+
+
+def test_worker_role_does_not_start_the_upload_expiry_timer(tmp_path, monkeypatch) -> None:
+    _, calls, boot = _boot_with_expiry_counter(
+        tmp_path, monkeypatch, ContainerRole.WORKER, upload_expiry_sweep_interval_seconds=0.02,
+    )
+    asyncio.run(boot())
+    assert calls["expiry"] == 0

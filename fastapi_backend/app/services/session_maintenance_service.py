@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import shutil
 from datetime import datetime, timedelta, timezone
@@ -183,9 +182,9 @@ class SessionMaintenanceService:
         Bounded rather than exhaustive: a backlog larger than one batch (a
         fresh enable against years of old sessions) is worked down one sweep
         at a time rather than holding up the caller — startup, or the
-        periodic loop below — until every candidate is done. Each purge is
-        independent and best-effort, so one failure (a locked file, a session
-        deleted mid-sweep) never stops the rest.
+        periodic loop (``core.tasks.periodic_loop``) — until every candidate
+        is done. Each purge is independent and best-effort, so one failure
+        (a locked file, a session deleted mid-sweep) never stops the rest.
         """
         retention_days = self.settings.session_video_retention_days
         if retention_days <= 0:
@@ -211,22 +210,6 @@ class SessionMaintenanceService:
                 retention_days,
             )
         return purged
-
-    async def video_retention_sweep_loop(self) -> None:
-        """Periodic companion to :meth:`run_video_retention_sweep`.
-
-        Template: ``JobQueueService.stale_job_reaper_loop`` — sleep first,
-        log and continue past a bad scan rather than let one end the loop, no
-        ``CancelledError`` handler so shutdown (``BackgroundTaskRegistry
-        .cancel_all()``) cancels it cleanly out of ``asyncio.sleep``.
-        """
-        interval = self.settings.session_retention_sweep_interval_seconds
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                await self.run_video_retention_sweep()
-            except Exception:
-                logger.exception("Video-retention sweep failed; will retry on the next interval.")
 
     async def purge_expired_video(self, session_id: str) -> bool:
         """Delete one top-level session's stored video file, leaving its

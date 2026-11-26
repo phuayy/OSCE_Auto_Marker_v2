@@ -525,6 +525,12 @@ class Settings:
         "SESSION_RETENTION_SWEEP_INTERVAL_SECONDS", 6 * 60 * 60
     )
 
+    # How often abandoned uploads (parts on disk, session pinned at
+    # waiting_for_upload, TTL elapsed) are reclaimed after the sweep startup
+    # always runs. Without a timer a long-running API leaks every abandoned
+    # multi-GB part set until its next restart. 0 disables the periodic timer.
+    upload_expiry_sweep_interval_seconds: float = read_float_env("UPLOAD_EXPIRY_SWEEP_INTERVAL_SECONDS", 60 * 60)
+
     # --- On-demand hosting ------------------------------------------------
     # For a VM that is switched on by the start gate (deploy/gcp/gate) and
     # should switch itself off again when nobody is using it. After this many

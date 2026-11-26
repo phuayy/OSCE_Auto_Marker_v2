@@ -12,7 +12,7 @@ from app.core.process import CommandRunner
 from app.core.rate_limit import FixedWindowRateLimiter
 from app.core.resources import ResourceLease
 from app.core.single_instance import SingleInstanceLock
-from app.core.tasks import BackgroundTaskRegistry
+from app.core.tasks import BackgroundTaskRegistry, periodic_loop
 from app.core.versioned_cache import VersionedCache
 from app.database.change_tracking import verify_change_tracking
 from app.database.migration_runner import run_database_migrations
@@ -281,8 +281,23 @@ class AppContainer:
             # owns session lifecycle recovery is the one that should own this
             # too, rather than a Hatchet worker racing it against the same rows.
             self.background.spawn(
-                self.session_maintenance.video_retention_sweep_loop(),
+                periodic_loop(
+                    self.settings.session_retention_sweep_interval_seconds,
+                    self.session_maintenance.run_video_retention_sweep,
+                    description="Video-retention sweep",
+                ),
                 name="session-video-retention",
+            )
+        if api and self.settings.upload_expiry_sweep_interval_seconds > 0:
+            # The startup sweep above only reclaims what expired while the API
+            # was down; this is what frees an upload abandoned on a running one.
+            self.background.spawn(
+                periodic_loop(
+                    self.settings.upload_expiry_sweep_interval_seconds,
+                    self.async_uploads.recover_expired_uploads,
+                    description="Expired-upload sweep",
+                ),
+                name="upload-expiry-sweep",
             )
         if api and self.idle_shutdown.enabled:
             # API only: it is the process that sees the requests, and the one
