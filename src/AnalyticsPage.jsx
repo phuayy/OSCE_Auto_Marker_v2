@@ -4,6 +4,7 @@ import {
   BarChart3,
   CalendarDays,
   ChevronDown,
+  Download,
   GraduationCap,
   Layers,
   ListChecks,
@@ -19,6 +20,15 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { AnalyticsSkeletonBody, LoadingRegion } from '@/components/skeletons.jsx';
 import { PageHeader } from '@/components/PageHeader.jsx';
 import { apiJson } from '@/lib/apiFetch';
+import { downloadBlob } from '@/lib/download';
+import {
+  DEFAULT_EXPORT_LAYOUT,
+  EXPORT_LAYOUTS,
+  describeExportBlocker,
+  requestCriteriaExport,
+  resultRowsToCsv,
+  resultsFileName,
+} from '@/lib/analyticsExport';
 import { formatAggregate, formatScore, isRawScoreDisplay, percentOf, sharedMaximum } from '@/lib/scoreDisplay';
 import { useScoreDisplay } from '@/lib/useScoreDisplay';
 import {
@@ -587,6 +597,64 @@ function ResultsTable({ rows, mode }) {
   );
 }
 
+/** The downloads for the rows the primary filter keeps: the table as a CSV
+ *  (built here) and the per-criterion marks (built by the server). */
+function ExportControls({ rows, filter }) {
+  const [layout, setLayout] = useState(DEFAULT_EXPORT_LAYOUT);
+  const [isBusy, setIsBusy] = useState(false);
+  const [error, setError] = useState('');
+  const blocker = describeExportBlocker(rows.length);
+
+  function downloadResults() {
+    downloadBlob(resultsFileName(), new Blob([resultRowsToCsv(rows)], { type: 'text/csv;charset=utf-8' }));
+  }
+
+  async function downloadCriteria() {
+    setIsBusy(true);
+    setError('');
+    try {
+      const { blob, fileName } = await requestCriteriaExport(filter, { layout });
+      downloadBlob(fileName, blob);
+    } catch (downloadError) {
+      setError(downloadError.message || 'Failed to download the marks.');
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2 px-6 pb-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button variant="outline" size="sm" className="gap-2" onClick={downloadResults} disabled={Boolean(blocker)} aria-describedby={blocker ? 'export-blocker' : undefined}>
+          <Download className="h-4 w-4" aria-hidden="true" />
+          Download results (CSV)
+        </Button>
+        <select
+          className="h-9 rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700"
+          value={layout}
+          onChange={(e) => setLayout(e.target.value)}
+          aria-label="Per-criterion marks format"
+          disabled={isBusy}
+        >
+          {EXPORT_LAYOUTS.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+        <Button variant="outline" size="sm" className="gap-2" onClick={downloadCriteria} disabled={isBusy || Boolean(blocker)} aria-describedby={blocker ? 'export-blocker' : undefined}>
+          {isBusy ? (
+            <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+          ) : (
+            <Download className="h-4 w-4" aria-hidden="true" />
+          )}
+          {isBusy ? 'Preparing…' : 'Download per-criterion marks'}
+        </Button>
+      </div>
+      {blocker ? <p id="export-blocker" className="text-xs text-slate-500">{blocker}</p> : null}
+      {error ? <p role="alert" className="text-sm text-rose-700">{error}</p> : null}
+    </div>
+  );
+}
+
 /* ---------- page ---------- */
 
 export default function AnalyticsPage({ onBack }) {
@@ -814,6 +882,7 @@ export default function AnalyticsPage({ onBack }) {
                   <ChevronDown className={`h-4 w-4 text-slate-400 transition-transform ${showTable ? 'rotate-180' : ''}`} />
                 </button>
               </CardHeader>
+              <ExportControls rows={rowsA} filter={filterA} />
               {showTable ? (
                 <CardContent>
                   <ResultsTable rows={rowsA} mode={mode} />
