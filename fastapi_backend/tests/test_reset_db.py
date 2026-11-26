@@ -93,13 +93,18 @@ def test_postgres_is_never_mistaken_for_the_default_sqlite_file(tmp_path: Path, 
     """With PostgreSQL configured the default SQLite file is not the database:
     it is truncated through the Postgres path and the SQLite file is left alone."""
     import asyncio
+    import dataclasses
     import importlib.util
 
     env = _env(tmp_path, "postgresql+psycopg://u:p@127.0.0.1:1/none")
     default = _default_db_path(env)
     _make_sqlite(default, sidecars=True)
-    for key in ("APP_DATABASE_URL", "DATABASE_URL", "STORAGE_ROOT"):
-        monkeypatch.setenv(key, env[key])
+    # Settings reads its environment when the class is defined, long before this
+    # test runs, so the configuration is injected rather than set in os.environ.
+    from app.core.config import Settings
+
+    configured = dataclasses.replace(Settings.load(), app_database_url=env["APP_DATABASE_URL"], database_url="")
+    monkeypatch.setattr(Settings, "load", classmethod(lambda cls: configured))
 
     spec = importlib.util.spec_from_file_location("reset_db_under_test", SCRIPT)
     module = importlib.util.module_from_spec(spec)
