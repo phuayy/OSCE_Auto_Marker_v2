@@ -273,9 +273,29 @@ class AssessmentRepository:
         completion shows in the filter without a re-run.
         """
         root_id = func.coalesce(AssessmentSessionRecord.parent_session_id, AssessmentSessionRecord.id)
+        # Columns, not entities: each of the three tables carries a whole JSON
+        # document (score sheets, session payloads) that no analytics row
+        # returns, and this reads up to MAX_RESULT_ROWS of them in one go.
         async with self.database.session() as db_session:
             rows = await db_session.execute(
-                select(AssessmentResultRecord, AssessmentSessionRecord, StudentRecord, SessionRecord)
+                select(
+                    AssessmentSessionRecord.id,
+                    AssessmentSessionRecord.session_name,
+                    AssessmentSessionRecord.workflow,
+                    AssessmentSessionRecord.parent_session_id,
+                    AssessmentSessionRecord.created_at,
+                    StudentRecord.id.label("student_id"),
+                    StudentRecord.display_name.label("student_name"),
+                    AssessmentResultRecord.result_type,
+                    AssessmentResultRecord.status,
+                    AssessmentResultRecord.score_total,
+                    AssessmentResultRecord.score_max,
+                    AssessmentResultRecord.pass_fail,
+                    SessionRecord.id.label("root_id"),
+                    SessionRecord.name.label("root_name"),
+                    SessionRecord.created_at.label("root_created_at"),
+                )
+                .select_from(AssessmentResultRecord)
                 .join(
                     AssessmentSessionRecord,
                     AssessmentResultRecord.assessment_session_id == AssessmentSessionRecord.id,
@@ -287,46 +307,44 @@ class AssessmentRepository:
             )
             return [
                 {
-                    "sessionId": assessment.id,
-                    "sessionName": assessment.session_name,
-                    "studentId": student.id,
-                    "studentName": student.display_name,
-                    "resultType": result.result_type,
-                    "status": result.status,
-                    "scoreTotal": result.score_total,
-                    "scoreMax": result.score_max,
-                    "passFail": result.pass_fail,
-                    "workflow": assessment.workflow,
-                    "parentSessionId": assessment.parent_session_id,
-                    "createdAt": assessment.created_at.isoformat() if assessment.created_at else None,
-                    **self._root_session_fields(assessment, root),
+                    "sessionId": row.id,
+                    "sessionName": row.session_name,
+                    "studentId": row.student_id,
+                    "studentName": row.student_name,
+                    "resultType": row.result_type,
+                    "status": row.status,
+                    "scoreTotal": row.score_total,
+                    "scoreMax": row.score_max,
+                    "passFail": row.pass_fail,
+                    "workflow": row.workflow,
+                    "parentSessionId": row.parent_session_id,
+                    "createdAt": row.created_at.isoformat() if row.created_at else None,
+                    **self._root_session_fields(row),
                 }
-                for result, assessment, student, root in rows.all()
+                for row in rows.all()
             ]
 
     @staticmethod
-    def _root_session_fields(
-        assessment: AssessmentSessionRecord,
-        root: SessionRecord | None,
-    ) -> dict[str, Any]:
+    def _root_session_fields(row: Any) -> dict[str, Any]:
         """The recording an assessment row belongs to, for grouping.
 
-        ``root`` is the live ``sessions`` row for the parent (a clip child) or
-        for the assessment's own id (a standard session); ``None`` when that
-        row is gone. A standard session with no live row still has a name —
-        the snapshot ``session_name`` — but a child with no parent row does
-        not, and reporting the child's own name there would let one clip pose
-        as a whole recording.
+        ``row`` carries the live ``sessions`` columns for the parent (a clip
+        child) or for the assessment's own id (a standard session) as
+        ``root_id`` / ``root_name`` / ``root_created_at``; ``root_id`` is
+        ``None`` when that row is gone. A standard session with no live row
+        still has a name — the snapshot ``session_name`` — but a child with no
+        parent row does not, and reporting the child's own name there would let
+        one clip pose as a whole recording.
         """
-        is_child = bool(assessment.parent_session_id)
-        if root is not None:
-            name = root.name
-            created_at = root.created_at
+        is_child = bool(row.parent_session_id)
+        if row.root_id is not None:
+            name = row.root_name
+            created_at = row.root_created_at
         else:
-            name = None if is_child else assessment.session_name
-            created_at = None if is_child else assessment.created_at
+            name = None if is_child else row.session_name
+            created_at = None if is_child else row.created_at
         return {
-            "rootSessionId": assessment.parent_session_id or assessment.id,
+            "rootSessionId": row.parent_session_id or row.id,
             "rootSessionName": name,
             "rootSessionCreatedAt": created_at.isoformat() if created_at else None,
         }
