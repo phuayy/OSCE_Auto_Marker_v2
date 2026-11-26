@@ -3,7 +3,8 @@ import { UploadCloud, Wand2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
-import { ITEM_STATUS, formatFileSize } from '@/lib/batchUpload';
+import { ITEM_STATUS } from '@/lib/batchUpload';
+import { formatFileSize } from '@/lib/uploadPreview';
 
 const STATUS_LABEL = {
   [ITEM_STATUS.WAITING]: 'Waiting',
@@ -110,7 +111,9 @@ export function BatchUploadPanel({ batch, caseStudy }) {
         <UploadCloud className="h-6 w-6" aria-hidden="true" />
         <span className="text-sm font-medium">Choose recordings, or drop them here</span>
         <span className="text-xs text-slate-500">
-          Up to {limits.maxBatchSize} videos of {formatFileSize(limits.maxVideoBytes)} each ({accept})
+          Up to {limits.maxBatchSize} videos
+          {limits.maxVideoBytes ? ` of ${formatFileSize(limits.maxVideoBytes)} each` : ''}
+          {accept ? ` (${accept})` : ''}
         </span>
       </button>
       <input

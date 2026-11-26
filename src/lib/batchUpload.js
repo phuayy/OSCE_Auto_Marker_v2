@@ -12,6 +12,14 @@
 // fakes (test/batchUpload.test.mjs).
 import { ApiError, ERROR_KIND } from './apiFetch.js';
 import { UPLOAD_PHASE } from './uploadTracking.js';
+import {
+  Severity,
+  assessPdfFile,
+  assessVideoFile,
+  blockingReason,
+  fileExtension,
+  readPdfHeaderCheck,
+} from './uploadPreview.js';
 
 export const BATCH_HEADER = 'X-Upload-Batch';
 
@@ -33,16 +41,9 @@ export const MAX_PARALLEL_RECORDINGS = 2;
 
 export const IN_FLIGHT_RETRY = Object.freeze({ maxAttempts: 12, baseMs: 2000, maxMs: 30000 });
 
-const PDF_PATTERN = /\.pdf$/i;
-
-function extensionOf(name) {
-  const match = /\.[^./\\]+$/.exec(String(name || ''));
-  return match ? match[0].toLowerCase() : '';
-}
-
 export function stripExtension(name) {
   const text = String(name || '').trim();
-  const extension = extensionOf(text);
+  const extension = fileExtension(text);
   const stem = extension ? text.slice(0, -extension.length) : text;
   return stem.trim() || text;
 }
@@ -57,28 +58,22 @@ export function uniqueName(base, taken) {
   }
 }
 
-/** Why this file cannot be a recording in a batch, or `null` when it can. */
+/**
+ * Why this file cannot be a recording in a batch, or `null` when it can: the
+ * upload form's own verdict (`assessVideoFile`), so one rule decides what is
+ * acceptable. Only the server's refusals (extension, size, empty) count; the
+ * playability notes the single form shows are not read here.
+ */
 export function recordingProblem(file, limits) {
-  const extensions = (limits.videoExtensions || []).map((e) => e.toLowerCase());
-  if (!extensions.includes(extensionOf(file.name))) {
-    return `Not a supported video (${extensions.join(', ')}).`;
-  }
-  if (!(file.size > 0)) return 'The file is empty.';
-  if (file.size > limits.maxVideoBytes) {
-    return `Larger than the ${Math.floor(limits.maxVideoBytes / (1024 * 1024))} MB limit.`;
-  }
-  return null;
+  return blockingReason(assessVideoFile({ file, limits }));
 }
 
-/** Why this file cannot be the batch's case study, or `null`. */
-export function caseStudyProblem(file, limits) {
+/** Why this file cannot be the batch's case study, or `null`: the form's own PDF check. */
+export async function caseStudyProblem(file, limits) {
   if (!file) return 'Choose the case study PDF first.';
-  if (!PDF_PATTERN.test(file.name || '')) return 'The case study must be a PDF.';
-  if (!(file.size > 0)) return 'The case study file is empty.';
-  if (file.size > limits.maxPdfBytes) {
-    return `The case study is larger than the ${Math.floor(limits.maxPdfBytes / (1024 * 1024))} MB limit.`;
-  }
-  return null;
+  const headerOk = await readPdfHeaderCheck(file);
+  const refusal = assessPdfFile({ file, limits, headerOk }).warnings.find((item) => item.severity === Severity.ERROR);
+  return refusal ? refusal.message : null;
 }
 
 const sameFile = (a, b) => a.name === b.name && a.size === b.size && a.lastModified === b.lastModified;
@@ -247,7 +242,7 @@ export async function runBatch({
   if (queue.length > limits.maxBatchSize) {
     return failWaiting(`A batch holds at most ${limits.maxBatchSize} recordings.`);
   }
-  const caseStudyIssue = caseStudyProblem(caseStudy, limits);
+  const caseStudyIssue = await caseStudyProblem(caseStudy, limits);
   if (caseStudyIssue) return failWaiting(caseStudyIssue);
 
   // One recording is an ordinary upload: no allowance to reserve, and the
@@ -349,9 +344,3 @@ export async function runBatch({
   return skipWaiting();
 }
 
-export function formatFileSize(bytes) {
-  const size = Number(bytes) || 0;
-  if (size >= 1024 ** 3) return `${(size / 1024 ** 3).toFixed(1)} GB`;
-  if (size >= 1024 ** 2) return `${Math.round(size / 1024 ** 2)} MB`;
-  return `${Math.max(1, Math.round(size / 1024))} KB`;
-}

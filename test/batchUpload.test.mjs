@@ -8,7 +8,8 @@ import {
   BATCH_HEADER,
   ITEM_STATUS,
   batchConcurrency,
-  formatFileSize,
+  caseStudyProblem,
+  recordingProblem,
   inFlightDelayMs,
   planBatch,
   resetFailed,
@@ -18,6 +19,7 @@ import {
   uniqueName,
 } from '../src/lib/batchUpload.js';
 import { UPLOAD_PHASE } from '../src/lib/uploadTracking.js';
+import { assessVideoFile, blockingReason } from '../src/lib/uploadPreview.js';
 
 const MB = 1024 * 1024;
 const limits = {
@@ -29,6 +31,11 @@ const limits = {
 };
 const video = (name, size = 10 * MB, lastModified = 1) => ({ name, size, lastModified });
 const pdf = { name: 'case.pdf', size: 1000 };
+const fileWithHeader = (name, header) => ({
+  name,
+  size: 1000,
+  slice: () => ({ arrayBuffer: async () => new TextEncoder().encode(header).buffer }),
+});
 
 // --- planning ---------------------------------------------------------------
 
@@ -57,7 +64,7 @@ test('unaccepted, oversized, empty and repeated files are rejected with a reason
   );
   assert.deepEqual(items.map((i) => i.name), ['a']);
   assert.deepEqual(rejected.map((r) => r.name), ['notes.txt', 'big.mp4', 'empty.mp4', 'a.mp4']);
-  assert.match(rejected[0].reason, /supported video/);
+  assert.match(rejected[0].reason, /\.txt files cannot be uploaded.*AVI, MKV, MOV, MP4/);
   assert.match(rejected[1].reason, /100 MB/);
   assert.match(rejected[2].reason, /empty/);
   assert.match(rejected[3].reason, /Already in the list/);
@@ -266,7 +273,7 @@ test('a refused reservation fails every waiting item up front with the reason', 
 
 test('a bad case study or an oversized queue fails up front without reserving', async () => {
   const h = harness();
-  const bad = await h.run(plan(2), { caseStudy: { name: 'case.docx', size: 10 } }).promise;
+  const bad = await h.run(plan(2), { caseStudy: fileWithHeader('case.docx', 'PK\u0003\u0004') }).promise;
   assert.match(bad.error, /PDF/);
   const big = await h.run(plan(5), { limits: { ...limits, maxBatchSize: 4 } }).promise;
   assert.match(big.error, /at most 4/);
@@ -362,8 +369,21 @@ test('summary aggregates counts and one byte fraction', () => {
   assert.deepEqual(summarizeBatch([]), { ...summarizeBatch([]), total: 0, finished: false, fraction: 0 });
 });
 
-test('file sizes read in the unit a person expects', () => {
-  assert.equal(formatFileSize(512), '1 KB');
-  assert.equal(formatFileSize(5 * MB), '5 MB');
-  assert.equal(formatFileSize(1.5 * 1024 * MB), '1.5 GB');
+test('a batch judges files by the upload form\'s rules, not rules of its own', async () => {
+  for (const file of [video('a.mp4'), video('a.txt'), video('big.mp4', 101 * MB), video('empty.mp4', 0), video('no-extension', MB)]) {
+    assert.equal(recordingProblem(file, limits), blockingReason(assessVideoFile({ file, limits })), file.name);
+  }
+  assert.equal(recordingProblem(video('a.mp4'), limits), null);
+  // Limits the server could not state are not checked (the form's behaviour too).
+  assert.equal(recordingProblem(video('a.txt'), { ...limits, videoExtensions: null, maxVideoBytes: null }), null);
+});
+
+test('the case study is checked by its content, as the form does', async () => {
+  assert.equal(await caseStudyProblem(null, limits), 'Choose the case study PDF first.');
+  assert.equal(await caseStudyProblem(fileWithHeader('case.pdf', '%PDF-1.7'), limits), null);
+  assert.match(await caseStudyProblem(fileWithHeader('case.pdf', 'PK\u0003\u0004'), limits), /does not look like a PDF/);
+  // A header that cannot be read is no refusal; an empty or oversized file is.
+  assert.equal(await caseStudyProblem({ name: 'case.pdf', size: 1000 }, limits), null);
+  assert.match(await caseStudyProblem({ name: 'case.pdf', size: 0 }, limits), /empty/);
+  assert.match(await caseStudyProblem({ name: 'case.pdf', size: 6 * MB }, limits), /over the 5 MB limit/);
 });

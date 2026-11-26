@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiJson } from './apiFetch.js';
 import { ITEM_STATUS, planBatch, resetFailed, runBatch, summarizeBatch } from './batchUpload.js';
 import { submitUpload } from './uploadSubmission.js';
+import { fetchUploadLimits } from './uploadPreview.js';
 
 const IDLE_STATUSES = new Set([ITEM_STATUS.WAITING, ITEM_STATUS.FAILED, ITEM_STATUS.SKIPPED]);
 
@@ -32,16 +33,16 @@ export function useBatchUpload({ enabled, caseStudy, buildRequest, tracker, tran
   useEffect(() => {
     if (!enabled || limits) return undefined;
     let cancelled = false;
-    apiJson('/api/uploads/limits', { fallbackMessage: 'Could not load the upload limits.' })
-      .then((body) => {
-        if (!cancelled) {
-          setLimits(body);
-          setLimitsError('');
-        }
-      })
-      .catch((failure) => {
-        if (!cancelled) setLimitsError(failure.message);
-      });
+    // The same (cached, normalised) answer the upload form's own checks use.
+    fetchUploadLimits(apiJson).then((value) => {
+      if (cancelled) return;
+      if (value?.maxBatchSize) {
+        setLimits(value);
+        setLimitsError('');
+      } else {
+        setLimitsError('Could not load the upload limits.');
+      }
+    });
     return () => {
       cancelled = true;
     };
