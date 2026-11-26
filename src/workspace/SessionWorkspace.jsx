@@ -22,6 +22,8 @@ import { SessionStatus } from '@/lib/enums';
 import { CLIP_ASSESSMENTS_ANCHOR_ID } from '@/lib/anchors';
 import { describeProcessingStage, formatProcessingStageLabel } from '@/lib/processingStage';
 import { describeCreator } from '@/lib/provenance';
+import { canMutateSession } from '@/lib/authz';
+import { rescoreAvailability } from '@/lib/rescoreAction';
 import { INTERMISSION_KIND } from '@/lib/manualTimeline.js';
 import { DRAFT_CLIP_REASON, isDraftClip } from '@/lib/clipSelection';
 import { formatMetricValue, formatRuntime, prettySpeaker } from '@/lib/format';
@@ -53,6 +55,7 @@ import {
   Loader2,
   MessageSquare,
   PlayCircle,
+  RefreshCw,
   RotateCw,
   Scissors,
   Sparkles,
@@ -123,6 +126,8 @@ export default function SessionWorkspace({
   runSelectedClipAssessments,
   runClipAssessment,
   rerunClipAssessment,
+  authUser,
+  onRequestRescore,
   deleteClipAssessment,
   openClipAssessmentView,
   deletingSessionId,
@@ -133,6 +138,14 @@ export default function SessionWorkspace({
   // Who uploaded the recording (or queued this clip's assessment), as the
   // server snapshotted them; null for a session recorded before creators were.
   const creator = describeCreator(session);
+  // Re-score redoes the marking on the transcript already held — offered for
+  // a finished standard session or clip child, to whoever may change it.
+  const mayMutate = canMutateSession(authUser, session);
+  const rescoreOffered = mayMutate && rescoreAvailability(session).available;
+  // The same, for a long recording's clips: any clip with a finished child.
+  const rescoreClipsOffered =
+    mayMutate &&
+    Object.values(clipAssessmentRuns || {}).some((run) => run?.status === SessionStatus.COMPLETED && run?.sessionId);
   const transcriptSegments = useMemo(() => {
     const segmentList = Array.isArray(transcript?.segments) ? transcript.segments : [];
     return segmentList
@@ -593,11 +606,24 @@ export default function SessionWorkspace({
                     </dd>
                   </div>
                 </dl>
-                {isClipAssessmentView ? (
-                  <div className="mt-4">
-                    <Button variant="outline" onClick={restoreParentSession}>
-                      Back to clip list
-                    </Button>
+                {isClipAssessmentView || rescoreOffered ? (
+                  <div className="mt-4 flex flex-wrap items-center gap-2">
+                    {isClipAssessmentView ? (
+                      <Button variant="outline" onClick={restoreParentSession}>
+                        Back to clip list
+                      </Button>
+                    ) : null}
+                    {rescoreOffered ? (
+                      <Button
+                        variant="outline"
+                        className="gap-2"
+                        onClick={() => onRequestRescore({ sessionId: session.id, clips: false })}
+                        title="Redo the content and/or communication marking on the existing transcript."
+                      >
+                        <RefreshCw className="h-4 w-4" aria-hidden="true" />
+                        Re-score
+                      </Button>
+                    ) : null}
                   </div>
                 ) : null}
               </CardContent>
@@ -1303,6 +1329,18 @@ export default function SessionWorkspace({
                           Run Selected Assessments
                           {selectedRunnableClipIds.length > 0 ? ` (${selectedRunnableClipIds.length})` : ''}
                         </Button>
+                        {rescoreClipsOffered ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => onRequestRescore({ sessionId: session.id, clips: true })}
+                            disabled={isLoadingWorkspace || isQueueingSelectedClips}
+                            title="Redo the marking of every assessed clip on its existing transcript."
+                          >
+                            <RefreshCw className="mr-1 h-3.5 w-3.5" aria-hidden="true" />
+                            Re-score all clips
+                          </Button>
+                        ) : null}
                       </div>
                     </CardHeader>
                     <CardContent className="space-y-3">

@@ -63,6 +63,8 @@ import { SessionCardActions } from '@/dashboard/SessionCardActions.jsx';
 import { workspaceBelongsToUpload } from '@/lib/uploadCompletion';
 import { indexClipAssessments } from '@/lib/clipAssessments';
 import { describeRerunAction } from '@/lib/rerunAction';
+import { describeRescoreResult } from '@/lib/rescoreAction';
+import { RescoreDialog } from '@/components/RescoreDialog.jsx';
 import { describeStartAction } from '@/lib/sessionStartAction';
 import {
   buildRegionFocusOptions,
@@ -216,6 +218,8 @@ export default function OSCEAiMarkerMockup({
   const [renamingSessionId, setRenamingSessionId] = useState(null);
   const [deletingSessionId, setDeletingSessionId] = useState(null);
   const [rerunningSessionId, setRerunningSessionId] = useState(null);
+  // The open Re-score dialog: { sessionId, clips } (clips = a whole recording's clips).
+  const [rescoreTarget, setRescoreTarget] = useState(null);
   const [startingSessionId, setStartingSessionId] = useState(null);
 
   const [session, setSession] = useState(null);
@@ -1139,6 +1143,20 @@ export default function OSCEAiMarkerMockup({
     } finally {
       setRerunningSessionId(null);
     }
+  }
+
+  // The server accepted a re-score. A single session is now in flight, which
+  // the workspace cannot show, so an open one hands back to the list where its
+  // card gauges the run; a clip batch stays on the clip list, whose rows follow
+  // the session index.
+  function finishRescore(response) {
+    const wasWorkspace = showWorkspace && !rescoreTarget?.clips;
+    setRescoreTarget(null);
+    if (wasWorkspace) {
+      goHome();
+    }
+    setNotice(describeRescoreResult(response));
+    refreshSessionIndex({ silent: true });
   }
 
   function goHome() {
@@ -2587,6 +2605,7 @@ export default function OSCEAiMarkerMockup({
                             rerunningSessionId={rerunningSessionId}
                             onStart={startSession}
                             onRerun={rerunSession}
+                            onRescore={(entry) => setRescoreTarget({ sessionId: entry.id, clips: false })}
                             onOpen={openExistingSession}
                             onPreloadWorkspace={() => preloadComponent(SessionWorkspace)}
                           />
@@ -2689,6 +2708,8 @@ export default function OSCEAiMarkerMockup({
               runSelectedClipAssessments={runSelectedClipAssessments}
               runClipAssessment={runClipAssessment}
               rerunClipAssessment={rerunClipAssessment}
+              authUser={authUser}
+              onRequestRescore={setRescoreTarget}
               deleteClipAssessment={deleteClipAssessment}
               openClipAssessmentView={openClipAssessmentView}
               deletingSessionId={deletingSessionId}
@@ -2702,6 +2723,17 @@ export default function OSCEAiMarkerMockup({
         )}
         </AnimatePresence>
       </main>
+
+      <AnimatePresence>
+        {rescoreTarget && (
+          <RescoreDialog
+            sessionId={rescoreTarget.sessionId}
+            clips={rescoreTarget.clips}
+            onClose={() => setRescoreTarget(null)}
+            onDone={finishRescore}
+          />
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {showConfirmStart && (

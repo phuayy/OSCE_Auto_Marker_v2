@@ -1,9 +1,10 @@
 import React from 'react';
-import { Loader2, Play, RotateCw } from 'lucide-react';
+import { Loader2, Play, RefreshCw, RotateCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { IN_FLIGHT_STATUSES } from '@/lib/processingStage';
 import { canMutateSession } from '@/lib/authz';
 import { describeRerunAction, offersRerun } from '@/lib/rerunAction';
+import { rescoreAvailability } from '@/lib/rescoreAction';
 import { describeStartAction } from '@/lib/sessionStartAction';
 
 // Opening a session is what needs the workspace chunk, so hovering or tabbing
@@ -34,6 +35,7 @@ export function SessionCardActions({
   rerunningSessionId,
   onStart,
   onRerun,
+  onRescore,
   onOpen,
   onPreloadWorkspace,
 }) {
@@ -95,6 +97,25 @@ export function SessionCardActions({
     );
   }
 
+  // Re-score is the cheap redo (the transcript is kept), offered beside Open
+  // for any finished session that has one — in addition to Re-run, never
+  // instead of it. A long recording has nothing to score itself; its clips are
+  // re-scored from the workspace.
+  const rescore = rescoreAvailability(entry);
+  const rescoreButton = rescore.available ? (
+    <Button
+      size="sm"
+      variant="outline"
+      onClick={() => onRescore(entry)}
+      disabled={!mayMutate}
+      className="gap-1"
+      title={mayMutate ? 'Redo the marking on the existing transcript.' : notOwnerTitle}
+    >
+      <RefreshCw className="h-3 w-3" />
+      Re-score
+    </Button>
+  ) : null;
+
   if (offersRerun(entry.status)) {
     // A failed or cancelled session opens (its partial artefacts are worth seeing), and it
     // can be re-run in place: same id, fresh job. The reason it failed is
@@ -119,10 +140,16 @@ export function SessionCardActions({
           )}
           {rerun.label}
         </Button>
+        {rescoreButton}
         {open}
       </>
     );
   }
 
-  return open;
+  return (
+    <>
+      {rescoreButton}
+      {open}
+    </>
+  );
 }
