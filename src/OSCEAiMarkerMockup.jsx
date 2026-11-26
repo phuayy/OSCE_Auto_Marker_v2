@@ -21,7 +21,8 @@ import {
   describeProcessingStage,
   formatProcessingStageLabel,
 } from '@/lib/processingStage';
-import { useUploadTracker } from '@/lib/uploadTracking';
+import { activeUploadTrack, useUploadTracker } from '@/lib/uploadTracking';
+import UploadProbeNotice from '@/components/upload/UploadProbeNotice.jsx';
 import {
   BarChart3,
   BellRing,
@@ -2933,6 +2934,8 @@ export default function OSCEAiMarkerMockup({
                           <div className="mt-1 text-xs text-amber-700">{stage.detail}</div>
                         ) : null}
                       </div>
+
+                      <UploadProbeNotice uploadId={activeUploadTrack(uploadTracker.tracks)?.uploadId ?? null} />
 
                       <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
                         Marking starts on the server once the files land. The session card
