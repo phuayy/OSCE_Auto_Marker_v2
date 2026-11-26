@@ -27,6 +27,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from app.pipeline.clinical_lexicon import CLINICAL_LEXICON
 from app.pipeline.phonetics import phonetic_codes
 
 _EDGE_PUNCTUATION = ".,;:!?…\"'()[]{}"
@@ -269,12 +270,15 @@ def _evaluate(
 
 
 class _ProtectedTerms:
-    """The corpus's own spellings, and whether a window already contains one.
+    """The words a window may not be rewritten away from: the corpus's own
+    spellings plus the bundled clinical lexicon of real, confusable terms.
 
     A window carrying a correctly transcribed term plus a neighbouring word
     ("nasal block or") is not a misrecognition of that term — it is the term,
     and rewriting it would delete the neighbour. The same check stops a correct
-    "prednisolone" from being pulled towards its sibling "prednisone".
+    "prednisolone" from being pulled towards its sibling "prednisone" — and,
+    through the lexicon, a correct "dysphasia" from becoming a corpus
+    "dysphagia".
 
     The answer depends only on the window's words, not on which term is being
     matched, so it is remembered: every window is otherwise re-checked once per
@@ -282,7 +286,11 @@ class _ProtectedTerms:
     """
 
     def __init__(self, terms: list[_Term]) -> None:
-        self._spellings = {term.casefold for term in terms}
+        # The lexicon covers what the corpus cannot list: a correct
+        # "hypoglycaemia" is 0.889 similar to a corpus "hyperglycaemia" and
+        # would be rewritten into the opposite finding. One mechanism, so a
+        # lexicon word inside a longer window protects it exactly like a term.
+        self._spellings = {term.casefold for term in terms} | CLINICAL_LEXICON
         self._max_words = max(len(term.words) for term in terms)
         self._answers: dict[tuple[str, ...], bool] = {}
 

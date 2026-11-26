@@ -415,6 +415,16 @@ against. The same term list also biases WhisperX's own decoding
 (`--hotwords`) before `transcript_correction.py`'s orthographic/phonetic
 passes run over the result.
 
+**Correction is for mis-renderings, never for swapping one real word for
+another.** A window that spells a corpus term, or a word in the bundled
+clinical lexicon ([clinical_lexicon.py](fastapi_backend/app/pipeline/clinical_lexicon.py):
+both sides of each confusable pair — hypo-/hyperglycaemia, dysphasia/dysphagia,
+prednisone/prednisolone) is protected by the one `_ProtectedTerms` check and is
+never rewritten, so a student's correct "hypoglycaemia" cannot become a corpus
+"hyperglycaemia" at 0.889 similarity. Raising the threshold is not the fix: it
+would drop legitimate corrections. Add to the lexicon real terms only, never
+misspellings.
+
 ---
 
 ## Long-Video Workflow (Auto-Crop)
