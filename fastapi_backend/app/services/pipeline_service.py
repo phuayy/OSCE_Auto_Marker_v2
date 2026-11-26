@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from app.core.artifacts import artifact_metadata, read_artifact_payload
-from app.core.exceptions import AppError, EmptyTranscriptError
+from app.core.exceptions import AppError, EmptyTranscriptError, is_retryable_failure
 from app.core.json_utils import extract_json_object, write_json_file
 from app.core.logging_utils import log_context
 from app.core.utils import exception_message, runtime_seconds, utc_now_iso
@@ -953,8 +953,21 @@ class PipelineService:
             if isinstance(error, Exception)
         ]
         if errors:
-            messages = "; ".join(str(error) or type(error).__name__ for error in errors)
-            raise RuntimeError(f"Post-transcription scoring failed: {messages}") from errors[0]
+            # The queue decides whether to retry from the exception it sees, so
+            # the branch's own error is raised, not a wrapper: a missing-input
+            # 422 in one branch must not become a retryable RuntimeError. When
+            # both fail, a permanent failure decides (re-running cannot fix it);
+            # the other is logged so its cause is not lost.
+            decisive = next((error for error in errors if not is_retryable_failure(error)), errors[0])
+            for other in errors:
+                if other is not decisive:
+                    logger.warning(
+                        "Second scoring branch also failed: %s",
+                        exception_message(other, "Scoring branch failed."),
+                        exc_info=other,
+                        extra=log_context(str(session.get("id")), "scoring_branches"),
+                    )
+            raise decisive
 
         return {
             OutputKey.AUDIO_PROFESSIONALISM: communication_result.get(OutputKey.AUDIO_PROFESSIONALISM),

@@ -375,6 +375,10 @@ Then asyncio.gather over TWO branches (PARALLEL_SCORING env var, default true):
         stepProgress: 80% shared by the markers, 100% after adjudication
 
   If PARALLEL_SCORING=false: fully sequential (audio_prof -> communication -> content).
+  When a branch fails, the branch's own exception is raised (never a wrapper):
+  the queue judges retryability from its type (`is_retryable_failure`, in
+  `core/exceptions.py`). If both fail, a non-retryable one decides and the other
+  is logged.
 
   SSE milestone: scored
 

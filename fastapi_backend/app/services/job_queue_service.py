@@ -11,7 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.core.config import Settings
-from app.core.exceptions import AppError
+from app.core.exceptions import AppError, is_retryable_failure
 from app.core.logging_utils import log_context
 from app.core.pagination_cursor import decode_cursor as decode_page_cursor
 from app.core.pagination_cursor import encode_cursor as encode_page_cursor
@@ -63,23 +63,6 @@ class FinalJobFailure(RuntimeError):
     good: the session is already failed and no further attempt should run.
     The Hatchet task turns it into a non-retryable error; any other exception
     that escapes means the row was requeued and Hatchet should retry."""
-
-
-def is_retryable_failure(error: BaseException) -> bool:
-    """Whether a failed job execution is worth running again.
-
-    An :class:`AppError` below 500 is a deliberate, caller-visible rejection —
-    an unsupported task type, a missing source file, a transcript with no
-    speech. Re-running it burns the job's remaining attempts and delays the
-    error the user needs to see. A few 5xx conditions are permanent for the
-    same reason even though the server is at fault (a model the host has no
-    memory to load), and say so through ``AppError.retryable``. Everything else
-    (subprocess crash, upstream 5xx, transient I/O) is treated as transient and
-    retried.
-    """
-    if isinstance(error, AppError):
-        return error.retryable
-    return True
 
 
 @dataclass(frozen=True)
