@@ -150,6 +150,16 @@ class ObjectStorage(Protocol):
     def public_url_for_key(self, key: str) -> str:
         """A URL the browser can read the object from."""
 
+    def playback_url(self, storage_ref: dict[str, Any]) -> str | None:
+        """The URL the browser plays a committed object from, *right now*.
+
+        A read-time capability, never persisted: on a cloud backend it is a
+        time-limited signature, so it is minted whenever a session is served
+        rather than stored at commit, where it would expire. ``None`` when the
+        ref is not this backend's (a deployment that switched backends), so the
+        caller keeps whatever it already has.
+        """
+
     async def materialize(self, storage_ref: dict[str, Any]) -> Path:
         """Return a local path holding the object's bytes, fetching if needed."""
 

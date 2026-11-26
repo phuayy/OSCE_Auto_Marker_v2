@@ -1012,8 +1012,9 @@ class AsyncUploadService:
             "mimeType": storage_ref.get("mimeType"),
             "storageRef": storage_ref,
         }
-        if kind == "video":
-            meta["url"] = self.storage.public_url_for_key(str(storage_ref.get("key") or ""))
+        # No playback URL here: for a signed one that would be a string with an
+        # expiry, persisted. SessionService.public_session resolves it from the
+        # storage ref each time the session is served.
         if rubric_asset:
             meta["rubricAssetId"] = rubric_asset["id"]
             meta["rubricDeduplicated"] = rubric_deduplicated

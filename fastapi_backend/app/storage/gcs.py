@@ -350,6 +350,12 @@ class GcsObjectStorageService:
     # Read side
     # ------------------------------------------------------------------
 
+    def playback_url(self, storage_ref: dict[str, Any]) -> str | None:
+        key = str(storage_ref.get("key") or "")
+        if str(storage_ref.get("provider") or "") != self.provider or not key:
+            return None
+        return self.public_url_for_key(key)
+
     def public_url_for_key(self, key: str) -> str:
         """A time-limited V4 signed URL the browser can read the object from.
 

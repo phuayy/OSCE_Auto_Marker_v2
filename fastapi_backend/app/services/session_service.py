@@ -28,6 +28,10 @@ SESSION_INDEX_CACHE_KEY = "session_index"
 # it is re-run from scratch when another writer got in first.
 SessionMutator = Callable[[dict[str, Any]], Any]
 
+# storage ref -> the URL to play it from now, or None when the ref is not one
+# the resolver owns.
+PlaybackUrlResolver = Callable[[dict[str, Any]], "str | None"]
+
 # How many times ``update`` re-reads and re-applies before giving up. Contention
 # on one session is a handful of writers (pipeline, queue, the user), so a
 # mutation that still cannot land after this many rounds is a bug, not load.
@@ -42,9 +46,14 @@ class SessionService:
         *,
         cache: VersionedCache | None = None,
         changes: ChangeFeedService | None = None,
+        playback_url: PlaybackUrlResolver | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository
+        # Turns a committed object's storage ref into the URL the player loads
+        # (the storage backend's ``playback_url``). Optional like the cache: a
+        # bare service serves whatever URL the document carries.
+        self._playback_url = playback_url
         # Both optional so a bare SessionService (tests, scripts) still works —
         # it just rebuilds the index on every call, as it always did.
         self.cache = cache
@@ -272,8 +281,28 @@ class SessionService:
     def generate_random_session_name() -> str:
         return f"{random.choice(SESSION_NAME_ADJECTIVES)} {random.choice(SESSION_NAME_NOUNS)} {random.randint(100, 999)}"
 
-    @staticmethod
-    def public_session(session: dict[str, Any]) -> dict[str, Any]:
+    def video_playback_url(self, video: dict[str, Any]) -> Any:
+        """The URL the player should load for a session's source video.
+
+        A signed URL is a read-time capability: it is resolved from the stored
+        storage ref on every serve, so one persisted at commit by an earlier
+        version (and long expired) is replaced too. A video with no ref (a
+        clip child's, pointing at its parent's exported MP4), one the retention
+        sweep purged, or a ref the resolver does not own keeps the stored URL.
+        A signing failure must not take the whole session read down with it, so
+        it also falls back to the stored URL.
+        """
+        stored = video.get("url")
+        storage_ref = video.get("storageRef")
+        if self._playback_url is None or video.get("purgedAt") or not isinstance(storage_ref, dict):
+            return stored
+        try:
+            return self._playback_url(storage_ref) or stored
+        except Exception:
+            logger.warning("Could not resolve a playback URL; serving the stored one.", exc_info=True)
+            return stored
+
+    def public_session(self, session: dict[str, Any]) -> dict[str, Any]:
         files = session.get("files") or {}
         outputs = session.get("outputs") or {}
         video = files.get("video") or {}
@@ -388,7 +417,7 @@ class SessionService:
                 "video": {
                     "originalName": video.get("originalName"),
                     "fileName": video.get("fileName"),
-                    "url": video.get("url"),
+                    "url": self.video_playback_url(video),
                     "sizeBytes": video.get("sizeBytes"),
                     "mimeType": video.get("mimeType"),
                     "uploadStatus": video.get("uploadStatus"),

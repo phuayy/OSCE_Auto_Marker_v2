@@ -297,6 +297,12 @@ class LocalObjectStorageService:
             raise AppError("Invalid object key.", status_code=400)
         return self.settings.object_storage_root / normalized
 
+    def playback_url(self, storage_ref: dict[str, Any]) -> str | None:
+        key = str(storage_ref.get("key") or "")
+        if str(storage_ref.get("provider") or "") != self.provider or not key:
+            return None
+        return self.public_url_for_key(key)
+
     def public_url_for_key(self, key: str) -> str:
         normalized_key = key.replace("\\", "/")
         return f"/media/source/{normalized_key}"

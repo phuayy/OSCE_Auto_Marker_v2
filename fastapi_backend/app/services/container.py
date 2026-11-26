@@ -333,13 +333,14 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         lambda table, _version: read_cache.invalidate_tables((table,))
     )
     session_repository = SessionRepository(orm_database, legacy_sessions_dir=active_settings.paths.sessions_dir)
+    storage = create_storage_service(active_settings)
     sessions = SessionService(
         active_settings,
         session_repository,
         cache=read_cache,
         changes=changes,
+        playback_url=storage.playback_url,
     )
-    storage = create_storage_service(active_settings)
     job_repository = JobRepository(orm_database, active_settings.paths.jobs_dir)
     jobs = JobQueueService(
         active_settings,
