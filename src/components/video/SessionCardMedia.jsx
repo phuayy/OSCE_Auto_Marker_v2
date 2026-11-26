@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { formatRuntime } from '@/lib/format';
 import { describeMediaState } from '@/lib/videoMedia';
-import { useMediaTicket } from '@/lib/useMediaTicket';
+import { refreshMediaTicket, useMediaTicket } from '@/lib/useMediaTicket';
 
 // The picture, length and conversion state of a session's video, on its card,
 // with a Watch button as soon as a playable source exists — in-flight sessions
@@ -22,9 +22,19 @@ export function SessionCardMedia({ entry, uploading = false, onWatch, onWatchInt
   const { ready: ticketReady } = useMediaTicket(Boolean(media.posterUrl) && !uploading);
   // No <img> until the ticket is on the URL: an unticketed /media/ request is a 401.
   const posterSrc = ticketReady ? resolveMediaUrl(media.posterUrl) || null : null;
-  const [posterFailed, setPosterFailed] = useState(false);
-  // A new poster (the job just wrote one) deserves a fresh attempt.
-  useEffect(() => setPosterFailed(false), [media.posterUrl]);
+  // A refused poster gets one new ticket and one more try before the
+  // placeholder (the ticket may have lapsed on a long-open page). A new poster
+  // URL (the job just wrote one) starts over.
+  const [poster, setPoster] = useState({ retries: 0, failed: false });
+  useEffect(() => setPoster({ retries: 0, failed: false }), [media.posterUrl]);
+  const posterFailed = poster.failed;
+  const onPosterError = () => {
+    if (poster.retries >= 1) {
+      setPoster((current) => ({ ...current, failed: true }));
+      return;
+    }
+    refreshMediaTicket().finally(() => setPoster({ retries: 1, failed: false }));
+  };
 
   if (uploading || (media.state === 'unknown' && !media.posterUrl)) return null;
 
@@ -34,11 +44,12 @@ export function SessionCardMedia({ entry, uploading = false, onWatch, onWatchInt
       <div className="relative aspect-video w-full overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
         {posterSrc && !posterFailed ? (
           <img
+            key={poster.retries}
             src={posterSrc}
             alt=""
             loading="lazy"
             decoding="async"
-            onError={() => setPosterFailed(true)}
+            onError={onPosterError}
             className="h-full w-full object-cover"
           />
         ) : (

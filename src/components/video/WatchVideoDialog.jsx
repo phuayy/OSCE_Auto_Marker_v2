@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, X } from 'lucide-react';
 import { resolveMediaUrl } from '@/auth';
 import { Button } from '@/components/ui/button';
@@ -51,7 +51,13 @@ export default function WatchVideoDialog({ sessionId, sessionName, entry, onClos
   const media = describeVideoMedia(session);
   const state = describeMediaState(session || entry);
   const { ready: ticketReady, error: ticketError } = useMediaTicket();
-  const videoSrc = ticketReady ? resolveMediaUrl(media.playerUrl) || null : null;
+  // Resolved once per source, deliberately not per ticket rotation: a new
+  // ticket in the URL would restart a video the viewer is part-way through.
+  const videoSrc = useMemo(
+    () => (ticketReady ? resolveMediaUrl(media.playerUrl) || null : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ticketReady, media.playerUrl],
+  );
   const posterSrc = ticketReady ? resolveMediaUrl(state.posterUrl || media.posterUrl) || undefined : undefined;
   const canPlay = Boolean(session) && state.canWatch && Boolean(videoSrc);
   const problem = loadError || ticketError?.message || null;

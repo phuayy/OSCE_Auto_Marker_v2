@@ -182,3 +182,10 @@ test('the button is for a failure or a legacy session, never while preparing or 
   assert.equal(panel({ url: '/x', playback: { url: '/p' }, media: { status: 'failed' } }).offer, false);
   assert.equal(panel({ url: null, purgedAt: 'x', media: { status: 'failed' } }).offer, false);
 });
+
+test('a purged list row (no media, no poster, no copy) is unknown, unwatchable, and draws nothing', () => {
+  const state = describeMediaState({ id: 's1', media: null, posterUrl: null, hasPlayback: false });
+  assert.deepEqual([state.state, state.canWatch, state.posterUrl], ['unknown', false, null]);
+  // SessionCardMedia returns null for exactly this: state unknown and no poster.
+  assert.equal(state.state === 'unknown' && !state.posterUrl, true);
+});
