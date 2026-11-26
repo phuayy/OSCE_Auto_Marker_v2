@@ -2598,7 +2598,7 @@ the admin-only `/api/admin/communication-rubric` router
 | Route | What it does |
 |---|---|
 | `POST /drafts?mode=llm\|auto` (multipart `rubric`) | Parses the PDF into a **draft** under `auth/communication_rubric_drafts/<32-hex id>/` and answers 201 `{draft, rubric}`. `llm` (the screen's **Upload for AI extraction**) runs the parser with `--force-llm`: the deterministic parser is skipped and the model reads the PDF; a refusal (`RUBRIC_LLM_FALLBACK=false`, no usable model, an ungrounded reply) is a 422 with the reason. The active rubric is never touched. Drafts expire after 24 h and are swept on the next extraction |
-| `PUT ""` `{rubric, draftId?}` | Saves an edited rubric. With `draftId` it also activates the draft's PDF (registered as a rubric asset, like an upload); without, it edits the active rubric in place and keeps its PDF/asset. 422 `{message, issues[]}` lists every problem at once; 404 for an expired/discarded draft |
+| `PUT ""` `{rubric, baseVersionId, draftId?}` | Saves an edited rubric. `baseVersionId` (required; the editor sends the active version it opened on) is compared with the active version under the service lock, so a save made after another administrator's save, upload, reset or restore is a 409 `{message, currentVersion}` and writes nothing; the editor offers "Reload the latest rubric". A request without it is a validation error. With `draftId` it also activates the draft's PDF (registered as a rubric asset, like an upload); without, it edits the active rubric in place and keeps its PDF/asset. 422 `{message, issues[]}` lists every problem at once; 404 for an expired/discarded draft |
 | `DELETE /drafts/{id}` | Discards a draft (204) |
 
 **One module owns the document.**

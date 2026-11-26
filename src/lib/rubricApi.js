@@ -45,6 +45,15 @@ export function extractRubricIssues(error) {
   return { message, issues };
 }
 
+/**
+ * True when the save was refused because the rubric changed after the editor
+ * opened (409 from `PUT /admin/communication-rubric`). The only 409 that route
+ * answers, so the status alone identifies it.
+ */
+export function isVersionConflict(error) {
+  return Boolean(error) && error.status === 409;
+}
+
 /** Locale date-time for an ISO stamp; the raw text when unparseable, '' when absent. */
 export function formatWhen(value) {
   if (!value) return '';

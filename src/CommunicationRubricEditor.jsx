@@ -37,7 +37,13 @@ import {
   updateIndicator,
   validateEditableRubric,
 } from '@/lib/rubricEditor';
-import { RUBRIC_ENDPOINT, draftEndpoint, extractRubricIssues, formatWhen } from '@/lib/rubricApi';
+import {
+  RUBRIC_ENDPOINT,
+  draftEndpoint,
+  extractRubricIssues,
+  formatWhen,
+  isVersionConflict,
+} from '@/lib/rubricApi';
 
 const FIELD =
   'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-500 focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/30 disabled:opacity-60';
@@ -58,12 +64,22 @@ function FieldError({ id, message }) {
  * extracted (`draft` set) or the active rubric edited in place (`draft` null).
  * All editing rules live in lib/rubricEditor.js; this holds state and calls them.
  */
-export default function CommunicationRubricEditor({ rubric, draft = null, onSaved, onClose }) {
+export default function CommunicationRubricEditor({
+  rubric,
+  baseVersionId,
+  draft = null,
+  onSaved,
+  onClose,
+  onReload,
+}) {
   const original = useMemo(() => toEditableRubric(rubric), [rubric]);
   const [editable, setEditable] = useState(original);
   const [isSaving, setIsSaving] = useState(false);
   const [isDiscarding, setIsDiscarding] = useState(false);
   const [serverError, setServerError] = useState({ message: '', issues: [] });
+  // True once a save was refused because someone else changed the rubric after
+  // this editor opened; the only way forward is to reload and edit again.
+  const [isStale, setIsStale] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const keepEditingRef = useRef(null);
 
@@ -77,7 +93,7 @@ export default function CommunicationRubricEditor({ rubric, draft = null, onSave
   const datalistId = 'rubric-section-suggestions';
 
   const change = (fn) => {
-    setServerError({ message: '', issues: [] });
+    if (!isStale) setServerError({ message: '', issues: [] });
     setEditable((current) => fn(current));
   };
 
@@ -88,19 +104,25 @@ export default function CommunicationRubricEditor({ rubric, draft = null, onSave
     try {
       const body = await apiJson(RUBRIC_ENDPOINT, {
         method: 'PUT',
-        json: { rubric: fromEditableRubric(editable), draftId: draft?.draftId ?? null },
+        json: {
+          rubric: fromEditableRubric(editable),
+          draftId: draft?.draftId ?? null,
+          baseVersionId,
+        },
         fallbackMessage: 'Could not save the rubric.',
       });
       onSaved?.(body);
     } catch (error) {
       const { message, issues } = extractRubricIssues(error);
+      setIsStale(isVersionConflict(error));
       setServerError({ message: message || 'Could not save the rubric.', issues });
     } finally {
       setIsSaving(false);
     }
   }
 
-  async function discard() {
+  // `done` runs once any draft is discarded: closing, or closing and reloading.
+  async function discard(done = onClose) {
     setConfirmOpen(false);
     if (draft?.draftId) {
       setIsDiscarding(true);
@@ -116,7 +138,7 @@ export default function CommunicationRubricEditor({ rubric, draft = null, onSave
         setIsDiscarding(false);
       }
     }
-    onClose?.();
+    done?.();
   }
 
   function requestClose() {
@@ -500,6 +522,11 @@ export default function CommunicationRubricEditor({ rubric, draft = null, onSave
               ))}
             </ul>
           ) : null}
+          {isStale ? (
+            <Button variant="outline" className="mt-2" onClick={() => discard(onReload)} disabled={busy}>
+              Reload the latest rubric
+            </Button>
+          ) : null}
         </div>
       ) : null}
 
@@ -508,7 +535,7 @@ export default function CommunicationRubricEditor({ rubric, draft = null, onSave
           {isDiscarding ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" /> : null}
           {draft ? 'Discard draft' : 'Cancel'}
         </Button>
-        <Button className="gap-2" onClick={handleSave} disabled={!validation.valid || busy}>
+        <Button className="gap-2" onClick={handleSave} disabled={!validation.valid || busy || isStale}>
           {isSaving ? (
             <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
           ) : (
@@ -540,7 +567,7 @@ export default function CommunicationRubricEditor({ rubric, draft = null, onSave
                 <Button ref={keepEditingRef} variant="outline" onClick={() => setConfirmOpen(false)}>
                   Keep editing
                 </Button>
-                <Button variant="destructive" onClick={discard}>
+                <Button variant="destructive" onClick={() => discard()}>
                   Discard
                 </Button>
               </div>

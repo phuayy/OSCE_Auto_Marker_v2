@@ -168,7 +168,11 @@ export default function CommunicationRubricPanel({ onBack, isAdmin = false }) {
         body: formData,
         fallbackMessage: 'The AI could not extract a rubric from that PDF.',
       });
-      setEditing({ draft: body.draft || null, rubric: body.rubric || null });
+      setEditing({
+        draft: body.draft || null,
+        rubric: body.rubric || null,
+        baseVersionId: version?.id,
+      });
     } catch (extractError) {
       setError(extractError.message || 'The AI could not extract a rubric from that PDF.');
     } finally {
@@ -184,6 +188,13 @@ export default function CommunicationRubricPanel({ onBack, isAdmin = false }) {
     setEditing(null);
     setError('');
     setNotice('Rubric saved. New communication scoring runs will use it.');
+  }
+
+  // Someone else changed the rubric while this editor was open: drop the stale
+  // edit and show what is active now.
+  function handleEditorReload() {
+    setEditing(null);
+    loadRubric();
   }
 
   async function handleReset() {
@@ -275,8 +286,10 @@ export default function CommunicationRubricPanel({ onBack, isAdmin = false }) {
             key={editing.draft?.draftId || 'in-place'}
             rubric={editing.rubric}
             draft={editing.draft}
+            baseVersionId={editing.baseVersionId}
             onSaved={handleEditorSaved}
             onClose={() => setEditing(null)}
+            onReload={handleEditorReload}
           />
         ) : (
         <>
@@ -383,7 +396,7 @@ export default function CommunicationRubricPanel({ onBack, isAdmin = false }) {
                     <Button
                       variant="outline"
                       className="gap-2"
-                      onClick={() => setEditing({ draft: null, rubric })}
+                      onClick={() => setEditing({ draft: null, rubric, baseVersionId: version?.id })}
                       disabled={busyAny || !rubric?.criteria?.length}
                     >
                       <Pencil className="h-4 w-4" aria-hidden="true" />

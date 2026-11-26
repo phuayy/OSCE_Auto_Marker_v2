@@ -55,6 +55,22 @@ class RubricVersionNotFound(LookupError):
     """No communication rubric version has that id."""
 
 
+class RubricVersionConflict(RuntimeError):
+    """An edit was based on a rubric version that is no longer the active one.
+
+    Another administrator saved, uploaded, reset or restored in the meantime;
+    applying this edit would silently discard their change. ``current`` is the
+    active version's summary, so the editor can say which one superseded it.
+    """
+
+    def __init__(self, current: dict[str, Any]) -> None:
+        self.current = current
+        super().__init__(
+            f"The rubric was changed by someone else (it is now version {current['versionNumber']}). "
+            "Reload to see their changes, then make your edit again."
+        )
+
+
 class RubricVersionAlreadyActive(RuntimeError):
     """The version asked to be restored is the one scoring already uses."""
 
@@ -524,10 +540,27 @@ class RubricService:
     # --- editing --------------------------------------------------------------
 
     async def save_edited(
-        self, rubric_input: dict[str, Any], *, draft_id: str | None = None, actor: Any = None
+        self,
+        rubric_input: dict[str, Any],
+        *,
+        base_version_id: str,
+        draft_id: str | None = None,
+        actor: Any = None,
     ) -> dict[str, Any]:
+        """Activate an edited rubric as the next version.
+
+        ``base_version_id`` is the version the editor was opened on. It is
+        compared with the active version under the same lock as every other
+        write to the rubric (save, upload, reset, restore), so a stale edit is
+        refused with ``RubricVersionConflict`` before anything is written
+        rather than overwriting what another administrator just saved. It is
+        required: a client that cannot say what it edited cannot be checked.
+        """
         payload = validate_edited_rubric(rubric_input)
         async with self._lock:
+            active = await self.versions.active()
+            if active is not None and active["id"] != base_version_id:
+                raise RubricVersionConflict(active)
             if draft_id is not None:
                 directory, draft = await asyncio.to_thread(self._load_draft, draft_id)
                 previous = (draft.get("rubric") or {}).get("extraction")

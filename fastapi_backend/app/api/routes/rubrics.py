@@ -11,6 +11,7 @@ from app.services.rubric_service import (
     RubricDraftNotFound,
     RubricParseError,
     RubricVersionAlreadyActive,
+    RubricVersionConflict,
     RubricVersionNotFound,
 )
 
@@ -147,11 +148,17 @@ async def save_communication_rubric(
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
     try:
-        return await container.rubrics.save_edited(body.rubric, draft_id=body.draftId, actor=current_actor(request))
+        return await container.rubrics.save_edited(
+            body.rubric, base_version_id=body.baseVersionId, draft_id=body.draftId, actor=current_actor(request)
+        )
     except RubricValidationError as error:
         raise HTTPException(
             status_code=422,
             detail={"message": "The rubric has problems to fix before it can be saved.", "issues": error.issues},
+        ) from error
+    except RubricVersionConflict as error:
+        raise HTTPException(
+            status_code=409, detail={"message": str(error), "currentVersion": error.current}
         ) from error
     except RubricDraftNotFound as error:
         raise HTTPException(status_code=404, detail=DRAFT_GONE) from error

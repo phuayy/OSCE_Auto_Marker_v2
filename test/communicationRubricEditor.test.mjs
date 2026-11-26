@@ -28,3 +28,13 @@ test('neither file uses dark: variants', () => {
   assert.doesNotMatch(editor, /\bdark:/);
   assert.doesNotMatch(panel, /\bdark:/);
 });
+
+test('a save carries the version the editor opened on, and a conflict offers a reload', () => {
+  assert.match(editor, /baseVersionId,/);
+  assert.match(editor, /isVersionConflict\(error\)/);
+  assert.match(editor, /Reload the latest rubric/);
+  // The panel captures the base when the editor opens, for both entry points.
+  assert.equal((panel.match(/baseVersionId: version\?\.id/g) || []).length, 2);
+  assert.match(panel, /baseVersionId=\{editing\.baseVersionId\}/);
+  assert.match(panel, /onReload=\{handleEditorReload\}/);
+});

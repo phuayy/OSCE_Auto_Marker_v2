@@ -87,7 +87,12 @@ async def _flow(tmp_path: Path) -> None:
         "pass_threshold": 15,
         "criteria": criteria,
     }
-    saved = (await svc.save_edited(edited, draft_id=draft["draft"]["draftId"], actor=ADMIN))["rubric"]
+    # No version is active yet, so there is nothing for this save to conflict with.
+    saved = (
+        await svc.save_edited(
+            edited, base_version_id="no-active-version", draft_id=draft["draft"]["draftId"], actor=ADMIN
+        )
+    )["rubric"]
 
     # 3. What is now active is exactly what was saved, with provenance.
     on_disk = json.loads(active_json.read_text(encoding="utf-8"))
@@ -124,7 +129,7 @@ async def _flow(tmp_path: Path) -> None:
 
     # 5. Editing in place afterwards keeps the PDF and asset, and re-stamps the revision.
     edited["pass_threshold"] = 17
-    again = (await svc.save_edited(edited, actor=ADMIN))["rubric"]
+    again = (await svc.save_edited(edited, base_version_id=saved["rubric_version"]["id"], actor=ADMIN))["rubric"]
     assert again["rubric_asset_id"] == on_disk["rubric_asset_id"]
     assert again["pass_threshold"] == 17 and again["rubric_revision"] != on_disk["rubric_revision"]
     assert again["extraction"]["source"] == {"method": "deterministic"}
