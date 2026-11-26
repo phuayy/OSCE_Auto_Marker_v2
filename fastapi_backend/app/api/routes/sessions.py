@@ -5,6 +5,8 @@ from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import current_actor, get_container, require_expensive_operation, require_session_owner
 from app.api.errors import http_error
+from app.domain.session_filters import SessionListFilter
+from app.domain.actors import Actor
 from app.domain.sessions import session_video_path
 from app.schemas.sessions import (
     AssessClipsRequest,
@@ -24,11 +26,21 @@ async def list_sessions(
     cursor: str | None = Query(None, max_length=512),
     parent_session_id: str | None = Query(None, alias="parentSessionId", max_length=36),
     roots_only: bool = Query(False, alias="rootsOnly"),
+    search: str | None = Query(None, alias="q"),
+    statuses: list[str] = Query(default_factory=list, alias="status"),
+    created_by: str | None = Query(None, alias="createdBy", max_length=36),
+    workflow: str | None = Query(None),
+    actor: Actor | None = Depends(current_actor),
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
+    if created_by == "me":
+        if actor is None:
+            raise HTTPException(status_code=401, detail="Authentication required.")
+        created_by = actor.user_id
     try:
+        filters = SessionListFilter.parse(search=search, statuses=statuses, created_by=created_by, workflow=workflow)
         return await container.sessions.list_page(
-            limit=limit, cursor=cursor, parent_session_id=parent_session_id, roots_only=roots_only,
+            limit=limit, cursor=cursor, parent_session_id=parent_session_id, roots_only=roots_only, filters=filters,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
