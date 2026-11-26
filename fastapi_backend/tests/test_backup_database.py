@@ -336,3 +336,24 @@ def test_restore_into_a_missing_live_database_works_without_a_safety_copy(tmp_pa
     payload = json.loads(result.stdout.strip().splitlines()[-1])
     assert payload["safetyCopy"] is None
     assert _session_names(db_path) == ["original"]
+
+
+def test_restore_keeps_only_the_newest_three_safety_copies_of_this_database(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    db_path = _db_path(env)
+    _migrate(db_path)
+    backup = _backup_of(env, tmp_path)
+    other = db_path.parent / "other.sqlite3.pre-restore-20200101T000000Z.sqlite3"
+    other.write_bytes(b"other database's copy")
+
+    made: list[Path] = []
+    for _ in range(4):
+        result = _restore(env, backup)
+        assert result.returncode == 0, result.stderr
+        made.append(Path(json.loads(result.stdout.strip().splitlines()[-1])["safetyCopy"]))
+        time.sleep(1.1)  # timestamps have one-second resolution
+
+    remaining = sorted(db_path.parent.glob(f"{db_path.name}.pre-restore-*.sqlite3"))
+    assert remaining == sorted(made[1:])
+    assert not made[0].exists()
+    assert other.exists()

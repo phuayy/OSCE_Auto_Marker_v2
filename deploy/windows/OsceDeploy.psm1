@@ -232,7 +232,8 @@ function Invoke-OsceRestoreDatabase {
         exit, with the script's own output in the exception message.
     .DESCRIPTION
         backup_database.py's restore exit codes (0 success; 1 restored but
-        failed integrity_check; 2 usage error; 5 refused because the API port
+        failed integrity_check; 2 usage error, or a backup
+        refused because it failed validation (nothing changed); 5 refused because the API port
         is currently serving  --  use -Force) are all, from this caller's
         point of view, one bit: did the database end up restored or not. A
         prior version of this function passed -AllowNonZeroExit and returned

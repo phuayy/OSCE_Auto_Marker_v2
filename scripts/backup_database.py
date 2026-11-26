@@ -57,6 +57,9 @@ except Exception:  # noqa: BLE001 - fall back to a small local probe
 
 
 SCHEMA_VERSION = 1
+# Each SQLite restore leaves a whole-database safety copy beside the live file;
+# keeping a few covers "I restored the wrong backup, twice" without unbounded growth.
+SAFETY_COPIES_KEPT = 3
 FILENAME_PREFIX = "osce-db-"
 
 
@@ -285,6 +288,15 @@ def _safety_copy_sqlite(live_path: Path) -> Path | None:
     return safety_path
 
 
+def _prune_safety_copies(live_path: Path, keep_path: Path | None) -> None:
+    """Delete all but the newest SAFETY_COPIES_KEPT safety copies of this database (never ``keep_path``)."""
+    # Timestamps are fixed-width UTC, so the name order is the age order.
+    copies = sorted(live_path.parent.glob(f"{live_path.name}.pre-restore-*.sqlite3"), reverse=True)
+    for stale in copies[SAFETY_COPIES_KEPT:]:
+        if stale != keep_path:
+            stale.unlink(missing_ok=True)
+
+
 def restore_sqlite(backup_file: Path, *, force: bool) -> Path | None:
     """Restore ``backup_file`` over the live database; returns the safety copy of what it replaced."""
     if not backup_file.exists():
@@ -325,6 +337,7 @@ def restore_sqlite(backup_file: Path, *, force: bool) -> Path | None:
             sidecar.unlink()
 
     _assert_integrity_ok(live_path)
+    _prune_safety_copies(live_path, safety_path)
     return safety_path
 
 
