@@ -4,7 +4,7 @@ Hard-reset the OSCE AI Marker databases and volatile storage for a fresh start.
 
 What is cleared:
   - PostgreSQL: all rows in every ORM and raw-SQL table (TRUNCATE CASCADE)
-  - SQLite:     the local database file is deleted
+  - SQLite:     the configured database file (and its -wal / -shm siblings) is deleted
   - Storage:    sessions/, uploads/, jobs/ directories are emptied
 
 What is preserved:
@@ -77,12 +77,28 @@ async def reset_postgres(url: str) -> None:
     print(f"  PostgreSQL: truncated {len(existing)} of {len(PG_TABLES)} table(s).")
 
 
+def _display(path: Path) -> str:
+    """Repo-relative when the path is under the repo, absolute otherwise (a
+    configured database may live anywhere)."""
+    try:
+        return str(path.relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
 def reset_sqlite(path: Path) -> None:
-    if path.exists():
-        path.unlink()
-        print(f"  SQLite: deleted {path.relative_to(ROOT_DIR)}")
+    # SQLite in WAL mode keeps committed rows in <db>-wal until a checkpoint;
+    # deleting only the main file would let the next open replay them into the
+    # "fresh" database.
+    candidates = [path, *(path.with_name(path.name + suffix) for suffix in ("-wal", "-shm"))]
+    removed = [candidate for candidate in candidates if candidate.exists()]
+    for candidate in removed:
+        candidate.unlink()
+    if removed:
+        for candidate in removed:
+            print(f"  SQLite: deleted {_display(candidate)}")
     else:
-        print("  SQLite: file not found, nothing to delete.")
+        print(f"  SQLite: {_display(path)} not found, nothing to delete.")
 
 
 def clear_directory(directory: Path, label: str) -> None:
@@ -97,7 +113,7 @@ def clear_directory(directory: Path, label: str) -> None:
         elif item.is_dir():
             shutil.rmtree(item)
             count += 1
-    print(f"  {label}: removed {count} item(s) from {directory.relative_to(ROOT_DIR)}")
+    print(f"  {label}: removed {count} item(s) from {_display(directory)}")
 
 
 async def run(*, clear_all: bool) -> None:
@@ -106,22 +122,19 @@ async def run(*, clear_all: bool) -> None:
     settings = Settings.load()
     db_source = settings.resolved_database_source
 
-    # resolved_database_source now guarantees this: a str only for a
-    # validated Postgres scheme, a Path for everything else (SQLite, or the
-    # empty-config default) — anything else already raised DatabaseUrlError
-    # by this point.
-    is_postgres = isinstance(db_source, str)
-    sqlite_path = settings.paths.database_path
-
+    # resolved_database_source is what the app itself connects to: a str only
+    # for a validated Postgres scheme, a Path for everything else (a configured
+    # SQLite file, or the default when nothing is configured) — anything else
+    # already raised DatabaseUrlError by this point. Exactly one of the two is
+    # the database; the default SQLite path is not it when Postgres is.
     print()
-    print("Resetting databases...")
+    print("Resetting database...")
 
-    if is_postgres:
-        await reset_postgres(str(db_source))
+    if isinstance(db_source, str):
+        await reset_postgres(db_source)
+        print("  SQLite: not the configured database, left untouched.")
     else:
-        print("  PostgreSQL: not configured (APP_DATABASE_URL not set), skipping.")
-
-    reset_sqlite(sqlite_path)
+        reset_sqlite(db_source)
 
     print()
     print("Clearing volatile storage...")
