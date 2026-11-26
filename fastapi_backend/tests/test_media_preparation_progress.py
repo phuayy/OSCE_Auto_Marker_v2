@@ -344,3 +344,25 @@ def test_real_conservative_profile_is_valid_ffmpeg(tmp_path: Path) -> None:
         out, lambda o: media._browser_copy_args(source, o, _BrowserCopyProfile.CONSERVATIVE), "Browser playback copy (ffmpeg)"
     ))
     assert out.stat().st_size > 0
+
+
+def test_cancelled_transcode_records_failed_and_still_propagates(tmp_path: Path) -> None:
+    runner = ScriptedRunner(hang=True)
+    media, session = make(tmp_path, runner)
+
+    async def go() -> None:
+        task = asyncio.create_task(prepare_session_media(media, session, apply))
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if runner.encodes:
+                break
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    final = session["files"]["video"]["media"]
+    assert final["status"] == MediaPreparationStatus.FAILED
+    assert final["error"] == "Conversion was cancelled."
+    assert final["stage"] is None and final["progress"] is None
+    assert not partials(tmp_path)

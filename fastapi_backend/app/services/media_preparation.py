@@ -29,6 +29,7 @@ failed poster or copy costs the player, never processing, and is reported on
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -49,6 +50,8 @@ Commit = Callable[[dict[str, Any], SessionMutator], Awaitable[Any]]
 # browser polls the session while it sees one of these.
 PENDING_MEDIA_STATUSES = frozenset({MediaPreparationStatus.QUEUED, MediaPreparationStatus.RUNNING})
 
+CANCELLED_MESSAGE = "Conversion was cancelled."
+INTERRUPTED_MESSAGE = "Interrupted by a server restart."
 COPY_FAILED_MESSAGE = "The server could not make a playable copy of this video."
 
 
@@ -135,6 +138,21 @@ def update_media(**fields: Any) -> SessionMutator:
     return mutate
 
 
+def abandon_media(message: str) -> SessionMutator:
+    """End a preparation nobody is running any more: ``failed`` with ``message``,
+    progress and stage cleared. A no-op unless the record still says the job is
+    pending, so it can never overwrite a result that landed meanwhile."""
+
+    def mutate(current: dict[str, Any]) -> Any:
+        video = _source_video(current)
+        status = ((video or {}).get("media") or {}).get("status")
+        if status not in PENDING_MEDIA_STATUSES:
+            return False
+        return update_media(status=MediaPreparationStatus.FAILED, error=message, stage=None, progress=None)(current)
+
+    return mutate
+
+
 def mark_media_queued() -> SessionMutator:
     """What enqueueing ``prepare_media`` writes, so the workspace can say a copy
     is on its way before the job starts."""
@@ -166,7 +184,22 @@ def _probe_facts(probe: dict[str, Any], *, browser_playable: bool | None) -> dic
 
 async def prepare_session_media(media: MediaPipeline, session: dict[str, Any], commit: Commit) -> None:
     """Probe, poster, playable copy — in that order, each recorded as it lands,
-    so the cheap facts reach the browser long before a transcode finishes."""
+    so the cheap facts reach the browser long before a transcode finishes.
+
+    A cancelled run records ``failed`` (shielded, so the write survives the
+    cancellation) before the cancellation propagates: nothing else would ever
+    move a record left at ``running`` with a progress bar."""
+    try:
+        await _prepare_session_media(media, session, commit)
+    except asyncio.CancelledError:
+        try:
+            await asyncio.shield(commit(session, abandon_media(CANCELLED_MESSAGE)))
+        except Exception:
+            logger.warning("Could not record the cancelled media preparation.", exc_info=True)
+        raise
+
+
+async def _prepare_session_media(media: MediaPipeline, session: dict[str, Any], commit: Commit) -> None:
     session_id = str(session.get("id") or "")
     context = log_context(session_id, "prepare_media")
     video = _source_video(session)

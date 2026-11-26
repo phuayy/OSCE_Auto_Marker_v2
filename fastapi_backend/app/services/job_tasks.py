@@ -34,6 +34,8 @@ from typing import Any, Awaitable, Callable
 
 from app.core.exceptions import AppError
 from app.domain.enums import JobLane, TaskType
+from app.services.media_preparation import abandon_media
+from app.services.session_service import SessionMutator
 
 # (pipeline, clips, session_id, job_payload) -> None
 JobHandler = Callable[[Any, Any, str, dict[str, Any]], Awaitable[None]]
@@ -52,6 +54,10 @@ class JobTaskSpec:
     mirrors_session_job: bool = True
     # The pool of local worker slots the task runs in.
     lane: JobLane = JobLane.MAIN
+    # For a task that reports on its own record: the mutator that ends that
+    # record as failed (given the reason) when its job can never run again
+    # (attempts exhausted at claim, or no job row left after a restart).
+    abandon: Callable[[str], SessionMutator] | None = None
 
 
 async def _run_process_session(pipeline: Any, _clips: Any, session_id: str, _payload: dict[str, Any]) -> None:
@@ -82,6 +88,7 @@ JOB_TASK_TYPES: dict[str, JobTaskSpec] = {
             owns_session_status=False,
             mirrors_session_job=False,
             lane=JobLane.MEDIA,
+            abandon=abandon_media,
         ),
     )
 }
@@ -110,6 +117,7 @@ __all__ = [
     "JobTaskSpec",
     "get_task_spec",
     "queue_owns_session_status",
+    "task_abandon",
     "task_lane",
 ]
 
@@ -119,6 +127,12 @@ def queue_mirrors_session_job(task_type: str) -> bool:
     for an unknown type, like ``queue_owns_session_status``."""
     spec = JOB_TASK_TYPES.get(str(task_type))
     return True if spec is None else spec.mirrors_session_job
+
+
+def task_abandon(task_type: str) -> Callable[[str], SessionMutator] | None:
+    """How this task type's own record is failed when its job is gone, or None."""
+    spec = JOB_TASK_TYPES.get(str(task_type))
+    return None if spec is None else spec.abandon
 
 
 def task_lane(task_type: str) -> JobLane:

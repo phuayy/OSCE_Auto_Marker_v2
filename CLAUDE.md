@@ -1015,7 +1015,15 @@ reads `out_time_us` through `CommandRunner`'s observer callback) and writes
 progress and stage are cleared on `ready`/`failed`. A failed first attempt is
 retried once with a conservative ffmpeg profile (regenerated timestamps, first
 audio stream, stereo, a deeper muxing queue; the 2 s keyframes and `faststart`
-stay); cancellation is never retried. The session-list projection carries
+stay); cancellation is never retried, and is recorded: a cancelled run writes
+`failed` / "Conversion was cancelled." (shielded) before re-raising. Because
+`prepare_media` does not own `session.status`, the session reconciliation never
+sees it, so `JobQueueService.reconcile_orphaned_media()` (startup, API role,
+after `reconcile_orphaned_sessions`) fails any `queued`/`running` media record
+with no active `prepare_media` job row ("Interrupted by a server restart."),
+and a job whose claim comes back `exhausted` ends its record the same way —
+both through `JobTaskSpec.abandon` (`abandon_media`), which only acts while the
+record is still pending. The session-list projection carries
 `media {status, stage, progress, durationSeconds, browserPlayable}`,
 `posterUrl` and `hasPlayback`, all null/false for a purged video.
 

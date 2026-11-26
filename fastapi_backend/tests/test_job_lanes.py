@@ -130,3 +130,111 @@ def test_task_lanes() -> None:
     assert task_lane(TaskType.PREPARE_MEDIA) == JobLane.MEDIA
     for task in (TaskType.PROCESS_SESSION, TaskType.AUTO_CROP, TaskType.EXPORT_CLIPS, "unknown-from-older-build"):
         assert task_lane(task) == JobLane.MAIN
+
+
+# --- an abandoned media preparation does not stay "running" --------------------
+
+from app.domain.enums import MediaPreparationStatus  # noqa: E402
+
+
+def session_with_media(status: str | None, *, purged: bool = False) -> dict[str, Any]:
+    video: dict[str, Any] = {"absolutePath": None if purged else "/x.mp4", "purgedAt": "2026-01-01" if purged else None}
+    if status is not None:
+        video["media"] = {"status": status, "stage": "converting", "progress": 0.4}
+    return {"id": "s", "status": "completed", "files": {"video": video}}
+
+
+class ProjectingSessions(FakeSessions):
+    """The fake store, with the list projection's media block."""
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        rows = []
+        for session in self.sessions.values():
+            video = (session.get("files") or {}).get("video") or {}
+            media = None if video.get("purgedAt") else video.get("media")
+            rows.append({"id": session["id"], "status": session["status"], "media": media})
+        return rows
+
+
+def make_reconciling(tmp_path) -> JobQueueService:
+    service = make_service(tmp_path, GatedPipeline())
+    service.sessions = ProjectingSessions()
+    return service
+
+
+def media_of(service: JobQueueService, session_id: str = "s") -> dict[str, Any]:
+    return service.sessions.sessions[session_id]["files"]["video"]["media"]  # type: ignore[attr-defined]
+
+
+def test_orphaned_pending_media_is_failed_at_startup(tmp_path) -> None:
+    service = make_reconciling(tmp_path)
+
+    async def go() -> list[str]:
+        await service.repository.initialize()
+        for status in (MediaPreparationStatus.QUEUED, MediaPreparationStatus.RUNNING):
+            service.sessions.sessions[f"s-{status}"] = {**session_with_media(status), "id": f"s-{status}"}  # type: ignore[attr-defined]
+        return await service.reconcile_orphaned_media()
+
+    assert sorted(asyncio.run(go())) == ["s-queued", "s-running"]
+    for key in ("s-queued", "s-running"):
+        media = media_of(service, key)
+        assert media["status"] == MediaPreparationStatus.FAILED
+        assert media["error"] == "Interrupted by a server restart."
+        assert media["stage"] is None and media["progress"] is None
+
+
+def test_media_with_an_active_job_ready_purged_or_absent_is_untouched(tmp_path) -> None:
+    service = make_reconciling(tmp_path)
+
+    async def go() -> list[str]:
+        await service.repository.initialize()
+        store = service.sessions.sessions  # type: ignore[attr-defined]
+        store["s"] = session_with_media(MediaPreparationStatus.RUNNING)
+        await service.enqueue("s", TaskType.PREPARE_MEDIA, {}, auto_start=False)
+        store["ready"] = {**session_with_media(MediaPreparationStatus.READY), "id": "ready"}
+        store["purged"] = {**session_with_media(MediaPreparationStatus.RUNNING, purged=True), "id": "purged"}
+        store["none"] = {**session_with_media(None), "id": "none"}
+        # An active job of ANOTHER type does not vouch for the preparation.
+        store["other"] = {**session_with_media(MediaPreparationStatus.RUNNING), "id": "other"}
+        await service.enqueue("other", TaskType.AUTO_CROP, {}, auto_start=False)
+        return await service.reconcile_orphaned_media()
+
+    assert asyncio.run(go()) == ["other"]
+    assert media_of(service)["status"] == MediaPreparationStatus.RUNNING
+    assert media_of(service, "ready")["status"] == MediaPreparationStatus.READY
+    assert media_of(service, "purged")["status"] == MediaPreparationStatus.RUNNING
+
+
+def test_exhausted_media_job_ends_the_media_record_failed(tmp_path) -> None:
+    service = make_reconciling(tmp_path)
+
+    async def go() -> None:
+        await service.repository.initialize()
+        service.sessions.sessions["s"] = session_with_media(MediaPreparationStatus.QUEUED)  # type: ignore[attr-defined]
+        job = await service.enqueue("s", TaskType.PREPARE_MEDIA, {}, auto_start=False)
+        # Recovered at boot with every attempt already spent.
+        async with service.repository.database.session() as db:
+            from app.database.models import JobRecord
+
+            record = await db.get(JobRecord, job["id"])
+            record.attempts = record.max_attempts
+            await db.commit()
+        result = await service.run_job(str(job["id"]), lane=JobLane.MEDIA)
+        assert result.error is not None
+
+    asyncio.run(go())
+    media = media_of(service)
+    assert media["status"] == MediaPreparationStatus.FAILED and media["progress"] is None and media["stage"] is None
+
+
+def test_startup_reconciles_media_only_in_the_process_that_owns_recovery(tmp_path) -> None:
+    service = make_reconciling(tmp_path)
+
+    async def go() -> None:
+        service.sessions.sessions["s"] = session_with_media(MediaPreparationStatus.RUNNING)  # type: ignore[attr-defined]
+        await service.startup(dispatch_queued=False, recover_interrupted=False)  # a Hatchet worker
+        assert media_of(service)["status"] == MediaPreparationStatus.RUNNING
+        await service.startup(dispatch_queued=False)  # the API
+        assert media_of(service)["status"] == MediaPreparationStatus.FAILED
+
+    asyncio.run(go())

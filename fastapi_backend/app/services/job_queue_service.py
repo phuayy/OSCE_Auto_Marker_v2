@@ -16,7 +16,7 @@ from app.core.logging_utils import log_context
 from app.core.pagination_cursor import decode_cursor as decode_page_cursor
 from app.core.pagination_cursor import encode_cursor as encode_page_cursor
 from app.core.utils import exception_message, parse_iso, utc_now_iso
-from app.domain.enums import JobLane
+from app.domain.enums import JobLane, TaskType
 from app.domain.jobs import (
     ACTIVE_JOB_STATUSES,
     FINISHED_JOB_STATUSES,
@@ -28,7 +28,8 @@ from app.domain.session_lifecycle import fail_session
 from app.domain.sessions import JOB_DRIVEN_STATUSES, SessionStatus
 from app.repositories.job_repository import DISPATCH_PAYLOAD_KEY, LEGACY_DISPATCH_RUN_ID_KEY, JobRepository
 from app.services.event_service import EventService
-from app.services.job_tasks import get_task_spec, queue_mirrors_session_job, queue_owns_session_status, task_lane
+from app.services.media_preparation import INTERRUPTED_MESSAGE, PENDING_MEDIA_STATUSES
+from app.services.job_tasks import get_task_spec, queue_mirrors_session_job, queue_owns_session_status, task_abandon, task_lane
 from app.services.session_service import SessionService
 from app.storage import ObjectStorage
 
@@ -121,6 +122,7 @@ class JobQueueService:
             # recovery (so requeued rows count as active) and before dispatch
             # (so a job that fails on claim finds its session already reconciled).
             await self.reconcile_orphaned_sessions()
+            await self.reconcile_orphaned_media()
         else:
             queued_jobs = await self.repository.list_queued()
         if dispatch_queued:
@@ -164,6 +166,50 @@ class JobQueueService:
                 ", ".join(orphaned),
             )
         return orphaned
+
+    async def reconcile_orphaned_media(self) -> list[str]:
+        """End the media preparation of sessions whose ``prepare_media`` job is gone.
+
+        ``prepare_media`` does not own ``session.status``, so the session
+        reconciliation above never sees it: a restart (or a job lost some other
+        way) would leave ``files.video.media`` at ``queued``/``running`` — a
+        spinner and a progress bar nothing will ever finish. The job table is
+        the authority: a session claiming a pending preparation with no active
+        ``prepare_media`` row is marked failed, which the workspace answers with
+        its "Try again" button. A purged video or a session with no ``media``
+        projects ``media: null`` and is skipped. Same gating as
+        ``reconcile_orphaned_sessions`` (only the process that owns recovery).
+        """
+        active = await self.repository.active_session_ids(TaskType.PREPARE_MEDIA)
+        reset: list[str] = []
+        for entry in await self.sessions.list_sessions():
+            session_id = str(entry.get("id") or "")
+            media = entry.get("media") or {}
+            if not session_id or session_id in active or media.get("status") not in PENDING_MEDIA_STATUSES:
+                continue
+            if await self._abandon_task_record(session_id, TaskType.PREPARE_MEDIA, INTERRUPTED_MESSAGE):
+                reset.append(session_id)
+        if reset:
+            logger.warning(
+                "Startup reconciliation: %d session(s) had a media preparation with no active job and were marked failed: %s",
+                len(reset),
+                ", ".join(reset),
+            )
+        return reset
+
+    async def _abandon_task_record(self, session_id: str, task_type: str, message: str) -> bool:
+        """End a self-reporting task's record as failed (see ``JobTaskSpec.abandon``).
+        Best effort: a session deleted meanwhile, or a write that keeps losing
+        its race, is logged and must not stop startup or a job's own failure path."""
+        abandon = task_abandon(task_type)
+        if abandon is None:
+            return False
+        try:
+            await self.sessions.update(session_id, abandon(message))
+        except Exception:
+            logger.warning("Could not end the %s record of session %s.", task_type, session_id, exc_info=True)
+            return False
+        return True
 
     async def shutdown(self) -> None:
         tasks = list(self._tasks.values())
@@ -859,6 +905,8 @@ class JobQueueService:
             error = AppError(message, status_code=500, retryable=False)
             if queue_owns_session_status(exhausted_type):
                 await self._fail_session(exhausted_session, error, message)
+            else:
+                await self._abandon_task_record(exhausted_session, exhausted_type, message)
             if raise_on_error:
                 raise FinalJobFailure(message) from error
             return JobRunResult(job=failed, error=error)
