@@ -21,6 +21,7 @@ import {
   findModelSpec,
   findProvider,
   formatContextWindow,
+  formatOutputLimit,
   isProviderReady,
   providerList,
   shouldShowCustomModelField,
@@ -160,9 +161,9 @@ export default function TargetPicker({
         </div>
       ) : null}
 
-      {modelSpec?.notes || formatContextWindow(modelSpec) ? (
+      {modelSpec?.notes || formatContextWindow(modelSpec) || formatOutputLimit(modelSpec) ? (
         <div className="text-[11px] text-slate-500">
-          {[formatContextWindow(modelSpec), modelSpec?.notes].filter(Boolean).join(' · ')}
+          {[formatContextWindow(modelSpec), formatOutputLimit(modelSpec), modelSpec?.notes].filter(Boolean).join(' · ')}
         </div>
       ) : null}
 

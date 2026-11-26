@@ -59,7 +59,7 @@ def test_job_repository_claims_queued_job_once(tmp_path) -> None:
     assert first_claim.job["status"] == "running"
     assert first_claim.job["attempts"] == 1
     assert not second_claim.claimed
-    assert second_claim.outcome == "not_queued"
+    assert second_claim.outcome == "held"
 
 
 def test_job_repository_prepares_failed_job_for_hatchet_retry(tmp_path) -> None:
@@ -80,7 +80,9 @@ def test_job_repository_prepares_failed_job_for_hatchet_retry(tmp_path) -> None:
     }
 
     asyncio.run(repository.write(job))
-    prepared = asyncio.run(repository.prepare_retry_attempt("job-1", "retry"))
+    prepared = asyncio.run(
+        repository.prepare_retry_attempt("job-1", "retry", worker_id="worker-1", stale_after_seconds=900)
+    )
 
     assert prepared["status"] == "queued"
     assert prepared["attempts"] == 1
@@ -222,9 +224,8 @@ def test_a_cancelled_job_cannot_be_overwritten_by_a_late_success(tmp_path) -> No
     assert cancelled["status"] == "cancelled"
 
     # The engine run's own completion callback lands after the cancel.
-    late_success = asyncio.run(repository.mark_succeeded("job-1"))
-    assert late_success["status"] == "cancelled"
-    assert late_success["error"] == "Session deleted."
+    late_success = asyncio.run(repository.mark_succeeded("job-1", worker_id="worker-1"))
+    assert late_success is None, "the late outcome is reported as not recorded"
 
     on_disk = asyncio.run(repository.read("job-1"))
     assert on_disk["status"] == "cancelled"
@@ -236,9 +237,9 @@ def test_a_cancelled_job_cannot_be_overwritten_by_a_late_failure(tmp_path) -> No
     asyncio.run(repository.claim_queued("job-1", "worker-1"))
     asyncio.run(repository.mark_cancelled("job-1", "Session deleted."))
 
-    late_failure = asyncio.run(repository.mark_failed("job-1", "boom"))
+    assert asyncio.run(repository.mark_failed("job-1", "boom", worker_id="worker-1")) is None
 
-    assert late_failure["status"] == "cancelled"
+    assert asyncio.run(repository.read("job-1"))["status"] == "cancelled"
 
 
 def test_a_finished_job_cannot_be_cancelled_after_the_fact(tmp_path) -> None:
@@ -247,7 +248,7 @@ def test_a_finished_job_cannot_be_cancelled_after_the_fact(tmp_path) -> None:
     repository = JobRepository(OrmDatabase(tmp_path / "osce_marker.sqlite3"))
     asyncio.run(repository.write(_queued_job()))
     asyncio.run(repository.claim_queued("job-1", "worker-1"))
-    asyncio.run(repository.mark_succeeded("job-1"))
+    asyncio.run(repository.mark_succeeded("job-1", worker_id="worker-1"))
 
     late_cancel = asyncio.run(repository.mark_cancelled("job-1", "too late"))
 
@@ -281,7 +282,7 @@ def test_finish_takes_the_write_lock_before_reading(tmp_path) -> None:
     repository.database.ensure_write_locked = spy_ensure_write_locked  # type: ignore[method-assign]
     JobRepository._require = staticmethod(spy_require)
     try:
-        asyncio.run(repository.mark_succeeded("job-1"))
+        asyncio.run(repository.mark_succeeded("job-1", worker_id="worker-1"))
     finally:
         JobRepository._require = staticmethod(original_require)
 

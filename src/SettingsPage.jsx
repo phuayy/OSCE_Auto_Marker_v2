@@ -116,7 +116,7 @@ export default function SettingsPage({ onBack, isAdmin = false }) {
             </p>
           </div>
 
-          <TranscriptionEngineSettings onSettingsChanged={adoptSettings} />
+          <TranscriptionEngineSettings onSettingsChanged={adoptSettings} isAdmin={isAdmin} />
 
           <LlmRoutingSettings
             version={providersVersion}

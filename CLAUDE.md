@@ -323,6 +323,11 @@ Steps tracked in `session.pipeline.steps`. Resumable — cached artifacts reused
 ```
 Step 1: audio_extraction
   ffmpeg: video -> <session_id>.mp3
+  Published atomically (MediaPipeline._run_ffmpeg_atomic: ffmpeg writes
+  .<name>.<id>.partial<ext>, then atomic_replace), as are the 16 kHz WAV, the bell
+  WAV, the poster and the playback copy. A file at the final path is therefore
+  finished, which is what lets resume adopt it by existence; a temp a hard kill
+  left is never adopted and is swept before that artifact is next written.
 
 Step 2: transcription  (engine selected in Settings; step key "transcription",
                         legacy sessions carry "whisperx")
@@ -384,6 +389,20 @@ Key files:
 - [pipeline/media.py](fastapi_backend/app/pipeline/media.py) — ffmpeg, WhisperX, bell detection, clip operations
 - [pipeline/scoring.py](fastapi_backend/app/pipeline/scoring.py) — scorer subprocess wrappers
 - [scripts/nvidia_osce_assessor.py](scripts/nvidia_osce_assessor.py) — content scorer with checkpoint/repair logic
+
+**Step 3's CPU work never runs on the event loop.** Hallucination screening
+(`screen_segments`) and corpus correction (`correct_segments`: difflib plus
+Double Metaphone per window per term, tens of seconds for a large corpus) are
+pure functions called through `asyncio.to_thread` at the `_screen_hallucinations`
+/ `_apply_corpus_corrections` boundary; the session commits stay on the loop.
+Run inline they froze HTTP, the change feed and job heartbeats for the whole
+process (long enough, and the reaper treats other jobs as stale). The matcher
+itself is cheaper without changing a result: each term pre-indexes its strings
+for difflib once, a window whose `quick_ratio` bound is under every threshold
+that could accept it skips the exact ratio, and the protected-term check is
+remembered per window. `tests/data/transcript_correction_golden.json` is output
+captured from the pre-optimisation code; `test_transcript_postprocessing_offloop.py`
+pins byte-identical results and that the loop keeps ticking meanwhile.
 
 **The corpus step 3 corrects against is DB-backed, not a fixed word list.**
 `corpora` (`CorpusRecord`) holds named term lists an admin manages via
@@ -471,7 +490,10 @@ correct underneath even while the panel is unmounted.
 
 1. Segmentation (`auto_crop` job): bell detector (`scripts/detect_bell_segments.py`) or
    person detector (RT-DETR) proposes ranges. `build_clip_drafts_from_ranges`
-   records them; no ffmpeg runs. Session status -> `cropped`.
+   records them; no ffmpeg runs. Session status -> `cropped`. The notification
+   is `split.ready` ("Split ready for review") — the boundaries are a proposal
+   to check, not clips; `clips.ready` is reserved for the end of an export,
+   when MP4s exist.
 2. The user adjusts boundaries in the timeline editor and hits **Export clips**:
    `POST /sessions/{id}/clips/manual` -> `ClipService.request_clip_export`.
    Persists the plan — a fresh `clipExport.planId`, and on each clip a stable
@@ -501,6 +523,17 @@ correct underneath even while the panel is unmounted.
    clip used to spend one unit each, so a 15-student recording queued 10 and got 429 for 5.
 5. Each clip assessment creates a **child** session (`parentSessionId` set), runs full pipeline.
 
+**A draft clip cannot be assessed.** `existing_file(meta)` in
+[domain/sessions.py](fastapi_backend/app/domain/sessions.py) is the one answer
+to "does this file-meta dict name a real file": empty path, `isDraft`, or a
+non-regular file is `None` (`Path("")` is `Path(".")`, which *exists*, so the old
+`Path(str(x or "")).exists()` guard accepted a draft and a finished child was
+then repointed at `.` and re-run, deleting its scores). `assess` checks the clip
+and the case study with it *before* any mutation and refuses a draft with 409; in
+`POST /clips/assess` that is that clip's own `results[]` entry. The browser mirrors
+it: `selectableClipIds` excludes drafts and the row buttons are disabled
+(`lib/clipSelection.js`).
+
 **One clip has one child session, and `assess` maintains that.** The request is
 idempotent: a clip whose child is *in flight* gets that child back
 (`reused: true`) rather than a second one, and a clip whose child has *finished*
@@ -515,7 +548,20 @@ clip id extracted from `clip_source`, newest first). The child records
 compares that with the clip's current `fileName` to mark a row
 "Clip re-cut since this assessment" (`src/lib/clipAssessments.js`).
 
-**Re-cropping one clip is an export scoped to that clip.** `POST
+**Re-cropping a clip that was never exported is not an export.** A range
+auto-crop proposed has no file, `planId` or `exportIndex` — nothing to re-cut —
+so `POST /clips/{clipId}/recrop` only moves its `start`/`end` (it stays a
+draft, no `revision` bump), queues no job, answers **200** with `job: null`,
+and the next "Export clips" cuts it under its own plan and index
+(`ClipService._never_planned`). `MediaPipeline.materialize_clip` backs that up
+by refusing a clip with no `exportIndex` outright: the index used to default to
+0, so every such clip resolved to the same `clip-1` name and one clip adopted
+another's finished MP4. A pre-plan clip (an `exportIndex`, no `planId`) is not
+"never planned" and keeps its flat legacy name. A cut clip with no `exportIndex` at all has no name
+the job could resolve, so its recrop is refused with 409 before anything
+changes (rather than turning its cut into a draft the job then cannot re-cut).
+
+**Re-cropping one clip that has been exported is an export scoped to that clip.** `POST
 /clips/{clipId}/recrop` answers **202**: it moves the clip's boundaries, bumps
 its `revision`, turns it back into a draft (range, no file) and queues the same
 `export_clips` job with `clipExport.scope = "clip"` and `clipIds`. It used to
@@ -531,9 +577,29 @@ The export job deliberately does **not** own `session.status` (see
 `app/services/job_tasks.py`). The user sits inside the timeline editor while
 clips are cut, and flipping the session to `processing` would eject them — the
 frontend refuses to open in-flight sessions. Progress lives on
-`session.clipExport` (`planId`, `status`, `scope`, `clipIds`, `completed`,
+`session.clipExport` (`planId`, `status`, `phase`, `scope`, `clipIds`, `completed`,
 `total`, `error`, `jobId`), which the session-list projection exposes as
 `clipExportStatus` / `clipExportCompleted` / `clipExportTotal`.
+
+**One transcode per recording; clips are cut from it.** A source no browser
+can decode (HEVC, 10-bit H.264, G.711 audio ...) used to be transcoded twice:
+once whole to 720p by `prepare_media`, and again clip by clip from the
+full-size original by the export. Now `export_clips_by_id` resolves the crop
+source once per run (`ClipService._resolve_export_source`): the original when
+it plays as it is (or `PLAYBACK_COPY_ENABLED=false`), else the playback copy
+via `MediaPipeline.ensure_playback_copy` — serialised per session by a
+`KeyedLocks`, so an export racing `prepare_media` waits and adopts the file the
+other wrote — recorded on `files.video.playback` if not yet there. The copy
+carries a keyframe every 2 s (`-force_key_frames`), so the clips are
+**stream-copied** from it, accurately enough; a copy written before that flag
+has the default GOP and just cuts less precisely. If the copy cannot be made
+the export cuts from the original (re-encode, now capped at
+`PLAYBACK_COPY_MAX_HEIGHT` too) rather than failing. Person detection and
+auto-crop keep reading the original. While that resolves, `clipExport.phase`
+(`ClipExportPhase`) is `preparing_source` and then `cutting` (null once
+finished or failed); the timeline editor shows "Preparing video…" with an
+explanation instead of `Exporting 0/13…`
+([lib/clipExportLabel.js](src/lib/clipExportLabel.js)).
 
 For the same reason every write the job makes is a **patch, not a document**:
 the checkpoint after each clip copies that clip's file fields and bumps
@@ -745,6 +811,25 @@ Hatchet-side run could not be fully aborted (`_cancel_hatchet_run` is
 best-effort) and that run reports success afterwards — without the
 predicate, the late `succeeded` silently replaced `cancelled` and the session
 showed a result the user had asked to abort.
+
+**A duplicate engine run cannot take a job off the worker executing it.** Two
+Hatchet runs can exist for one job id (an overlapping redispatch, two reapers,
+a rerun of a queued row). Three rules keep the second one harmless.
+`claim_queued` answers `held` — not `not_queued` — when the row is `running`
+under another worker, and `_execute_job` returns quietly on it: raising would
+make Hatchet retry, and that retry is what used to requeue the live row.
+`prepare_retry_attempt` (which takes the retrying `worker_id` and the reaper's
+`JOB_STALE_RUNNING_TIMEOUT_SECONDS`) requeues a `failed` row always, but a
+`running` one only when its `locked_by` is the retrying worker itself or its
+`locked_at` heartbeat is stale — in the `UPDATE`'s predicate, so a fresh row
+held by someone else is left alone. And `mark_succeeded` / `mark_failed` take
+the executing worker's id and only transition a `running` row it still owns,
+returning `None` when they did not (`mark_cancelled` stays unfenced: cancel
+comes from the API); `_execute_job` announces nothing and syncs no session for
+a finish that returned `None`, which is also why a late success on a cancelled
+row is no longer reported as `succeeded`. `JobRepository.rerun` closes the
+trigger: only a terminal row may be rerun, and not while another active job
+exists for the same session and task type (409 `AppError` either way).
 
 **Reading an artefact: the file on disk is the document.** Every producer writes
 its JSON to disk and records only metadata (`fileName`, `absolutePath`,
@@ -997,7 +1082,7 @@ a departmental system, a script — cannot poll `/api/sessions` forever or hold
 a stream open, so `POST /api/admin/webhooks` registers an outbound HTTP
 endpoint instead: [webhook_dispatcher.py](fastapi_backend/app/services/webhook_dispatcher.py)
 POSTs a signed JSON body to it whenever `NotificationService` records one of
-`SUBSCRIBABLE_EVENT_TYPES` (`scoring.completed`, `clips.ready`,
+`SUBSCRIBABLE_EVENT_TYPES` (`scoring.completed`, `split.ready`, `clips.ready`,
 `session.failed` — [domain/notifications.py](fastapi_backend/app/domain/notifications.py)).
 The whole `/api/admin/webhooks` router is admin-only, reads included — unlike
 corpora or the rubric, nothing here is a marker's input to a run, and a
@@ -1276,6 +1361,30 @@ that account's next run in every process, with no restart, because both
 repositories are cached `SnapshotCache` snapshots kept fresh by the change
 feed (see **Caching the scoring hot path**) — the merge itself costs nothing
 beyond what resolving the deployment document already cost.
+
+### Engine options a marker may not set
+
+`transcriptionEngineOptions` is user-scoped as a key, but not every parameter
+inside it is. `ParameterSpec.deployment_scoped` (published as `deploymentScoped`
+on `GET /api/settings/transcription-engines`) marks the ones that decide what
+the *server* loads or runs: WhisperX `model` and `audioFilters`, Canary `model`
+(a HuggingFace repo or local path), and the ffmpeg filter chain. One rule, in
+`app/pipeline/transcription/registry.py` (`deployment_scoped_options`,
+`strip_deployment_scoped`), is applied twice: `_reject_deployment_scoped` 403s a
+personal PUT/PATCH that names one (same error shape as a whole deployment key),
+and `PreferencesService.effective_for` drops them from a stored row when
+layering — so a row written before the rule keeps nothing. Engine options are
+layered per engine and per parameter, so a marker tuning `batchSize` no longer
+discards the administrator's `model`. An administrator sets them through
+`PATCH /api/admin/settings`; the settings card renders them read-only ("Set by
+an administrator") for everyone else.
+
+Separately, for everyone, `audioFilters` must be a plain comma-separated chain of
+allow-listed audio filters ([pipeline/audio_filters.py](fastapi_backend/app/pipeline/audio_filters.py):
+no `;`, `[ ]`, quotes, or `movie` / `amovie` / `ladspa`), checked by
+`ParameterSpec.check` at the `validate_options` boundary — a stored invalid
+value degrades to the defaults like any other invalid option. `WHISPERX_AUDIO_FILTERS`
+and `CANARY_AUDIO_FILTERS` are checked at startup and warned about.
 
 ### Score display
 
@@ -1716,7 +1825,7 @@ recording; its Student column the scored subject.
 | `HUMAN_SEGMENTS_CONFIDENCE` | `0.7` | RT-DETR score threshold. Not the knob for edge limbs — use the height ratio |
 | `HUMAN_SEGMENTS_REGION_LEFT_ENABLED` / `HUMAN_SEGMENTS_REGION_RIGHT_ENABLED` | `true` / `true` | Which horizontal zone(s) of the frame count at all — independent of the occupancy preset above. Standalone-CLI default only; the pipeline always passes an explicit resolved value (see `app/pipeline/region_focus.py`) |
 | `HUMAN_SEGMENTS_REGION_LEFT_RATIO` / `HUMAN_SEGMENTS_REGION_RIGHT_RATIO` | `1.0` / `1.0` | Fraction of frame width, measured from that edge inward, that counts as the enabled zone |
-| `PLAYBACK_COPY_ENABLED` / `PLAYBACK_COPY_MAX_HEIGHT` | `true` / `720` | A source the browser cannot decode (HEVC, 10-bit H.264, ProRes, G.711 audio) gets an H.264/AAC copy at `output/playback/<session>/`, written by the `prepare_media` job, recorded on `files.video.playback` and played by the workspace in place of the original (`app/services/media_preparation.py`); clips cut from such a source are re-encoded rather than stream-copied. The max height also bounds the poster frame. Processing always reads the original |
+| `PLAYBACK_COPY_ENABLED` / `PLAYBACK_COPY_MAX_HEIGHT` | `true` / `720` | A source the browser cannot decode (HEVC, 10-bit H.264, ProRes, G.711 audio) gets an H.264/AAC copy at `output/playback/<session>/`, written by the `prepare_media` job, recorded on `files.video.playback` and played by the workspace in place of the original (`app/services/media_preparation.py`); clips of such a source are stream-copied from that copy (one transcode per recording; the copy has a keyframe every 2 s), and the re-encode fallback is capped at the same height. The max height also bounds the poster frame. Processing always reads the original |
 | `RUBRIC_LLM_FALLBACK` | `true` | When deterministic rubric extraction fails on a new/changed PDF, let an LLM extract it instead (`scripts/rubric_llm_fallback.py`). `false` = fail as before. See **Rubric extraction LLM fallback** |
 | `PARALLEL_SCORING` | `true` | Run content branch parallel to communication branch |
 | `GPU_SLOTS` | `1` | Jobs that may hold the accelerator at once (transcription, person detection). 0 = unbounded. Per process |
@@ -1751,7 +1860,7 @@ recording; its Student column the scored subject.
 | `LLM_MAX_ATTEMPTS_PER_MODE` | `3` | Attempts per request shape before the router degrades the shape |
 | `LLM_INITIAL_BACKOFF_SECONDS` / `LLM_MAX_BACKOFF_SECONDS` / `LLM_BACKOFF_JITTER_RATIO` | `1.5` / `8` / `0.25` | Retry backoff. Jitter keeps the parallel content and communication branches from retrying in lockstep |
 | `LLM_CIRCUIT_FAILURE_THRESHOLD` / `LLM_CIRCUIT_COOLDOWN_SECONDS` | `6` / `60` | Consecutive failures before a provider is skipped, and for how long |
-| `LLM_TEMPERATURE` / `LLM_TOP_P` / `LLM_MAX_TOKENS` / `LLM_REQUEST_TIMEOUT_SECONDS` | `0.2` / `0.9` / `24576` / `360` | Sampling, shared by all providers. The `NVIDIA_*` spellings still work |
+| `LLM_TEMPERATURE` / `LLM_TOP_P` / `LLM_MAX_TOKENS` / `LLM_REQUEST_TIMEOUT_SECONDS` | `0.2` / `0.9` / `24576` / `360` | Sampling, shared by all providers — except that `max_tokens` is the *requested* budget: each target clamps it to its model's declared `ModelSpec.max_output_tokens` (`LLMProvider.output_budget`). The `NVIDIA_*` spellings still work |
 | `WHISPERX_HF_TOKEN` | — | HuggingFace token for pyannote diarisation |
 | `ENVIRONMENT` | `development` | Declares the deployment shape rather than any one behaviour. Most insecure config here stays a startup *warning* either way (`collect_runtime_warnings`) so a local checkout is never surprised by a hard crash over a default it did not touch; `production` additionally refuses to **start** with the handful of combinations in `Settings.startup_fatal_errors()` — currently just `PROTECT_MEDIA_ENDPOINTS=false` — where starting anyway would be actively unsafe. Never set this in local development |
 | `PROTECT_MEDIA_ENDPOINTS` | `true` | Auth-gate `/media/*`. `ENVIRONMENT=production` refuses to start with this off |
@@ -2014,6 +2123,22 @@ kind, not just a third copy: a synchronous `time.sleep` loop with no jitter,
 retrying an OS-level sharing violation on an atomic rename rather than
 backing off a remote call, so it is not a candidate to merge with the other
 two.
+
+**A request is shaped for the model it goes to.** `LLMProvider.output_budget`
+is the one place the deployment-wide `LLM_MAX_TOKENS` meets a model's own
+`ModelSpec.max_output_tokens`: the budget is clamped per target (a fallback gets
+*its* limit, not the primary's), an id outside the shortlist or a spec with no
+declared limit keeps the configured value, and a clamp is logged once at INFO.
+Every adapter — OpenAI-compatible, Anthropic, custom — calls it, so a vendor is
+never sent a budget it answers 400 to (terminal for the target; it used to make
+DeepSeek and gpt-4o panel markers always degrade). `ModelSpec.token_parameter`
+and `supports_sampling` carry the o-series' differences (`max_completion_tokens`,
+no `temperature`/`top_p`) as data rather than model-id string matching. The
+Settings **Test** builds its request from `request_defaults_from_env` — the same
+sampling, budget and ladder a scoring run starts from, with only the prompt
+swapped — so a provider that rejects the real shape fails the test; the budget is
+a ceiling, not a spend. The picker shows each model's output limit: a content
+sheet is long, and a low ceiling (8K) can truncate it.
 
 **Selection applies to the next run everywhere, with no restart.**
 `LLMSettingsService.routing()` resolves `llmPrimary` / `llmFallbacks` before

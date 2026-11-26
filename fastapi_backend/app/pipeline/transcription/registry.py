@@ -89,3 +89,47 @@ def build_all(dependencies: EngineDependencies) -> dict[str, TranscriptionEngine
     """Instantiate every engine. Construction is cheap — no model loads, no
     subprocesses — so the router holds them all and never rebuilds per run."""
     return {engine_id: factory(dependencies) for engine_id, factory in ENGINE_FACTORIES.items()}
+
+
+def deployment_scoped_options(options_by_engine: object) -> list[str]:
+    """``engine.parameter`` for every deployment-scoped option present in a
+    ``transcriptionEngineOptions`` document.
+
+    The one place that decides which engine options a marker may not set: the
+    write path rejects a marker's request that names any of these, and
+    :func:`strip_deployment_scoped` removes them from a row stored before the
+    rule existed.
+    """
+    if not isinstance(options_by_engine, dict):
+        return []
+    found: list[str] = []
+    for engine_id, options in options_by_engine.items():
+        descriptor = descriptor_for(str(engine_id))
+        if descriptor is None or not isinstance(options, dict):
+            continue
+        for name in options:
+            spec = descriptor.parameter(str(name))
+            if spec is not None and spec.deployment_scoped:
+                found.append(f"{engine_id}.{name}")
+    return found
+
+
+def strip_deployment_scoped(options_by_engine: object) -> dict[str, dict]:
+    """A copy of a user's per-engine option document without its
+    deployment-scoped parameters (and without anything that is not a
+    per-engine object)."""
+    if not isinstance(options_by_engine, dict):
+        return {}
+    stripped: dict[str, dict] = {}
+    for engine_id, options in options_by_engine.items():
+        if not isinstance(options, dict):
+            continue
+        descriptor = descriptor_for(str(engine_id))
+        stripped[str(engine_id)] = {
+            name: value
+            for name, value in options.items()
+            if descriptor is None
+            or (spec := descriptor.parameter(str(name))) is None
+            or not spec.deployment_scoped
+        }
+    return stripped

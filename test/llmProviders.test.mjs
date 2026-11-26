@@ -10,6 +10,7 @@ import {
   buildSettingsPayload,
   describeRouting,
   effectiveDiffers,
+  formatOutputLimit,
   findProvider,
   isCustomModel,
   resolveFallbackTarget,
@@ -203,4 +204,11 @@ test('a server-side drop of a keyless target is surfaced as a difference', () =>
 
 test('the custom-model sentinel is never a real model id', () => {
   assert.equal(findProvider(DESCRIPTION, 'nvidia').models.some((model) => model.id === CUSTOM_MODEL), false);
+});
+
+test('formatOutputLimit names a model\'s output ceiling and stays silent when unknown', () => {
+  assert.equal(formatOutputLimit({ maxOutputTokens: 8192 }), '8K max output');
+  assert.equal(formatOutputLimit({ maxOutputTokens: 500 }), '500 max output');
+  assert.equal(formatOutputLimit({ maxOutputTokens: 0 }), '');
+  assert.equal(formatOutputLimit(null), '');
 });

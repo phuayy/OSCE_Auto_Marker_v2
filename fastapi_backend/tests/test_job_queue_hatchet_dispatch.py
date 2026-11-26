@@ -148,7 +148,7 @@ def test_rerun_clears_old_dispatch_metadata_and_records_the_new_run(tmp_path, mo
         job_id = str(job["id"])
         await service.repository.record_dispatch(job_id, {"runId": "run-first", "dispatchedAt": _stale_iso(0)})
         await service.repository.claim_queued(job_id, "worker-1")
-        await service.repository.mark_failed(job_id, "boom")
+        await service.repository.mark_failed(job_id, "boom", worker_id="worker-1")
         await service.rerun(job_id)
         return await service.repository.read(job_id)
 

@@ -193,6 +193,16 @@ export function formatContextWindow(model) {
   return `${size} context`;
 }
 
+// The most this model will write in one answer. Shown beside the context window
+// because a scoring sheet is long: the server clamps every request to this
+// limit, so a small one is worth seeing before choosing the model.
+export function formatOutputLimit(model) {
+  const size = Number(model?.maxOutputTokens || 0);
+  if (!size) return '';
+  if (size >= 1_000) return `${Math.round(size / 1_000)}K max output`;
+  return `${size} max output`;
+}
+
 // --- marking mode ------------------------------------------------------------
 //
 // The panel card's logic: which markers and adjudicator to show, what to warn

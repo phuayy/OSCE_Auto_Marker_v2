@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.pipeline.audio_filters import validate_filter_chain
 from app.pipeline.media import MediaPipeline
 from app.pipeline.whisperx_options import WhisperxRunOptions
 from app.pipeline.transcription.base import (
@@ -18,6 +19,7 @@ from app.pipeline.transcription.base import (
     EngineCapabilities,
     EngineDescriptor,
     ParameterSpec,
+    require_text,
     ParameterType,
     TranscriptionEngine,
     TranscriptionRequest,
@@ -48,6 +50,9 @@ DESCRIPTOR = EngineDescriptor(
             type=ParameterType.STRING,
             default="large-v3",
             help="Checkpoint name. large-v3 is the accuracy default; distil-large-v3 and large-v3-turbo trade a little accuracy for speed.",
+            # Names a HuggingFace repo or a local path the server loads.
+            deployment_scoped=True,
+            check=require_text,
         ),
         ParameterSpec(
             name="computeType",
@@ -100,6 +105,9 @@ DESCRIPTOR = EngineDescriptor(
             default="highpass=f=80,loudnorm",
             help="Applied to the dedicated 16 kHz WAV. Empty feeds the extracted MP3 unfiltered.",
             advanced=True,
+            # An ffmpeg filter graph runs on the server; see audio_filters.
+            deployment_scoped=True,
+            check=validate_filter_chain,
         ),
         ParameterSpec(
             name="initialPrompt",

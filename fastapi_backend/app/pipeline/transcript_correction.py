@@ -21,7 +21,8 @@ silently rewritten.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import lru_cache
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -76,6 +77,22 @@ class _Term:
     words: tuple[str, ...]
     letters: str
     keys: tuple[str, str]
+    # difflib indexes its *second* sequence once (``set_seq2``) and re-scans
+    # only the first per call, so each term keeps one matcher per string it is
+    # ever compared against and swaps the window in as ``a`` — the same
+    # (window, term) argument order, so the ratios are bit-identical to
+    # ``SequenceMatcher(None, window, term)`` built from scratch every time.
+    # Mutable and not thread-safe: one set of terms per ``correct_segments`` call.
+    casefold_matcher: SequenceMatcher = field(init=False, repr=False, compare=False)
+    letters_matcher: SequenceMatcher = field(init=False, repr=False, compare=False)
+    key_matchers: tuple[tuple[SequenceMatcher, ...], ...] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "casefold_matcher", _matcher_against(self.casefold))
+        object.__setattr__(self, "letters_matcher", _matcher_against(self.letters))
+        object.__setattr__(
+            self, "key_matchers", tuple(_matcher_against(key) for key in self.keys if key)
+        )
 
     @property
     def phonetic_eligible_length(self) -> int:
@@ -105,6 +122,7 @@ class _Match:
         )
 
 
+@lru_cache(maxsize=8192)
 def _core(token: str) -> tuple[str, str, str]:
     """Split a token into (leading punctuation, core, trailing punctuation)."""
     start = 0
@@ -116,12 +134,29 @@ def _core(token: str) -> tuple[str, str, str]:
     return token[:start], token[start:end], token[end:]
 
 
+@lru_cache(maxsize=8192)
 def _letters(text: str) -> str:
     return _NON_ALPHA.sub("", str(text or "").casefold())
 
 
-def _ratio(left: str, right: str) -> float:
-    return SequenceMatcher(None, left, right).ratio()
+def _matcher_against(right: str) -> SequenceMatcher:
+    matcher = SequenceMatcher(None)
+    matcher.set_seq2(right)
+    return matcher
+
+
+def _ratio_against(matcher: SequenceMatcher, left: str) -> float:
+    """``SequenceMatcher(None, left, right).ratio()`` with ``right`` pre-indexed."""
+    matcher.set_seq1(left)
+    return matcher.ratio()
+
+
+def _ratio_upper_bound(matcher: SequenceMatcher, left: str) -> float:
+    """A value that is never below :func:`_ratio_against` — difflib's own cheap
+    multiset bound. Same formula as ``ratio()`` with a match count that can only
+    be larger, so a bound under a threshold proves the real ratio is too."""
+    matcher.set_seq1(left)
+    return matcher.quick_ratio()
 
 
 def _prepare_terms(terms: list[Any]) -> list[_Term]:
@@ -156,16 +191,27 @@ def _orthographic_ratio(window_text: str, window_letters: str, term: _Term) -> f
     term has: "para set a mole" reads as 0.55 against "paracetamol" with its
     spaces in, and 0.87 without them.
     """
-    return max(_ratio(window_text.casefold(), term.casefold), _ratio(window_letters, term.letters))
+    return max(
+        _ratio_against(term.casefold_matcher, window_text.casefold()),
+        _ratio_against(term.letters_matcher, window_letters),
+    )
+
+
+def _orthographic_upper_bound(window_text: str, window_letters: str, term: _Term) -> float:
+    return max(
+        _ratio_upper_bound(term.casefold_matcher, window_text.casefold()),
+        _ratio_upper_bound(term.letters_matcher, window_letters),
+    )
 
 
 def _phonetic_ratio(window_letters: str, term: _Term) -> float:
     """Best agreement across the primary/alternate readings of both sides."""
     window_keys = [key for key in phonetic_codes(window_letters) if key]
-    term_keys = [key for key in term.keys if key]
-    if not window_keys or not term_keys:
+    if not window_keys or not term.key_matchers:
         return 0.0
-    return max(_ratio(window_key, term_key) for window_key in window_keys for term_key in term_keys)
+    return max(
+        _ratio_against(term_matcher, window_key) for window_key in window_keys for term_matcher in term.key_matchers
+    )
 
 
 def _length_compatible(window_letters: str, term: _Term) -> bool:
@@ -185,45 +231,74 @@ def _evaluate(
     if not window_letters or not _length_compatible(window_letters, term):
         return None
 
-    ratio = _orthographic_ratio(window_text, window_letters, term)
-
     # The orthographic channel only speaks for windows of the term's own word
     # count — that is the behaviour it was tuned for, and widening it would
     # trade precision for reach the phonetic channel already covers.
+    orthographic_threshold: float | None = None
     if span == len(term.words):
-        threshold = policy.min_ratio
+        orthographic_threshold = policy.min_ratio
         # The relaxation exists for long single words ("parasitamol" ->
         # "paracetamol", 0.818). It must not extend to multi-word terms, whose
         # windows are phrases of common speech: at 0.80, "sure that" scores as
         # "sore throat" and "make sure that everything" is destroyed.
         if len(term.words) == 1 and len(term.casefold) >= policy.relaxed_length:
-            threshold = max(0.0, threshold - policy.relaxed_ratio_delta)
-        if ratio >= threshold:
-            return _Match(span=span, ratio=ratio, phonetic_ratio=_phonetic_ratio(window_letters, term), method="orthographic")
+            orthographic_threshold = max(0.0, orthographic_threshold - policy.relaxed_ratio_delta)
+    phonetic_allowed = policy.phonetic_enabled and term.phonetic_eligible_length >= policy.min_phonetic_key_codes
 
-    if not policy.phonetic_enabled or term.phonetic_eligible_length < policy.min_phonetic_key_codes:
+    # Most windows in a transcript are nowhere near any term. Whichever channel
+    # could still accept needs the ratio to clear its own floor, so a window
+    # whose cheap upper bound is under the lower floor is rejected without the
+    # quadratic comparison — the outcome is the same, the work is not.
+    floors = [floor for floor in (orthographic_threshold, policy.min_phonetic_char_ratio if phonetic_allowed else None) if floor is not None]
+    if not floors:
+        return None
+    if _orthographic_upper_bound(window_text, window_letters, term) < min(floors):
         return None
 
+    ratio = _orthographic_ratio(window_text, window_letters, term)
+
+    if orthographic_threshold is not None and ratio >= orthographic_threshold:
+        return _Match(span=span, ratio=ratio, phonetic_ratio=_phonetic_ratio(window_letters, term), method="orthographic")
+
+    if not phonetic_allowed or ratio < policy.min_phonetic_char_ratio:
+        return None
     phonetic_ratio = _phonetic_ratio(window_letters, term)
-    if phonetic_ratio >= policy.min_phonetic_ratio and ratio >= policy.min_phonetic_char_ratio:
+    if phonetic_ratio >= policy.min_phonetic_ratio:
         return _Match(span=span, ratio=ratio, phonetic_ratio=phonetic_ratio, method="phonetic")
     return None
 
 
-def _contains_protected(cores: list[str], protected: set[str], max_words: int) -> bool:
-    """True if the window already spells some corpus term verbatim.
+class _ProtectedTerms:
+    """The corpus's own spellings, and whether a window already contains one.
 
     A window carrying a correctly transcribed term plus a neighbouring word
     ("nasal block or") is not a misrecognition of that term — it is the term,
     and rewriting it would delete the neighbour. The same check stops a correct
     "prednisolone" from being pulled towards its sibling "prednisone".
+
+    The answer depends only on the window's words, not on which term is being
+    matched, so it is remembered: every window is otherwise re-checked once per
+    corpus term.
     """
-    lowered = [core.casefold() for core in cores]
-    for start in range(len(lowered)):
-        for span in range(1, min(max_words, len(lowered) - start) + 1):
-            if " ".join(lowered[start : start + span]) in protected:
-                return True
-    return False
+
+    def __init__(self, terms: list[_Term]) -> None:
+        self._spellings = {term.casefold for term in terms}
+        self._max_words = max(len(term.words) for term in terms)
+        self._answers: dict[tuple[str, ...], bool] = {}
+
+    def within(self, cores: list[str]) -> bool:
+        key = tuple(cores)
+        answer = self._answers.get(key)
+        if answer is None:
+            answer = self._answers[key] = self._scan([core.casefold() for core in cores])
+        return answer
+
+    def _scan(self, lowered: list[str]) -> bool:
+        for start in range(len(lowered)):
+            for span in range(1, min(self._max_words, len(lowered) - start) + 1):
+                if " ".join(lowered[start : start + span]) in self._spellings:
+                    return True
+        return False
 
 
 def _capitalize_like(replacement: str, window_text: str) -> str:
@@ -248,8 +323,7 @@ def correct_segments(
     prepared = _prepare_terms(terms)
     if not prepared:
         return []
-    protected = {term.casefold for term in prepared}
-    protected_max_words = max(len(term.words) for term in prepared)
+    protected = _ProtectedTerms(prepared)
 
     corrections: list[dict[str, Any]] = []
     for segment in segments:
@@ -263,7 +337,7 @@ def correct_segments(
         segment_corrections: list[tuple[int, dict[str, Any]]] = []
         for term in prepared:
             for match, start, window_text, window in _rank_candidates(
-                tokens, locked, term, protected, protected_max_words, active_policy
+                tokens, locked, term, protected, active_policy
             ):
                 positions = range(start, start + match.span)
                 if any(position in locked for position in positions):
@@ -297,8 +371,7 @@ def _rank_candidates(
     tokens: list[str | None],
     locked: set[int],
     term: _Term,
-    protected: set[str],
-    protected_max_words: int,
+    protected: _ProtectedTerms,
     policy: CorrectionPolicy,
 ) -> list[tuple[_Match, int, str, list[tuple[str, str, str]]]]:
     """Every accepted window for one term in one segment, best first.
@@ -319,7 +392,7 @@ def _rank_candidates(
             window = [_core(str(tokens[position])) for position in range(start, start + span)]
             cores = [core for _, core, _ in window]
             window_text = " ".join(cores)
-            if not window_text or _contains_protected(cores, protected, protected_max_words):
+            if not window_text or protected.within(cores):
                 continue
             match = _evaluate(window_text, _letters(window_text), span, term, policy)
             if match is not None:

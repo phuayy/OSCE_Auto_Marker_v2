@@ -117,7 +117,7 @@ class AnthropicProvider(LLMProvider):
         payload: dict[str, Any] = {
             "model": resolved_model,
             "messages": conversation,
-            "max_tokens": request.max_tokens,
+            "max_tokens": self.output_budget(request, resolved_model),
             "temperature": request.temperature,
         }
         if system_prompt:

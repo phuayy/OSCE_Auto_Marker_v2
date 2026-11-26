@@ -110,6 +110,23 @@ def session_video_path(session: dict[str, Any]) -> Path:
     return path
 
 
+def existing_file(meta: dict[str, Any] | None) -> Path | None:
+    """The regular file a file-meta dict points at, or ``None`` when it has none.
+
+    A draft clip carries ``absolutePath: None`` (or no key at all), and
+    ``Path("")`` is ``Path(".")`` — which exists — so ``Path(str(x or "")).exists()``
+    reads "no file" as "the working directory". An ``isDraft`` record is a
+    range whose cut has not landed, whatever stale path it may still name.
+    """
+    if not isinstance(meta, dict) or meta.get("isDraft"):
+        return None
+    raw = meta.get("absolutePath")
+    if not raw:
+        return None
+    path = Path(str(raw))
+    return path if path.is_file() else None
+
+
 def session_clips(session: dict[str, Any]) -> list[dict[str, Any]]:
     """The clip list, or an empty list when the session has none."""
     outputs = session.get("outputs")
@@ -134,6 +151,7 @@ __all__ = [
     "SessionStatus",
     "TERMINAL_STATUSES",
     "empty_outputs",
+    "existing_file",
     "find_clip",
     "session_clips",
     "session_video_path",

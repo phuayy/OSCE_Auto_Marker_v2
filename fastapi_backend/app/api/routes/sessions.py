@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import current_actor, get_container, require_expensive_operation, require_session_owner
@@ -254,6 +254,7 @@ async def recrop_clip(
     session_id: str,
     clip_id: str,
     payload: RecropClipRequest,
+    response: Response,
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
     """Move a clip's boundaries and queue the job that re-cuts its MP4.
@@ -263,11 +264,18 @@ async def recrop_clip(
     full split uses. Cutting it here held the connection for minutes on a long
     station and lost the work on a restart. Poll the session's ``clipExport``
     for progress.
+
+    A clip that was never exported has no cut to replace: only its range moves,
+    nothing is queued (``job`` is null) and the answer is 200 — the MP4 is cut
+    by the next "Export clips".
     """
     try:
-        return await container.clips.request_clip_recrop(session_id, clip_id, payload.start, payload.end)
+        result = await container.clips.request_clip_recrop(session_id, clip_id, payload.start, payload.end)
     except Exception as error:
         raise http_error(error, fallback_message="Recrop failed.", not_found_message="Session not found.") from error
+    if result.get("job") is None:
+        response.status_code = 200
+    return result
 
 
 @router.post("/{session_id}/clips/assess", status_code=202, dependencies=[Depends(require_session_owner), Depends(require_expensive_operation)])

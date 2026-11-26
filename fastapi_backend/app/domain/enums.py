@@ -41,6 +41,18 @@ class ClipExportStatus(StrEnum):
     FAILED = "failed"
 
 
+class ClipExportPhase(StrEnum):
+    """Which part of a running export the job is in, on ``session.clipExport.phase``.
+
+    ``preparing_source`` is the wait for the one browser-playable copy a clip of
+    an undecodable camera format is cut from (it may be transcoding); ``cutting``
+    is the per-clip crop loop.
+    """
+
+    PREPARING_SOURCE = "preparing_source"
+    CUTTING = "cutting"
+
+
 class ClipExportScope(StrEnum):
     """How much of a session's clip list one export job cuts.
 

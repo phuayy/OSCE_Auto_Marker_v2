@@ -23,6 +23,7 @@ import logging
 from typing import Any
 
 from app.domain.settings_scope import is_user_scoped
+from app.pipeline.transcription.registry import strip_deployment_scoped
 from app.repositories.app_settings_repository import (
     LLM_FALLBACKS_KEY,
     LLM_MARKING_MODE_KEY,
@@ -63,12 +64,34 @@ class PreferencesService:
         never be one — the write path enforces the boundary) is ignored here
         too, so a bug on the write side cannot let a marker's row reach past
         what they are allowed to change.
+
+        ``transcriptionEngineOptions`` is layered per engine and per
+        parameter rather than replaced, and only with the parameters a marker
+        may set: an engine option that decides what the server loads or runs
+        (``registry.strip_deployment_scoped``) keeps the deployment's value
+        even from a row stored before that rule existed, and a marker tuning
+        one parameter does not discard the administrator's others.
         """
         document = await self.defaults()
         for key, value in (await self.overrides_for(user_id)).items():
-            if is_user_scoped(key):
+            if not is_user_scoped(key):
+                continue
+            if key == TRANSCRIPTION_OPTIONS_KEY:
+                document[key] = self._layer_engine_options(document.get(key), value)
+            else:
                 document[key] = value
         return document
+
+    @staticmethod
+    def _layer_engine_options(deployment: Any, override: Any) -> dict[str, dict[str, Any]]:
+        merged = {
+            str(engine_id): dict(options)
+            for engine_id, options in (deployment.items() if isinstance(deployment, dict) else [])
+            if isinstance(options, dict)
+        }
+        for engine_id, options in strip_deployment_scoped(override).items():
+            merged[engine_id] = {**merged.get(engine_id, {}), **options}
+        return merged
 
     async def set_overrides(self, user_id: str, values: dict[str, Any]) -> dict[str, Any]:
         """Store ``user_id``'s overrides for the given keys. Every key must be

@@ -23,6 +23,7 @@ import { CLIP_ASSESSMENTS_ANCHOR_ID } from '@/lib/anchors';
 import { describeProcessingStage, formatProcessingStageLabel } from '@/lib/processingStage';
 import { describeCreator } from '@/lib/provenance';
 import { INTERMISSION_KIND } from '@/lib/manualTimeline.js';
+import { DRAFT_CLIP_REASON, isDraftClip } from '@/lib/clipSelection';
 import { formatMetricValue, formatRuntime, prettySpeaker } from '@/lib/format';
 import { formatScore } from '@/lib/scoreDisplay';
 import { useScoreDisplay } from '@/lib/useScoreDisplay';
@@ -1401,6 +1402,8 @@ export default function SessionWorkspace({
                           );
                         }
                         const runState = clipAssessmentRuns[clip.id] || { status: 'idle' };
+                        // No cut file yet (auto-crop proposal, or mid re-cut): nothing to assess.
+                        const isDraft = isDraftClip(clip);
                         const isCompleted = runState.status === SessionStatus.COMPLETED && Boolean(runState.sessionId);
                         // Child session id backing a running clip, used to re-open its progress overlay.
                         const progressSessionId = runState.sessionId || clipAssessmentIndex[clip.id]?.sessionId || null;
@@ -1429,13 +1432,15 @@ export default function SessionWorkspace({
                                   type="checkbox"
                                   className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer accent-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
                                   checked={selectedClipAssessmentIds.has(clip.id)}
-                                  disabled={runState.status === 'running' || isQueueingSelectedClips}
+                                  disabled={runState.status === 'running' || isDraft || isQueueingSelectedClips}
                                   onChange={() => toggleClipSelected(clip.id)}
                                   aria-label={`Select ${clip.label || `Student ${index + 1}`} for batch assessment`}
                                   title={
-                                    runState.status === 'running'
-                                      ? 'Already queued — available again when this run finishes.'
-                                      : 'Include this clip in "Run Selected Assessments"'
+                                    isDraft
+                                      ? DRAFT_CLIP_REASON
+                                      : runState.status === 'running'
+                                        ? 'Already queued — available again when this run finishes.'
+                                        : 'Include this clip in "Run Selected Assessments"'
                                   }
                                 />
                                 <div className="min-w-0">
@@ -1485,8 +1490,8 @@ export default function SessionWorkspace({
                                     size="sm"
                                     variant="ghost"
                                     onClick={() => rerunClipAssessment(clip, progressSessionId)}
-                                    disabled={isLoadingWorkspace}
-                                    title="Re-run assessment for this clip (keeps the same record)"
+                                    disabled={isLoadingWorkspace || isDraft}
+                                    title={isDraft ? DRAFT_CLIP_REASON : 'Re-run assessment for this clip (keeps the same record)'}
                                     className="text-slate-700 hover:bg-slate-100"
                                   >
                                     <RotateCw className="mr-1 h-3.5 w-3.5" />
@@ -1545,7 +1550,8 @@ export default function SessionWorkspace({
                                   <Button
                                     size="sm"
                                     onClick={() => runClipAssessment(clip)}
-                                    disabled={isLoadingWorkspace}
+                                    disabled={isLoadingWorkspace || isDraft}
+                                    title={isDraft ? DRAFT_CLIP_REASON : undefined}
                                   >
                                     Run assessment
                                   </Button>

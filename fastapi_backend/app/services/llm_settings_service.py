@@ -29,13 +29,13 @@ from typing import Any, Union
 from app.core.secret_box import redact_secrets
 from app.llm import credentials as credential_resolver
 from app.llm import registry
-from app.llm.base import ChatRequest, LLMError, ProviderCredentials, ReasoningPolicy
+from app.llm.base import LLMError, ProviderCredentials, ReasoningPolicy
 from app.llm.catalog import ProviderCatalog, builtin_catalog
 from app.llm.custom import redact_connection_secrets
 from app.llm.panel import MarkingMode, PanelConfig, TieBreak, marker_key, parse_marking_mode
 from app.llm.router import LLMRouter
 from app.llm.routing import LLMTarget, RoutingConfig
-from app.llm.runtime import retry_policy_from_env
+from app.llm.runtime import request_defaults_from_env, retry_policy_from_env
 from app.pipeline.marking.base import MarkerAssignment, MarkingPlan
 from app.services.custom_provider_service import CustomProviderService
 from app.services.preferences_service import PreferencesService
@@ -85,7 +85,6 @@ KeyOverrideSource = Union[Mapping[str, str], Callable[[], Mapping[str, str]]]
 # the operator is still looking at it, and a scoring-length 6-minute timeout
 # would make a dead endpoint indistinguishable from a hung browser tab.
 TEST_TIMEOUT_SECONDS = 30.0
-TEST_MAX_TOKENS = 64
 
 
 class LLMSettingsService:
@@ -603,13 +602,16 @@ class LLMSettingsService:
         secrets = tuple(value for value in (probe_key, sent_key) if value)
         source = resolved.sources.get(resolved_id, "none")
         router = LLMRouter(dict(providers), config)
-        request = ChatRequest(
+        # Sampling, token budget and mode ladder come from the same defaults a
+        # scoring run starts from, so a provider that rejects the real request
+        # shape (a budget over its limit, a refused ``temperature``) fails the
+        # test too. Only the prompt is a probe - the budget is a ceiling, not a
+        # spend, and the model is asked for a dozen tokens.
+        request = request_defaults_from_env(
             messages=[
                 {"role": "system", "content": "You are a connectivity probe. Answer with JSON only."},
                 {"role": "user", "content": 'Reply with exactly this JSON object: {"ok": true}'},
             ],
-            temperature=0.0,
-            max_tokens=TEST_MAX_TOKENS,
             timeout_seconds=TEST_TIMEOUT_SECONDS,
             json_mode=True,
             reasoning=ReasoningPolicy(enabled=False),
