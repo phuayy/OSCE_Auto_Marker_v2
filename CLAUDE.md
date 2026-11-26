@@ -2384,9 +2384,13 @@ Five properties the design rests on:
 * **Definitions travel with the routing.** `subprocess_env()` serialises them
   into `OSCE_LLM_CUSTOM_PROVIDERS` alongside `OSCE_LLM_ROUTING`, from the same
   resolved snapshot, so a scorer told to call `campus-gateway` can find out what
-  that means and cannot disagree with the settings screen about it. The blob is
-  credential-free and safe to log. Unset, a scorer sees exactly the six shipped
-  providers, as before.
+  that means and cannot disagree with the settings screen about it. Only the
+  providers the routing *names* travel (`ProviderCatalog.to_env(provider_ids)`),
+  and the blob is credential-free and safe to log: the extra headers/query/body
+  are stripped from it and sent in a variable of their own per routed provider
+  (`OSCE_LLM_EXTRAS_<ID>`, `extras_env_name` — same slug and so same collision
+  rule as the key variable), rehydrated by `catalog_from_env`. Unset, a scorer
+  sees exactly the six shipped providers, as before.
 * **A connection can carry a second credential, and only an admin reads it
   back.** `extraHeaders` / `extraQuery` / `extraBody` are the escape hatch a
   corporate gateway's own auth token, a repeated Azure key, or a signed

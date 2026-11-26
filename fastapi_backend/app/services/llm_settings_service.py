@@ -318,9 +318,10 @@ class LLMSettingsService:
         # The definitions travel with the routing, not separately: a subprocess
         # told to call "our-gateway" has to be able to find out what that means,
         # and reading it from the same snapshot the routing was filtered against
-        # is what stops the two disagreeing.
-        env.update(resolved.catalog.to_env())
+        # is what stops the two disagreeing. Only routed providers go: their
+        # extra headers/query/body are second credentials and travel like keys.
         provider_ids = [target.provider_id for target in config.targets()]
+        env.update(resolved.catalog.to_env(provider_ids))
         env.update(
             credential_resolver.credential_env_for(
                 provider_ids, overrides=resolved.overrides, catalog=resolved.catalog

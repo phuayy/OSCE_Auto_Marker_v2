@@ -343,7 +343,7 @@ def test_definitions_reach_a_subprocess_through_the_environment() -> None:
     """A scorer has no database. It learns what 'campus-gateway' means from the
     variable the API serialised, which is why the two can never disagree."""
     catalog = builtin_catalog().with_custom([CustomProviderSpec.from_raw(GATEWAY)])
-    env = catalog.to_env()
+    env = catalog.to_env(["campus-gateway"])
 
     rebuilt = catalog_from_env(env)
 
@@ -356,7 +356,7 @@ def test_definitions_reach_a_subprocess_through_the_environment() -> None:
 
 
 def test_a_deployment_with_no_custom_providers_hands_over_the_environment_it_always_did() -> None:
-    assert builtin_catalog().to_env() == {}
+    assert builtin_catalog().to_env(["openai"]) == {}
     assert catalog_from_env({}).provider_ids() == registry.provider_ids()
 
 
