@@ -12,10 +12,17 @@ from app.core.exceptions import AppError
 from app.core.logging_utils import log_context
 from app.core.utils import utc_now_iso
 from app.domain.enums import TaskType, Workflow
-from app.domain.sessions import IN_FLIGHT_STATUSES, SessionStatus, session_clips, session_video_path
+from app.domain.sessions import (
+    IN_FLIGHT_STATUSES,
+    SessionStatus,
+    clip_list_busy,
+    session_clips,
+    session_video_path,
+)
 from app.repositories.notification_repository import NotificationRepository
 from app.repositories.video_repository import VideoRepository
 from app.services.assessment_service import AssessmentService
+from app.services.clip_export_admission import settled_export_identity
 from app.services.job_queue_service import JobQueueService
 from app.services.media_preparation import mark_media_queued
 from app.services.session_service import SessionMutator, SessionService
@@ -332,6 +339,7 @@ class SessionMaintenanceService:
             TaskType.AUTO_CROP,
             {"workflow": session.get("workflow"), "segmentation": session.get("segmentation")},
             stage="session_auto_crop",
+            settled_export=await settled_export_identity(self.jobs, session),
         )
 
     async def _ready_to_start(self, session_id: str) -> dict[str, Any]:
@@ -363,7 +371,14 @@ class SessionMaintenanceService:
             return TaskType.AUTO_CROP
         return TaskType.PROCESS_SESSION
 
-    async def _admit(self, session_id: str, *, reset: SessionMutator | None = None) -> dict[str, Any]:
+    async def _admit(
+        self,
+        session_id: str,
+        *,
+        reset: SessionMutator | None = None,
+        guard_clip_export: bool = False,
+        settled_export: tuple[str, str, str] | None = None,
+    ) -> dict[str, Any]:
         """Atomically claim the session for a run: one ``sessions.update``
         mutator that refuses (409) a session already in flight and otherwise
         flips it to ``queued``, applying ``reset`` (a rerun's outputs/pipeline
@@ -380,11 +395,23 @@ class SessionMaintenanceService:
         ``rerun_session``, after this call) safe to run unconditionally once
         it returns: nothing can be running the session while it has no job,
         because this write is what makes the job possible.
+
+        ``guard_clip_export`` is for a run that replaces the clip list
+        (auto-crop): it must also refuse while a clip export is live, since the
+        export is cutting the very list the run is about to overwrite and the
+        session's status does not say so (the export job does not own it).
+        ``settled_export`` is the record the caller found dead in the job
+        queue, which does not count (``clip_list_busy``).
         """
 
         def admit(current: dict[str, Any]) -> Any:
             if str(current.get("status") or "").lower() in IN_FLIGHT_STATUSES:
                 raise AppError("This session is already being processed.", status_code=409)
+            if guard_clip_export and clip_list_busy(current, settled_export=settled_export):
+                raise AppError(
+                    "A clip export is already running for this session. Wait for it to finish before re-splitting.",
+                    status_code=409,
+                )
             current["status"] = SessionStatus.QUEUED
             current["error"] = None
             if reset is not None:
@@ -482,13 +509,18 @@ class SessionMaintenanceService:
         payload: dict[str, Any],
         *,
         stage: str,
+        settled_export: tuple[str, str, str] | None = None,
     ) -> dict[str, Any]:
         """Admit the session (queued, atomically) and enqueue ``task_type`` for
         it. Used by :meth:`start_processing` / :meth:`start_auto_crop`, which
         have no reset to fold into the admission and no destructive cleanup to
         run in between — see :meth:`rerun_session` for the case that does.
         """
-        await self._admit(session_id)
+        await self._admit(
+            session_id,
+            guard_clip_export=task_type == TaskType.AUTO_CROP,
+            settled_export=settled_export,
+        )
         return await self._enqueue_and_attach(session_id, task_type, payload, stage=stage)
 
     async def rerun_session(self, session_id: str) -> dict[str, Any]:
@@ -541,7 +573,12 @@ class SessionMaintenanceService:
             current["pipeline"] = dict(reset_pipeline)
             # status/error are set by ``_admit`` itself in the same write.
 
-        await self._admit(session_id, reset=reset)
+        await self._admit(
+            session_id,
+            reset=reset,
+            guard_clip_export=task_type == TaskType.AUTO_CROP,
+            settled_export=await settled_export_identity(self.jobs, session),
+        )
 
         # From here on this call has won the run: nothing else can be scoring
         # this session while it holds no job (``_admit`` is what makes a job

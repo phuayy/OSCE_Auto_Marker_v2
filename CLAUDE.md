@@ -587,6 +587,20 @@ footage it is replacing. Once the new cut is durable the old file is deleted —
 unless a child session's video still is that file, the same rule
 `_prune_stale_plan_dirs` applies to whole plan directories.
 
+**Admission to the clip list is one rule, checked and claimed in one write.**
+Export, recrop and an auto-crop (re)run all rewrite the clip list, so each
+refuses (409) while `clip_list_busy` ([domain/sessions.py](fastapi_backend/app/domain/sessions.py))
+holds: a job-driven status (`queued` counts, not only `processing`) or a live
+`clipExport`. The check runs again inside the `SessionService.update` mutator
+that writes the new record, on the freshly read document — the same shape as
+`SessionMaintenanceService._admit` — and a per-session lock covers the window
+before the job id is attached. A `clipExport` record is only a claim; the job
+row decides ([services/clip_export_admission.py](fastapi_backend/app/services/clip_export_admission.py)):
+a record whose job is terminal, missing, or (with no `jobId`) has no active
+`export_clips` job is stale and may be replaced. If the enqueue fails after
+admission the record is marked `failed` with the error (guarded on it still
+being that request's record), so a failed start never locks exports out.
+
 The export job deliberately does **not** own `session.status` (see
 `app/services/job_tasks.py`). The user sits inside the timeline editor while
 clips are cut, and flipping the session to `processing` would eject them — the
