@@ -57,6 +57,7 @@ import { describeClipExportOutcome } from '@/lib/clipExportOutcome';
 import { MEDIA_POLL_INTERVAL_MS, describeVideoMedia, effectiveVideoDuration, mergeSessionFiles } from '@/lib/videoMedia';
 import { creatorName } from '@/lib/provenance';
 import { canMutateSession } from '@/lib/authz';
+import { buildManualSplitPayload, seedTimelineFromClips } from '@/lib/timelineSeed';
 import { indexClipAssessments } from '@/lib/clipAssessments';
 import { describeRerunAction } from '@/lib/rerunAction';
 import { describeStartAction } from '@/lib/sessionStartAction';
@@ -71,7 +72,6 @@ import {
 import {
   INTERMISSION_KIND,
   MIN_BOUNDARY_GAP_SECONDS,
-  ensureKinds,
   hitTestTimeline,
   insertSeparator,
   normalizeLabels,
@@ -426,24 +426,14 @@ export default function OSCEAiMarkerMockup({
     }
 
     if (videoClips.length > 1) {
-      const sortedClips = [...videoClips].sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
-      const nextBoundaries = [];
-      for (let index = 0; index < sortedClips.length - 1; index += 1) {
-        const boundary = Number(sortedClips[index].end || 0);
-        if (boundary > 0 && boundary < videoDurationSeconds) {
-          nextBoundaries.push(boundary);
-        }
-      }
-
-      // The person detector emits a full timeline partition — seed each
-      // segment's kind so intermissions render greyed from the first paint.
-      const nextKinds = sortedClips.map((clip) =>
-        clip.kind === INTERMISSION_KIND ? INTERMISSION_KIND : 'session'
-      );
-      setManualSegmentCount(sortedClips.length);
-      setManualBoundaries(nextBoundaries);
-      setManualSegmentKinds(nextKinds);
-      setManualLabels(normalizeLabels(sortedClips.map((clip) => String(clip.label || '')), nextKinds));
+      // Gaps between clips (bell detection) seed as intermissions, so an
+      // unchanged Export reproduces the detected clips; the person detector's
+      // full partition passes through as it always did.
+      const seed = seedTimelineFromClips({ clips: videoClips, duration: videoDurationSeconds });
+      setManualSegmentCount(seed.kinds.length);
+      setManualBoundaries(seed.boundaries);
+      setManualSegmentKinds(seed.kinds);
+      setManualLabels(seed.labels);
       return;
     }
 
@@ -1860,17 +1850,15 @@ export default function OSCEAiMarkerMockup({
     setIsSavingManualSegments(true);
     setError('');
     try {
-      const sortedBoundaries = [...manualBoundaries].sort((a, b) => a - b).map((value) => Number(value));
-      const expectedSegmentCount = sortedBoundaries.length + 1;
-      const kinds = ensureKinds(manualSegmentKinds, expectedSegmentCount);
-      const payload = {
-        boundaries: sortedBoundaries,
-        labels: normalizeLabels(manualLabels, kinds),
+      const payload = buildManualSplitPayload({
+        boundaries: manualBoundaries,
+        labels: manualLabels,
+        kinds: manualSegmentKinds,
         // Kinds are a human-detection concept: intermission segments export as
-        // greyed markers — no MP4 is cut, no downstream compute is spent. Bell
-        // splits have no intermissions, so the field is omitted (all sessions).
-        ...(isPersonSegmentedSession ? { kinds } : {}),
-      };
+        // greyed markers — no MP4 is cut, no downstream compute is spent. A
+        // bell split sends them only once a gap has been seeded as one.
+        includeKinds: isPersonSegmentedSession,
+      });
       const body = await apiJson(`/api/sessions/${session.id}/clips/manual`, {
         method: 'POST',
         json: payload,
