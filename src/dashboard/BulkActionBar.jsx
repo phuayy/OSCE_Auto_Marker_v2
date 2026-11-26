@@ -5,14 +5,14 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Modal } from '@/components/ui/dialog';
 import { RescoreDialog } from '@/components/RescoreDialog.jsx';
-import { apiFetch, apiJson, readErrorMessage } from '@/lib/apiFetch';
+import { apiJson } from '@/lib/apiFetch';
+import { emptyFilter } from '@/lib/analyticsFilters';
+import { requestCriteriaExport } from '@/lib/analyticsExport';
 import { downloadBlob } from '@/lib/download';
 import {
   BulkAction,
   bulkAvailability,
   eligibleIds,
-  exportFileName,
-  exportUrl,
   summarizeBulkResult,
 } from '@/lib/sessionSelection';
 
@@ -85,14 +85,9 @@ export function BulkActionBar({ entries, identity, onClear, onSettled }) {
     setBusy(BulkAction.EXPORT);
     setOutcome(null);
     try {
-      const response = await apiFetch(exportUrl(ids));
-      if (!response.ok) {
-        let body = null;
-        try { body = await response.json(); } catch { /* a non-JSON refusal */ }
-        throw new Error(readErrorMessage(body, 'The export failed.'));
-      }
-      const blob = await response.blob();
-      downloadBlob(exportFileName(response.headers.get('Content-Disposition')), blob);
+      // The Analytics page's own request: these recordings, no time window.
+      const { blob, fileName } = await requestCriteriaExport({ ...emptyFilter(), sessionIds: ids });
+      downloadBlob(fileName, blob);
       setOutcome({ failures: [], tone: 'success', message: `Exported results for ${ids.length === 1 ? '1 session' : `${ids.length} sessions`}.` });
     } catch (error) {
       setOutcome({ failures: [], tone: 'danger', message: error.message || 'The export failed.' });

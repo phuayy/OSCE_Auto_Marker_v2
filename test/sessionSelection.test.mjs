@@ -114,7 +114,7 @@ test('a malformed response is reported, never counted as success', () => {
   }
 });
 
-import { MAX_EXPORT_SESSIONS, exportFileName, exportUrl } from '../src/lib/sessionSelection.js';
+import { MAX_EXPORT_SESSIONS } from '../src/lib/sessionSelection.js';
 
 test('export is capped so its query string stays a sane length', () => {
   const many = Array.from({ length: MAX_EXPORT_SESSIONS + 1 }, (_, i) => row(`s${i}`, 'completed'));
@@ -122,23 +122,4 @@ test('export is capped so its query string stays a sane length', () => {
   assert.equal(e.allowed, false);
   assert.match(e.reason, /at most 100/);
   assert.equal(bulkAvailability(many.slice(1), marker)[BulkAction.EXPORT].allowed, true);
-});
-
-test('export url repeats rootSessionIds', () => {
-  const url = new URL(exportUrl(['a b', 'c']), 'http://x');
-  assert.equal(url.searchParams.get('format'), 'long');
-  assert.deepEqual(url.searchParams.getAll('rootSessionIds'), ['a b', 'c']);
-});
-
-test('export file name: header wins, anything odd falls to a dated default', () => {
-  const now = new Date('2026-03-04T10:00:00Z');
-  const dated = 'osce-results-2026-03-04.csv';
-  assert.equal(exportFileName('attachment; filename="marks.csv"', now), 'marks.csv');
-  assert.equal(exportFileName("attachment; filename*=UTF-8''r%C3%A9sum%C3%A9.csv", now), 'résumé.csv');
-  assert.equal(exportFileName('attachment; filename=plain.csv; size=2', now), 'plain.csv');
-  assert.equal(exportFileName('attachment; filename="../../etc/passwd"', now), 'passwd');
-  assert.equal(exportFileName('attachment; filename*=UTF-8\'\'%E0%A4%A', now), dated);
-  assert.equal(exportFileName('attachment', now), dated);
-  assert.equal(exportFileName(null, now), dated);
-  assert.equal(exportFileName('attachment; filename=".."', now), dated);
 });

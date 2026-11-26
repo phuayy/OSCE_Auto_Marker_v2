@@ -116,33 +116,6 @@ export function bulkAvailability(entries, identity) {
   return result;
 }
 
-/** The analytics export URL for these recordings. */
-export function exportUrl(sessionIds) {
-  const query = new URLSearchParams({ format: 'long' });
-  sessionIds.forEach((id) => query.append('rootSessionIds', id));
-  return `/api/analytics/export?${query}`;
-}
-
-/**
- * The file name the server offered in `Content-Disposition` (RFC 6266,
- * `filename*` first), reduced to a bare name — a header is not trusted to
- * choose a directory — or a dated default.
- */
-export function exportFileName(disposition, now = new Date()) {
-  const fallback = `osce-results-${now.toISOString().slice(0, 10)}.csv`;
-  const text = String(disposition || '');
-  const encoded = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(text);
-  const plain = /filename\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(text);
-  let name = '';
-  try {
-    name = encoded ? decodeURIComponent(encoded[1].trim()) : (plain?.[1] ?? plain?.[2] ?? '').trim();
-  } catch {
-    name = '';
-  }
-  name = name.split(/[\\/]/).pop().replace(/[\u0000-\u001f]/g, '').trim();
-  return name && name !== '.' && name !== '..' ? name : fallback;
-}
-
 const WORDING = {
   [BulkAction.RERUN]: { done: 'queued for re-run', cannot: 're-run' },
   [BulkAction.RESCORE]: { done: 'queued for re-score', cannot: 're-score' },
