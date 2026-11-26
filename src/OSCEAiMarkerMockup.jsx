@@ -3,10 +3,11 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ensureStreamTicket } from '@/auth';
 import { useChangeStream } from '@/changeStream';
-import { ApiError, ERROR_KIND, apiJson } from '@/lib/apiFetch';
+import { apiJson } from '@/lib/apiFetch';
 import { WORKSPACE_LAYOUT, loadSessionWorkspace, workspaceLayoutFor } from '@/lib/sessionWorkspace';
 import { uploadFileToResumableSession } from '@/lib/resumableUpload';
-import { DEFAULT_PART_CONCURRENCY, recordedPartNumbers, uploadParts } from '@/lib/partUpload';
+import { recordedPartNumbers, uploadParts } from '@/lib/partUpload';
+import { submitUpload } from '@/lib/uploadSubmission';
 import { CONNECTION_STATUS, useConnectionStatus } from '@/lib/connectionStatus';
 import { CLIP_ASSESSMENTS_ANCHOR_ID } from '@/lib/anchors';
 import { coalesceAsync } from '@/lib/coalesce';
@@ -20,7 +21,7 @@ import {
   describeProcessingStage,
   formatProcessingStageLabel,
 } from '@/lib/processingStage';
-import { UPLOAD_PHASE, useUploadTracker } from '@/lib/uploadTracking';
+import { useUploadTracker } from '@/lib/uploadTracking';
 import {
   BarChart3,
   BellRing,
@@ -32,30 +33,24 @@ import {
   Film,
   Loader2,
   LogOut,
-  Play,
-  RotateCw,
   Settings,
-  Trash2,
   UploadCloud,
   User,
   Users,
   Video,
   Wand2,
 } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Modal } from '@/components/ui/dialog';
 import { Progress } from '@/components/ui/progress';
 import { PageHeader } from '@/components/PageHeader.jsx';
-import { SessionStatusBadge } from '@/components/SessionStatusBadge.jsx';
 import RegionFocusPreview from '@/components/RegionFocusPreview.jsx';
 import OccupancyPresetGlyph from '@/components/OccupancyPresetGlyph.jsx';
 import CorporaManager from './CorporaManager.jsx';
 import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
 import { describeClipExportOutcome } from '@/lib/clipExportOutcome';
 import { MEDIA_POLL_INTERVAL_MS, describeVideoMedia, effectiveVideoDuration, mergeSessionFiles } from '@/lib/videoMedia';
-import { creatorName } from '@/lib/provenance';
 import { canMutateSession } from '@/lib/authz';
 import {
   buildManualSplitPayload,
@@ -63,9 +58,11 @@ import {
   planTimelineReseed,
   seedTimelineFromClips,
 } from '@/lib/timelineSeed';
+import { SessionCard } from '@/dashboard/SessionCard.jsx';
+import { SessionCardActions } from '@/dashboard/SessionCardActions.jsx';
 import { workspaceBelongsToUpload } from '@/lib/uploadCompletion';
 import { indexClipAssessments } from '@/lib/clipAssessments';
-import { describeRerunAction, offersRerun } from '@/lib/rerunAction';
+import { describeRerunAction } from '@/lib/rerunAction';
 import { describeStartAction } from '@/lib/sessionStartAction';
 import {
   buildRegionFocusOptions,
@@ -119,6 +116,9 @@ const CLIP_EXPORT_POLL_MS = 3000;
 // almost nothing: the session-index endpoint is served from a change-token
 // cache, so a tick that finds no change is a dictionary lookup.
 const IN_FLIGHT_HEARTBEAT_MS = 12000;
+
+// What `submitUpload` sends bytes with; the dashboard owns no transfer logic.
+const UPLOAD_TRANSPORTS = { uploadParts, recordedPartNumbers, uploadFileToResumableSession };
 
 function debugPipeline(message) {
   if (import.meta.env.DEV) {
@@ -1099,102 +1099,6 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
-  // Renders the action control for a saved-session row. In-flight sessions
-  // (assembling/queued/processing) are deliberately NOT enterable — opening a
-  // half-processed session would show empty/partial results. The card itself
-  // gauges the current stage (see describeProcessingStage); this button
-  // unlocks once processing reaches a terminal state.
-  function renderSessionAction(sessionEntry) {
-    // An upload still in flight in this tab is as un-enterable as a running
-    // pipeline — the session has no video on disk yet — but the server still
-    // reports it as `waiting_for_upload`, so the status alone cannot say so.
-    const uploading = uploadTracker.isActive(sessionEntry.id);
-    const inFlight = uploading || IN_FLIGHT_STATUSES.has(sessionEntry.status);
-
-    if (inFlight) {
-      return (
-        <Button
-          size="sm"
-          variant="outline"
-          disabled
-          className="gap-1"
-          title={
-            uploading
-              ? 'Available once the upload finishes. Progress is shown on this card.'
-              : 'Available when processing completes. Progress is shown on this card.'
-          }
-        >
-          <Loader2 className="h-3 w-3 animate-spin" />
-          {uploading ? 'Uploading…' : 'Processing…'}
-        </Button>
-      );
-    }
-
-    // Sources committed, run never queued (an upload completed with
-    // autoProcess off). The only thing to do with such a session is start it,
-    // so the card offers exactly that — the endpoint behind this button had no
-    // caller in the browser at all, which is what made `uploaded` a dead end.
-    // The server enforces this regardless (owner or admin only); disabling
-    // here just keeps the click from happening in the first place, with the
-    // same reason a 403 would have given.
-    const mayMutate = canMutateSession(authUser, sessionEntry);
-    const notOwnerTitle = 'Only this session’s creator or an administrator may do this.';
-
-    const start = describeStartAction(sessionEntry);
-    if (start) {
-      return (
-        <>
-          <Button
-            size="sm"
-            onClick={() => startSession(sessionEntry)}
-            disabled={startingSessionId === sessionEntry.id || !mayMutate}
-            className="gap-1"
-            title={mayMutate ? start.title : notOwnerTitle}
-          >
-            {startingSessionId === sessionEntry.id ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <Play className="h-3 w-3" />
-            )}
-            {start.label}
-          </Button>
-          <OpenSessionButton onOpen={() => openExistingSession(sessionEntry.id)} />
-        </>
-      );
-    }
-
-    if (offersRerun(sessionEntry.status)) {
-      // A failed or cancelled session opens (its partial artefacts are worth seeing), and it
-      // can be re-run in place: same id, fresh job. The reason it failed is
-      // rendered on the card itself — see the session list. What the re-run
-      // *is* depends on the workflow (a long recording re-runs segmentation,
-      // not the pipeline), so the button says which: lib/rerunAction.js.
-      const rerun = describeRerunAction(sessionEntry);
-      return (
-        <>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => rerunSession(sessionEntry)}
-            disabled={rerunningSessionId === sessionEntry.id || !mayMutate}
-            className="gap-1"
-            title={mayMutate ? rerun.title : notOwnerTitle}
-          >
-            {rerunningSessionId === sessionEntry.id ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <RotateCw className="h-3 w-3" />
-            )}
-            {rerun.label}
-          </Button>
-          <OpenSessionButton onOpen={() => openExistingSession(sessionEntry.id)} />
-        </>
-      );
-    }
-
-    return <OpenSessionButton onOpen={() => openExistingSession(sessionEntry.id)} />;
-  }
-
   // Queue the first run of a session whose files are already on the server.
   // Deliberately NOT the re-run endpoint: re-run deletes the previous run's
   // artefacts and assessment rows, and this session has none to delete — while
@@ -1334,74 +1238,9 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
-  async function uploadFileParts(file, fileUpload, onProgress, { completedParts } = {}) {
-    // The backend picks the transport at initiate: parts relayed through this
-    // API on a local deployment, straight at the bucket on a cloud one.
-    if (fileUpload.strategy === 'gcs_resumable') {
-      return uploadFileToResumableSession(file, fileUpload, onProgress);
-    }
-    if (fileUpload.strategy !== 'local_multipart') {
-      throw new Error(`Unsupported upload strategy: ${fileUpload.strategy || 'unknown'}.`);
-    }
-    if (!fileUpload.partUrlTemplate) {
-      throw new Error('Upload plan did not include a part URL template.');
-    }
-    const partSize = Number(fileUpload.partSizeBytes || 0);
-    if (!Number.isFinite(partSize) || partSize <= 0) {
-      throw new Error('Upload plan did not include a valid part size.');
-    }
-
-    // Parts go through the same door as every other API call: a 502 from the
-    // proxy or a dropped socket is retried with jitter instead of ending the
-    // transfer, and storing a part is idempotent on the server, so a retry of
-    // a part whose response was lost is safe. Several parts are in flight at
-    // once — the server serialises them per upload, so none can be lost.
-    return uploadParts({
-      file,
-      partSize,
-      completedParts,
-      concurrency: DEFAULT_PART_CONCURRENCY,
-      putPart: (partNumber, chunk) =>
-        apiJson(fileUpload.partUrlTemplate.replace('{partNumber}', String(partNumber)), {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: chunk,
-          idempotent: true,
-          fallbackMessage: `Upload part ${partNumber} failed.`,
-        }),
-      onProgress: (uploadedBytes) => onProgress?.(uploadedBytes, file.size, fileUpload),
-    });
-  }
-
-  // One transfer of one file, resumed once from the server's own ledger if it
-  // breaks. `GET /uploads/{id}` says exactly which parts arrived, so an outage
-  // in the middle of a 2 GB video costs the parts in flight, not the file.
-  // A 4xx is the server refusing the request itself and is not retried.
-  async function uploadFileWithResume(uploadId, file, fileUpload, onProgress, sessionId) {
-    try {
-      return await uploadFileParts(file, fileUpload, onProgress);
-    } catch (error) {
-      const refused = error instanceof ApiError && (error.kind === ERROR_KIND.CLIENT || error.kind === ERROR_KIND.ABORT);
-      if (refused || fileUpload.strategy !== 'local_multipart') {
-        throw error;
-      }
-      // Recorded on the track, not in overlay state: the user may well have
-      // dismissed the overlay, and the note has to reach the session card too.
-      uploadTracker.note(sessionId, 'Connection interrupted — resuming from the last saved part.');
-      const status = await apiJson(`/api/uploads/${uploadId}`, {
-        fallbackMessage: 'Could not read the upload status to resume.',
-      });
-      return uploadFileParts(file, fileUpload, onProgress, {
-        completedParts: recordedPartNumbers(status, fileUpload.fileId),
-      });
-    }
-  }
-
   async function runAsyncUploadAssessment() {
-    const initiateBody = await apiJson('/api/uploads/initiate', {
-      method: 'POST',
-      fallbackMessage: 'Async upload initiation failed.',
-      json: {
+    const { sessionId } = await submitUpload({
+      request: {
         workflow: uploadFlow,
         autoProcess: true,
         sessionName: sessionNameInput.trim() || null,
@@ -1409,81 +1248,24 @@ export default function OSCEAiMarkerMockup({
         segmentationOptions: buildSegmentationOptions(),
         regionFocusOptions: buildRegionFocusOptionsForUpload(),
         corpusId: selectedCorpusId || null,
-        files: [
-          {
-            kind: 'video',
-            originalName: videoFile.name,
-            mimeType: videoFile.type || 'video/mp4',
-            sizeBytes: videoFile.size,
-          },
-          {
-            kind: 'caseStudy',
-            originalName: caseStudyFile.name,
-            mimeType: caseStudyFile.type || 'application/pdf',
-            sizeBytes: caseStudyFile.size,
-          },
-        ],
+      },
+      files: { video: videoFile, caseStudy: caseStudyFile },
+      tracker: uploadTracker,
+      api: { apiJson },
+      transports: UPLOAD_TRANSPORTS,
+      onSessionCreated: (created) => {
+        // The track is open and the session exists server-side: remember which
+        // one this tab is sending (a failure marks its card) and pull it into
+        // the list so the card is there if the overlay is dismissed.
+        setSession(created);
+        activeUploadSessionIdRef.current = created.id;
+        refreshSessionIndex();
       },
     });
 
-    const sessionId = initiateBody.session?.id;
-    if (!sessionId) {
-      throw new Error('Async upload initiation did not return a session.');
-    }
-    setSession(initiateBody.session);
-
-    const filePlans = initiateBody.fileUploads || [];
-    const videoPlan = filePlans.find((item) => item.kind === 'video');
-    const caseStudyPlan = filePlans.find((item) => item.kind === 'caseStudy');
-    if (!videoPlan || !caseStudyPlan) {
-      throw new Error('Async upload initiation did not return both file upload plans.');
-    }
-
-    // The session now exists server-side (status `waiting_for_upload`), so it
-    // can carry the transfer's progress on its own card. Open the track before
-    // the first byte and pull the session into the list right away, so the card
-    // is already there if the user dismisses the overlay a second later.
-    activeUploadSessionIdRef.current = sessionId;
-    uploadTracker.begin(sessionId, videoFile.size + caseStudyFile.size);
-    refreshSessionIndex();
-
-    // Both files are one transfer as far as the user is concerned, so progress
-    // is reported against their combined size rather than restarting at 0% for
-    // the second file.
-    let bytesFromCompletedFiles = 0;
-    const updateUploadProgress = (uploadedBytes, totalBytes, plan) => {
-      const label = plan.kind === 'caseStudy' ? 'case study' : 'video';
-      uploadTracker.reportProgress(sessionId, bytesFromCompletedFiles + uploadedBytes, label);
-    };
-
-    await uploadFileWithResume(initiateBody.uploadId, videoFile, videoPlan, updateUploadProgress, sessionId);
-    bytesFromCompletedFiles += videoFile.size;
-    await uploadFileWithResume(
-      initiateBody.uploadId,
-      caseStudyFile,
-      caseStudyPlan,
-      updateUploadProgress,
-      sessionId,
-    );
-
-    uploadTracker.setPhase(sessionId, UPLOAD_PHASE.FINALIZING);
-    // `complete` is idempotent on the server (a repeat returns the same
-    // assembling/committed record), so a lost response is safe to retry.
-    await apiJson(`/api/uploads/${initiateBody.uploadId}/complete`, {
-      method: 'POST',
-      json: { autoProcess: true },
-      idempotent: true,
-      fallbackMessage: 'Upload finalization failed.',
-    });
     // Upload is committed and the job is queued. Return the user to the main
     // page: the session card shows the live stage, other sessions stay fully
     // browsable, and this session unlocks when processing completes.
-    //
-    // The server's status now describes the session better than this tab can,
-    // so the client-side track stands down and `describeProcessingStage` takes
-    // the card back over.
-    uploadTracker.setPhase(sessionId, UPLOAD_PHASE.DONE);
-    uploadTracker.forget(sessionId);
     activeUploadSessionIdRef.current = null;
     // Return to the list only if the screen is still this upload's: a session
     // the user opened while it transferred stays open (the card in the list
@@ -2776,145 +2558,40 @@ export default function OSCEAiMarkerMockup({
                     aria-label="Saved sessions"
                   >
                     {visibleSessions.map((sessionEntry) => (
-                      <li
+                      <SessionCard
                         key={sessionEntry.id}
-                        className="rounded-xl border border-slate-200 bg-slate-50 p-3"
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0 flex-1">
-                            <input
-                              type="text"
-                              value={sessionNameDrafts[sessionEntry.id] ?? sessionEntry.name ?? ''}
-                              onChange={(event) =>
-                                setSessionNameDrafts((previous) => ({
-                                  ...previous,
-                                  [sessionEntry.id]: event.target.value,
-                                }))
-                              }
-                              onBlur={(event) => {
-                                const nextValue = event.target.value.trim();
-                                const currentValue = String(sessionEntry.name || '').trim();
-                                if (nextValue && nextValue !== currentValue) {
-                                  renameSessionName(sessionEntry.id, nextValue);
-                                }
-                              }}
-                              onKeyDown={(event) => {
-                                if (event.key === 'Enter') {
-                                  event.preventDefault();
-                                  event.currentTarget.blur();
-                                }
-                              }}
-                              disabled={renamingSessionId === sessionEntry.id}
-                              aria-label="Session name"
-                              className="w-full rounded-lg border border-transparent bg-white px-2 py-1.5 text-sm font-semibold text-slate-800 shadow-sm focus:border-cyan-400 focus:outline-none focus:ring-2 focus:ring-cyan-400/30"
-                            />
-                            <div className="mt-1 truncate text-[11px] text-slate-500" title={sessionEntry.id}>
-                              {sessionEntry.id}
-                              {/* Who uploaded it (the list projection carries the
-                                  snapshot); a session from before creators were
-                                  recorded shows nothing rather than a guess. */}
-                              {creatorName(sessionEntry) ? (
-                                <span className="text-slate-500"> · by {creatorName(sessionEntry)}</span>
-                              ) : null}
-                            </div>
-                            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                              {/* The status as a word, in its tone, from one
-                                  table (lib/sessionStatus.js). An upload still
-                                  leaving this tab is busy whatever the server
-                                  calls the row. */}
-                              <SessionStatusBadge
-                                status={sessionEntry.status}
-                                busy={uploadTracker.isActive(sessionEntry.id) || undefined}
-                              />
-                              {sessionEntry.hasVideoClips || sessionEntry.status === SessionStatus.CROPPED ? (
-                                <Badge variant="accent">Several students</Badge>
-                              ) : null}
-                            </div>
-                            {(() => {
-                              // Stage gauge for in-flight sessions: the row is
-                              // not enterable, so the card is where the user
-                              // tracks how far along the run is.
-                              //
-                              // Two sources, one gauge. While this tab is still
-                              // sending bytes the server knows nothing but
-                              // "waiting_for_upload", so the client-side track
-                              // answers; once the upload is committed it stands
-                              // down and the server-derived stage takes over.
-                              const uploadStage = uploadTracker.describe(sessionEntry.id);
-                              const stage = uploadStage || describeProcessingStage(sessionEntry);
-                              if (!stage) return null;
-                              const failed = Boolean(stage.failed);
-                              return (
-                                <div className="mt-2">
-                                  <div className="flex items-center justify-between gap-2 text-[11px] text-slate-600">
-                                    {/* The stage's own percentage when the step
-                                        streams one (upload bytes, WhisperX),
-                                        next to the elapsed clock and the
-                                        completion on the right. */}
-                                    <span className={failed ? 'text-rose-600' : undefined}>
-                                      {formatProcessingStageLabel(stage)}
-                                      {failed ? '' : '…'}
-                                    </span>
-                                    <span className="flex shrink-0 items-center gap-1">
-                                      {stage.elapsedSeconds === undefined ? null : (
-                                        <>
-                                          <Clock3 className="h-3 w-3 text-slate-500" aria-hidden="true" />
-                                          <span className="tabular-nums">
-                                            {formatRuntime(stage.elapsedSeconds)}
-                                          </span>
-                                          <span className="text-slate-300" aria-hidden="true">·</span>
-                                        </>
-                                      )}
-                                      <span className="tabular-nums">{Math.round(stage.fraction * 100)}%</span>
-                                    </span>
-                                  </div>
-                                  <Progress
-                                    value={stage.fraction * 100}
-                                    className="mt-1 h-1.5"
-                                    label={`${formatProcessingStageLabel(stage)} progress`}
-                                  />
-                                  {failed && uploadTracker.tracks[sessionEntry.id]?.error ? (
-                                    <div className="mt-1 text-[11px] text-rose-600">
-                                      {uploadTracker.tracks[sessionEntry.id].error}
-                                    </div>
-                                  ) : null}
-                                </div>
-                              );
-                            })()}
-                            {sessionEntry.status === SessionStatus.FAILED && sessionEntry.error ? (
-                              // The list projection carries the failure reason so a
-                              // session the user cannot usefully open still says why —
-                              // including "interrupted by a server restart", which the
-                              // startup reconciliation writes for jobs that died.
-                              <div className="mt-2 rounded border border-rose-100 bg-rose-50 px-2 py-1 text-[11px] leading-snug text-rose-700">
-                                {sessionEntry.error}
-                              </div>
-                            ) : null}
-                          </div>
-                          <div className="flex shrink-0 items-center gap-1">
-                            {renderSessionAction(sessionEntry)}
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => deleteSession(sessionEntry.id)}
-                              disabled={deletingSessionId === sessionEntry.id || !canMutateSession(authUser, sessionEntry)}
-                              aria-label={`Delete session ${sessionEntry.name || sessionEntry.id}`}
-                              title={
-                                canMutateSession(authUser, sessionEntry)
-                                  ? 'Delete this session and all student assessments under it'
-                                  : 'Only this session’s creator or an administrator may delete it.'
-                              }
-                              className="text-rose-600 hover:bg-rose-50 hover:text-rose-700 focus-visible:ring-rose-500"
-                            >
-                              {deletingSessionId === sessionEntry.id ? (
-                                <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-                              ) : (
-                                <Trash2 className="h-4 w-4" aria-hidden="true" />
-                              )}
-                            </Button>
-                          </div>
-                        </div>
-                      </li>
+                        entry={sessionEntry}
+                        uploading={uploadTracker.isActive(sessionEntry.id)}
+                        // Two sources, one gauge. While this tab is still
+                        // sending bytes the server knows nothing but
+                        // "waiting_for_upload", so the client-side track
+                        // answers; once the upload is committed it stands
+                        // down and the server-derived stage takes over.
+                        stage={uploadTracker.describe(sessionEntry.id) || describeProcessingStage(sessionEntry)}
+                        uploadError={uploadTracker.tracks[sessionEntry.id]?.error}
+                        nameDraft={sessionNameDrafts[sessionEntry.id]}
+                        renaming={renamingSessionId === sessionEntry.id}
+                        onNameDraftChange={(value) =>
+                          setSessionNameDrafts((previous) => ({ ...previous, [sessionEntry.id]: value }))
+                        }
+                        onRename={(value) => renameSessionName(sessionEntry.id, value)}
+                        mayMutate={canMutateSession(authUser, sessionEntry)}
+                        deleting={deletingSessionId === sessionEntry.id}
+                        onDelete={() => deleteSession(sessionEntry.id)}
+                        actions={
+                          <SessionCardActions
+                            entry={sessionEntry}
+                            authUser={authUser}
+                            uploading={uploadTracker.isActive(sessionEntry.id)}
+                            startingSessionId={startingSessionId}
+                            rerunningSessionId={rerunningSessionId}
+                            onStart={startSession}
+                            onRerun={rerunSession}
+                            onOpen={openExistingSession}
+                            onPreloadWorkspace={() => preloadComponent(SessionWorkspace)}
+                          />
+                        }
+                      />
                     ))}
                   </ul>
                   {hasMoreSessions && (
@@ -3290,19 +2967,6 @@ export default function OSCEAiMarkerMockup({
           WorkspaceSkeleton in the main slot, drawn in the outline of the view
           about to open, so nothing pops up and nothing is dimmed. */}
     </div>
-  );
-}
-
-// Opening a session is what needs the workspace chunk, so hovering or tabbing
-// to the button that does it starts the fetch. By the time the click lands the
-// chunk is normally parsed — the same preload-on-intent the dashboard's nav
-// buttons use for Settings, Analytics and the Rubric.
-function OpenSessionButton({ onOpen }) {
-  const warm = () => preloadComponent(SessionWorkspace);
-  return (
-    <Button size="sm" variant="outline" onClick={onOpen} onMouseEnter={warm} onFocus={warm}>
-      Open
-    </Button>
   );
 }
 
