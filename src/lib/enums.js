@@ -143,6 +143,11 @@ export const ScoreDisplay = Object.freeze({
   "RAW": "raw"
 });
 
+export const ScoringBranch = Object.freeze({
+  "CONTENT": "content",
+  "COMMUNICATION": "communication"
+});
+
 export const RubricVersionStatus = Object.freeze({
   "ACTIVE": "active",
   "RETIRED": "retired"

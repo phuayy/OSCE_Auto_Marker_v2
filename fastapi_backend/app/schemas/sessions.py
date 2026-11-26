@@ -4,7 +4,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.domain.enums import ClipKind
+from app.domain.enums import ClipKind, ScoringBranch
 
 
 class RenameSessionRequest(BaseModel):
@@ -60,6 +60,20 @@ class RecropClipRequest(BaseModel):
 MAX_BATCH_ASSESS_CLIPS = 200
 
 
+def _clean_clip_ids(value: list[str]) -> list[str]:
+    """Trimmed, de-duplicated clip ids in request order; at least one must remain."""
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        clip_id = str(item or "").strip()
+        if clip_id and clip_id not in seen:
+            seen.add(clip_id)
+            cleaned.append(clip_id)
+    if not cleaned:
+        raise ValueError("`clipIds` must name at least one clip.")
+    return cleaned
+
+
 class AssessClipsRequest(BaseModel):
     """``POST /sessions/{id}/clips/assess`` — queue several clips as one action."""
 
@@ -70,16 +84,36 @@ class AssessClipsRequest(BaseModel):
     @field_validator("clip_ids", mode="after")
     @classmethod
     def dedupe_non_empty(cls, value: list[str]) -> list[str]:
-        cleaned: list[str] = []
-        seen: set[str] = set()
-        for item in value:
-            clip_id = str(item or "").strip()
-            if clip_id and clip_id not in seen:
-                seen.add(clip_id)
-                cleaned.append(clip_id)
-        if not cleaned:
-            raise ValueError("`clipIds` must name at least one clip.")
-        return cleaned
+        return _clean_clip_ids(value)
+
+
+class RescoreRequest(BaseModel):
+    """``POST /sessions/{id}/rescore`` — which scoring branches to redo."""
+
+    branches: list[ScoringBranch] = Field(min_length=1)
+
+    @field_validator("branches", mode="after")
+    @classmethod
+    def no_repeats(cls, value: list[ScoringBranch]) -> list[ScoringBranch]:
+        if len(set(value)) != len(value):
+            raise ValueError("`branches` must not repeat a branch.")
+        return value
+
+
+class RescoreClipsRequest(RescoreRequest):
+    """``POST /sessions/{id}/clips/rescore`` — the same, for a recording's clips.
+
+    Without ``clipIds`` every assessable clip is considered.
+    """
+
+    clip_ids: list[str] | None = Field(None, alias="clipIds", min_length=1, max_length=MAX_BATCH_ASSESS_CLIPS)
+
+    model_config = {"populate_by_name": True}
+
+    @field_validator("clip_ids", mode="after")
+    @classmethod
+    def dedupe_non_empty(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else _clean_clip_ids(value)
 
 
 class RenameClipRequest(BaseModel):

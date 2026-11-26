@@ -114,6 +114,19 @@ class UploadFileKind(StrEnum):
     CASE_STUDY = "caseStudy"
 
 
+class ScoringBranch(StrEnum):
+    """A scoring branch a re-score may redo (``POST /sessions/{id}/rescore``).
+
+    Audio professionalism is deliberately not a branch: it is a pure function
+    of the audio and the transcript, neither of which a re-score changes (a
+    rubric edit or a different scoring model only affects the two LLM-marked
+    branches), so a re-score always keeps it.
+    """
+
+    CONTENT = "content"
+    COMMUNICATION = "communication"
+
+
 class ScoreDisplay(StrEnum):
     """How the screens present a score: a share of the maximum, or the points
     themselves. A per-account display preference (see CLAUDE.md "Two-tier
