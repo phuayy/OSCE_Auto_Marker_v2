@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import glob
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from enum import Enum
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -15,10 +17,11 @@ from app.core.config import Settings
 from app.core.exceptions import AppError, EmptyTranscriptError
 from app.core.json_utils import extract_json_object
 from app.core.locks import KeyedLocks
-from app.core.process import CommandRunner
+from app.core.process import CommandRunner, OutputCallback
 from app.core.resources import ResourceLease
 from app.core.utils import atomic_replace, clamp_number, format_timestamp, utc_now_iso
 from app.pipeline import person_presets
+from app.pipeline.ffmpeg_progress import progress_output_handler
 from app.pipeline import region_focus
 from app.pipeline.progress_tracker import ProgressTracker
 from app.pipeline.whisperx_options import WhisperxRunOptions
@@ -34,12 +37,24 @@ ProgressCallback = Callable[[float], Awaitable[None]]
 # artifact belongs to a different engine.
 ENGINE_MARKER_WHISPERX = "whisperx"
 
+# Called as the browser-copy transcode starts an attempt (``fraction`` 0.0, or
+# None when the source's duration is unknown) and again as ffmpeg advances
+# within it. ``attempt`` is 1-based: 2 means the conservative profile.
+TranscodeProgressCallback = Callable[[int, float | None], Awaitable[None]]
+
 
 logger = logging.getLogger(__name__)
 
 # Where the poster frame is taken from: far enough in to miss the black or
 # fading first frame many cameras record, never past a tenth of the video.
 POSTER_OFFSET_SECONDS = 1.0
+
+
+class _BrowserCopyProfile(Enum):
+    """The two ffmpeg setting sets the browser copy is attempted with."""
+
+    STANDARD = "standard"
+    CONSERVATIVE = "conservative"
 
 
 class MediaPipeline:
@@ -266,6 +281,8 @@ class MediaPipeline:
         final_path: Path,
         build_args: Callable[[Path], list[str]],
         label: str,
+        *,
+        on_output: OutputCallback | None = None,
     ) -> None:
         """Run ffmpeg into a sibling temp file and publish it with one rename.
 
@@ -286,7 +303,7 @@ class MediaPipeline:
         staging_path = final_path.with_name(f".{final_path.name}.{uuid4().hex[:8]}.partial{final_path.suffix}")
         published = False
         try:
-            await self.runner.run(self.settings.ffmpeg_bin, build_args(staging_path), label)
+            await self.runner.run(self.settings.ffmpeg_bin, build_args(staging_path), label, on_output=on_output)
             if not staging_path.is_file() or staging_path.stat().st_size <= 0:
                 raise RuntimeError(f"{label} wrote no output.")
             await asyncio.to_thread(atomic_replace, staging_path, final_path)
@@ -436,7 +453,13 @@ class MediaPipeline:
             return None
         return (str(video_path), stat.st_size, stat.st_mtime_ns)
 
-    async def ensure_playback_copy(self, session: dict[str, Any]) -> dict[str, Any] | None:
+    async def ensure_playback_copy(
+        self,
+        session: dict[str, Any],
+        *,
+        duration_seconds: float = 0.0,
+        on_progress: TranscodeProgressCallback | None = None,
+    ) -> dict[str, Any] | None:
         """Make sure a browser can play this session's source video.
 
         Returns the metadata of an H.264 copy (written once, under
@@ -445,6 +468,10 @@ class MediaPipeline:
         A copy already on disk is reused, so a retried job does not transcode
         twice. Callers record the result on ``files.video.playback``; the
         workspace plays that in place of the original.
+
+        ``duration_seconds`` (the source's, from the probe) and ``on_progress``
+        let the caller watch the transcode; both are optional, and without a
+        duration the callback only hears each attempt begin.
         """
         if not self.settings.playback_copy_enabled:
             return None
@@ -464,7 +491,9 @@ class MediaPipeline:
             if not output_path.is_file() or output_path.stat().st_size <= 0:
                 if await self.video_is_browser_playable(source_path):
                     return None
-                await self._transcode_for_browser(source_path, output_path)
+                await self._transcode_for_browser(
+                        source_path, output_path, duration_seconds=duration_seconds, on_progress=on_progress
+                    )
         return artifact_metadata(output_path, f"/media/playback/{session_id}")
 
     def poster_path(self, session_id: str) -> Path:
@@ -515,46 +544,92 @@ class MediaPipeline:
 
         await self._run_ffmpeg_atomic(output_path, build_args, "Poster frame (ffmpeg)")
 
-    async def _transcode_for_browser(self, input_path: Path, output_path: Path) -> None:
+    async def _transcode_for_browser(
+        self,
+        input_path: Path,
+        output_path: Path,
+        *,
+        duration_seconds: float = 0.0,
+        on_progress: TranscodeProgressCallback | None = None,
+    ) -> None:
+        """Write the H.264/AAC copy, retrying once with the conservative profile.
+
+        Cameras write the odd file the standard settings choke on (broken
+        timestamps, extra data streams, a muxing queue that overflows), and a
+        failed copy used to stay failed until someone pressed "Try again". The
+        second attempt trades fidelity to the source's oddities for a result:
+        regenerated timestamps, one stereo audio track, a deeper muxing queue.
+        Both keep the 2 s keyframes and ``faststart`` the clip export relies on.
+        Cancellation is not a failure and is never retried.
+        """
+        profiles = (_BrowserCopyProfile.STANDARD, _BrowserCopyProfile.CONSERVATIVE)
+        for attempt, profile in enumerate(profiles, start=1):
+            handler: OutputCallback | None = None
+            if on_progress is not None:
+                await on_progress(attempt, 0.0 if duration_seconds > 0 else None)
+                handler = progress_output_handler(duration_seconds, functools.partial(on_progress, attempt))
+            label = "Browser playback copy (ffmpeg)" if attempt == 1 else "Browser playback copy, conservative (ffmpeg)"
+            try:
+                await self._run_ffmpeg_atomic(
+                    output_path,
+                    lambda output, profile=profile: self._browser_copy_args(input_path, output, profile),
+                    label,
+                    on_output=handler,
+                )
+                return
+            except Exception:
+                if attempt == len(profiles):
+                    raise
+                logger.warning(
+                    "Browser playback copy of %s failed; retrying with the conservative profile.",
+                    input_path,
+                    exc_info=True,
+                )
+
+    def _browser_copy_args(self, input_path: Path, output: Path, profile: _BrowserCopyProfile) -> list[str]:
+        conservative = profile is _BrowserCopyProfile.CONSERVATIVE
         max_height = max(0, int(self.settings.playback_copy_max_height or 0))
         # Never upscale; keep the width even, which libx264 requires.
-        scale = [] if max_height <= 0 else ["-vf", f"scale=-2:'min({max_height},ih)'"]
-
-        def build_args(output: Path) -> list[str]:
-            return [
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                str(input_path),
-                "-map",
-                "0:v:0",
-                "-map",
-                "0:a?",
-                *scale,
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "26",
-                "-pix_fmt",
-                "yuv420p",
-                # A keyframe every 2 s, so a clip cut from this copy by stream copy
-                # starts close to where it was asked to. Copies written before this
-                # flag existed have the encoder's default GOP; cuts on them are just
-                # less precise, which is acceptable.
-                "-force_key_frames",
-                "expr:gte(t,n_forced*2)",
-                "-c:a",
-                "aac",
-                "-movflags",
-                "+faststart",
-                str(output),
-            ]
-
-        await self._run_ffmpeg_atomic(output_path, build_args, "Browser playback copy (ffmpeg)")
+        filters = [] if max_height <= 0 else [f"scale=-2:'min({max_height},ih)'"]
+        if conservative:
+            filters.append("format=yuv420p")
+        return [
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            # Machine-readable progress on stdout (see app.pipeline.ffmpeg_progress).
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            *(["-fflags", "+genpts"] if conservative else []),
+            "-i",
+            str(input_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?" if conservative else "0:a?",
+            *(["-max_muxing_queue_size", "1024", "-ac", "2"] if conservative else []),
+            *(["-vf", ",".join(filters)] if filters else []),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "26",
+            *([] if conservative else ["-pix_fmt", "yuv420p"]),
+            # A keyframe every 2 s, so a clip cut from this copy by stream copy
+            # starts close to where it was asked to. Copies written before this
+            # flag existed have the encoder's default GOP; cuts on them are just
+            # less precise, which is acceptable.
+            "-force_key_frames",
+            "expr:gte(t,n_forced*2)",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            str(output),
+        ]
 
     async def crop_video_segment(
         self,

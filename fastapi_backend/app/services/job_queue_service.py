@@ -16,6 +16,7 @@ from app.core.logging_utils import log_context
 from app.core.pagination_cursor import decode_cursor as decode_page_cursor
 from app.core.pagination_cursor import encode_cursor as encode_page_cursor
 from app.core.utils import exception_message, parse_iso, utc_now_iso
+from app.domain.enums import JobLane
 from app.domain.jobs import (
     ACTIVE_JOB_STATUSES,
     FINISHED_JOB_STATUSES,
@@ -27,7 +28,7 @@ from app.domain.session_lifecycle import fail_session
 from app.domain.sessions import JOB_DRIVEN_STATUSES, SessionStatus
 from app.repositories.job_repository import DISPATCH_PAYLOAD_KEY, LEGACY_DISPATCH_RUN_ID_KEY, JobRepository
 from app.services.event_service import EventService
-from app.services.job_tasks import get_task_spec, queue_mirrors_session_job, queue_owns_session_status
+from app.services.job_tasks import get_task_spec, queue_mirrors_session_job, queue_owns_session_status, task_lane
 from app.services.session_service import SessionService
 from app.storage import ObjectStorage
 
@@ -101,7 +102,7 @@ class JobQueueService:
         self.clips: Any = None
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._worker_id = f"{socket.gethostname()}:{uuid4()}"
-        self._semaphore: asyncio.Semaphore | None = None
+        self._lane_semaphores: dict[JobLane, asyncio.Semaphore] = {}
         # Serialises the find_active -> insert critical section so two concurrent
         # enqueue/create calls for the same session cannot both create a job.
         self._enqueue_lock = asyncio.Lock()
@@ -399,10 +400,18 @@ class JobQueueService:
             return max(1, self.settings.hatchet_job_retries + 1)
         return 3
 
-    async def run_job(self, job_id: str, *, raise_on_error: bool = False) -> JobRunResult:
-        if self._semaphore is None:
-            self._semaphore = asyncio.Semaphore(max(1, self.settings.job_worker_concurrency))
-        async with self._semaphore:
+    def _lane_semaphore(self, lane: JobLane) -> asyncio.Semaphore:
+        """The slots of one lane, created on first use inside the running loop."""
+        semaphore = self._lane_semaphores.get(lane)
+        if semaphore is None:
+            size = self.settings.media_job_concurrency if lane == JobLane.MEDIA else self.settings.job_worker_concurrency
+            semaphore = self._lane_semaphores[lane] = asyncio.Semaphore(max(1, size))
+        return semaphore
+
+    async def run_job(
+        self, job_id: str, *, raise_on_error: bool = False, lane: JobLane = JobLane.MAIN
+    ) -> JobRunResult:
+        async with self._lane_semaphore(lane):
             return await self._execute_job(job_id, raise_on_error=raise_on_error)
 
     async def prepare_hatchet_retry_attempt(self, job_id: str, retry_count: int) -> bool:
@@ -563,7 +572,9 @@ class JobQueueService:
             return
         upcoming_attempt = int(job.get("attempts") or 0) + 1
         try:
-            self._tasks[job_id] = asyncio.create_task(self._run_local(job_id, upcoming_attempt))
+            self._tasks[job_id] = asyncio.create_task(
+                self._run_local(job_id, upcoming_attempt, task_lane(str(job.get("taskType"))))
+            )
         except RuntimeError:
             return
 
@@ -636,7 +647,7 @@ class JobQueueService:
                 return str(value)
         return None
 
-    async def _run_local(self, job_id: str, attempt: int = 1) -> None:
+    async def _run_local(self, job_id: str, attempt: int = 1, lane: JobLane = JobLane.MAIN) -> None:
         """Execute a job in-process, retrying transient failures.
 
         The retry loop lives in the runner rather than in ``_execute_job``
@@ -658,7 +669,7 @@ class JobQueueService:
                     )
                     await asyncio.sleep(backoff_seconds)
                 try:
-                    result = await self.run_job(job_id)
+                    result = await self.run_job(job_id, lane=lane)
                 except Exception:
                     # _execute_job already turns every failure it recognises
                     # into a JobRunResult; reaching here means something raised

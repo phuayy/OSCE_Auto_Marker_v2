@@ -510,6 +510,9 @@ PUBLIC_MEDIA_FACT_KEYS = (
     "videoCodec",
     "audioCodec",
     "browserPlayable",
+    "stage",
+    "progress",
+    "attempts",
     "updatedAt",
 )
 

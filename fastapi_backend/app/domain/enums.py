@@ -78,6 +78,15 @@ class MediaPreparationStatus(StrEnum):
     FAILED = "failed"
 
 
+class MediaPreparationStage(StrEnum):
+    """What a running ``prepare_media`` job is doing, as ``media.stage`` says it
+    (null when the job is not running)."""
+
+    PROBING = "probing"
+    POSTER = "poster"
+    CONVERTING = "converting"
+
+
 class AssessmentResultStatus(StrEnum):
     """Status of one scorer's row in ``assessment_results`` — a vocabulary of
     its own, not ``SessionStatus``/``StepStatus``: by the time a scorer's
@@ -92,6 +101,19 @@ class TaskType(StrEnum):
     AUTO_CROP = "auto_crop"
     EXPORT_CLIPS = "export_clips"
     PREPARE_MEDIA = "prepare_media"
+
+
+class JobLane(StrEnum):
+    """Which pool of local worker slots a task type runs in.
+
+    ``main`` is the pipeline work (``JOB_WORKER_CONCURRENCY`` slots); ``media``
+    is the side task that prepares a video for the browser, which must never
+    wait behind — or take a slot from — a scoring run. A local-backend concept:
+    Hatchet bounds its workers through their own slots.
+    """
+
+    MAIN = "main"
+    MEDIA = "media"
 
 
 class Workflow(StrEnum):

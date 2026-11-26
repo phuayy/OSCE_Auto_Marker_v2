@@ -458,6 +458,13 @@ class Settings:
     job_queue_backend: str = os.getenv("JOB_QUEUE_BACKEND", "local").strip().lower() or "local"
     local_job_auto_start: bool = read_bool_env("LOCAL_JOB_AUTO_START", True)
     job_worker_concurrency: int = read_int_env("JOB_WORKER_CONCURRENCY", 2)
+    # Local backend only: slots of the separate lane the prepare_media job runs
+    # in, so preparing a video for the browser never waits behind a scoring run
+    # (and never takes one of its slots). Below 1 is read as 1.
+    media_job_concurrency: int = read_int_env("MEDIA_JOB_CONCURRENCY", 1)
+    # A transcode's progress is a session write each time, and every session
+    # write wakes the change feed: at most one per this many seconds.
+    media_progress_write_interval_seconds: float = read_float_env("MEDIA_PROGRESS_WRITE_INTERVAL_SECONDS", 5.0)
     # Token revocation, the login/token rate limiters and the per-upload part
     # lock are all in-process state (see app/core/single_instance.py) — a
     # second API instance sharing this storage root would silently not share

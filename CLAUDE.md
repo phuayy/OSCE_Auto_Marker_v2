@@ -1002,6 +1002,23 @@ before this, or one whose copy failed, is (re)queued by
 operation budget), offered as "Make a playable copy" under the player. Failures
 never fail the job: they land on `media.status = failed` / `media.error`.
 
+**`prepare_media` has its own lane, progress and a retry.** Task types belong to
+a `JobLane` (`JobTaskSpec.lane`): `main` (`JOB_WORKER_CONCURRENCY` slots) or
+`media` (`MEDIA_JOB_CONCURRENCY`), one semaphore each in the local backend, so a
+transcode starts at once beside a full set of scoring jobs. Lanes are a
+local-backend concept; Hatchet bounds the machine through worker slots. The
+transcode runs ffmpeg with `-progress pipe:1` (`pipeline/ffmpeg_progress.py`
+reads `out_time_us` through `CommandRunner`'s observer callback) and writes
+`files.video.media.progress` (fraction 0..1, capped at 0.99 until published),
+`.stage` (`MediaPreparationStage`) and `.attempts` through
+`TranscodeProgressReporter`, throttled by `MEDIA_PROGRESS_WRITE_INTERVAL_SECONDS`;
+progress and stage are cleared on `ready`/`failed`. A failed first attempt is
+retried once with a conservative ffmpeg profile (regenerated timestamps, first
+audio stream, stereo, a deeper muxing queue; the 2 s keyframes and `faststart`
+stay); cancellation is never retried. The session-list projection carries
+`media {status, stage, progress, durationSeconds, browserPlayable}`,
+`posterUrl` and `hasPlayback`, all null/false for a purged video.
+
 `export_clips` carries a **scope**: a whole split (`plan`, queued by "Export
 clips") or a re-cut of named clips (`clip`, queued by a recrop). The payload's
 `clipIds` decide what one run cuts, so a retry cuts exactly what the request
@@ -1884,6 +1901,8 @@ recording; its Student column the scored subject.
 | `PARALLEL_SCORING` | `true` | Run content branch parallel to communication branch |
 | `GPU_SLOTS` | `1` | Jobs that may hold the accelerator at once (transcription, person detection). 0 = unbounded. Per process |
 | `JOB_QUEUE_BACKEND` | `local` | `local` or `hatchet` |
+| `MEDIA_JOB_CONCURRENCY` | `1` | Local backend: slots of the separate lane `prepare_media` runs in, so a transcode never waits behind scoring runs or takes their `JOB_WORKER_CONCURRENCY` slots. Below 1 reads as 1 |
+| `MEDIA_PROGRESS_WRITE_INTERVAL_SECONDS` | `5` | At most one `media.progress` session write per this many seconds during a transcode (and only when it moved by 0.01), since each write wakes the change feed |
 | `JOB_HEARTBEAT_INTERVAL_SECONDS` | `60` | How often a genuinely-running job refreshes `jobs.locked_at`, proving the worker executing it is still alive |
 | `JOB_STALE_RUNNING_TIMEOUT_SECONDS` | `900` | How long `running` with no heartbeat before the periodic reaper treats a job as orphaned and requeues it |
 | `JOB_REAPER_INTERVAL_SECONDS` | `300` | How often the reaper scans for stale-running jobs; `0` disables it (startup-only recovery, as before) |
