@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,7 @@ from app.repositories.corpus_repository import CorpusRepository
 from app.repositories.upload_repository import UploadRepository
 from app.repositories.video_repository import VideoRepository
 from app.schemas.uploads import CompleteUploadRequest, InitiateUploadRequest
+from app.services.artifact_service import ensure_pdf_file
 from app.services.event_service import EventService
 from app.services.job_queue_service import JobQueueService
 from app.services.rubric_asset_service import RubricAssetService
@@ -948,6 +950,10 @@ class AsyncUploadService:
         storage_ref["localPath"] = str(path)
         if path.suffix.lower() != ".pdf":
             raise AppError("Committed caseStudy is not a PDF file.", status_code=400)
+        # The declaration only vouches for a name and a MIME type; this is the
+        # first point the stored bytes can be judged, and it runs before any
+        # job is queued, so a non-PDF never reaches GPU transcription.
+        await asyncio.to_thread(ensure_pdf_file, path)
 
     def _committed_file_meta(
         self,
