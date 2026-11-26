@@ -120,13 +120,15 @@ class BulkSessionsRequest(BaseModel):
 
 class BulkSessionResult(BaseModel):
     """One session's outcome. ``status`` is the HTTP status the single-session
-    route would have answered; ``error`` / ``code`` are present only on failure."""
+    route would have answered; ``error`` / ``code`` are present only on failure,
+    ``note`` only where success needs explaining."""
 
     session_id: str = Field(serialization_alias="sessionId")
     ok: bool
     status: int
     error: str | None = None
     code: str | None = None
+    note: str | None = None
 
 
 class BulkSessionsSummary(BaseModel):

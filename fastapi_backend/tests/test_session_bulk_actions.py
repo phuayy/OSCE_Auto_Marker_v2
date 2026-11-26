@@ -167,6 +167,44 @@ def test_deleting_a_recording_removes_its_clip_children_like_the_single_delete(w
     assert [world.exists(name) for name in ("parent", "child-1", "child-2", "other")] == [False, False, False, True]
 
 
+def _recording_with_clips(world: _World) -> None:
+    owner = _owner(world.marker_id)
+    world.seed(
+        _session("parent", workflow="long", createdBy=owner),
+        _session("child-1", parentSessionId="parent", createdBy=owner),
+        _session("child-2", parentSessionId="parent", createdBy=owner),
+    )
+
+
+def test_a_clip_ticked_after_its_recording_is_covered_not_failed(world: _World) -> None:
+    _recording_with_clips(world)
+    response = world.post("delete", ["parent", "child-1", "ghost", "child-2"])
+    results = _by_id(response)
+    note = "Deleted with its recording."
+    assert results["child-1"] == {"sessionId": "child-1", "ok": True, "status": 200, "note": note}
+    assert results["child-2"]["note"] == note and results["parent"].get("note") is None
+    assert results["ghost"]["code"] == "not_found"  # a genuinely unknown id still fails
+    assert response.json()["summary"] == {"ok": 3, "failed": 1}
+
+
+def test_a_clip_ticked_before_its_recording_is_a_plain_success(world: _World) -> None:
+    _recording_with_clips(world)
+    response = world.post("delete", ["child-1", "parent", "child-2", "ghost"])
+    results = _by_id(response)
+    assert results["child-1"] == {"sessionId": "child-1", "ok": True, "status": 200}
+    assert results["child-2"]["note"] == "Deleted with its recording."
+    assert results["ghost"]["ok"] is False
+    assert response.json()["summary"] == {"ok": 3, "failed": 1}
+    assert not any(world.exists(name) for name in ("parent", "child-1", "child-2"))
+
+
+def test_a_missing_clip_is_not_covered_unless_its_recording_was_deleted_here(world: _World) -> None:
+    world.seed(_session("parent", workflow="long", createdBy=_owner("someone-else")))
+    # Refused parent (403): nothing was deleted, so an unknown id stays a 404.
+    results = _by_id(world.post("delete", ["parent", "ghost"]))
+    assert results["parent"]["code"] == "forbidden" and results["ghost"]["code"] == "not_found"
+
+
 # --- the budget ----------------------------------------------------------------------
 
 

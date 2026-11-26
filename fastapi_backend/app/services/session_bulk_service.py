@@ -22,8 +22,8 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from app.api.errors import http_error
 from app.domain.access import ensure_may_mutate
+from app.core.error_mapping import classify_error
 from app.domain.actors import Actor
 from app.schemas.sessions import BulkSessionResult, BulkSessionsSummary, BulkSessionsResponse
 from app.services.session_maintenance_service import SessionMaintenanceService
@@ -45,6 +45,9 @@ class BulkAction:
     # request, so a batch of 11 is not refused by a budget of 10.
     charges_budget: bool
     options_model: type[BaseModel] | None = None
+    # Whether the action on a recording also removes its clip children, so a
+    # child ticked beside its recording is covered rather than a failure.
+    cascades_to_children: bool = False
 
 
 async def _rerun(service: SessionBulkService, session_id: str, _options: BaseModel | None) -> object:
@@ -59,8 +62,10 @@ async def _delete(service: SessionBulkService, session_id: str, _options: BaseMo
 BULK_SESSION_ACTIONS: dict[str, BulkAction] = {
     "rerun": BulkAction(_rerun, charges_budget=True),
     # The single delete charges nothing, so neither does a batch of them.
-    "delete": BulkAction(_delete, charges_budget=False),
+    "delete": BulkAction(_delete, charges_budget=False, cascades_to_children=True),
 }
+
+COVERED_BY_PARENT_NOTE = "Deleted with its recording."
 
 _CODES = {403: "forbidden", 404: "not_found", 409: "conflict", 429: "rate_limited"}
 
@@ -122,11 +127,36 @@ class SessionBulkService:
         Sequential on purpose: each item is a short transaction and a delete
         touches files, so running them together would only contend.
         """
-        results = [await self._run_one(plan, session_id, actor) for session_id in plan.session_ids]
+        parents = await self._recorded_parents(plan)
+        done: set[str] = set()
+        results: list[BulkSessionResult] = []
+        for session_id in plan.session_ids:
+            result = await self._run_one(plan, session_id, actor)
+            if not result.ok and result.status == 404 and parents.get(session_id) in done:
+                # Its recording went earlier in this request and took it along.
+                result = BulkSessionResult(session_id=session_id, ok=True, status=200, note=COVERED_BY_PARENT_NOTE)
+            elif result.ok:
+                done.add(session_id)
+            results.append(result)
         succeeded = sum(1 for result in results if result.ok)
         return BulkSessionsResponse(
             results=results, summary=BulkSessionsSummary(ok=succeeded, failed=len(results) - succeeded),
         )
+
+    async def _recorded_parents(self, plan: BulkPlan) -> dict[str, str]:
+        """For an action that cascades, each requested session's parent, read
+        before anything is removed (a deleted child can no longer be asked)."""
+        if not plan.action.cascades_to_children:
+            return {}
+        parents: dict[str, str] = {}
+        for session_id in plan.session_ids:
+            try:
+                parent = (await self.sessions.read(session_id)).get("parentSessionId")
+            except FileNotFoundError:
+                continue
+            if parent:
+                parents[session_id] = str(parent)
+        return parents
 
     async def _run_one(self, plan: BulkPlan, session_id: str, actor: Actor | None) -> BulkSessionResult:
         try:
@@ -136,11 +166,11 @@ class SessionBulkService:
             ensure_may_mutate(session, actor, subject="session")
             await plan.action.handler(self, session_id, plan.options)
         except Exception as error:  # noqa: BLE001 - one item's failure is that item's result
-            refusal = http_error(
+            outcome = classify_error(
                 error, fallback_message="Failed to complete this action.", not_found_message="Session not found.",
             )
             return BulkSessionResult(
-                session_id=session_id, ok=False, status=refusal.status_code,
-                error=str(refusal.detail), code=_code_for(refusal.status_code),
+                session_id=session_id, ok=False, status=outcome.status_code,
+                error=outcome.message, code=_code_for(outcome.status_code),
             )
         return BulkSessionResult(session_id=session_id, ok=True, status=200)
