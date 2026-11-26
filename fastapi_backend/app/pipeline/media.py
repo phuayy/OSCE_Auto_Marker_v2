@@ -13,6 +13,7 @@ from app.core.artifacts import artifact_metadata
 from app.core.config import Settings
 from app.core.exceptions import EmptyTranscriptError
 from app.core.json_utils import extract_json_object
+from app.core.locks import KeyedLocks
 from app.core.process import CommandRunner
 from app.core.resources import ResourceLease
 from app.core.utils import atomic_replace, clamp_number, format_timestamp, utc_now_iso
@@ -413,10 +414,16 @@ class MediaPipeline:
         source_path = Path(str(source))
         session_id = str(session["id"])
         output_path = self.settings.paths.output_playback_dir / session_id / f"{session_id}-playback.mp4"
-        if not output_path.is_file() or output_path.stat().st_size <= 0:
-            if await self.video_is_browser_playable(source_path):
-                return None
-            await self._transcode_for_browser(source_path, output_path)
+        # One transcode per recording: the prepare_media job and a clip export
+        # both ask for this copy, and whichever arrives second must wait and
+        # adopt the file the first wrote, so the existence check is made
+        # inside the lock.
+        locks = self.__dict__.setdefault("_playback_copy_locks", KeyedLocks())
+        async with locks.hold(session_id):
+            if not output_path.is_file() or output_path.stat().st_size <= 0:
+                if await self.video_is_browser_playable(source_path):
+                    return None
+                await self._transcode_for_browser(source_path, output_path)
         return artifact_metadata(output_path, f"/media/playback/{session_id}")
 
     def poster_path(self, session_id: str) -> Path:
@@ -500,6 +507,12 @@ class MediaPipeline:
             "26",
             "-pix_fmt",
             "yuv420p",
+            # A keyframe every 2 s, so a clip cut from this copy by stream copy
+            # starts close to where it was asked to. Copies written before this
+            # flag existed have the encoder's default GOP; cuts on them are just
+            # less precise, which is acceptable.
+            "-force_key_frames",
+            "expr:gte(t,n_forced*2)",
             "-c:a",
             "aac",
             "-movflags",
@@ -559,6 +572,9 @@ class MediaPipeline:
             except RuntimeError:
                 await asyncio.to_thread(staging_path.unlink, True)
 
+        max_height = max(0, int(self.settings.playback_copy_max_height or 0))
+        # Same rule as the playback copy: never upscale, keep the width even.
+        scale = [] if max_height <= 0 else ["-vf", f"scale=-2:'min({max_height},ih)'"]
         args_reencode = [
             "-y",
             "-hide_banner",
@@ -574,6 +590,7 @@ class MediaPipeline:
             "0:v:0",
             "-map",
             "0:a?",
+            *scale,
             "-c:v",
             "libx264",
             "-preset",

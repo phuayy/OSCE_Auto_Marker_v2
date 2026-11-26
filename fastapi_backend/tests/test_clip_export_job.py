@@ -160,6 +160,7 @@ def test_export_job_cuts_every_clip_and_checkpoints_after_each(tmp_path) -> None
         write["clipExport"]["completed"]
         for write in sessions.writes
         if write.get("clipExport", {}).get("status") == "running"
+        and write["clipExport"].get("phase") == "cutting"
     ]
     assert counters == [0, 1, 2, 3]
 

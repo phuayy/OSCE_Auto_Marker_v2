@@ -465,7 +465,10 @@ correct underneath even while the panel is unmounted.
 
 1. Segmentation (`auto_crop` job): bell detector (`scripts/detect_bell_segments.py`) or
    person detector (RT-DETR) proposes ranges. `build_clip_drafts_from_ranges`
-   records them; no ffmpeg runs. Session status -> `cropped`.
+   records them; no ffmpeg runs. Session status -> `cropped`. The notification
+   is `split.ready` ("Split ready for review") — the boundaries are a proposal
+   to check, not clips; `clips.ready` is reserved for the end of an export,
+   when MP4s exist.
 2. The user adjusts boundaries in the timeline editor and hits **Export clips**:
    `POST /sessions/{id}/clips/manual` -> `ClipService.request_clip_export`.
    Persists the plan — a fresh `clipExport.planId`, and on each clip a stable
@@ -525,9 +528,29 @@ The export job deliberately does **not** own `session.status` (see
 `app/services/job_tasks.py`). The user sits inside the timeline editor while
 clips are cut, and flipping the session to `processing` would eject them — the
 frontend refuses to open in-flight sessions. Progress lives on
-`session.clipExport` (`planId`, `status`, `scope`, `clipIds`, `completed`,
+`session.clipExport` (`planId`, `status`, `phase`, `scope`, `clipIds`, `completed`,
 `total`, `error`, `jobId`), which the session-list projection exposes as
 `clipExportStatus` / `clipExportCompleted` / `clipExportTotal`.
+
+**One transcode per recording; clips are cut from it.** A source no browser
+can decode (HEVC, 10-bit H.264, G.711 audio ...) used to be transcoded twice:
+once whole to 720p by `prepare_media`, and again clip by clip from the
+full-size original by the export. Now `export_clips_by_id` resolves the crop
+source once per run (`ClipService._resolve_export_source`): the original when
+it plays as it is (or `PLAYBACK_COPY_ENABLED=false`), else the playback copy
+via `MediaPipeline.ensure_playback_copy` — serialised per session by a
+`KeyedLocks`, so an export racing `prepare_media` waits and adopts the file the
+other wrote — recorded on `files.video.playback` if not yet there. The copy
+carries a keyframe every 2 s (`-force_key_frames`), so the clips are
+**stream-copied** from it, accurately enough; a copy written before that flag
+has the default GOP and just cuts less precisely. If the copy cannot be made
+the export cuts from the original (re-encode, now capped at
+`PLAYBACK_COPY_MAX_HEIGHT` too) rather than failing. Person detection and
+auto-crop keep reading the original. While that resolves, `clipExport.phase`
+(`ClipExportPhase`) is `preparing_source` and then `cutting` (null once
+finished or failed); the timeline editor shows "Preparing video…" with an
+explanation instead of `Exporting 0/13…`
+([lib/clipExportLabel.js](src/lib/clipExportLabel.js)).
 
 For the same reason every write the job makes is a **patch, not a document**:
 the checkpoint after each clip copies that clip's file fields and bumps
@@ -990,7 +1013,7 @@ a departmental system, a script — cannot poll `/api/sessions` forever or hold
 a stream open, so `POST /api/admin/webhooks` registers an outbound HTTP
 endpoint instead: [webhook_dispatcher.py](fastapi_backend/app/services/webhook_dispatcher.py)
 POSTs a signed JSON body to it whenever `NotificationService` records one of
-`SUBSCRIBABLE_EVENT_TYPES` (`scoring.completed`, `clips.ready`,
+`SUBSCRIBABLE_EVENT_TYPES` (`scoring.completed`, `split.ready`, `clips.ready`,
 `session.failed` — [domain/notifications.py](fastapi_backend/app/domain/notifications.py)).
 The whole `/api/admin/webhooks` router is admin-only, reads included — unlike
 corpora or the rubric, nothing here is a marker's input to a run, and a
@@ -1709,7 +1732,7 @@ recording; its Student column the scored subject.
 | `HUMAN_SEGMENTS_CONFIDENCE` | `0.7` | RT-DETR score threshold. Not the knob for edge limbs — use the height ratio |
 | `HUMAN_SEGMENTS_REGION_LEFT_ENABLED` / `HUMAN_SEGMENTS_REGION_RIGHT_ENABLED` | `true` / `true` | Which horizontal zone(s) of the frame count at all — independent of the occupancy preset above. Standalone-CLI default only; the pipeline always passes an explicit resolved value (see `app/pipeline/region_focus.py`) |
 | `HUMAN_SEGMENTS_REGION_LEFT_RATIO` / `HUMAN_SEGMENTS_REGION_RIGHT_RATIO` | `1.0` / `1.0` | Fraction of frame width, measured from that edge inward, that counts as the enabled zone |
-| `PLAYBACK_COPY_ENABLED` / `PLAYBACK_COPY_MAX_HEIGHT` | `true` / `720` | A source the browser cannot decode (HEVC, 10-bit H.264, ProRes, G.711 audio) gets an H.264/AAC copy at `output/playback/<session>/`, written by the `prepare_media` job, recorded on `files.video.playback` and played by the workspace in place of the original (`app/services/media_preparation.py`); clips cut from such a source are re-encoded rather than stream-copied. The max height also bounds the poster frame. Processing always reads the original |
+| `PLAYBACK_COPY_ENABLED` / `PLAYBACK_COPY_MAX_HEIGHT` | `true` / `720` | A source the browser cannot decode (HEVC, 10-bit H.264, ProRes, G.711 audio) gets an H.264/AAC copy at `output/playback/<session>/`, written by the `prepare_media` job, recorded on `files.video.playback` and played by the workspace in place of the original (`app/services/media_preparation.py`); clips of such a source are stream-copied from that copy (one transcode per recording; the copy has a keyframe every 2 s), and the re-encode fallback is capped at the same height. The max height also bounds the poster frame. Processing always reads the original |
 | `PARALLEL_SCORING` | `true` | Run content branch parallel to communication branch |
 | `GPU_SLOTS` | `1` | Jobs that may hold the accelerator at once (transcription, person detection). 0 = unbounded. Per process |
 | `JOB_QUEUE_BACKEND` | `local` | `local` or `hatchet` |

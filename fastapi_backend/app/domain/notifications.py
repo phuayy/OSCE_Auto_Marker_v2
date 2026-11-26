@@ -16,6 +16,10 @@ class NotificationType(str, Enum):
     """
 
     SCORING_COMPLETED = "scoring.completed"
+    # A long recording's boundaries are proposed (draft clips, no MP4s yet):
+    # the examiner should review them. CLIPS_READY is reserved for the moment
+    # the clips actually exist, i.e. the end of an export.
+    SPLIT_READY = "split.ready"
     CLIPS_READY = "clips.ready"
     SESSION_FAILED = "session.failed"
     # Emitted only by the "send test event" action on a webhook subscription.
@@ -27,6 +31,7 @@ class NotificationType(str, Enum):
 # delivered directly to the subscription under test, never fanned out.
 SUBSCRIBABLE_EVENT_TYPES: tuple[str, ...] = (
     NotificationType.SCORING_COMPLETED.value,
+    NotificationType.SPLIT_READY.value,
     NotificationType.CLIPS_READY.value,
     NotificationType.SESSION_FAILED.value,
 )

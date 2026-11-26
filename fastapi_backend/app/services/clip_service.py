@@ -14,6 +14,7 @@ from app.core.logging_utils import log_context
 from app.domain.actors import PROVENANCE_KEY, Actor, provenance_of
 from app.domain.clip_summaries import aggregate_clip_summaries, build_clip_summary_row
 from app.domain.enums import (
+    ClipExportPhase,
     ClipExportScope,
     ClipExportStatus,
     ClipKind,
@@ -37,6 +38,7 @@ from app.pipeline import person_presets
 from app.pipeline import region_focus
 from app.pipeline.media import MediaPipeline
 from app.services.event_service import EventService
+from app.services.media_preparation import set_video_artifact
 from app.services.pipeline_service import PipelineService
 from app.services.session_service import SessionMutator, SessionService
 
@@ -255,10 +257,11 @@ class ClipService:
         intermission_count = len(clips) - session_count
         if self.notifications is not None:
             await self.notifications.emit(
-                NotificationType.CLIPS_READY,
-                "Clips ready",
-                f'"{session.get("name") or session_id}" has been split into '
-                f"{session_count} clip{'s' if session_count != 1 else ''} — ready for assessment.",
+                NotificationType.SPLIT_READY,
+                "Split ready for review",
+                f'"{session.get("name") or session_id}": '
+                f"{session_count} clip{'s' if session_count != 1 else ''} found — "
+                "check the boundaries, then export them.",
                 session_id=session_id,
             )
         await self.events.publish(
@@ -635,6 +638,7 @@ class ClipService:
                         and not clip.get("isDraft")
                         and clip.get("kind") != ClipKind.INTERMISSION
                     ),
+                    "phase": ClipExportPhase.PREPARING_SOURCE,
                     "startedAt": started_at,
                     "endedAt": None,
                     "error": None,
@@ -650,11 +654,21 @@ class ClipService:
         )
 
         try:
+            # Resolved once per run, not per clip: for a camera format no
+            # browser decodes this waits on (or performs) the one transcode of
+            # the recording, and every clip is then stream-copied from it.
+            crop_source = await self._resolve_export_source(session, video_path)
+
+            def cutting(current: dict[str, Any]) -> Any:
+                current.setdefault("clipExport", {})["phase"] = ClipExportPhase.CUTTING
+                return None
+
+            await self._commit(session, cutting)
             for position, clip in enumerate(pending, start=1):
                 result = await self.media.materialize_clip(
                     session_id=session_id,
                     clip=clip,
-                    video_path=video_path,
+                    video_path=crop_source,
                     plan_id=plan_id or None,
                 )
                 materialized = dict(result["clip"])
@@ -715,7 +729,7 @@ class ClipService:
 
             def fail(current: dict[str, Any]) -> Any:
                 current.setdefault("clipExport", {}).update(
-                    {"status": EXPORT_FAILED, "endedAt": ended_at, "error": message}
+                    {"status": EXPORT_FAILED, "phase": None, "endedAt": ended_at, "error": message}
                 )
                 return None
 
@@ -738,7 +752,13 @@ class ClipService:
 
         def finish(current: dict[str, Any]) -> Any:
             current.setdefault("clipExport", {}).update(
-                {"status": EXPORT_COMPLETED, "completed": total, "endedAt": ended_at, "error": None}
+                {
+                    "status": EXPORT_COMPLETED,
+                    "phase": None,
+                    "completed": total,
+                    "endedAt": ended_at,
+                    "error": None,
+                }
             )
             # A session mid-assessment keeps the status it earned; only a session
             # still sitting on its upload is promoted to "cropped".
@@ -779,6 +799,41 @@ class ClipService:
             "clipCount": total,
             "intermissionCount": len(clips) - total,
         }
+
+    async def _resolve_export_source(self, session: dict[str, Any], original: Path) -> Path:
+        """The file this export's clips are cut from.
+
+        A browser-playable original is cut as it is. One no browser can decode
+        (HEVC, 10-bit H.264, G.711 audio ...) is cut from the H.264 playback
+        copy instead, so the footage is transcoded once per recording rather
+        than once for the player and again, at full size, for every clip: the
+        copy is ensured here (waiting for ``prepare_media`` if it is mid-way
+        through writing it, reusing the file when it is done) and the clips are
+        then stream-copied from it. If the copy cannot be made the original is
+        used and the crop re-encodes, as it always did - an export must not
+        fail because the convenience copy did.
+        """
+        if not self.media.settings.playback_copy_enabled:
+            return original
+        try:
+            if await self.media.video_is_browser_playable(original):
+                return original
+            playback = await self.media.ensure_playback_copy(session)
+            path = Path(str((playback or {}).get("absolutePath") or ""))
+            if not playback or not path.is_file():
+                return original
+            recorded = ((session.get("files") or {}).get("video") or {}).get("playback")
+            if recorded != playback:
+                await self._commit(session, set_video_artifact("playback", playback))
+            return path
+        except Exception:
+            logger.warning(
+                "Could not prepare the playback copy to cut clips from for session %s; cutting from the original.",
+                session.get("id"),
+                exc_info=True,
+                extra=log_context(str(session.get("id") or ""), "clip_export_source"),
+            )
+            return original
 
     async def _prune_stale_plan_dirs(self, session_id: str, *, keep_plan_id: str) -> None:
         """Delete clip directories of superseded plans nothing refers to any more.

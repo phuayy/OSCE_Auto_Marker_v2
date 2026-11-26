@@ -10,6 +10,7 @@ import React from 'react';
 import { Button } from '@/components/ui/button';
 import { RotateCw, Scissors, Trash2 } from 'lucide-react';
 import { SessionStatus } from '@/lib/enums';
+import { exportBannerParts, exportButtonLabel } from '@/lib/clipExportLabel.js';
 import { formatRuntime } from '@/lib/format';
 import {
   INTERMISSION_KIND,
@@ -81,7 +82,7 @@ export default function ManualTimelineEditor({
             disabled={!session?.id || !videoDurationSeconds || isSavingManualSegments || isClipExportRunning}
           >
             {isSavingManualSegments || isClipExportRunning
-              ? `Exporting ${Number(clipExport?.completed || 0)}/${Number(clipExport?.total || 0)}…`
+              ? exportButtonLabel(clipExport)
               : 'Export clips'}
           </Button>
         </div>
@@ -89,12 +90,11 @@ export default function ManualTimelineEditor({
 
       {isClipExportRunning ? (
         <div className="mb-3 rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs text-cyan-900">
-          Cutting clips in the background:{' '}
-          <span className="font-semibold">
-            {Number(clipExport?.completed || 0)}/{Number(clipExport?.total || 0)}
-          </span>{' '}
-          exported. Clips become assessable as they land — this survives a page reload or a server
-          restart, and resumes where it stopped.
+          <span className="font-semibold">{exportBannerParts(clipExport).lead}.</span>{' '}
+          {exportBannerParts(clipExport).detail}
+          {exportBannerParts(clipExport).hint ? (
+            <p className="mt-1">{exportBannerParts(clipExport).hint}</p>
+          ) : null}
         </div>
       ) : null}
 

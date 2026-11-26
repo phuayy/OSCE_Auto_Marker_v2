@@ -15,6 +15,7 @@ import { apiJson } from '@/lib/apiFetch';
 
 const EVENT_LABELS = {
   'scoring.completed': 'Scoring complete',
+  'split.ready': 'Split ready for review',
   'clips.ready': 'Clips ready',
   'session.failed': 'Processing failed',
 };
