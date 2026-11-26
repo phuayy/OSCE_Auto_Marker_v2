@@ -91,6 +91,9 @@ async function sendFileWithResume({ uploadId, sessionId, tracker, ...transfer })
  * the first byte is sent. Resolves `{ sessionId, uploadId, session }` after
  * `complete` succeeds and the track has been handed back to the server's own
  * status; rejects with the first failure that survives the one resume.
+ *
+ * `initiateHeaders` are extra headers for the initiate call only; a batch
+ * upload sends `X-Upload-Batch` through it (see lib/batchUpload.js).
  */
 export async function submitUpload({
   request,
@@ -100,10 +103,12 @@ export async function submitUpload({
   transports,
   onSessionCreated,
   concurrency = DEFAULT_PART_CONCURRENCY,
+  initiateHeaders,
 }) {
   const { video, caseStudy } = files;
   const initiateBody = await api.apiJson('/api/uploads/initiate', {
     method: 'POST',
+    headers: initiateHeaders,
     fallbackMessage: 'Async upload initiation failed.',
     json: {
       ...request,

@@ -245,3 +245,16 @@ test('concurrent submissions keep their own sessions, bytes and results', async 
   assert.deepEqual(a.h.calls[1], ['begin', 'A', 210, { uploadId: 'u-A' }]);
   assert.deepEqual(b.h.calls[1], ['begin', 'B', 310, { uploadId: 'u-B' }]);
 });
+
+test('initiateHeaders reach the initiate call only', async () => {
+  const h = harness();
+  const seen = {};
+  const original = h.api.apiJson;
+  h.api.apiJson = async (url, options) => {
+    seen[url] = options.headers;
+    return original(url, options);
+  };
+  await run(h, { initiateHeaders: { 'X-Upload-Batch': 'b1' } });
+  assert.deepEqual(seen['/api/uploads/initiate'], { 'X-Upload-Batch': 'b1' });
+  assert.equal(seen['/api/uploads/u1/complete'], undefined);
+});

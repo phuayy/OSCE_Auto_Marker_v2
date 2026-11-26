@@ -49,6 +49,7 @@ OSCE-AI-FYP/
 │   │   ├── StudentClipSplitterCard.jsx # Auto-split clip list + per-clip trim
 │   │   └── primitives.jsx              # StatusRow / Metric / FeedbackBlock / ContentSheetEmptyState / IndicatorList
 │   ├── components/
+│   │   ├── upload/BatchUploadPanel.jsx # "Several recordings": multi-select/drop zone, per-row name/status/progress, Start / Cancel / Retry failed
 │   │   ├── AuthShell.jsx       # The dark pre-login frame + its fields/buttons; every pre-login screen composes it
 │   │   ├── AuthNewPasswordFields.jsx # "New password" + "Confirm" on that frame (invitation and reset screens)
 │   │   ├── TargetPicker.jsx    # One provider+model choice; shared by every settings card that asks for one
@@ -68,6 +69,8 @@ OSCE-AI-FYP/
 │   │   ├── download.js         # downloadBlob + the CSV encoder behind the score sheet (pure)
 │   │   ├── anchors.js          # DOM ids the dashboard scrolls to and the workspace renders
 │   │   ├── uploadSubmission.js # submitUpload: initiate -> per-file transfer (one resume) -> complete, all dependencies injected, no module state (pure)
+│   │   ├── batchUpload.js      # Batch upload queue: planBatch / runBatch / resetFailed / summarizeBatch (pure, DI; reserves one allowance, 2 recordings at a time, waits out the in-flight 429)
+│   │   ├── useBatchUpload.js   # React binding the dashboard calls, so a running batch outlives the upload form
 │   │   ├── clipAssessments.js  # Clip -> its newest child session, run status, stale-cut flag (pure)
 │   │   ├── coalesce.js         # Single-flight wrapper: a burst of refresh triggers = one run + one catch-up (pure)
 │   │   ├── clipExportOutcome.js # What the editor does when an export/recrop job lands (pure)
@@ -737,6 +740,18 @@ flight" costs nothing. The concurrent-uploads cap applies to batched initiates t
 store is in process and keyed by account id, the same single-process scope as the rate
 limiters; ids are 128-bit random and compared in constant time among the account's own
 batches; expired and spent batches are pruned on access.
+
+The browser side is `lib/batchUpload.js` (see its header): the dashboard's
+"Several recordings" toggle shows one shared case-study picker and a
+`BatchUploadPanel`; the workflow / segmentation / corpus options are the form's own
+(`buildUploadRequest`), and each recording goes through `submitUpload` with
+`initiateHeaders: {X-Upload-Batch}`, at most two at a time. A recording refused
+with "uploads in flight" waits and retries with bounded backoff; any other failure
+marks that row failed and aborts its upload (a failed upload otherwise keeps
+holding a concurrent-upload slot) without stopping the rest. Cancel stops
+*starting* recordings; a transfer already under way finishes. A lone recording
+takes no allowance (the server refuses a batch of one). Each rubric asset is
+deduplicated by content hash server-side, so one PDF per session costs one asset.
 
 **Parts are serialised per upload, so the client may send them in parallel.**
 The upload record is a JSON file rewritten on every part; without a lock, two

@@ -22,6 +22,8 @@ import {
   formatProcessingStageLabel,
 } from '@/lib/processingStage';
 import { useUploadTracker } from '@/lib/uploadTracking';
+import { useBatchUpload } from '@/lib/useBatchUpload';
+import { BatchUploadPanel } from '@/components/upload/BatchUploadPanel.jsx';
 import {
   BarChart3,
   BellRing,
@@ -236,6 +238,22 @@ export default function OSCEAiMarkerMockup({
   // transfer keeps running and keeps reporting here, where the session card
   // reads it.
   const uploadTracker = useUploadTracker();
+  // Several recordings under one case study. Owned here, not by the panel, so a
+  // running batch survives the form unmounting while a session is open; it
+  // keeps its own per-item session ids and never touches
+  // `activeUploadSessionIdRef`, which belongs to the single-file flow.
+  const [batchMode, setBatchMode] = useState(false);
+  const batchUpload = useBatchUpload({
+    enabled: batchMode,
+    caseStudy: caseStudyFile,
+    buildRequest: buildUploadRequest,
+    tracker: uploadTracker,
+    transports: UPLOAD_TRANSPORTS,
+    // Each session appears in the list as soon as it exists, and again as each
+    // recording lands; the refresh is coalesced, so a burst is one request.
+    onSessionCreated: () => refreshSessionIndex({ silent: true }),
+    onItemFinished: () => refreshSessionIndex({ silent: true }),
+  });
   // Overlay visibility only. Deliberately separate from `isUploading`, which
   // means "a transfer is in flight" and still gates the upload form.
   const [uploadOverlayDismissed, setUploadOverlayDismissed] = useState(false);
@@ -1238,17 +1256,22 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
+  // The upload options shared by the single form and the batch panel; the
+  // session name is the one thing each supplies for itself.
+  function buildUploadRequest() {
+    return {
+      workflow: uploadFlow,
+      autoProcess: true,
+      segmentation: uploadFlow === Workflow.LONG ? segmentationMethod : null,
+      segmentationOptions: buildSegmentationOptions(),
+      regionFocusOptions: buildRegionFocusOptionsForUpload(),
+      corpusId: selectedCorpusId || null,
+    };
+  }
+
   async function runAsyncUploadAssessment() {
     const { sessionId } = await submitUpload({
-      request: {
-        workflow: uploadFlow,
-        autoProcess: true,
-        sessionName: sessionNameInput.trim() || null,
-        segmentation: uploadFlow === Workflow.LONG ? segmentationMethod : null,
-        segmentationOptions: buildSegmentationOptions(),
-        regionFocusOptions: buildRegionFocusOptionsForUpload(),
-        corpusId: selectedCorpusId || null,
-      },
+      request: { ...buildUploadRequest(), sessionName: sessionNameInput.trim() || null },
       files: { video: videoFile, caseStudy: caseStudyFile },
       tracker: uploadTracker,
       api: { apiJson },
@@ -2441,19 +2464,47 @@ export default function OSCEAiMarkerMockup({
                   </div>
                 )}
 
+                <div className="flex flex-wrap items-center gap-2" role="radiogroup" aria-label="How many recordings">
+                  {[
+                    { value: false, label: 'One recording' },
+                    { value: true, label: 'Several recordings' },
+                  ].map((option) => (
+                    <button
+                      key={option.label}
+                      type="button"
+                      role="radio"
+                      aria-checked={batchMode === option.value}
+                      onClick={() => setBatchMode(option.value)}
+                      className={`rounded-full border px-3 py-1 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 ${
+                        batchMode === option.value
+                          ? 'border-cyan-600 bg-cyan-50 text-cyan-800'
+                          : 'border-slate-300 bg-white text-slate-600 hover:border-cyan-500'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                  <UploadCard
-                    icon={<Video className="h-5 w-5" />}
-                    title={uploadFlow === Workflow.LONG ? 'Long station recording' : 'Station recording'}
-                    subtitle={uploadFlow === Workflow.LONG ? 'MP4, MOV or MKV — usually 5 minutes or longer' : 'MP4, MOV or MKV'}
-                    fileName={videoFile?.name || null}
-                    onPick={() => videoInputRef.current?.click()}
-                  />
+                  {!batchMode && (
+                    <UploadCard
+                      icon={<Video className="h-5 w-5" />}
+                      title={uploadFlow === Workflow.LONG ? 'Long station recording' : 'Station recording'}
+                      subtitle={uploadFlow === Workflow.LONG ? 'MP4, MOV or MKV — usually 5 minutes or longer' : 'MP4, MOV or MKV'}
+                      fileName={videoFile?.name || null}
+                      onPick={() => videoInputRef.current?.click()}
+                    />
+                  )}
 
                   <UploadCard
                     icon={<FileSpreadsheet className="h-5 w-5" />}
                     title="Case study"
-                    subtitle="PDF. The rubric is read from its closing checklist section"
+                    subtitle={
+                      batchMode
+                        ? 'PDF, shared by every recording below. The rubric is read from its closing checklist section'
+                        : 'PDF. The rubric is read from its closing checklist section'
+                    }
                     fileName={caseStudyFile?.name || null}
                     onPick={() => caseStudyInputRef.current?.click()}
                   />
@@ -2475,22 +2526,26 @@ export default function OSCEAiMarkerMockup({
                   onChange={(event) => setCaseStudyFile(event.target.files?.[0] || null)}
                 />
 
-                <div className="flex flex-wrap items-center gap-3 pt-2">
-                  <Button
-                    size="lg"
-                    className="gap-2"
-                    onClick={requestStartAssessment}
-                    disabled={!videoFile || !caseStudyFile || isUploading || isLoadingWorkspace}
-                  >
-                    <Wand2 className="h-4 w-4" aria-hidden="true" />
-                    {uploadFlow === Workflow.LONG ? 'Upload and split into clips' : 'Upload and start assessment'}
-                  </Button>
-                  <span className="text-sm text-slate-500" role="status">
-                    {videoFile && caseStudyFile
-                      ? 'Both files chosen. Marking runs on this machine.'
-                      : 'Choose a recording and a case study PDF to start.'}
-                  </span>
-                </div>
+                {batchMode ? (
+                  <BatchUploadPanel batch={batchUpload} caseStudy={caseStudyFile} />
+                ) : (
+                  <div className="flex flex-wrap items-center gap-3 pt-2">
+                    <Button
+                      size="lg"
+                      className="gap-2"
+                      onClick={requestStartAssessment}
+                      disabled={!videoFile || !caseStudyFile || isUploading || isLoadingWorkspace}
+                    >
+                      <Wand2 className="h-4 w-4" aria-hidden="true" />
+                      {uploadFlow === Workflow.LONG ? 'Upload and split into clips' : 'Upload and start assessment'}
+                    </Button>
+                    <span className="text-sm text-slate-500" role="status">
+                      {videoFile && caseStudyFile
+                        ? 'Both files chosen. Marking runs on this machine.'
+                        : 'Choose a recording and a case study PDF to start.'}
+                    </span>
+                  </div>
+                )}
 
                 {error && (
                   <div role="alert" className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-sm text-rose-700">
