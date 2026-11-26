@@ -26,6 +26,13 @@ How long a start takes depends on the machine and the image. Expect a few
 minutes. The gate measures every start (from the VM's start time to the app
 reporting ready) and uses the median of the recent ones as its estimate.
 
+"Ready" needs the readiness probe to pass *and* the VM not to be saying
+`updating` (the install script is replacing the app) or `stopping` (an idle
+shutdown is under way) in `osce/boot`: the old app keeps answering until the
+moment it is stopped, so the probe alone would send people to a dying app.
+A value left from the previous run is ignored. When setup re-runs it counts
+the GPU its own running VM holds as available, so the L4 profile is kept.
+
 ## Automated setup
 
 `bash deploy/gcp/setup.sh` does every step below in a project of your choice,
