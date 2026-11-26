@@ -268,6 +268,9 @@ commit_update() {
 
 # Stop the old app, back up (updates only), then swap the new code in.
 replace_app_code() {
+  # The old app answers its probe until the next line; tell the gate first so it
+  # does not send anyone to an app that is about to be stopped.
+  if [[ "$UPDATING" == 1 ]]; then report_boot updating; fi
   systemctl stop osce-marker >/dev/null 2>&1 || true
   if [[ "$UPDATING" == 1 ]]; then
     stage "backup"

@@ -107,6 +107,14 @@ def _obs(status: str, **kwargs) -> Observation:
         (_obs("RUNNING", boot=BootValue("failed", START_TS - 3600)), "booting"),
         # If the app did come up after all, ready wins over a reported failure.
         (_obs("RUNNING", boot=BootValue("failed", START_TS + 900), app_ready=True), "ready"),
+        # The probe still passes while the VM replaces the app or shuts down: the
+        # boot stage is authoritative, so the page never sends anyone there.
+        (_obs("RUNNING", boot=BootValue("updating", START_TS + 60), app_ready=True), "app-starting"),
+        (_obs("RUNNING", boot=BootValue("stopping", START_TS + 60), app_ready=True), "stopping"),
+        (_obs("RUNNING", boot=BootValue("updating", START_TS + 60)), "app-starting"),
+        # A stopping/updating value left from the previous run is ignored.
+        (_obs("RUNNING", boot=BootValue("stopping", START_TS - 3600), app_ready=True), "ready"),
+        (_obs("RUNNING", boot=BootValue("updating", START_TS - 3600), app_ready=True), "ready"),
         (_obs("REPAIRING"), "unavailable"),
         (_obs("TERMINATED", start_requested=True, start_error="no GPU"), "failed"),
     ],

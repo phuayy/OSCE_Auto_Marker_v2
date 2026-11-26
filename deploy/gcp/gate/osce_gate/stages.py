@@ -10,7 +10,10 @@ Three sources, each covering the part of a boot the others cannot see:
   while it cannot answer HTTP yet;
 * the app's readiness probe (``/api/health/ready``) — the only thing that
   says "ready". A guest attribute saying so is not enough: the page must not
-  send anyone to an address that does not answer.
+  send anyone to an address that does not answer. The probe is not enough
+  either while the VM says it is replacing the app or shutting down: the old
+  app still answers until the moment it is stopped, so a passing probe beside a
+  fresh ``updating`` / ``stopping`` stage is the app about to go away.
 """
 
 from __future__ import annotations
@@ -54,6 +57,8 @@ _BOOT_TO_STEP = {
     "database": "database",
     "loading": "loading",
     "ready": "loading",
+    # The VM's install script is replacing the running app (an update).
+    "updating": "app-starting",
     "stopping": "stopping",
     # Written by the VM's install script or boot watchdog when the app will
     # not come up. The machine is about to power itself off.
@@ -63,6 +68,8 @@ _BOOT_TO_STEP = {
 # this run's start time is the previous run's and must be ignored. A little
 # slack for the two clocks involved.
 _CLOCK_SLACK_SECONDS = 30
+# Boot stages that outrank a passing probe: the app answers, but not for long.
+_OVERRIDES_PROBE = {"updating", "stopping"}
 
 
 @dataclass(frozen=True)
@@ -115,12 +122,15 @@ def derive_stage(observation: Observation) -> str:
         return "provisioning"
     if status != "RUNNING":
         return "unavailable"
-    if observation.app_ready:
-        return "ready"
     boot = observation.boot
-    if boot is not None and (
+    current_boot = boot is not None and (
         observation.last_start is None or boot.at >= observation.last_start - _CLOCK_SLACK_SECONDS
-    ):
+    )
+    if observation.app_ready:
+        if current_boot and boot.stage in _OVERRIDES_PROBE:
+            return _BOOT_TO_STEP[boot.stage]
+        return "ready"
+    if current_boot:
         return _BOOT_TO_STEP.get(boot.stage, "booting")
     return "booting"
 
