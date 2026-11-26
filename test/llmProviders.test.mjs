@@ -216,6 +216,7 @@ test('formatOutputLimit names a model\'s output ceiling and stays silent when un
 // ---- Merging a catalogue refresh into a form (M30) --------------------------
 
 import {
+  describeTestFailure,
   resolveRoutingState,
   settleMarkers,
   settleTarget,
@@ -265,4 +266,20 @@ test('resolveRoutingState matches what the card shows on load', () => {
   const state = resolveRoutingState(description);
   assert.deepEqual(state.primary, t('openai', 'gpt-4.1'));
   assert.deepEqual(state.fallback, t('nvidia', 'm'));
+});
+
+// ---- A Test that the caller may not run (M32) -------------------------------
+
+test('describeTestFailure: a 403 is a permission message, not a provider failure', () => {
+  const out = describeTestFailure({ status: 403, message: 'Forbidden' });
+  assert.equal(out.ok, false);
+  assert.equal(out.denied, true);
+  assert.match(out.error, /administrator/i);
+});
+
+test('describeTestFailure: any other error stays a failed probe', () => {
+  const out = describeTestFailure({ status: 502, message: 'Bad gateway' });
+  assert.equal(out.denied, undefined);
+  assert.equal(out.error, 'Bad gateway');
+  assert.match(describeTestFailure(new Error('')).error, /could not be run/);
 });

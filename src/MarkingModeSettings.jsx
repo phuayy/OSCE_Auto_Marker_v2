@@ -29,7 +29,7 @@ import { apiJson } from '@/lib/apiFetch';
 // the criteria they disagree on. Everything the card shows — the modes, the
 // tie-break policies, what the server would actually run — comes from
 // GET /api/settings/llm-providers, so this file knows no vendor names.
-export default function MarkingModeSettings({ version = 0, onProvidersChanged, onSettingsChanged }) {
+export default function MarkingModeSettings({ version = 0, onProvidersChanged, onSettingsChanged, isAdmin = false }) {
   const [description, setDescription] = useState(null); // null = never loaded
   const [loadError, setLoadError] = useState('');
   const [saveError, setSaveError] = useState('');
@@ -203,6 +203,7 @@ export default function MarkingModeSettings({ version = 0, onProvidersChanged, o
                     error={errors[`marker${index}`] || ''}
                     testing={testing === `marker${index}`}
                     testResult={testResults[`marker${index}`]}
+                    canTest={isAdmin}
                     onTest={() => runTest(`marker${index}`, target)}
                   />
                 ))}
@@ -217,6 +218,7 @@ export default function MarkingModeSettings({ version = 0, onProvidersChanged, o
                   error={errors.adjudicator || ''}
                   testing={testing === 'adjudicator'}
                   testResult={testResults.adjudicator}
+                  canTest={isAdmin}
                   onTest={() => runTest('adjudicator', adjudicator)}
                 />
 

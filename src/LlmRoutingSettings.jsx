@@ -25,7 +25,7 @@ import { apiJson } from '@/lib/apiFetch';
 // this file. The choice applies to every future run: content scoring,
 // communication scoring and transcript preprocessing, including per-clip runs
 // and the Hatchet worker.
-export default function LlmRoutingSettings({ version = 0, onProvidersChanged, onSettingsChanged }) {
+export default function LlmRoutingSettings({ version = 0, onProvidersChanged, onSettingsChanged, isAdmin = false }) {
   const [description, setDescription] = useState(null); // null = never loaded
   const [loadError, setLoadError] = useState('');
   const [saveError, setSaveError] = useState('');
@@ -154,6 +154,7 @@ export default function LlmRoutingSettings({ version = 0, onProvidersChanged, on
               error={errors.primaryModel || ''}
               testing={testing === 'primary'}
               testResult={testResults.primary}
+              canTest={isAdmin}
               onTest={() => runTest('primary')}
             />
             <TargetPicker
@@ -166,6 +167,7 @@ export default function LlmRoutingSettings({ version = 0, onProvidersChanged, on
               noneOption={{ value: NO_FALLBACK, label: 'None — fail instead of switching' }}
               testing={testing === 'fallback'}
               testResult={testResults.fallback}
+              canTest={isAdmin}
               onTest={() => runTest('fallback')}
             />
 

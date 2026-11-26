@@ -148,6 +148,20 @@ export function settleValue(current, baseline, fresh) {
   return sameValue(current, baseline) ? fresh : current;
 }
 
+// What a failed Test probe means to the screen. A 403 is the caller's role
+// (the live test is a billable call on the deployment's key and is
+// administrator-only), not the provider failing, so it is marked `denied`.
+export function describeTestFailure(error) {
+  if (error?.status === 403) {
+    return {
+      ok: false,
+      denied: true,
+      error: 'Only an administrator can run a connection test.',
+    };
+  }
+  return { ok: false, error: error?.message || 'The connection test could not be run.' };
+}
+
 // Things worth telling the operator before they save this pairing.
 export function routingWarnings({ description, primary, fallback }) {
   const warnings = [];
