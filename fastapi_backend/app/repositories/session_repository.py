@@ -17,7 +17,12 @@ from app.core.utils import parse_iso, session_name_key
 from app.database.models import SessionRecord, utc_now
 from app.database.orm import OrmDatabase
 from app.domain.actors import PROVENANCE_KEY, provenance_of, provenance_user_id
-from app.domain.sessions import SESSION_PAYLOAD_SCHEMA_VERSION, SessionStatus, validate_session_payload
+from app.domain.sessions import (
+    IN_FLIGHT_STATUSES,
+    SESSION_PAYLOAD_SCHEMA_VERSION,
+    SessionStatus,
+    validate_session_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +103,16 @@ def _compact_steps(value: Any) -> dict[str, Any] | None:
             "progress": _optional_float(state.get("progress")),
         }
     return compact
+
+
+# A session in one of these states is reading (or still receiving) its source
+# video, so nothing may delete it: a run (``queued``/``processing``), the upload
+# assembler, or a transfer that has not finished. The retention sweep consults
+# this both when it lists candidates and again just before it deletes one.
+SOURCE_IN_USE_STATUSES: frozenset[str] = IN_FLIGHT_STATUSES | {
+    SessionStatus.WAITING_FOR_UPLOAD,
+    SessionStatus.UPLOADING,
+}
 
 
 def _record_to_dict(record: SessionRecord) -> dict[str, Any]:
@@ -407,7 +422,8 @@ class SessionRepository:
         ``SessionMaintenanceService._delete_artifacts``) — so this never
         names one. Oldest first, so a sweep interrupted partway through a
         large backlog always makes progress on the sessions the policy has
-        waited longest for.
+        waited longest for. A session a run or an upload is still using
+        (``SOURCE_IN_USE_STATUSES``) is never a candidate, however old.
         """
         payload = SessionRecord.payload
         statement = (
@@ -415,6 +431,7 @@ class SessionRepository:
             .where(
                 SessionRecord.parent_session_id.is_(None),
                 SessionRecord.created_at < cutoff,
+                SessionRecord.status.not_in(sorted(SOURCE_IN_USE_STATUSES)),
                 payload["files", "video", "absolutePath"].as_string().isnot(None),
                 payload["files", "video", "purgedAt"].as_string().is_(None),
             )

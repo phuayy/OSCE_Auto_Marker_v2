@@ -243,13 +243,16 @@ class AppContainer:
             # pinned at waiting_for_upload) once their TTL has elapsed. Frees
             # leaked bytes and clears dead session cards.
             await self.async_uploads.recover_expired_uploads()
+        await self.jobs.startup(dispatch_queued=dispatch_queued_jobs, recover_interrupted=recover_interrupted_jobs)
+        if api and self.settings.session_video_retention_days > 0:
             # One sweep at boot regardless of the periodic interval below, so a
             # deployment that was stopped for a while (or is enabling this for
             # the first time against old data) does not wait for the first
-            # timer tick to start honouring the retention window.
-            if self.settings.session_video_retention_days > 0:
-                await self.session_maintenance.run_video_retention_sweep()
-        await self.jobs.startup(dispatch_queued=dispatch_queued_jobs, recover_interrupted=recover_interrupted_jobs)
+            # timer tick to start honouring the retention window. After job
+            # recovery and orphan reconciliation: until then a session a
+            # restart interrupted still says `processing` with no job row, and
+            # the sweep must see the statuses recovery settles.
+            await self.session_maintenance.run_video_retention_sweep()
         # Weights are fetched after the process is otherwise ready, never
         # before: a deployment must serve requests while a multi-gigabyte
         # checkpoint downloads, and the download is optional for correctness.

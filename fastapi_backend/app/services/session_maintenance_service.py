@@ -19,6 +19,7 @@ from app.domain.sessions import (
     session_clips,
     session_video_path,
 )
+from app.repositories.session_repository import SOURCE_IN_USE_STATUSES
 from app.repositories.notification_repository import NotificationRepository
 from app.repositories.video_repository import VideoRepository
 from app.services.assessment_service import AssessmentService
@@ -234,10 +235,16 @@ class SessionMaintenanceService:
         Idempotent and safe to call speculatively: a session with no video on
         disk, one already purged, or a clip-assessment child (whose
         ``files.video`` is its parent's exported clip, not its own) is a
-        no-op that returns ``False``.
+        no-op that returns ``False`` — as is one a run or an upload is still
+        using (``SOURCE_IN_USE_STATUSES``).
         """
         session = await self.sessions.read(session_id)
         if session.get("parentSessionId"):
+            return False
+        # Re-checked on the row as it is *now*: the candidate list is older than
+        # this call, and a session that was re-run or is still uploading since
+        # then is reading this very file.
+        if str(session.get("status") or "") in SOURCE_IN_USE_STATUSES:
             return False
         video = (session.get("files") or {}).get("video")
         absolute_path = video.get("absolutePath") if isinstance(video, dict) else None
