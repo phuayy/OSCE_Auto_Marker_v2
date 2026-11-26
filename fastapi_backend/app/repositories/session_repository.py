@@ -17,6 +17,8 @@ from app.core.utils import parse_iso, session_name_key
 from app.database.models import SessionRecord, utc_now
 from app.database.orm import OrmDatabase
 from app.domain.actors import PROVENANCE_KEY, provenance_of, provenance_user_id
+from app.domain.enums import Workflow
+from app.domain.session_filters import SessionListFilter
 from app.domain.sessions import (
     SESSION_PAYLOAD_SCHEMA_VERSION,
     SOURCE_IN_USE_STATUSES,
@@ -53,6 +55,40 @@ def _version_token(updated_at: datetime | None) -> str | None:
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt.isoformat(timespec="microseconds")
+
+
+_LIKE_ESCAPE = "\\"
+
+
+def _contains_pattern(term: str) -> str:
+    """``term`` as a LIKE "contains" pattern with its own wildcards neutralised,
+    so a search for ``50%`` or ``a_b`` matches those characters literally."""
+    escaped = term.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2).replace("%", _LIKE_ESCAPE + "%").replace("_", _LIKE_ESCAPE + "_")
+    return f"%{escaped}%"
+
+
+def _filter_clauses(filters: SessionListFilter) -> list[Any]:
+    """The ``WHERE`` terms for the list filters; they combine with AND.
+
+    The name search is a scan (no index can serve a leading wildcard) and the
+    comparison is ``lower(name)`` against an already-lowercased term, which
+    folds only ASCII on SQLite and everything on PostgreSQL.
+    """
+    clauses: list[Any] = []
+    if filters.search:
+        clauses.append(func.lower(SessionRecord.name).like(_contains_pattern(filters.search), escape=_LIKE_ESCAPE))
+    if filters.statuses:
+        clauses.append(SessionRecord.status.in_(filters.statuses))
+    if filters.created_by:
+        clauses.append(SessionRecord.created_by == filters.created_by)
+    if filters.workflow is Workflow.LONG:
+        clauses.append(SessionRecord.payload["workflow"].as_string() == Workflow.LONG.value)
+    elif filters.workflow is Workflow.STANDARD:
+        # A session recorded before `workflow` existed is a standard one, as
+        # everywhere else (`_task_type_for` treats anything not long that way).
+        workflow = SessionRecord.payload["workflow"].as_string()
+        clauses.append(or_(workflow.is_(None), workflow != Workflow.LONG.value))
+    return clauses
 
 
 def _optional_int(value: Any) -> int | None:
@@ -329,6 +365,7 @@ class SessionRepository:
     async def read_index_projection(
         self, *, limit: int | None = None, after: tuple[datetime, str] | None = None,
         parent_session_id: str | None = None, roots_only: bool = False,
+        filters: SessionListFilter | None = None,
     ) -> list[dict[str, Any]]:
         """Read only the fields the session-list cards render.
 
@@ -376,6 +413,9 @@ class SessionRepository:
             statement = statement.where(SessionRecord.parent_session_id.is_(None))
         elif parent_session_id is not None:
             statement = statement.where(SessionRecord.parent_session_id == parent_session_id)
+        if filters is not None:
+            for clause in _filter_clauses(filters):
+                statement = statement.where(clause)
         if after is not None:
             created_at, session_id = after
             statement = statement.where(or_(

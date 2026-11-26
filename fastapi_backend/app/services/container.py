@@ -58,6 +58,7 @@ from app.services.pipeline_service import PipelineService
 from app.services.prompt_registry_service import PromptRegistryService
 from app.services.rubric_asset_service import RubricAssetService
 from app.services.rubric_service import RubricService
+from app.services.session_bulk_service import SessionBulkService
 from app.services.session_maintenance_service import SessionMaintenanceService
 from app.services.session_service import SessionService
 from app.storage import ObjectStorage, create_storage_service
@@ -125,6 +126,7 @@ class AppContainer:
     custom_providers: CustomProviderService
     videos: VideoRepository
     session_maintenance: SessionMaintenanceService
+    session_bulk: SessionBulkService
     login_rate_limiter: FixedWindowRateLimiter
     expensive_operation_rate_limiter: FixedWindowRateLimiter
     # Batch-upload allowances, in process like the limiters above.
@@ -537,6 +539,7 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         custom_providers=custom_providers,
         videos=videos,
         session_maintenance=session_maintenance,
+        session_bulk=SessionBulkService(sessions, session_maintenance),
         login_rate_limiter=login_rate_limiter,
         expensive_operation_rate_limiter=FixedWindowRateLimiter(
             max_attempts=active_settings.rate_limit_rerun_per_hour, window_seconds=3600,

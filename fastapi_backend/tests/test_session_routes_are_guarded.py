@@ -7,8 +7,10 @@ require_job_owner and require_upload_owner (app/api/dependencies.py), applied
 as a route dependency so a handler added to one of these routers without
 remembering the gate fails this test instead of shipping unprotected. Reads
 (GET) are deliberately excluded — every marker may still see every session —
-and POST /api/uploads/initiate is an explicit, commented exception: it
-creates the record the other routes gate, so there is nothing yet to own.
+and two POST routes are explicit, commented exceptions: /api/uploads/initiate
+creates the record the other routes gate (nothing yet to own), and
+/api/sessions/bulk names its sessions in the body, so its gate runs per item
+inside SessionBulkService (proved in test_session_bulk_actions.py).
 """
 
 from __future__ import annotations
@@ -22,10 +24,20 @@ _GUARDED_PREFIXES = ("/api/sessions/", "/api/jobs/", "/api/uploads/")
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _OWNERSHIP_GATES = (require_session_owner, require_job_owner, require_upload_owner)
 
-# Creates the record every other route in this module guards (or, for batches,
-# an allowance scoped to the caller's own account id); there is no owner yet to check. Every other mutating route under the three prefixes
-# above must carry one of _OWNERSHIP_GATES.
-_ALLOWLIST = {("POST", "/api/uploads/initiate"), ("POST", "/api/uploads/batches")}
+# Every other mutating route under the three prefixes above must carry one of
+# _OWNERSHIP_GATES. The exceptions:
+# - initiate creates the record every other route in this module guards; there
+#   is no owner yet to check.
+# - batches creates an allowance scoped to the caller's own account id, so
+#   there is no record to own either.
+# - bulk has no {session_id} path parameter for a dependency to read; each id
+#   in the body is checked with `ensure_may_mutate` before its action runs, and
+#   a refusal is that item's result (403) while the rest continue.
+_ALLOWLIST = {
+    ("POST", "/api/uploads/initiate"),
+    ("POST", "/api/uploads/batches"),
+    ("POST", "/api/sessions/bulk"),
+}
 
 
 def _mutating_routes() -> list[RouteContext]:

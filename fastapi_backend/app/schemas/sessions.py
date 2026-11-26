@@ -134,3 +134,42 @@ class PublicSessionResponse(BaseModel):
 
 class SessionListResponse(BaseModel):
     sessions: list[dict[str, Any]]
+
+
+class BulkSessionsRequest(BaseModel):
+    """``POST /sessions/bulk`` — one action applied to several sessions.
+
+    Only shapes are checked here. Which actions exist, how many ids one
+    request may carry and what ``options`` an action takes are the bulk
+    service's registry (``app.services.session_bulk_service``), so adding an
+    action never touches this model.
+    """
+
+    action: str
+    session_ids: list[str] = Field(alias="sessionIds")
+    options: dict[str, Any] | None = None
+
+    model_config = {"populate_by_name": True}
+
+
+class BulkSessionResult(BaseModel):
+    """One session's outcome. ``status`` is the HTTP status the single-session
+    route would have answered; ``error`` / ``code`` are present only on failure,
+    ``note`` only where success needs explaining."""
+
+    session_id: str = Field(serialization_alias="sessionId")
+    ok: bool
+    status: int
+    error: str | None = None
+    code: str | None = None
+    note: str | None = None
+
+
+class BulkSessionsSummary(BaseModel):
+    ok: int
+    failed: int
+
+
+class BulkSessionsResponse(BaseModel):
+    results: list[BulkSessionResult]
+    summary: BulkSessionsSummary
