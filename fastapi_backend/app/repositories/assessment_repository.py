@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import Select, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import (
@@ -17,6 +19,7 @@ from app.database.models import (
 )
 from app.database.orm import OrmDatabase
 from app.domain.enums import AssessmentResultStatus
+from app.domain.results_export import CriterionExportRow, ResultsExportFilter
 
 
 def _communication_rubric_id(payload: dict[str, Any]) -> str | None:
@@ -31,6 +34,10 @@ def _communication_rubric_id(payload: dict[str, Any]) -> str | None:
         return str(output["rubricAssetId"])
     legacy = payload.get("communicationRubricAssetId")
     return str(legacy) if legacy else None
+
+
+def _utc_midnight(day: date) -> datetime:
+    return datetime.combine(day, time.min, tzinfo=UTC)
 
 
 class AssessmentRepository:
@@ -323,6 +330,115 @@ class AssessmentRepository:
                 }
                 for row in rows.all()
             ]
+
+    # Rows the database hands over per round trip while an export streams.
+    EXPORT_FETCH_SIZE = 2_000
+
+    async def count_criterion_export_rows(self, export_filter: ResultsExportFilter) -> int:
+        """How many rows :meth:`stream_criterion_export_rows` would yield —
+        asked first so an over-large export is refused before it starts."""
+        counted = self._criterion_export_query(export_filter).order_by(None).subquery()
+        async with self.database.session() as db_session:
+            return int(await db_session.scalar(select(func.count()).select_from(counted)) or 0)
+
+    async def stream_criterion_export_rows(
+        self, export_filter: ResultsExportFilter
+    ) -> AsyncIterator[CriterionExportRow]:
+        """Every criterion row the filter keeps, in export order — recording
+        date, recording, scored session, result type, criterion number — as a
+        stream, so a whole exam is never held in memory at once.
+
+        A result with no criterion rows comes back once with its criterion
+        fields empty (an outer join), so a scored student is never silently
+        absent. Like :meth:`list_result_rows` this selects columns only: the
+        score-sheet JSON on the result and criterion rows is never loaded.
+        """
+        query = self._criterion_export_query(export_filter)
+        async with self.database.session() as db_session:
+            rows = await db_session.stream(query.execution_options(yield_per=self.EXPORT_FETCH_SIZE))
+            async for row in rows:
+                root = self._root_session_fields(row)
+                yield CriterionExportRow(
+                    result_id=row.result_id,
+                    root_session_id=root["rootSessionId"],
+                    root_session_name=root["rootSessionName"],
+                    root_session_created_at=root["rootSessionCreatedAt"],
+                    session_id=row.id,
+                    student_name=row.student_name,
+                    result_type=row.result_type,
+                    result_total=row.score_total,
+                    result_max=row.score_max,
+                    result_pass_fail=row.pass_fail,
+                    criterion_index=row.criterion_index,
+                    criterion_label=row.label,
+                    score=row.score,
+                    max_score=row.max_score,
+                    passed=row.passed,
+                    is_critical=row.is_critical,
+                    score_label=row.score_label,
+                    timestamp=row.timestamp,
+                )
+
+    @staticmethod
+    def _criterion_export_query(export_filter: ResultsExportFilter) -> Select[Any]:
+        root_id = func.coalesce(AssessmentSessionRecord.parent_session_id, AssessmentSessionRecord.id)
+        query = (
+            select(
+                AssessmentSessionRecord.id,
+                AssessmentSessionRecord.parent_session_id,
+                AssessmentSessionRecord.session_name,
+                AssessmentSessionRecord.created_at,
+                StudentRecord.display_name.label("student_name"),
+                AssessmentResultRecord.id.label("result_id"),
+                AssessmentResultRecord.result_type,
+                AssessmentResultRecord.score_total,
+                AssessmentResultRecord.score_max,
+                AssessmentResultRecord.pass_fail,
+                AssessmentCriterionRecord.criterion_index,
+                AssessmentCriterionRecord.label,
+                AssessmentCriterionRecord.score,
+                AssessmentCriterionRecord.max_score,
+                AssessmentCriterionRecord.passed,
+                AssessmentCriterionRecord.is_critical,
+                AssessmentCriterionRecord.score_label,
+                AssessmentCriterionRecord.timestamp,
+                SessionRecord.id.label("root_id"),
+                SessionRecord.name.label("root_name"),
+                SessionRecord.created_at.label("root_created_at"),
+            )
+            .select_from(AssessmentResultRecord)
+            .join(
+                AssessmentSessionRecord,
+                AssessmentResultRecord.assessment_session_id == AssessmentSessionRecord.id,
+            )
+            .join(StudentRecord, AssessmentSessionRecord.student_id == StudentRecord.id)
+            .outerjoin(SessionRecord, SessionRecord.id == root_id)
+            .outerjoin(AssessmentCriterionRecord, AssessmentCriterionRecord.result_id == AssessmentResultRecord.id)
+            .where(AssessmentResultRecord.result_type.in_([kind.value for kind in export_filter.result_types]))
+            .order_by(
+                func.coalesce(SessionRecord.created_at, AssessmentSessionRecord.created_at),
+                root_id,
+                AssessmentSessionRecord.created_at,
+                AssessmentSessionRecord.id,
+                AssessmentResultRecord.result_type,
+                AssessmentCriterionRecord.criterion_index,
+                AssessmentCriterionRecord.id,
+            )
+        )
+        if export_filter.root_session_ids:
+            query = query.where(root_id.in_(export_filter.root_session_ids))
+        if export_filter.session_ids:
+            query = query.where(AssessmentSessionRecord.id.in_(export_filter.session_ids))
+        if export_filter.student_ids:
+            query = query.where(StudentRecord.id.in_(export_filter.student_ids))
+        if export_filter.date_from is not None:
+            query = query.where(AssessmentSessionRecord.created_at >= _utc_midnight(export_filter.date_from))
+        if export_filter.date_to is not None and export_filter.date_to < date.max:
+            # Inclusive day: everything before the next midnight.
+            query = query.where(
+                AssessmentSessionRecord.created_at < _utc_midnight(export_filter.date_to + timedelta(days=1))
+            )
+        return query
 
     @staticmethod
     def _root_session_fields(row: Any) -> dict[str, Any]:
