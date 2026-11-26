@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Loader2, Scale, Users } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -15,6 +15,9 @@ import {
   effectiveMarkingDiffers,
   panelWarnings,
   resolvePanelState,
+  settleMarkers,
+  settleTarget,
+  settleValue,
   validatePanel,
 } from '@/lib/llmProviders';
 import { apiJson } from '@/lib/apiFetch';
@@ -39,18 +42,40 @@ export default function MarkingModeSettings({ version = 0, onProvidersChanged, o
   const [testing, setTesting] = useState('');
   const [testResults, setTestResults] = useState({});
 
-  async function loadProviders() {
+  // What the form held when it was last set from the server (null until the
+  // first load): a field equal to it is clean, one that differs is unsaved.
+  const baselineRef = useRef(null);
+
+  // `reset` puts the form back to the server's state — the first load and this
+  // card's own save. Any other refresh (another card saved a key or a model)
+  // only updates the catalogue and merges: unsaved edits survive, and one whose
+  // provider left the catalogue is cleared (see `settleTarget`).
+  async function loadProviders({ reset = false } = {}) {
     setLoadError('');
     try {
       const body = await apiJson('/api/settings/llm-providers', {
         fallbackMessage: 'Failed to load scoring providers.',
       });
+      const fresh = resolvePanelState(body);
+      const baseline = baselineRef.current;
+      baselineRef.current = fresh;
       setDescription(body);
-      const state = resolvePanelState(body);
-      setMode(state.mode);
-      setMarkers(state.markers);
-      setAdjudicator(state.adjudicator);
-      setTieBreak(state.tieBreak);
+      if (reset || !baseline) {
+        setMode(fresh.mode);
+        setMarkers(fresh.markers);
+        setAdjudicator(fresh.adjudicator);
+        setTieBreak(fresh.tieBreak);
+      } else {
+        setMode((current) => settleValue(current, baseline.mode, fresh.mode));
+        setMarkers((current) => settleMarkers(current, baseline.markers, fresh.markers, body));
+        setAdjudicator((current) =>
+          settleTarget(current, baseline.adjudicator, fresh.adjudicator, body, {
+            providerId: NO_ADJUDICATOR,
+            model: '',
+          }),
+        );
+        setTieBreak((current) => settleValue(current, baseline.tieBreak, fresh.tieBreak));
+      }
     } catch (error) {
       setLoadError(error.message || 'Failed to load scoring providers.');
     }
@@ -86,7 +111,7 @@ export default function MarkingModeSettings({ version = 0, onProvidersChanged, o
         fallbackMessage: 'Failed to save the marking mode.',
       });
       setSavedAt(Date.now());
-      await loadProviders();
+      await loadProviders({ reset: true });
       if (onProvidersChanged) onProvidersChanged();
       if (onSettingsChanged) onSettingsChanged(body.settings);
     } catch (error) {
@@ -124,7 +149,7 @@ export default function MarkingModeSettings({ version = 0, onProvidersChanged, o
         {loadError ? (
           <div className="flex items-center justify-between rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
             <span>{loadError}</span>
-            <Button variant="outline" size="sm" onClick={loadProviders}>
+            <Button variant="outline" size="sm" onClick={() => loadProviders()}>
               Retry
             </Button>
           </div>
