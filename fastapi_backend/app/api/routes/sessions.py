@@ -10,6 +10,7 @@ from app.domain.actors import Actor
 from app.domain.sessions import session_video_path
 from app.schemas.sessions import (
     AssessClipsRequest,
+    BulkSessionsRequest,
     ManualClipsRequest,
     RecropClipRequest,
     RenameClipRequest,
@@ -44,6 +45,29 @@ async def list_sessions(
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.post("/bulk")
+async def bulk_sessions(
+    payload: BulkSessionsRequest,
+    request: Request,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Apply one action to up to 100 sessions; each answers for itself (always 200).
+
+    Not behind ``require_session_owner`` (there is no ``{session_id}`` to read):
+    the creator-or-admin gate runs per item inside the service, and the
+    expensive-operation budget is spent here, once, only for an action that
+    spends it — after validation, so a rejected request costs nothing.
+    """
+    try:
+        plan = container.session_bulk.prepare(payload.action, payload.session_ids, payload.options)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if plan.charges_budget:
+        require_expensive_operation(request, container)
+    response = await container.session_bulk.run(plan, current_actor(request))
+    return response.model_dump(by_alias=True, exclude_none=True)
 
 
 @router.patch("/{session_id}/name", dependencies=[Depends(require_session_owner)])
