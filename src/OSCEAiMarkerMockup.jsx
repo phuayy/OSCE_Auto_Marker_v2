@@ -65,7 +65,7 @@ import {
 } from '@/lib/timelineSeed';
 import { workspaceBelongsToUpload } from '@/lib/uploadCompletion';
 import { indexClipAssessments } from '@/lib/clipAssessments';
-import { describeRerunAction } from '@/lib/rerunAction';
+import { describeRerunAction, offersRerun } from '@/lib/rerunAction';
 import { describeStartAction } from '@/lib/sessionStartAction';
 import {
   buildRegionFocusOptions,
@@ -1163,8 +1163,8 @@ export default function OSCEAiMarkerMockup({
       );
     }
 
-    if (sessionEntry.status === SessionStatus.FAILED) {
-      // A failed session opens (its partial artefacts are worth seeing), and it
+    if (offersRerun(sessionEntry.status)) {
+      // A failed or cancelled session opens (its partial artefacts are worth seeing), and it
       // can be re-run in place: same id, fresh job. The reason it failed is
       // rendered on the card itself — see the session list. What the re-run
       // *is* depends on the workflow (a long recording re-runs segmentation,

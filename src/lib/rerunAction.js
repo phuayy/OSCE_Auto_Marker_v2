@@ -8,12 +8,17 @@
 //
 // Pure: no React, no fetch (see test/rerunAction.test.mjs).
 
-import { Workflow } from './enums.js';
+import { SessionStatus, Workflow } from './enums.js';
 
 /** The list projection's long-session test — the same rule the workspace uses. */
 export function isLongEntry(entry) {
   if (entry?.parentSessionId) return false;      // a clip child is one clip
   return String(entry?.workflow || '') === Workflow.LONG || Boolean(entry?.hasVideoClips);
+}
+
+/** A session that ended without a result (failed, or stopped by the user) can be re-run in place. */
+export function offersRerun(status) {
+  return status === SessionStatus.FAILED || status === SessionStatus.CANCELLED;
 }
 
 export function describeRerunAction(entry) {
