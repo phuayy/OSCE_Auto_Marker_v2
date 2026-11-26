@@ -1,9 +1,10 @@
 import React, { useRef, useState } from 'react';
 import { AnimatePresence } from 'framer-motion';
-import { Download, Loader2, RotateCw, Trash2, X } from 'lucide-react';
+import { Download, Loader2, RefreshCw, RotateCw, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Modal } from '@/components/ui/dialog';
+import { RescoreDialog } from '@/components/RescoreDialog.jsx';
 import { apiFetch, apiJson, readErrorMessage } from '@/lib/apiFetch';
 import { downloadBlob } from '@/lib/download';
 import {
@@ -29,6 +30,7 @@ export function BulkActionBar({ entries, identity, onClear, onSettled }) {
   const [busy, setBusy] = useState('');
   const [outcome, setOutcome] = useState(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [rescoreIds, setRescoreIds] = useState(null);
   const cancelRef = useRef(null);
   const namesRef = useRef(new Map());
 
@@ -37,10 +39,28 @@ export function BulkActionBar({ entries, identity, onClear, onSettled }) {
 
   if (entries.length === 0 && !outcome) return null;
 
+  function rememberNames() {
+    namesRef.current = new Map(entries.map((entry) => [entry.id, entry.name || entry.id]));
+  }
+
+  // Show what the server said per session and clear the ones it dealt with.
+  function settle(response, action) {
+    const summary = summarizeBulkResult(response, action);
+    setOutcome(summary);
+    onSettled(summary.succeededIds);
+  }
+
+  function chooseRescore() {
+    const ids = eligibleIds(BulkAction.RESCORE, entries, identity);
+    if (ids.length === 0 || busy) return;
+    rememberNames();
+    setRescoreIds(ids);
+  }
+
   async function runBulk(action) {
     const ids = eligibleIds(action, entries, identity);
     if (ids.length === 0 || busy) return;
-    namesRef.current = new Map(entries.map((entry) => [entry.id, entry.name || entry.id]));
+    rememberNames();
     setBusy(action);
     setOutcome(null);
     try {
@@ -49,9 +69,7 @@ export function BulkActionBar({ entries, identity, onClear, onSettled }) {
         json: { action, sessionIds: ids },
         fallbackMessage: 'The bulk request failed.',
       });
-      const summary = summarizeBulkResult(response, action);
-      setOutcome(summary);
-      onSettled(summary.succeededIds);
+      settle(response, action);
     } catch (error) {
       // The whole request was refused (offline, rate limited): nothing ran,
       // so nothing is cleared from the selection.
@@ -85,6 +103,7 @@ export function BulkActionBar({ entries, identity, onClear, onSettled }) {
 
   const buttons = [
     { action: BulkAction.RERUN, label: 'Re-run failed', icon: RotateCw, variant: 'outline', run: () => runBulk(BulkAction.RERUN) },
+    { action: BulkAction.RESCORE, label: 'Re-score', icon: RefreshCw, variant: 'outline', run: chooseRescore },
     { action: BulkAction.EXPORT, label: 'Export results', icon: Download, variant: 'outline', run: exportResults },
     { action: BulkAction.DELETE, label: 'Delete', icon: Trash2, variant: 'destructive', run: () => setConfirmingDelete(true) },
   ];
@@ -144,6 +163,16 @@ export function BulkActionBar({ entries, identity, onClear, onSettled }) {
       ) : null}
 
       <AnimatePresence>
+        {rescoreIds ? (
+          <RescoreDialog
+            sessionIds={rescoreIds}
+            onClose={() => setRescoreIds(null)}
+            onDone={(response) => {
+              setRescoreIds(null);
+              settle(response, BulkAction.RESCORE);
+            }}
+          />
+        ) : null}
         {confirmingDelete ? (
           <Modal
             onClose={() => setConfirmingDelete(false)}

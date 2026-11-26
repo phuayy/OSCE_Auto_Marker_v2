@@ -9,6 +9,7 @@ import {
   rescoreAvailability,
   rescoreEndpoint,
   rescorePayload,
+  rescoreRequest,
 } from '../src/lib/rescoreAction.js';
 
 const done = { status: 'completed' };
@@ -116,4 +117,14 @@ test('unknown codes are counted without being explained, distinct known ones joi
 
 test('a batch with no clip to consider says so', () => {
   assert.match(describeRescoreResult({ results: [] }), /Nothing to re-score/);
+});
+
+test('the request: one session, a clip batch, or several sessions in one bulk call', () => {
+  const payload = { branches: ['content'] };
+  assert.deepEqual(rescoreRequest({ sessionId: 'a b' }, payload), { url: '/api/sessions/a%20b/rescore', json: payload });
+  assert.deepEqual(rescoreRequest({ sessionId: 'a', clips: true }, payload), { url: '/api/sessions/a/clips/rescore', json: payload });
+  const ids = ['x', 'y'];
+  const bulk = rescoreRequest({ sessionIds: ids }, payload);
+  assert.deepEqual(bulk, { url: '/api/sessions/bulk', json: { action: 'rescore', sessionIds: ['x', 'y'], options: payload } });
+  assert.notEqual(bulk.json.sessionIds, ids, 'the caller\'s array is copied, not shared');
 });

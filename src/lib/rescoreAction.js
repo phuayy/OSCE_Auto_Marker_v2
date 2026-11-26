@@ -28,6 +28,19 @@ export function rescoreEndpoint(sessionId, { clips = false } = {}) {
   return `/api/sessions/${encodeURIComponent(sessionId)}/${clips ? 'clips/' : ''}rescore`;
 }
 
+/**
+ * What to send for a choice `payload` (from `rescorePayload`): one session, a
+ * long recording's clips, or — given `sessionIds` — several sessions in one
+ * bulk request (`POST /sessions/bulk`, which spends the hourly budget once and
+ * answers per session). Returns `{ url, json }`.
+ */
+export function rescoreRequest({ sessionId, sessionIds, clips = false }, payload) {
+  if (Array.isArray(sessionIds)) {
+    return { url: '/api/sessions/bulk', json: { action: 'rescore', sessionIds: [...sessionIds], options: payload } };
+  }
+  return { url: rescoreEndpoint(sessionId, { clips }), json: payload };
+}
+
 function stepsOf(source) {
   const steps = source?.steps ?? source?.pipeline?.steps;
   return steps && typeof steps === 'object' ? steps : null;

@@ -9,9 +9,11 @@
 import { SessionStatus } from './enums.js';
 import { canMutateSession } from './authz.js';
 import { offersRerun } from './rerunAction.js';
+import { rescoreAvailability } from './rescoreAction.js';
 
 export const BulkAction = Object.freeze({
   RERUN: 'rerun',
+  RESCORE: 'rescore',
   DELETE: 'delete',
   EXPORT: 'export',
 });
@@ -68,6 +70,9 @@ function eligibility(action, entry, identity) {
   switch (action) {
     case BulkAction.RERUN:
       if (!offersRerun(entry.status)) return 'only failed or cancelled sessions can be re-run';
+      return canMutateSession(identity, entry) ? null : 'created by someone else';
+    case BulkAction.RESCORE:
+      if (!rescoreAvailability(entry).available) return 'only finished sessions with a transcript can be re-scored';
       return canMutateSession(identity, entry) ? null : 'created by someone else';
     case BulkAction.DELETE:
       if (entry.status === SessionStatus.UPLOADING) return 'still uploading';
@@ -140,6 +145,7 @@ export function exportFileName(disposition, now = new Date()) {
 
 const WORDING = {
   [BulkAction.RERUN]: { done: 'queued for re-run', cannot: 're-run' },
+  [BulkAction.RESCORE]: { done: 'queued for re-score', cannot: 're-score' },
   [BulkAction.DELETE]: { done: 'deleted', cannot: 'delete' },
 };
 

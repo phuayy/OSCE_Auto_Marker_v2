@@ -50,6 +50,18 @@ test('availability: re-run only failed/cancelled the viewer may change', () => {
   assert.equal(bulkAvailability(entries, admin)[BulkAction.RERUN].count, 4);
 });
 
+test('availability: re-score needs a finished session with a transcript the viewer may change', () => {
+  const long = { ...row('long', 'completed'), hasVideoClips: true };
+  const entries = [
+    row('ok', 'completed'), row('failed-no-steps', 'failed'), row('busy', 'processing'), long, row('theirs', 'completed', 'other'),
+  ];
+  const a = bulkAvailability(entries, marker)[BulkAction.RESCORE];
+  assert.deepEqual(eligibleIds(BulkAction.RESCORE, entries, marker), ['ok']);
+  assert.equal(a.count, 1);
+  assert.match(a.reason, /4 skipped: only finished sessions with a transcript/);
+  assert.equal(bulkAvailability(entries, admin)[BulkAction.RESCORE].count, 2);
+});
+
 test('availability: delete covers any non-uploading session the viewer may change', () => {
   const entries = [row('a', 'completed'), row('b', 'processing'), row('u', 'uploading'), row('t', 'completed', 'other')];
   const d = bulkAvailability(entries, marker)[BulkAction.DELETE];
@@ -87,6 +99,10 @@ test('summary wording: singular, plural, partial, all failed', () => {
   assert.equal(all.tone, 'danger');
   assert.equal(all.failures[0].error, 'The request failed.');
   assert.equal(summarizeBulkResult({ results: [bad('a')] }, 'delete').message, 'Could not delete the session.');
+  assert.equal(summarizeBulkResult({ results: [ok('a'), ok('b')] }, 'rescore').message, '2 sessions queued for re-score.');
+  const refused = summarizeBulkResult({ results: [ok('a'), { sessionId: 'b', ok: false, error: 'No transcript.', code: 'no_transcript' }] }, 'rescore');
+  assert.equal(refused.message, '1 session queued for re-score; 1 failed.');
+  assert.deepEqual(refused.failures, [{ sessionId: 'b', error: 'No transcript.', code: 'no_transcript' }]);
 });
 
 test('a malformed response is reported, never counted as success', () => {

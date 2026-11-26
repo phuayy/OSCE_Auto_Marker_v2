@@ -6,19 +6,20 @@ import { apiJson } from '@/lib/apiFetch';
 import {
   RESCORE_BRANCH_OPTIONS,
   RESCORE_KEPT_NOTE,
-  rescoreEndpoint,
   rescorePayload,
+  rescoreRequest,
 } from '@/lib/rescoreAction';
 
 // Ask which marking to redo, send it, and hand the answer back.
 //
 // Mounted only while open, so each opening starts with both branches ticked.
 // `clips` re-scores every assessed clip of a long recording instead of one
-// session. The dialog owns its own request (busy and error states live here, so
+// session; `sessionIds` re-scores that many sessions in one bulk request (the
+// answer is then the bulk `{ results, summary }`). The dialog owns its own request (busy and error states live here, so
 // the three places that offer Re-score stay a button and a callback);
 // `onDone(response)` runs after the server accepted it, and the caller words
 // the notice and refreshes whatever it shows.
-export function RescoreDialog({ sessionId, clips = false, onClose, onDone }) {
+export function RescoreDialog({ sessionId, sessionIds, clips = false, onClose, onDone }) {
   const [choice, setChoice] = useState(() =>
     Object.fromEntries(RESCORE_BRANCH_OPTIONS.map(({ branch }) => [branch, true])),
   );
@@ -26,16 +27,18 @@ export function RescoreDialog({ sessionId, clips = false, onClose, onDone }) {
   const [error, setError] = useState('');
   const firstOptionRef = useRef(null);
   const payload = rescorePayload(choice);
-  const subject = clips ? 'all clips' : 'this session';
+  let subject = clips ? 'all clips' : 'this session';
+  if (Array.isArray(sessionIds)) subject = sessionIds.length === 1 ? '1 session' : `${sessionIds.length} sessions`;
 
   async function submit() {
     if (!payload || busy) return;
     setBusy(true);
     setError('');
     try {
-      const response = await apiJson(rescoreEndpoint(sessionId, { clips }), {
+      const { url, json } = rescoreRequest({ sessionId, sessionIds, clips }, payload);
+      const response = await apiJson(url, {
         method: 'POST',
-        json: payload,
+        json,
         fallbackMessage: 'The re-score could not be queued.',
       });
       onDone(response);
