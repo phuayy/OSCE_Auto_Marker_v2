@@ -16,10 +16,10 @@ from app.core.security import hash_action_token
 from app.domain.users import ActionTokenPurpose, UserRole, UserStatus
 from app.mail.base import EmailDeliveryError
 from app.services.container import create_container
-from app.services.user_admin_service import LastAdminError, UserAdminError
+from app.services.user_admin_service import LastAdminError
 from tests.fixtures.mail import RecordingEmailSender
 from tests.test_routes import build_test_client
-from tests.test_user_admin import GOOD_PASSWORD, MARKER_EMAIL, _accept, _activate_marker, _headers, _invite, _login, _mailer, _token
+from tests.test_user_admin import GOOD_PASSWORD, MARKER_EMAIL, _accept, _activate_marker, _headers, _invite, _mailer, _token
 
 
 class GatedEmailSender(RecordingEmailSender):

@@ -9,7 +9,7 @@ from app.core.exceptions import AppError
 from app.schemas.uploads import CompleteUploadRequest
 from app.services.container import create_container
 from tests.test_session_maintenance import _init, _settings
-from tests.fixtures.local_upload import PDF, VIDEO, committed_files, local_upload, settled, stub_ffprobe
+from tests.fixtures.local_upload import PDF, local_upload, settled, stub_ffprobe
 
 
 # --- M26: playback URL is resolved at read time -------------------------------

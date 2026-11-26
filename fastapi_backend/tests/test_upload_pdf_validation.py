@@ -12,7 +12,7 @@ from app.schemas.uploads import CompleteUploadRequest
 from app.services.artifact_service import ensure_pdf_file
 from app.services.container import create_container
 from tests.test_session_maintenance import _init, _settings
-from tests.fixtures.local_upload import PDF, VIDEO, committed_files, local_upload, settled, stub_ffprobe
+from tests.fixtures.local_upload import PDF, committed_files, local_upload, settled, stub_ffprobe
 
 
 # --- M29: the validator itself ------------------------------------------------
