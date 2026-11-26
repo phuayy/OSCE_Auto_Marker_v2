@@ -157,25 +157,41 @@ def clean_rubric_label(text: str) -> str:
     return cleaned
 
 
+# A criterion starts where the rubric's numbered list does: a number and a dot
+# opening a line. "aged 65. " in the middle of a criterion's own prose is not a
+# list marker, and neither is a number the PDF's line wrap happened to leave at
+# the start of a line -- which is why the number must also be the next one in
+# sequence (see below). ``(?!\d)`` keeps a decimal such as "2.5 mg" out.
+_CRITERION_MARKER_RE = re.compile(r"^[ \t]*(\d{1,2})\.(?!\d)[ \t]*", flags=re.MULTILINE)
+_CRITERION_END_RE = re.compile(r"cut\s+score\b|references?\s*:", flags=re.IGNORECASE)
+
+
 def extract_rubric_criteria_from_case_study_rubric(rubric_section: str) -> list[dict[str, Any]]:
-    compact = " ".join(str(rubric_section or "").split())
-    if not compact:
+    """The rubric's numbered criteria, in order.
+
+    Numbering counts only as list structure: a marker must open a line *and*
+    be the next number after the previous criterion (starting at 1). Anything
+    else -- a figure in a sentence, a wrapped "65." -- stays inside the
+    criterion it belongs to instead of splitting it in two.
+    """
+    text = str(rubric_section or "")
+    if not text.strip():
         return []
 
-    criterion_pattern = re.compile(
-        r"(?<!\d)(\d{1,2})\.\s*(.*?)(?=(?<!\d)\d{1,2}\.\s|cut\s+score\b|references?\s*:|$)",
-        flags=re.IGNORECASE,
-    )
+    markers: list[re.Match[str]] = []
+    for match in _CRITERION_MARKER_RE.finditer(text):
+        if int(match.group(1)) == len(markers) + 1:
+            markers.append(match)
 
-    parsed: list[tuple[int, dict[str, Any]]] = []
-    seen_numbers: set[int] = set()
+    criteria: list[dict[str, Any]] = []
+    for index, marker in enumerate(markers):
+        end = markers[index + 1].start() if index + 1 < len(markers) else len(text)
+        body = text[marker.end() : end]
+        terminator = _CRITERION_END_RE.search(body)
+        if terminator:
+            body = body[: terminator.start()]
 
-    for match in criterion_pattern.finditer(compact):
-        number = int(match.group(1))
-        if number in seen_numbers:
-            continue
-
-        raw_label = str(match.group(2) or "").strip()
+        raw_label = " ".join(body.split())
         if not raw_label:
             continue
 
@@ -186,19 +202,9 @@ def extract_rubric_criteria_from_case_study_rubric(rubric_section: str) -> list[
         if not label:
             continue
 
-        seen_numbers.add(number)
-        parsed.append(
-            (
-                number,
-                {
-                    "label": label,
-                    "is_critical": is_critical,
-                },
-            )
-        )
+        criteria.append({"label": label, "is_critical": is_critical})
 
-    parsed.sort(key=lambda item: item[0])
-    return [entry for _number, entry in parsed]
+    return criteria
 
 
 # The two standards every content prompt shares. The markers are marked

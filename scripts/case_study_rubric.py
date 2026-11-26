@@ -60,7 +60,7 @@ from rubric_section import (
 
 # Bump when the extraction above starts producing different output for the same
 # bytes. Entries written by an older version are simply never looked up again.
-EXTRACTOR_VERSION = "case-study-rubric-v1"
+EXTRACTOR_VERSION = "case-study-rubric-v2"
 
 CACHE_SCHEMA = "case-study-rubric-cache-v1"
 

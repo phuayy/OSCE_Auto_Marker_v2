@@ -2034,6 +2034,8 @@ All three scorers are independent Python subprocesses. Read from disk, write JSO
 | `audio_professionalism_extractor.py` | `--audio` MP3 + `--transcript` normalised JSON | `audio_professionalism/<id>.json` |
 | `nvidia_osce_communication.py` | `--transcript` normalised JSON + parsed rubric JSON + optional `--audio-professionalism` JSON | `communication_scores/<id>.json` |
 
+The audio-professionalism script has no role mapping to read (the transcript carries diarisation labels only), so it picks "the student" as the speaker who asks the most questions (at least two, strictly more than anyone else), else the speaker who opened the station, at a confidence below its low-confidence warning line. Talk time is not used: in a history-taking station the actor-patient often talks most. `student_speaker` in its output records `selection`, a plain-words `reason` and per-speaker evidence (`speakers[]`).
+
 Communication scorer takes audio professionalism as optional input — must run after it. Content scorer is independent, runs parallel to the whole communication branch.
 
 **Every input is handed over; none is guessed.** `ScoringPipeline` passes the
@@ -2049,14 +2051,14 @@ was missing (another session's rubric, silently). Those fallbacks are gone:
 optional input that is named but missing is still an error, exit code 2 on
 usage errors, which the job queue does not retry.
 
-Content scorer has checkpoint/repair: saves after each LLM call, up to 2 repair passes on bad JSON output, resumes from checkpoint on crash.
+Content scorer has checkpoint/repair: saves after each LLM call, up to 2 repair passes on bad JSON output, resumes from checkpoint on crash. A checkpoint resumes *interrupted* work only: a run that exhausts its repairs clears it before failing (`scorer_checkpoint.clear_checkpoint`), and a resume that finds one already at the repair limit with issues outstanding starts fresh, so the queue's retry never replays the failure without calling the model.
 
 **The rubric is extracted from the case-study PDF once, not once per marker.**
 Pulling the clinical context, the rubric section and the criteria out of a PDF
 is a pure function of that file's bytes, so `scripts/case_study_rubric.py`
 caches the result under `storage/output/case_study_rubrics/`, keyed by a SHA-256
 of the file plus an `EXTRACTOR_VERSION` covering the parsing itself. A
-deterministic entry cannot go stale: different bytes are a different key. An
+deterministic entry cannot go stale: different bytes are a different key (a parser change bumps `EXTRACTOR_VERSION`, so older entries are never looked up). Criterion numbering counts only as list structure: a number-and-dot must open a line *and* be the next number in sequence from 1, so "aged 65. " in a criterion's prose, or a figure a line wrap left at a line start, never splits it. An
 LLM-produced entry has more inputs than the bytes, so it is judged on read
 (see **Rubric extraction LLM fallback**). A panel of N markers used to pay
 N+1 identical pypdf passes (the adjudicator repeats the extraction so its
