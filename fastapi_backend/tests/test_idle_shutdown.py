@@ -33,6 +33,14 @@ class FakeCounter:
         return self.counts.get(statuses, 0)
 
 
+class FakeUploads:
+    def __init__(self) -> None:
+        self.open = 0
+
+    async def count_open_transfers(self) -> int:
+        return self.open
+
+
 class RecordingReporter(BootStageReporter):
     def __init__(self) -> None:
         super().__init__(enabled=False)
@@ -44,6 +52,7 @@ class RecordingReporter(BootStageReporter):
 
 def _service(clock: FakeClock, *, command: str | None = None, minutes: int = 30):
     jobs, sessions, reporter = FakeCounter(), FakeCounter(), RecordingReporter()
+    uploads = FakeUploads()
     service = IdleShutdownService(
         idle_minutes=minutes,
         check_interval_seconds=60,
@@ -51,8 +60,10 @@ def _service(clock: FakeClock, *, command: str | None = None, minutes: int = 30)
         activity=ActivityTracker(clock),
         jobs=jobs,
         sessions=sessions,
+        uploads=uploads,
         boot_stage=reporter,
     )
+    service.fake_uploads = uploads
     return service, jobs, sessions, reporter
 
 
@@ -119,6 +130,49 @@ def test_work_in_flight_holds_the_vm_and_restarts_the_window_when_it_ends() -> N
     sessions.counts[frozenset({SessionStatus.ASSEMBLING})] = 1
     clock.now += 3600
     assert asyncio.run(service.check_once()) is False
+
+
+def test_an_open_upload_transfer_holds_the_vm() -> None:
+    clock = FakeClock()
+    service, *_ = _service(clock)
+    service.fake_uploads.open = 1
+    clock.now += 3 * 3600
+    assert asyncio.run(service.check_once()) is False
+    # The transfer ended: a full window from here.
+    service.fake_uploads.open = 0
+    clock.now += 20 * 60
+    assert asyncio.run(service.check_once()) is False
+    clock.now += 11 * 60
+    assert asyncio.run(service.check_once()) is True
+
+
+def test_open_transfers_are_counted_only_inside_their_window(tmp_path) -> None:
+    from app.database.orm import OrmDatabase
+    from app.repositories.session_repository import SessionRepository
+    from app.repositories.upload_repository import UploadRepository
+
+    async def run() -> list[int]:
+        database = OrmDatabase(tmp_path / "idle.sqlite3")
+        await database.initialize()
+        await SessionRepository(database).write({"id": "s1", "name": "Session"})
+        repo = UploadRepository(database)
+        counts = []
+
+        async def put(upload_id: str, status: str, expires: str) -> None:
+            await repo.write({"id": upload_id, "sessionId": "s1", "status": status, "expiresAt": expires, "files": []})
+
+        counts.append(await repo.count_open_transfers())
+        await put("open-init", "initiated", "2099-01-01T00:00:00Z")
+        await put("open-upl", "uploading", "2099-01-01T00:00:00Z")
+        counts.append(await repo.count_open_transfers())
+        for index, status in enumerate(("committed", "aborted", "expired", "failed", "assembling")):
+            await put(f"done-{index}", status, "2099-01-01T00:00:00Z")
+        await put("abandoned", "uploading", "2000-01-01T00:00:00Z")
+        counts.append(await repo.count_open_transfers())
+        await database.shutdown()
+        return counts
+
+    assert asyncio.run(run()) == [0, 2, 2]
 
 
 def test_a_failing_command_is_retried_next_tick() -> None:

@@ -478,6 +478,7 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         activity=activity,
         jobs=job_repository,
         sessions=session_repository,
+        uploads=async_uploads.repository,
         boot_stage=boot_stage,
     )
     return AppContainer(
