@@ -1818,6 +1818,21 @@ rules it is built on, and what `test/skeletons.test.mjs` pins:
   `test/bundleSplit.test.mjs` asserts it is reachable from the entry and would
   fail the moment it dragged a lazy module in with it.
 
+**Filtering and bulk actions on the Saved sessions list.** The list is paged, so
+a search box and a status chip (`lib/sessionFilters.js`: all, mine, in progress,
+failed, completed, long) are sent to `GET /api/sessions` on every page
+(`fetchSessionPages`' `filterParams`), never applied to the rows already loaded.
+Changing the filter resets paging and the selection and retires every request in
+flight (`createRequestSequence`), so a slow unfiltered answer cannot overwrite a
+newer filtered one; the chip (not the text) is remembered in localStorage. A
+filter that can hide a running session keeps the in-flight heartbeat on
+(`couldHideInFlight`), since the screen no longer says whether anything runs.
+Selection (`lib/sessionSelection.js`) is a Set of ids pruned on every refresh;
+`bulkAvailability` mirrors the server's owner/status rules per action, and
+`BulkActionBar` runs re-run/delete through `POST /api/sessions/bulk` (per-item
+results; successes leave the selection) and exports the selected recordings via
+`GET /api/analytics/export`, capped at `MAX_EXPORT_SESSIONS` ids per request.
+
 **Key state flows:**
 
 - `openExistingSession(id)` — open a session; bounces in-flight sessions back

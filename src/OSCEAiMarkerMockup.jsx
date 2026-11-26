@@ -11,7 +11,26 @@ import { submitUpload } from '@/lib/uploadSubmission';
 import { CONNECTION_STATUS, useConnectionStatus } from '@/lib/connectionStatus';
 import { CLIP_ASSESSMENTS_ANCHOR_ID } from '@/lib/anchors';
 import { coalesceAsync } from '@/lib/coalesce';
-import { fetchSessionPages } from '@/lib/sessionPages';
+import { createRequestSequence, fetchSessionPages } from '@/lib/sessionPages';
+import {
+  DEFAULT_FILTER,
+  couldHideInFlight,
+  describeEmptyResult,
+  filterKey,
+  readStoredChip,
+  toQueryParams,
+  writeStoredChip,
+} from '@/lib/sessionFilters';
+import {
+  clearSelection,
+  pruneSelection,
+  removeFromSelection,
+  selectAllVisible,
+  selectedEntries,
+  toggleSelection as toggleSessionSelection,
+} from '@/lib/sessionSelection';
+import { SessionListToolbar } from '@/dashboard/SessionListToolbar';
+import { BulkActionBar } from '@/dashboard/BulkActionBar';
 import { clampNumber, formatRuntime } from '@/lib/format';
 import { LazyBoundary, lazyComponent, preloadComponent } from '@/lib/lazyRoute';
 import { LoadingRegion, SessionRowsSkeleton, WorkspaceSkeleton } from '@/components/skeletons.jsx';
@@ -213,6 +232,12 @@ export default function OSCEAiMarkerMockup({
   const [sessionIndexLoading, setSessionIndexLoading] = useState(false);
   const [hasMoreSessions, setHasMoreSessions] = useState(false);
   const sessionPageCountRef = useRef(1);
+  // What the Saved sessions list is narrowed to (search text + status chip).
+  // Applied by the server on every page; the ref is what refreshSessionIndex
+  // reads, so a coalesced background refresh never runs with a stale filter.
+  const [sessionFilter, setSessionFilter] = useState(() => ({ ...DEFAULT_FILTER, chip: readStoredChip() }));
+  const sessionFilterRef = useRef(sessionFilter);
+  const [selectedSessionIds, setSelectedSessionIds] = useState(() => new Set());
   // False until the index has answered once. `sessionIndex` starts empty, and
   // "no sessions yet" and "not asked yet" must not look the same: the first
   // fetch draws rows in outline, and the empty state waits for a real answer.
@@ -333,8 +358,9 @@ export default function OSCEAiMarkerMockup({
   const videoInputRef = useRef(null);
   const caseStudyInputRef = useRef(null);
   const clipExportWasWatchedRef = useRef(false);
-  // Issue number of the newest GET /api/sessions; see refreshSessionIndex.
-  const sessionIndexRequestSeqRef = useRef(0);
+  // Issue numbers of GET /api/sessions; see refreshSessionIndex.
+  const sessionIndexRequestsRef = useRef(null);
+  if (!sessionIndexRequestsRef.current) sessionIndexRequestsRef.current = createRequestSequence();
   const videoPlayerRef = useRef(null);
   const videoPlayerSectionRef = useRef(null);
   const timelineContainerRef = useRef(null);
@@ -852,8 +878,13 @@ export default function OSCEAiMarkerMockup({
   // detection, a long transcription). Recovery must not depend on the same
   // channel that just went quiet.
   const hasInFlightSessions = useMemo(
-    () => sessionIndex.some((entry) => IN_FLIGHT_STATUSES.has(String(entry?.status))),
-    [sessionIndex],
+    () =>
+      // A filter can hide the running sessions, so what is on screen no
+      // longer says whether anything is in flight: keep the floor under the
+      // change stream for as long as the filter might be hiding one.
+      couldHideInFlight(sessionFilter) ||
+      sessionIndex.some((entry) => IN_FLIGHT_STATUSES.has(String(entry?.status))),
+    [sessionIndex, sessionFilter],
   );
 
   useEffect(() => {
@@ -981,13 +1012,18 @@ export default function OSCEAiMarkerMockup({
     // still overlap them. Whichever request was *issued* last is the truth;
     // a response for an earlier request is dropped rather than allowed to
     // roll the cards back to a stage the run has already left.
-    const requestSeq = (sessionIndexRequestSeqRef.current += 1);
+    const isCurrent = sessionIndexRequestsRef.current.issue();
     try {
       const fetchPage = (url) => apiJson(url, { fallbackMessage: 'Failed to load sessions.' });
-      const isCurrent = () => requestSeq === sessionIndexRequestSeqRef.current;
       const parentId = showWorkspace && videoClips.length ? session?.id : null;
       const [body, children] = await Promise.all([
-        fetchSessionPages(fetchPage, sessionPageCountRef.current, isCurrent),
+        fetchSessionPages(
+          fetchPage,
+          sessionPageCountRef.current,
+          isCurrent,
+          null,
+          toQueryParams(sessionFilterRef.current),
+        ),
         parentId ? fetchSessionPages(fetchPage, Infinity, isCurrent, parentId) : null,
       ]);
       if (!body || !isCurrent()) {
@@ -999,6 +1035,7 @@ export default function OSCEAiMarkerMockup({
       setHasMoreSessions(body.hasMore);
       setSessionIndex(sessions);
       setHasLoadedSessionIndex(true);
+      setSelectedSessionIds((previous) => pruneSelection(previous, body.sessions));
       setSessionNameDrafts((previous) => {
         const next = { ...previous };
         sessions.forEach((sessionEntry) => {
@@ -1030,6 +1067,29 @@ export default function OSCEAiMarkerMockup({
         setSessionIndexLoading(false);
       }
     }
+  }
+
+  // A new filter is a new list: back to the first page, nothing selected, and
+  // every request still in flight (it was issued for the old filter) retired
+  // before the new one is issued.
+  function changeSessionFilter(next) {
+    const current = sessionFilterRef.current;
+    if (filterKey(next) === filterKey(current) && next.chip === current.chip) return;
+    const chipChanged = next.chip !== current.chip;
+    sessionFilterRef.current = next;
+    setSessionFilter(next);
+    if (chipChanged) writeStoredChip(next.chip);
+    sessionPageCountRef.current = 1;
+    sessionIndexRequestsRef.current.invalidate();
+    setSelectedSessionIds(clearSelection());
+    refreshSessionIndex();
+  }
+
+  function toggleSelectAllSessions() {
+    setSelectedSessionIds((previous) => {
+      const all = selectAllVisible(visibleSessions, (id) => uploadTracker.isActive(id));
+      return previous.size >= all.size ? clearSelection() : all;
+    });
   }
 
   // Re-read the open session and adopt it, ignoring a response that arrived
@@ -2616,6 +2676,25 @@ export default function OSCEAiMarkerMockup({
                   <CardDescription>Open, rename or delete any session on this machine.</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
+                  <SessionListToolbar
+                    filter={sessionFilter}
+                    onFilterChange={changeSessionFilter}
+                    shownCount={visibleSessions.length}
+                    hasMore={hasMoreSessions}
+                    selectableCount={visibleSessions.filter((entry) => !uploadTracker.isActive(entry.id)).length}
+                    selectedCount={selectedSessionIds.size}
+                    onToggleSelectAll={toggleSelectAllSessions}
+                  />
+                  <BulkActionBar
+                    entries={selectedEntries(selectedSessionIds, visibleSessions)}
+                    identity={authUser}
+                    onClear={() => setSelectedSessionIds(clearSelection())}
+                    onSettled={(doneIds) => {
+                      setSelectedSessionIds((previous) => removeFromSelection(previous, doneIds));
+                      refreshSessionIndex();
+                    }}
+                  />
+
                   {/* First load only: rows in outline until the index answers.
                       A later refresh keeps the rows it has and dims the list
                       (below); the coalesced background refreshes are silent
@@ -2649,7 +2728,7 @@ export default function OSCEAiMarkerMockup({
                       failed first fetch the error above is the whole story. */}
                   {hasLoadedSessionIndex && !sessionIndexLoading && visibleSessions.length === 0 ? (
                     <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
-                      No saved sessions yet. Upload a video to create one.
+                      {describeEmptyResult(sessionFilter)}
                     </div>
                   ) : null}
 
@@ -2689,6 +2768,8 @@ export default function OSCEAiMarkerMockup({
                             onWatchIntent={() => preloadComponent(WatchVideoDialog)}
                           />
                         }
+                        selected={selectedSessionIds.has(sessionEntry.id)}
+                        onToggleSelected={() => setSelectedSessionIds((previous) => toggleSessionSelection(previous, sessionEntry.id))}
                         actions={
                           <SessionCardActions
                             entry={sessionEntry}
