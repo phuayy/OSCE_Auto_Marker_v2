@@ -12,6 +12,18 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def utc_iso(value: datetime) -> str:
+    """``value`` as timezone-aware UTC ISO-8601 with ``Z``.
+
+    SQLite hands back the naive datetimes the app stored, and everything the
+    app stores is UTC, so a naive value is read as UTC; an aware one is
+    converted to the same instant in UTC. A browser parses an offset-less
+    string as *local* time, which is the bug this exists to prevent.
+    """
+    aware = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return aware.isoformat().replace("+00:00", "Z")
+
+
 def parse_iso(value: object) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))

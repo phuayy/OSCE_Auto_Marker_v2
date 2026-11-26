@@ -12,6 +12,7 @@ from typing import Any
 
 from sqlalchemy import event, func, select
 
+from app.core.utils import utc_iso
 from app.database.models import (
     AssessmentResultRecord,
     AssessmentSessionRecord,
@@ -54,7 +55,7 @@ def _legacy_root_fields(assessment: AssessmentSessionRecord, root: SessionRecord
     return {
         "rootSessionId": assessment.parent_session_id or assessment.id,
         "rootSessionName": name,
-        "rootSessionCreatedAt": created_at.isoformat() if created_at else None,
+        "rootSessionCreatedAt": utc_iso(created_at) if created_at else None,
     }
 
 
@@ -82,7 +83,7 @@ async def _legacy_rows(repository: AssessmentRepository) -> list[dict[str, Any]]
                 "passFail": result.pass_fail,
                 "workflow": assessment.workflow,
                 "parentSessionId": assessment.parent_session_id,
-                "createdAt": assessment.created_at.isoformat() if assessment.created_at else None,
+                "createdAt": utc_iso(assessment.created_at) if assessment.created_at else None,
                 **_legacy_root_fields(assessment, root),
             }
             for result, assessment, student, root in rows.all()

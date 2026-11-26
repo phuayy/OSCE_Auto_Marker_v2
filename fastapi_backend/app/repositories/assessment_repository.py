@@ -16,6 +16,7 @@ from app.database.models import (
     StudentRecord,
     utc_now,
 )
+from app.core.utils import utc_iso
 from app.database.orm import OrmDatabase
 from app.domain.enums import AssessmentResultStatus
 from app.domain.results_export import CriterionExportRow, ResultsExportFilter
@@ -320,7 +321,7 @@ class AssessmentRepository:
                     "passFail": row.pass_fail,
                     "workflow": row.workflow,
                     "parentSessionId": row.parent_session_id,
-                    "createdAt": row.created_at.isoformat() if row.created_at else None,
+                    "createdAt": utc_iso(row.created_at) if row.created_at else None,
                     **self._root_session_fields(row),
                 }
                 for row in rows.all()
@@ -470,7 +471,7 @@ class AssessmentRepository:
         return {
             "rootSessionId": row.parent_session_id or row.id,
             "rootSessionName": name,
-            "rootSessionCreatedAt": created_at.isoformat() if created_at else None,
+            "rootSessionCreatedAt": utc_iso(created_at) if created_at else None,
         }
 
     @staticmethod

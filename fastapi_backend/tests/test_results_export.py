@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -20,6 +20,7 @@ from sqlalchemy import event
 from app.api.routes import analytics
 from app.core.csv_export import CSV_BOM, csv_cell, csv_line
 from app.core.exceptions import AppError
+from app.core.utils import utc_iso
 from app.database.models import (
     AssessmentCriterionRecord,
     AssessmentResultRecord,
@@ -750,3 +751,30 @@ def test_an_over_cap_request_answers_422_with_a_message_and_no_csv(client, monke
     assert response.status_code == 422
     assert "Narrow the filter" in response.json()["error"]
     assert CSV_BOM not in response.text
+
+
+# --------------------------------------------------------------- time zones
+
+
+def test_utc_iso_reads_a_naive_value_as_utc_and_keeps_an_aware_instant() -> None:
+    assert utc_iso(datetime(2026, 1, 10, 23, 30, 5, 123456)) == "2026-01-10T23:30:05.123456Z"
+    assert utc_iso(datetime(2026, 1, 10, 23, 30, tzinfo=UTC)) == "2026-01-10T23:30:00Z"
+    # The same instant, written in UTC.
+    assert utc_iso(datetime(2026, 1, 11, 7, 30, tzinfo=timezone(timedelta(hours=8)))) == "2026-01-10T23:30:00Z"
+
+
+def test_analytics_rows_and_the_csv_carry_utc_timestamps_with_z(tmp_path) -> None:
+    """SQLite returns naive datetimes; a browser would read them as local time."""
+
+    async def _run() -> list[dict[str, Any]]:
+        database, service = make_service(tmp_path)
+        await seed_exam(database)
+        try:
+            return await service.repository.list_result_rows()
+        finally:
+            await database.shutdown()
+
+    rows = asyncio.run(_run())
+    stamps = [value for row in rows for value in (row["createdAt"], row["rootSessionCreatedAt"]) if value]
+    assert stamps and all(value.endswith("Z") for value in stamps), stamps
+    assert all(datetime.fromisoformat(value.replace("Z", "+00:00")).utcoffset() == timedelta(0) for value in stamps)
