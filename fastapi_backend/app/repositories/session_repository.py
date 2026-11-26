@@ -76,6 +76,32 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
+def _video_summary(row: Any) -> dict[str, Any]:
+    """What the session card shows of the source video: the preparation job's
+    state, a poster and whether a playable copy exists.
+
+    A purged video offers nothing to watch, so its media facts, poster and copy
+    are all withheld (a stale ``browserPlayable`` must not offer Watch) even
+    though files may still be on disk. ``media`` is also ``None`` for a session
+    recorded before the prepare_media job existed. URLs are the stored
+    ones ``public_session`` serves for these artefacts.
+    """
+    purged = bool(row.video_purged_at)
+    return {
+        "media": None
+        if purged or row.media_status is None
+        else {
+            "status": row.media_status,
+            "stage": row.media_stage or None,
+            "progress": _optional_float(row.media_progress),
+            "durationSeconds": _optional_float(row.media_duration),
+            "browserPlayable": None if row.media_browser_playable is None else bool(row.media_browser_playable),
+        },
+        "posterUrl": None if purged else row.poster_url or None,
+        "hasPlayback": not purged and bool(row.playback_url),
+    }
+
+
 def _compact_steps(value: Any) -> dict[str, Any] | None:
     """Status + live progress for every pipeline step, for the list projection.
 
@@ -335,6 +361,16 @@ class SessionRepository:
             payload["clipExport", "total"].as_float().label("clip_export_total"),
             payload["error"].as_string().label("error"),
             payload[PROVENANCE_KEY].as_json().label("created_by"),
+            # The video's preparation facts, path by path: the card shows a
+            # thumbnail and a duration, and nothing else of `files` is needed.
+            payload["files", "video", "purgedAt"].as_string().label("video_purged_at"),
+            payload["files", "video", "poster", "url"].as_string().label("poster_url"),
+            payload["files", "video", "playback", "url"].as_string().label("playback_url"),
+            payload["files", "video", "media", "status"].as_string().label("media_status"),
+            payload["files", "video", "media", "stage"].as_string().label("media_stage"),
+            payload["files", "video", "media", "progress"].as_float().label("media_progress"),
+            payload["files", "video", "media", "durationSeconds"].as_float().label("media_duration"),
+            payload["files", "video", "media", "browserPlayable"].as_boolean().label("media_browser_playable"),
         ).order_by(SessionRecord.created_at.desc(), SessionRecord.id.desc())
         if roots_only:
             statement = statement.where(SessionRecord.parent_session_id.is_(None))
@@ -389,6 +425,7 @@ class SessionRepository:
                     # Who created the session, as they were at the time (the
                     # card says "by Dr M"); None for a row that predates this.
                     "createdBy": provenance_of({PROVENANCE_KEY: row.created_by}),
+                    **_video_summary(row),
                 }
             )
         return projections

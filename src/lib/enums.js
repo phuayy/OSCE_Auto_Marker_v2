@@ -68,6 +68,12 @@ export const MediaPreparationStatus = Object.freeze({
   "FAILED": "failed"
 });
 
+export const MediaPreparationStage = Object.freeze({
+  "PROBING": "probing",
+  "POSTER": "poster",
+  "CONVERTING": "converting"
+});
+
 export const UploadProbeStatus = Object.freeze({
   "PENDING": "pending",
   "READY": "ready",
