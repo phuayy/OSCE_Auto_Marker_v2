@@ -2744,6 +2744,7 @@ marker's input to a run.
 
 ### Session storage lifecycle contracts
 
+- A re-run keeps what is derived from the source video: `SessionArtifacts.owned_paths(keep_source=True)` skips the upload records and `output/playback/<id>/` (playback copy + poster, which `files.video` still points at); delete removes them.
 - `SessionArtifacts` owns convention-based cleanup: new per-session output types belong under `output/<category>/<session-id>/`. Shared case-study rubric caches are excluded; clips and source videos retain their separate ownership rules. Flat legacy outputs and scorer checkpoint sidecars remain supported.
 - Upload metadata lives in `UploadRecord` (`uploads`, migration `0012`, following user preferences in `0011`). API startup imports valid legacy JSON after session migration and archives it as `.json.migrated`; malformed and orphaned records are retained with warnings for operator review.
 - `OrmDatabase.unit_of_work()` joins repository operations in the current task into one transaction. Participating repositories must use `transaction()` and flush rather than calling `commit()` themselves. Child tasks do not inherit the transaction. Upload initiation, assembly transitions, final upload/session/job/video persistence, and expiry state changes use this boundary; heavy file assembly stays outside it.

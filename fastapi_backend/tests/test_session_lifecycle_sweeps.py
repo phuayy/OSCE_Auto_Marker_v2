@@ -19,6 +19,7 @@ import pytest
 from app.core.config import Settings
 from app.services import container as container_module
 from app.services.container import ContainerRole, create_container
+from app.services.session_artifacts import SessionArtifacts
 
 
 def _settings(tmp_path: Path, **overrides: Any) -> Settings:
@@ -163,6 +164,103 @@ def test_boot_retention_sweep_runs_after_job_recovery(tmp_path, monkeypatch) -> 
         finally:
             await container.shutdown()
         assert order.index("retention") > order.index("jobs")
+
+    asyncio.run(_run())
+
+
+# --- M6 ---------------------------------------------------------------------
+
+
+def _playback_files(settings: Settings, session_id: str) -> list[Path]:
+    folder = settings.paths.output_playback_dir / session_id
+    folder.mkdir(parents=True, exist_ok=True)
+    files = [folder / f"{session_id}-playback.mp4", folder / f"{session_id}-poster.jpg"]
+    for path in files:
+        path.write_text("x", encoding="utf-8")
+    return files
+
+
+def test_source_derived_artifacts_are_kept_for_a_rerun_and_removed_for_a_delete(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    kept = _playback_files(settings, "s1")
+    scores = settings.paths.output_scores_dir / "s1.json"
+    scores.parent.mkdir(parents=True, exist_ok=True)
+    scores.write_text("{}", encoding="utf-8")
+    artifacts = SessionArtifacts(settings)
+    session = {"id": "s1"}
+
+    rerun = artifacts.owned_paths(session, keep_clips=True, keep_source=True)
+    assert settings.paths.output_playback_dir / "s1" not in rerun
+    assert scores in rerun
+
+    delete = artifacts.owned_paths(session)
+    assert settings.paths.output_playback_dir / "s1" in delete
+    assert all(path.exists() for path in kept)
+
+
+def test_rerun_keeps_the_playable_copy_poster_and_their_session_references(tmp_path) -> None:
+    async def _run() -> None:
+        container = create_container(_settings(tmp_path))
+        await _init(container)
+
+        async def _noop(_job) -> None:
+            return None
+
+        container.jobs._dispatch = _noop  # type: ignore[method-assign]
+        playback, poster = _playback_files(container.settings, "re1")
+        video = await _old_session(container, tmp_path, "re1", "completed")
+        media = {"durationSeconds": 12.0}
+        await container.sessions.update(
+            "re1",
+            lambda s: s["files"]["video"].update(
+                playback={"absolutePath": str(playback)}, poster={"absolutePath": str(poster)}, media=media,
+            ),
+        )
+
+        await container.session_maintenance.rerun_session("re1")
+
+        assert playback.exists() and poster.exists() and video.exists()
+        reloaded = (await container.sessions.read("re1"))["files"]["video"]
+        assert reloaded["playback"] == {"absolutePath": str(playback)}
+        assert reloaded["poster"] == {"absolutePath": str(poster)}
+        assert reloaded["media"] == media
+        await container.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_delete_session_still_removes_the_playable_copy(tmp_path) -> None:
+    async def _run() -> None:
+        container = create_container(_settings(tmp_path))
+        await _init(container)
+        files = _playback_files(container.settings, "del1")
+        await _old_session(container, tmp_path, "del1", "completed")
+
+        await container.session_maintenance.delete_session("del1")
+
+        assert not any(path.exists() for path in files)
+        assert not (container.settings.paths.output_playback_dir / "del1").exists()
+        await container.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_a_session_with_no_playback_copy_is_unaffected_by_rerun(tmp_path) -> None:
+    async def _run() -> None:
+        container = create_container(_settings(tmp_path))
+        await _init(container)
+
+        async def _noop(_job) -> None:
+            return None
+
+        container.jobs._dispatch = _noop  # type: ignore[method-assign]
+        video = await _old_session(container, tmp_path, "plain", "completed")
+
+        await container.session_maintenance.rerun_session("plain")
+
+        assert video.exists()
+        assert (await container.sessions.read("plain"))["status"] == "queued"
+        await container.shutdown()
 
     asyncio.run(_run())
 

@@ -652,7 +652,7 @@ class SessionMaintenanceService:
         if not SessionArtifacts.valid_id(session_id):
             return
         for path in SessionArtifacts(self.settings).owned_paths(
-            session, keep_clips=keep_clips, keep_upload=keep_owned_video,
+            session, keep_clips=keep_clips, keep_source=keep_owned_video,
         ):
             if path.is_symlink() or not path.is_dir():
                 self._unlink(path)
