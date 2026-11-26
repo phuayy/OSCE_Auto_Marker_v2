@@ -990,6 +990,13 @@ asked for even if the user has dragged another separator since; the progress
 record counts only those clips, and only a `plan` run prunes superseded plan
 directories.
 
+"Queue owns session status" also governs cancellation: `cancel()` moves a
+session that is still `queued`/`processing` *and still points at that job* to
+`cancelled` (error = the cancel reason) through `_sync_session_job`, on both
+backends — startup reconciliation never runs on a Hatchet worker, so nothing
+else would — and the session is re-runnable like any terminal one. A newer
+job's session, and a task type that does not own status, are left alone.
+
 "Queue owns session status" also governs failure: for an owned task, exhausted
 retries mark the session terminally failed. `export_clips` opts out because a
 failed export must not bury a session whose clip list is still perfectly good.

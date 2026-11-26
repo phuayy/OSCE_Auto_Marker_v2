@@ -1119,6 +1119,11 @@ class JobQueueService:
         job_status = str(job.get("status") or "")
 
         def mutate(session: dict[str, Any]) -> Any:
+            current_job_id = (session.get("job") or {}).get("id")
+            if job_status == JobStatus.CANCELLED and current_job_id not in (None, public_job["id"]):
+                # A newer run owns the session now; the old job's cancellation
+                # must neither displace its record nor end it.
+                return False
             session["job"] = public_job
             if not owns_status:
                 # The handler reports its own progress (see app.services.job_tasks).
@@ -1131,6 +1136,13 @@ class JobQueueService:
             elif job_status == JobStatus.QUEUED and session.get("status") != SessionStatus.COMPLETED:
                 session["status"] = SessionStatus.QUEUED
                 session["error"] = None
+            elif job_status == JobStatus.CANCELLED and session.get("status") in JOB_DRIVEN_STATUSES:
+                # The run was stopped on purpose: nothing will move this
+                # session out of queued/processing otherwise (startup
+                # reconciliation never runs on a Hatchet worker), and a
+                # cancelled session is re-runnable like any terminal one.
+                session["status"] = SessionStatus.CANCELLED
+                session["error"] = job.get("error") or "Job cancelled."
             return None
 
         try:
