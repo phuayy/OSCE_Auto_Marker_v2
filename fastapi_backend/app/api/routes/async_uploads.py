@@ -2,17 +2,62 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Path, Query, Request, status
 
-from app.api.dependencies import current_actor, get_container, require_expensive_operation, require_upload_owner
+from app.api.dependencies import (
+    current_actor,
+    get_container,
+    require_expensive_operation,
+    require_upload_admission,
+    require_upload_owner,
+)
 from app.api.errors import http_error
 from app.core.exceptions import AppError
-from app.schemas.uploads import CompleteUploadRequest, InitiateUploadRequest
+from app.schemas.uploads import CompleteUploadRequest, InitiateUploadRequest, OpenUploadBatchRequest
+from app.services.async_upload_service import VIDEO_EXTENSIONS
 from app.services.container import AppContainer
 
 
 router = APIRouter(prefix="/uploads", tags=["async uploads"])
 
 
-@router.post("/initiate", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_expensive_operation)])
+# Declared before the "/{upload_id}" routes: a literal path segment must win
+# over the id parameter, or "limits" would be read as an upload id.
+@router.get("/limits")
+async def get_upload_limits(container: AppContainer = Depends(get_container)) -> dict[str, object]:
+    """What one upload may be, so the browser can vet files before sending any."""
+    settings = container.settings
+    return {
+        "maxVideoBytes": settings.max_video_upload_bytes,
+        "maxPdfBytes": settings.max_pdf_upload_bytes,
+        "videoExtensions": sorted(VIDEO_EXTENSIONS),
+        "maxConcurrentUploads": max(1, settings.max_concurrent_uploads_per_user),
+        "maxBatchSize": max(2, settings.max_upload_batch_size),
+    }
+
+
+@router.post("/batches", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_expensive_operation)])
+async def open_upload_batch(
+    payload: OpenUploadBatchRequest,
+    request: Request,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Reserve ``count`` initiates for one charge against the hourly budget;
+    each initiate then names the batch in ``X-Upload-Batch``."""
+    actor = current_actor(request)
+    if actor is None:
+        raise http_error(AppError("Authentication required.", status_code=401))
+    try:
+        batch = container.upload_batches.open(actor.user_id, payload.count)
+    except Exception as error:
+        raise http_error(error, fallback_message="Could not open the upload batch.") from error
+    return {
+        "batchId": batch.batch_id,
+        "count": batch.count,
+        "remaining": batch.remaining,
+        "expiresAt": batch.expires_at,
+    }
+
+
+@router.post("/initiate", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_upload_admission)])
 async def initiate_upload(
     payload: InitiateUploadRequest,
     request: Request,

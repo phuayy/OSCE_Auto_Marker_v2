@@ -162,6 +162,7 @@ OSCE-AI-FYP/
 │       │   ├── pipeline_service.py      # Orchestrates full assessment pipeline
 │       │   ├── clip_service.py          # Auto-crop, clip export planning/execution, clip assessment
 │       │   ├── async_upload_service.py  # Chunked multipart upload + assembly
+│       │   ├── upload_batches.py        # Per-account batch-upload allowances (one hourly-budget charge for N initiates)
 │       │   ├── job_queue_service.py     # Local asyncio + Hatchet dispatch
 │       │   ├── job_tasks.py             # Job task-type registry (handler + status ownership)
 │       │   ├── event_service.py         # In-process SSE pub/sub
@@ -714,6 +715,24 @@ committed, because on GCS it deletes the objects by key, which after a commit
 are the session's source files. `delete_committed_object(storageRef)` removes
 one committed source (GCS: generation-scoped; `NotFound` counts as done), and
 is what retention and session deletion call. Session state: `waiting_for_upload -> assembling -> uploaded -> queued -> processing -> completed`.
+
+**Many recordings: limits and batches.** `GET /api/uploads/limits` (any signed-in
+user) publishes what the server will accept — `maxVideoBytes`, `maxPdfBytes`,
+`videoExtensions` (read from `VIDEO_EXTENSIONS`, never copied), `maxConcurrentUploads`,
+`maxBatchSize` — so the browser vets files before sending any. An exam day is 10-60
+recordings, and a loop of initiates dies on the hourly expensive-operation budget
+(`RATE_LIMIT_RERUN_PER_HOUR`) after ten. `POST /api/uploads/batches {count}` charges
+that budget **once** and returns `{batchId, count, remaining, expiresAt}`
+([upload_batches.py](fastapi_backend/app/services/upload_batches.py)); each initiate then
+carries `X-Upload-Batch: <batchId>` and `require_upload_admission` spends one unit of
+the caller's batch instead of the hourly budget. A batch that cannot be spent (unknown,
+another account's, expired, used up) is a 409 — never silently charged to the hourly
+budget — and the unit is handed back when the initiate fails (the
+`MAX_CONCURRENT_UPLOADS_PER_USER` 429, a rejected file), so waiting out "uploads in
+flight" costs nothing. The concurrent-uploads cap applies to batched initiates too. The
+store is in process and keyed by account id, the same single-process scope as the rate
+limiters; ids are 128-bit random and compared in constant time among the account's own
+batches; expired and spent batches are pruned on access.
 
 **Parts are serialised per upload, so the client may send them in parallel.**
 The upload record is a JSON file rewritten on every part; without a lock, two
@@ -1882,6 +1901,7 @@ recording; its Student column the scored subject.
 | `PLAYBACK_COPY_ENABLED` / `PLAYBACK_COPY_MAX_HEIGHT` | `true` / `720` | A source the browser cannot decode (HEVC, 10-bit H.264, ProRes, G.711 audio) gets an H.264/AAC copy at `output/playback/<session>/`, written by the `prepare_media` job, recorded on `files.video.playback` and played by the workspace in place of the original (`app/services/media_preparation.py`); clips of such a source are stream-copied from that copy (one transcode per recording; the copy has a keyframe every 2 s), and the re-encode fallback is capped at the same height. The max height also bounds the poster frame. Processing always reads the original |
 | `RUBRIC_LLM_FALLBACK` | `true` | When deterministic rubric extraction fails on a new/changed PDF, let an LLM extract it instead (`scripts/rubric_llm_fallback.py`). `false` = fail as before. See **Rubric extraction LLM fallback** |
 | `PARALLEL_SCORING` | `true` | Run content branch parallel to communication branch |
+| `MAX_UPLOAD_BATCH_SIZE` / `UPLOAD_BATCH_TTL_SECONDS` / `MAX_OPEN_UPLOAD_BATCHES_PER_USER` | `50` / `21600` / `2` | Batch upload allowances: most recordings one `POST /api/uploads/batches` may reserve, how long it stays spendable, and unspent batches an account may hold at once. See **Upload Flow** |
 | `GPU_SLOTS` | `1` | Jobs that may hold the accelerator at once (transcription, person detection). 0 = unbounded. Per process |
 | `JOB_QUEUE_BACKEND` | `local` | `local` or `hatchet` |
 | `JOB_HEARTBEAT_INTERVAL_SECONDS` | `60` | How often a genuinely-running job refreshes `jobs.locked_at`, proving the worker executing it is still alive |
