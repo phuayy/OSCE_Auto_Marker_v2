@@ -1093,6 +1093,12 @@ the person detector's `stream_progress` — stays installed whatever SSE is
 doing, because `on_progress` drives the session card's gauge; those guard their
 own publish calls, which `publish` no-ops anyway.
 
+**Callbacks are observers.** `CommandRunner` catches an `Exception` raised by an
+`on_output` callback (a 409 from a session write, say), logs the first few and a
+suppressed-count summary, and carries on: the subprocess's exit status alone
+decides the result, so a finished multi-hour run is never failed by its
+progress reporting. Cancellation still propagates.
+
 ---
 
 ## Webhooks

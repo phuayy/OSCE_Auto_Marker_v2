@@ -89,3 +89,83 @@ def test_a_timed_out_command_also_kills_its_grandchild(tmp_path) -> None:
         assert heartbeat.read_text() == last_seen, "grandchild kept running after the parent was killed"
 
     asyncio.run(scenario())
+
+
+# --- callbacks are observers: they never decide the run's outcome -----------
+
+_THREE_LINES = "print('a'); print('b'); print('c')"
+
+
+def test_a_callback_error_does_not_fail_a_successful_run(tmp_path, caplog) -> None:
+    runner = CommandRunner(tmp_path)
+    seen: list[str] = []
+
+    def on_output(_stream: str, text: str) -> None:
+        seen.append(text)
+        if len(seen) == 1:
+            raise RuntimeError("409: session is being updated")
+
+    with caplog.at_level("WARNING", logger="app.core.process"):
+        result = asyncio.run(runner.run(sys.executable, ["-c", _THREE_LINES], "observer", on_output=on_output))
+
+    assert result.stdout.split() == ["a", "b", "c"]
+    assert len(seen) == 3  # the run kept delivering after the error
+    assert "session is being updated" in caplog.text
+
+
+def test_an_async_callback_error_is_also_swallowed(tmp_path) -> None:
+    runner = CommandRunner(tmp_path)
+
+    async def on_output(_stream: str, _text: str) -> None:
+        raise RuntimeError("write conflict")
+
+    result = asyncio.run(runner.run(sys.executable, ["-c", _THREE_LINES], "observer", on_output=on_output))
+    assert result.stdout.split() == ["a", "b", "c"]
+
+
+def test_a_callback_failing_on_every_line_is_logged_a_bounded_number_of_times(tmp_path, caplog) -> None:
+    runner = CommandRunner(tmp_path)
+
+    def on_output(_stream: str, _text: str) -> None:
+        raise RuntimeError("always broken")
+
+    code = "for i in range(300): print(i)"
+    with caplog.at_level("WARNING", logger="app.core.process"):
+        result = asyncio.run(runner.run(sys.executable, ["-c", code], "observer", on_output=on_output))
+
+    assert result.stdout.count("\n") == 299
+    errors = [record for record in caplog.records if "always broken" in record.getMessage()]
+    assert 1 <= len(errors) <= 5
+    assert any("suppressed" in record.getMessage() for record in caplog.records)
+
+
+def test_a_failing_subprocess_is_still_a_failure_when_its_callback_also_fails(tmp_path) -> None:
+    runner = CommandRunner(tmp_path)
+
+    def on_output(_stream: str, _text: str) -> None:
+        raise RuntimeError("observer broke")
+
+    code = "import sys; print('x'); sys.stderr.write('real failure\\n'); sys.exit(4)"
+    with pytest.raises(RuntimeError, match="exit code 4") as raised:
+        asyncio.run(runner.run(sys.executable, ["-c", code], "observer", on_output=on_output))
+    assert "real failure" in str(raised.value)
+
+
+def test_cancellation_still_stops_the_process_despite_callbacks(tmp_path) -> None:
+    runner = CommandRunner(tmp_path)
+
+    def on_output(_stream: str, _text: str) -> None:
+        raise RuntimeError("noisy observer")
+
+    code = "import time\nprint('up', flush=True)\ntime.sleep(60)\n"
+
+    async def scenario() -> float:
+        task = asyncio.create_task(runner.run(sys.executable, ["-c", code], "cancel", on_output=on_output))
+        await asyncio.sleep(1.0)
+        started = time.monotonic()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return time.monotonic() - started
+
+    assert asyncio.run(scenario()) < 20
