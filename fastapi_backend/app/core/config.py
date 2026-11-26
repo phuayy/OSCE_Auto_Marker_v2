@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from app.core.env import read_bool_env, read_csv_env, read_float_env, read_int_env
+from app.pipeline.audio_filters import validate_filter_chain
 from app.database.db_url import (
     POSTGRES_SCHEMES,
     SQLITE_SCHEMES,
@@ -1022,6 +1023,17 @@ class Settings:
         handful of combinations production refuses to start with instead.
         """
         warnings: list[str] = []
+        for variable, chain in (
+            ("WHISPERX_AUDIO_FILTERS", self.whisperx_audio_filters),
+            ("CANARY_AUDIO_FILTERS", self.canary_audio_filters),
+        ):
+            try:
+                validate_filter_chain(chain)
+            except ValueError as error:
+                warnings.append(
+                    f"{variable} is not a safe ffmpeg filter chain and is passed to ffmpeg as "
+                    f"written: {error}"
+                )
         if "*" in self.cors_allow_origins:
             warnings.append(
                 "CORS_ALLOW_ORIGINS allows any origin ('*'); set explicit origins "

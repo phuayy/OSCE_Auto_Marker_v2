@@ -226,7 +226,7 @@ def test_prepare_retry_attempt_succeeds_for_an_existing_failed_job(tmp_path) -> 
     async def scenario() -> tuple[bool, dict[str, Any]]:
         job = await _enqueue_dispatched_job(service, "session-retry")
         await service.repository.claim_queued(str(job["id"]), "worker-1")
-        await service.repository.mark_failed(str(job["id"]), "transient")
+        await service.repository.mark_failed(str(job["id"]), "transient", worker_id="worker-1")
         still_exists = await service.prepare_hatchet_retry_attempt(str(job["id"]), retry_count=1)
         return still_exists, await service.repository.read(str(job["id"]))
 

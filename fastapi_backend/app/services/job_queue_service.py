@@ -433,6 +433,10 @@ class JobQueueService:
         surface as an unhandled ``FileNotFoundError`` crashing the Hatchet
         task; the caller (``process_job``) now reads ``False`` as "nothing left
         to do" and stops without running the job or raising.
+
+        A ``running`` row is requeued only when its worker is provably gone
+        (see ``JobRepository.prepare_retry_attempt``); a duplicate run's retry
+        therefore leaves a live run's row alone.
         """
         if retry_count <= 0:
             return True
@@ -440,6 +444,8 @@ class JobQueueService:
             job = await self.repository.prepare_retry_attempt(
                 job_id,
                 f"Preparing Hatchet retry attempt {retry_count}.",
+                worker_id=self._worker_id,
+                stale_after_seconds=self.settings.job_stale_running_timeout_seconds,
             )
         except FileNotFoundError:
             logger.info(
@@ -448,6 +454,17 @@ class JobQueueService:
                 retry_count,
             )
             return False
+        if str(job.get("status")) != JobStatus.QUEUED:
+            # A live run holds the row (or it is terminal / out of attempts):
+            # nothing was requeued, so there is no retry to announce. The claim
+            # that follows decides what this run does.
+            logger.info(
+                "Job %s is %s; Hatchet retry attempt %d left it as it was.",
+                job_id,
+                job.get("status"),
+                retry_count,
+            )
+            return True
         await self.repository.append_event(
             job_id,
             "retry_prepared",
@@ -727,6 +744,8 @@ class JobQueueService:
         requeued = await self.repository.prepare_retry_attempt(
             job_id,
             f"Retrying after failure: {message}",
+            worker_id=self._worker_id,
+            stale_after_seconds=self.settings.job_stale_running_timeout_seconds,
         )
         if str(requeued.get("status")) != JobStatus.QUEUED:
             # The row moved on (cancelled, or attempts exhausted concurrently);
@@ -784,7 +803,12 @@ class JobQueueService:
             await self.repository.append_event(job_id, "retry_skipped", reason, {"sessionId": session_id})
             return None
 
-        requeued = await self.repository.prepare_retry_attempt(job_id, f"Retrying after failure: {message}")
+        requeued = await self.repository.prepare_retry_attempt(
+            job_id,
+            f"Retrying after failure: {message}",
+            worker_id=self._worker_id,
+            stale_after_seconds=self.settings.job_stale_running_timeout_seconds,
+        )
         if str(requeued.get("status")) != JobStatus.QUEUED:
             return None
         # The run Hatchet is about to retry is the one already on record; only
@@ -844,6 +868,19 @@ class JobQueueService:
             if raise_on_error:
                 raise FinalJobFailure(message) from error
             return JobRunResult(job=failed, error=error)
+        if claim.held:
+            # A second engine run for a job the live one already owns (an
+            # overlapping redispatch, a rerun of a queued row). Raising would
+            # have Hatchet retry, and the retry's requeue is how a duplicate
+            # used to take the row off its live worker; the holder owns the
+            # job, so this run simply has nothing to do.
+            logger.info(
+                "Job %s is running under %s; this duplicate run stands down.",
+                job_id,
+                claim.job.get("lockedBy"),
+                extra=log_context(str(claim.job.get("sessionId")), "job_claim_held", job_id=job_id),
+            )
+            return JobRunResult()
         if not claim.claimed:
             if raise_on_error:
                 status = str(claim.job.get("status") or "")
@@ -887,7 +924,13 @@ class JobQueueService:
             payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
             await spec.run(self.pipeline, self.clips, session_id, payload)
 
-            finished = await self.repository.mark_succeeded(job_id)
+            finished = await self.repository.mark_succeeded(job_id, worker_id=self._worker_id)
+            if finished is None:
+                # Cancelled, or requeued and claimed by another run, while this
+                # one executed: the outcome was not recorded, so nothing is
+                # announced and the session is left to the row's real owner.
+                logger.warning("Job %s finished but this worker no longer owns it.", job_id, extra=job_context)
+                return JobRunResult()
             logger.info("Job succeeded: %s", task_type, extra=job_context)
             await self.repository.append_event(job_id, JobStatus.SUCCEEDED, f"{task_type} succeeded", {"sessionId": session_id})
             await self._sync_session_job(finished)
@@ -915,7 +958,10 @@ class JobQueueService:
         except Exception as error:
             message = self._exception_message(error, "Job failed.")
             logger.error("Job failed: %s (%s)", task_type, message, extra=job_context)
-            failed = await self.repository.mark_failed(job_id, message)
+            failed = await self.repository.mark_failed(job_id, message, worker_id=self._worker_id)
+            if failed is None:
+                logger.warning("Job %s failed but this worker no longer owns it: %s", job_id, message, extra=job_context)
+                return JobRunResult()
             await self.repository.append_event(job_id, JobStatus.FAILED, message, {"sessionId": session_id})
             # Hatchet re-runs a raised task itself. The row goes back to
             # ``queued`` *now*, not when the next attempt starts, so between

@@ -6,16 +6,30 @@
 import { RUN_STATUS } from './clipAssessments.js';
 import { INTERMISSION_KIND } from './manualTimeline.js';
 
+/** Why a draft clip's run buttons are off — the server refuses it with 409. */
+export const DRAFT_CLIP_REASON = 'Not cut yet — export clips (or wait for the re-cut) first.';
+
+/**
+ * A draft is a range whose MP4 has not been cut (auto-crop's proposal, or a
+ * clip mid re-cut). It has no file to assess, whatever its run state says.
+ */
+export function isDraftClip(clip) {
+  return clip?.isDraft === true;
+}
+
 /**
  * Clip ids eligible for batch selection, in clip order. Intermissions are
- * never assessable; a clip whose assessment is already running cannot be
- * queued again.
+ * never assessable; neither is a draft with no cut file; a clip whose
+ * assessment is already running cannot be queued again.
  */
 export function selectableClipIds(clips, runStates) {
   return (Array.isArray(clips) ? clips : [])
     .filter(
       (clip) =>
-        clip?.id && clip.kind !== INTERMISSION_KIND && runStates?.[clip.id]?.status !== RUN_STATUS.RUNNING
+        clip?.id &&
+        clip.kind !== INTERMISSION_KIND &&
+        !isDraftClip(clip) &&
+        runStates?.[clip.id]?.status !== RUN_STATUS.RUNNING
     )
     .map((clip) => clip.id);
 }

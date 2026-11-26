@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import glob
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -11,7 +12,7 @@ from uuid import uuid4
 
 from app.core.artifacts import artifact_metadata
 from app.core.config import Settings
-from app.core.exceptions import EmptyTranscriptError
+from app.core.exceptions import AppError, EmptyTranscriptError
 from app.core.json_utils import extract_json_object
 from app.core.locks import KeyedLocks
 from app.core.process import CommandRunner
@@ -241,38 +242,78 @@ class MediaPipeline:
     async def extract_audio_to_mp3(self, session: dict[str, Any]) -> dict[str, Any]:
         audio_file_name = f"{session['id']}.mp3"
         audio_path = self.settings.paths.output_audio_dir / audio_file_name
-        args = [
-            "-y",
-            "-i",
-            str(session["files"]["video"]["absolutePath"]),
-            "-vn",
-            "-codec:a",
-            "libmp3lame",
-            "-q:a",
-            self.settings.audio_mp3_vbr_quality,
-            "-ar",
-            self.settings.audio_mp3_sample_rate,
-            str(audio_path),
-        ]
-        await self.runner.run(self.settings.ffmpeg_bin, args, "Audio extraction (ffmpeg)")
+
+        def build_args(output: Path) -> list[str]:
+            return [
+                "-y",
+                "-i",
+                str(session["files"]["video"]["absolutePath"]),
+                "-vn",
+                "-codec:a",
+                "libmp3lame",
+                "-q:a",
+                self.settings.audio_mp3_vbr_quality,
+                "-ar",
+                self.settings.audio_mp3_sample_rate,
+                str(output),
+            ]
+
+        await self._run_ffmpeg_atomic(audio_path, build_args, "Audio extraction (ffmpeg)")
         return artifact_metadata(audio_path, "/media/audio")
+
+    async def _run_ffmpeg_atomic(
+        self,
+        final_path: Path,
+        build_args: Callable[[Path], list[str]],
+        label: str,
+    ) -> None:
+        """Run ffmpeg into a sibling temp file and publish it with one rename.
+
+        The pipeline resumes by adopting whatever sits at an artifact's final
+        path, so that path must only ever hold a finished file: ffmpeg killed
+        mid-write (restart, cancel, watchdog) used to leave a truncated MP3
+        there, and only the first minutes of a station were then transcribed.
+        The temp keeps the extension (ffmpeg picks its muxer from it) and is
+        removed on failure and cancellation alike; one a hard kill left behind
+        is never adopted (it is not the final name) and is swept before the next
+        write. One writer per artifact is guaranteed by the job queue, so the
+        sweep cannot take a live run's temp.
+        """
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        stale_pattern = f".{glob.escape(final_path.name)}.*.partial{glob.escape(final_path.suffix)}"
+        for stale in final_path.parent.glob(stale_pattern):
+            stale.unlink(missing_ok=True)
+        staging_path = final_path.with_name(f".{final_path.name}.{uuid4().hex[:8]}.partial{final_path.suffix}")
+        published = False
+        try:
+            await self.runner.run(self.settings.ffmpeg_bin, build_args(staging_path), label)
+            if not staging_path.is_file() or staging_path.stat().st_size <= 0:
+                raise RuntimeError(f"{label} wrote no output.")
+            await asyncio.to_thread(atomic_replace, staging_path, final_path)
+            published = True
+        finally:
+            if not published:
+                staging_path.unlink(missing_ok=True)
 
     async def create_bell_detection_wav(self, source_path: Path, sample_rate: int) -> Path:
         wav_path = source_path.with_name(f"{source_path.stem}.bell.wav")
-        args = [
-            "-y",
-            "-i",
-            str(source_path),
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            str(sample_rate),
-            "-sample_fmt",
-            "s16",
-            str(wav_path),
-        ]
-        await self.runner.run(self.settings.ffmpeg_bin, args, "Bell detector WAV conversion (ffmpeg)")
+
+        def build_args(output: Path) -> list[str]:
+            return [
+                "-y",
+                "-i",
+                str(source_path),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                str(sample_rate),
+                "-sample_fmt",
+                "s16",
+                str(output),
+            ]
+
+        await self._run_ffmpeg_atomic(wav_path, build_args, "Bell detector WAV conversion (ffmpeg)")
         return wav_path
 
     async def get_video_duration_seconds(self, video_path: Path) -> float:
@@ -450,81 +491,70 @@ class MediaPipeline:
         return artifact_metadata(output_path, f"/media/playback/{session_id}")
 
     async def _grab_frame(self, input_path: Path, output_path: Path, *, offset_seconds: float) -> None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        staging_path = output_path.with_name(f".{output_path.name}.{uuid4().hex[:8]}.partial{output_path.suffix}")
         max_height = max(0, int(self.settings.playback_copy_max_height or 0))
         scale = [] if max_height <= 0 else ["-vf", f"scale=-2:'min({max_height},ih)'"]
-        args = [
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            # Before -i: seek by keyframe instead of decoding up to the offset.
-            "-ss",
-            f"{offset_seconds:.3f}",
-            "-i",
-            str(input_path),
-            "-frames:v",
-            "1",
-            *scale,
-            "-q:v",
-            "4",
-            str(staging_path),
-        ]
-        try:
-            await self.runner.run(self.settings.ffmpeg_bin, args, "Poster frame (ffmpeg)")
-        except Exception:
-            await asyncio.to_thread(staging_path.unlink, True)
-            raise
-        if not staging_path.is_file() or staging_path.stat().st_size <= 0:
-            await asyncio.to_thread(staging_path.unlink, True)
-            raise RuntimeError("ffmpeg wrote no poster frame.")
-        await asyncio.to_thread(atomic_replace, staging_path, output_path)
+
+        def build_args(output: Path) -> list[str]:
+            return [
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                # Before -i: seek by keyframe instead of decoding up to the offset.
+                "-ss",
+                f"{offset_seconds:.3f}",
+                "-i",
+                str(input_path),
+                "-frames:v",
+                "1",
+                *scale,
+                "-q:v",
+                "4",
+                str(output),
+            ]
+
+        await self._run_ffmpeg_atomic(output_path, build_args, "Poster frame (ffmpeg)")
 
     async def _transcode_for_browser(self, input_path: Path, output_path: Path) -> None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        staging_path = output_path.with_name(f".{output_path.name}.{uuid4().hex[:8]}.partial{output_path.suffix}")
         max_height = max(0, int(self.settings.playback_copy_max_height or 0))
         # Never upscale; keep the width even, which libx264 requires.
         scale = [] if max_height <= 0 else ["-vf", f"scale=-2:'min({max_height},ih)'"]
-        args = [
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            str(input_path),
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a?",
-            *scale,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "26",
-            "-pix_fmt",
-            "yuv420p",
-            # A keyframe every 2 s, so a clip cut from this copy by stream copy
-            # starts close to where it was asked to. Copies written before this
-            # flag existed have the encoder's default GOP; cuts on them are just
-            # less precise, which is acceptable.
-            "-force_key_frames",
-            "expr:gte(t,n_forced*2)",
-            "-c:a",
-            "aac",
-            "-movflags",
-            "+faststart",
-            str(staging_path),
-        ]
-        try:
-            await self.runner.run(self.settings.ffmpeg_bin, args, "Browser playback copy (ffmpeg)")
-        except Exception:
-            await asyncio.to_thread(staging_path.unlink, True)
-            raise
-        await asyncio.to_thread(atomic_replace, staging_path, output_path)
+
+        def build_args(output: Path) -> list[str]:
+            return [
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(input_path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                *scale,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "26",
+                "-pix_fmt",
+                "yuv420p",
+                # A keyframe every 2 s, so a clip cut from this copy by stream copy
+                # starts close to where it was asked to. Copies written before this
+                # flag existed have the encoder's default GOP; cuts on them are just
+                # less precise, which is acceptable.
+                "-force_key_frames",
+                "expr:gte(t,n_forced*2)",
+                "-c:a",
+                "aac",
+                "-movflags",
+                "+faststart",
+                str(output),
+            ]
+
+        await self._run_ffmpeg_atomic(output_path, build_args, "Browser playback copy (ffmpeg)")
 
     async def crop_video_segment(
         self,
@@ -1008,7 +1038,20 @@ class MediaPipeline:
         Revision 0 (every clip a split produces) keeps the historical names
         untouched; a re-cut clip carries ``-r<revision>``.
         """
-        export_index = int(clip.get("exportIndex") or 0)
+        raw_index = clip.get("exportIndex")
+        if raw_index is None:
+            # The index is half of the file's identity. Defaulting it to 0 made
+            # every clip without one resolve to the same ``clip-1`` name, and
+            # the adoption rule below then handed one student's footage to
+            # another. A clip that has never been through an export plan has no
+            # name to cut to; refuse rather than guess a shared one.
+            raise AppError(
+                "This clip is not part of an export plan, so it has no file name to be cut to. "
+                "Export clips to plan it first.",
+                status_code=400,
+                retryable=False,
+            )
+        export_index = int(raw_index)
         revision = int(clip.get("revision") or 0)
         revision_suffix = f"-r{revision}" if revision > 0 else ""
         resolved_plan = str(plan_id or clip.get("planId") or "")
@@ -1312,22 +1355,25 @@ class MediaPipeline:
         if not filters:
             return source_path
         wav_path = source_path.with_suffix(".wav")
-        args = [
-            "-y",
-            "-i",
-            str(source_path),
-            "-vn",
-            "-af",
-            filters,
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-sample_fmt",
-            "s16",
-            str(wav_path),
-        ]
-        await self.runner.run(self.settings.ffmpeg_bin, args, "WhisperX input WAV (ffmpeg filters)")
+
+        def build_args(output: Path) -> list[str]:
+            return [
+                "-y",
+                "-i",
+                str(source_path),
+                "-vn",
+                "-af",
+                filters,
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-sample_fmt",
+                "s16",
+                str(output),
+            ]
+
+        await self._run_ffmpeg_atomic(wav_path, build_args, "WhisperX input WAV (ffmpeg filters)")
         return wav_path
 
     async def _resolve_whisperx_device(self, session_id: str) -> str:

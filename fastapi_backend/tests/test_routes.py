@@ -766,6 +766,49 @@ def test_recrop_answers_202_with_a_queued_job(tmp_path) -> None:
     assert (body["clip"]["start"], body["clip"]["end"]) == (10.0, 140.0)
 
 
+def test_recrop_of_a_never_exported_clip_answers_200_with_no_job(tmp_path) -> None:
+    """An auto-crop draft has no cut to replace: only its range moves."""
+    client = build_test_client(tmp_path)
+    token = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    container = client.app.state.container
+    video_path = tmp_path / "recording.mp4"
+    video_path.write_bytes(b"video")
+    asyncio.run(
+        container.sessions.write(
+            {
+                "id": "s-draft",
+                "name": "Long Station",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "status": "cropped",
+                "workflow": "long",
+                "files": {"video": {"absolutePath": str(video_path)}},
+                "outputs": {
+                    "videoClips": [
+                        {"id": "clip-a", "label": "Student A", "kind": "session", "start": 0.0, "end": 120.0,
+                         "fileName": None, "url": None, "absolutePath": None, "isDraft": True}
+                    ]
+                },
+            }
+        )
+    )
+
+    async def fake_video_duration(_path: Path) -> float:
+        return 600.0
+
+    container.media.get_video_duration_seconds = fake_video_duration
+
+    response = client.post(
+        "/api/sessions/s-draft/clips/clip-a/recrop", headers=headers, json={"start": 10.0, "end": 140.0}
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["job"] is None
+    assert body["clip"]["isDraft"] is True
+    assert (body["clip"]["start"], body["clip"]["end"]) == (10.0, 140.0)
+
+
 def test_unscoped_job_listing_is_paginated_not_unbounded(tmp_path) -> None:
     """``GET /api/jobs`` with no ``sessionId`` used to return every job row the
     deployment had ever created. It now pages the same way ``GET /api/sessions``

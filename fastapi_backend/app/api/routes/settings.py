@@ -11,11 +11,13 @@ from app.llm.panel import MarkingMode, PanelConfig, parse_marking_mode
 from app.llm.routing import LLMTarget
 from app.pipeline import person_presets
 from app.pipeline import region_focus
+from app.pipeline.transcription.registry import deployment_scoped_options
 from app.repositories.app_settings_repository import (
     LLM_FALLBACKS_KEY,
     LLM_MARKING_MODE_KEY,
     LLM_PANEL_KEY,
     LLM_PRIMARY_KEY,
+    TRANSCRIPTION_OPTIONS_KEY,
 )
 from app.schemas.settings import (
     CustomProviderRequest,
@@ -449,7 +451,18 @@ async def patch_settings(
 
 
 def _reject_deployment_scoped(changes: dict[str, Any]) -> None:
+    """403 for a personal write that names a deployment-scoped key — or, inside
+    ``transcriptionEngineOptions``, a deployment-scoped engine parameter (the
+    ffmpeg filter chain, the model checkpoint; see ``ParameterSpec``)."""
     stray = next((key for key in changes if not is_user_scoped(key)), None)
+    if stray is None:
+        stray = next(
+            (
+                f"{TRANSCRIPTION_OPTIONS_KEY}.{option}"
+                for option in deployment_scoped_options(changes.get(TRANSCRIPTION_OPTIONS_KEY))
+            ),
+            None,
+        )
     if stray is not None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

@@ -4,12 +4,15 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { EngineSettingsSkeleton, LoadingRegion } from '@/components/skeletons.jsx';
 import {
+  buildDeploymentOptionsPayload,
   buildTranscriptionPatch,
   effectiveValue,
   engineWarnings,
   findEngine,
+  isDeploymentScoped,
   resolveSelectedEngineId,
   splitParameters,
+  userEditableOptions,
   validateEngineOptions,
 } from '@/lib/transcriptionEngines';
 import { apiJson } from '@/lib/apiFetch';
@@ -20,7 +23,12 @@ import { apiJson } from '@/lib/apiFetch';
 // GET /api/settings/transcription-engines, so a newly shipped engine appears
 // here without a frontend change. The chosen engine applies to every future
 // run, including per-student clip runs and the Hatchet worker.
-export default function TranscriptionEngineSettings({ onSettingsChanged }) {
+//
+// Parameters the backend marks deploymentScoped (the model checkpoint, the ffmpeg
+// filter chain) decide what the server loads or runs, so they belong to the
+// deployment document: an administrator edits them here and they are saved
+// through the admin route; everyone else sees them read-only.
+export default function TranscriptionEngineSettings({ onSettingsChanged, isAdmin = false }) {
   const [description, setDescription] = useState(null); // null = never loaded
   const [loadError, setLoadError] = useState('');
   const [saveError, setSaveError] = useState('');
@@ -28,6 +36,9 @@ export default function TranscriptionEngineSettings({ onSettingsChanged }) {
   const [savedAt, setSavedAt] = useState(0);
   const [selectedEngineId, setSelectedEngineId] = useState('');
   const [optionsByEngine, setOptionsByEngine] = useState({});
+  // The deployment document's own engine options: what a read-only control
+  // shows, and what an administrator edits.
+  const [deploymentOptions, setDeploymentOptions] = useState({});
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   async function loadEngines() {
@@ -42,7 +53,8 @@ export default function TranscriptionEngineSettings({ onSettingsChanged }) {
 
       setDescription(enginesBody);
       setSelectedEngineId(resolveSelectedEngineId(enginesBody));
-      setOptionsByEngine(settingsBody.settings?.transcriptionEngineOptions || {});
+      setOptionsByEngine(userEditableOptions(enginesBody, settingsBody.overrides?.transcriptionEngineOptions));
+      setDeploymentOptions(settingsBody.defaults?.transcriptionEngineOptions || {});
     } catch (error) {
       setLoadError(error.message || 'Failed to load transcription engines.');
     }
@@ -54,22 +66,28 @@ export default function TranscriptionEngineSettings({ onSettingsChanged }) {
 
   const engine = useMemo(() => findEngine(description, selectedEngineId), [description, selectedEngineId]);
   const overrides = optionsByEngine[selectedEngineId] || {};
-  const errors = useMemo(() => validateEngineOptions(engine, overrides), [engine, overrides]);
+  const deploymentBag = deploymentOptions[selectedEngineId] || {};
+  const errors = useMemo(
+    () => validateEngineOptions(engine, isAdmin ? { ...overrides, ...deploymentBag } : overrides),
+    [engine, overrides, deploymentBag, isAdmin],
+  );
   const { basic, advanced } = splitParameters(engine);
   const warnings = engineWarnings(engine);
   const hasErrors = Object.keys(errors).length > 0;
 
-  function setOption(name, value) {
-    setOptionsByEngine((current) => ({
+  function setOption(parameter, value) {
+    const update = isDeploymentScoped(parameter) ? setDeploymentOptions : setOptionsByEngine;
+    update((current) => ({
       ...current,
-      [selectedEngineId]: { ...(current[selectedEngineId] || {}), [name]: value },
+      [selectedEngineId]: { ...(current[selectedEngineId] || {}), [parameter.name]: value },
     }));
   }
 
-  function resetOption(name) {
-    setOptionsByEngine((current) => {
+  function resetOption(parameter) {
+    const update = isDeploymentScoped(parameter) ? setDeploymentOptions : setOptionsByEngine;
+    update((current) => {
       const next = { ...(current[selectedEngineId] || {}) };
-      delete next[name];
+      delete next[parameter.name];
       return { ...current, [selectedEngineId]: next };
     });
   }
@@ -79,12 +97,21 @@ export default function TranscriptionEngineSettings({ onSettingsChanged }) {
     setSaveError('');
     try {
       const payload = buildTranscriptionPatch(description, selectedEngineId, optionsByEngine);
+      if (isAdmin) {
+        const deploymentPayload = buildDeploymentOptionsPayload(description, deploymentOptions);
+        const saved = await apiJson('/api/admin/settings', {
+          method: 'PATCH',
+          json: deploymentPayload,
+          fallbackMessage: 'Failed to save the deployment transcription options.',
+        });
+        setDeploymentOptions(saved.settings?.transcriptionEngineOptions || {});
+      }
       const body = await apiJson('/api/settings', {
         method: 'PATCH',
         json: payload,
         fallbackMessage: 'Failed to save the transcription engine.',
       });
-      setOptionsByEngine(body.settings?.transcriptionEngineOptions || {});
+      setOptionsByEngine(userEditableOptions(description, optionsByEngine));
       setSavedAt(Date.now());
       if (onSettingsChanged) onSettingsChanged(body.settings);
     } catch (error) {
@@ -95,8 +122,11 @@ export default function TranscriptionEngineSettings({ onSettingsChanged }) {
   }
 
   function renderControl(parameter) {
-    const value = effectiveValue(engine, parameter, overrides);
-    const isOverridden = overrides[parameter.name] !== undefined;
+    const scoped = isDeploymentScoped(parameter);
+    const readOnly = scoped && !isAdmin;
+    const source = scoped ? deploymentBag : overrides;
+    const value = effectiveValue(engine, parameter, source);
+    const isOverridden = !readOnly && source[parameter.name] !== undefined;
     const error = errors[parameter.name];
     const controlId = `engine-${selectedEngineId}-${parameter.name}`;
 
@@ -109,7 +139,7 @@ export default function TranscriptionEngineSettings({ onSettingsChanged }) {
           {isOverridden ? (
             <button
               type="button"
-              onClick={() => resetOption(parameter.name)}
+              onClick={() => resetOption(parameter)}
               className="flex items-center gap-1 text-[11px] text-slate-500 hover:text-slate-800"
               title="Restore this deployment's default"
             >
@@ -125,7 +155,8 @@ export default function TranscriptionEngineSettings({ onSettingsChanged }) {
             type="button"
             role="switch"
             aria-checked={Boolean(value)}
-            onClick={() => setOption(parameter.name, !value)}
+            disabled={readOnly}
+            onClick={() => setOption(parameter, !value)}
             className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
               value ? 'bg-violet-600' : 'bg-slate-300'
             }`}
@@ -139,8 +170,9 @@ export default function TranscriptionEngineSettings({ onSettingsChanged }) {
         ) : parameter.type === 'enum' ? (
           <select
             id={controlId}
+            disabled={readOnly}
             value={String(value ?? '')}
-            onChange={(event) => setOption(parameter.name, event.target.value)}
+            onChange={(event) => setOption(parameter, event.target.value)}
             className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm"
           >
             {(parameter.options || []).map((option) => (
@@ -152,12 +184,13 @@ export default function TranscriptionEngineSettings({ onSettingsChanged }) {
         ) : (
           <input
             id={controlId}
+            disabled={readOnly}
             type={parameter.type === 'int' || parameter.type === 'float' ? 'number' : 'text'}
             step={parameter.type === 'float' ? '0.1' : undefined}
             min={parameter.minimum}
             max={parameter.maximum}
             value={value ?? ''}
-            onChange={(event) => setOption(parameter.name, event.target.value)}
+            onChange={(event) => setOption(parameter, event.target.value)}
             className={`rounded-lg border px-3 py-1.5 text-sm ${
               error ? 'border-rose-300 bg-rose-50' : 'border-slate-200 bg-white'
             }`}
@@ -165,6 +198,11 @@ export default function TranscriptionEngineSettings({ onSettingsChanged }) {
         )}
 
         {parameter.help ? <div className="text-[11px] text-slate-500">{parameter.help}</div> : null}
+        {scoped ? (
+          <div className="text-[11px] font-medium text-slate-500">
+            {readOnly ? 'Set by an administrator for every marker.' : 'Deployment setting: applies to every marker.'}
+          </div>
+        ) : null}
         {error ? <div className="text-[11px] font-medium text-rose-600">{error}</div> : null}
       </div>
     );

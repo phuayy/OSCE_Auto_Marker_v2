@@ -14,10 +14,13 @@ rather than letting vendor exceptions leak upward.
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -261,6 +264,12 @@ class ModelSpec:
     max_output_tokens: int = 0
     supports_json_mode: bool = True
     supports_reasoning_control: bool = False
+    # Name of the body field that carries the output budget. OpenAI's o-series
+    # rejects ``max_tokens`` and wants ``max_completion_tokens``.
+    token_parameter: str = "max_tokens"
+    # False for models that reject ``temperature`` / ``top_p`` outright (the
+    # o-series): the fields are omitted rather than sent and refused.
+    supports_sampling: bool = True
     notes: str = ""
 
     def to_public(self) -> dict[str, Any]:
@@ -440,6 +449,11 @@ def truncate_for_log(content: str, max_chars: int = 2_000) -> str:
     return f"{text[:max_chars]}... [truncated, total {len(text)} chars]"
 
 
+# (provider, model, requested budget) triples already reported, so a run's many
+# calls log a clamp once. Carries no credential.
+_CLAMP_LOGGED: set[tuple[str, str, int]] = set()
+
+
 class LLMProvider:
     """Base class. Subclasses supply ``descriptor`` and ``complete``."""
 
@@ -481,6 +495,37 @@ class LLMProvider:
 
     def complete(self, request: ChatRequest, model: str, mode: RequestMode) -> ChatResponse:
         raise NotImplementedError
+
+    def model_spec(self, model: str) -> ModelSpec | None:
+        """The shortlist entry for ``model``; None for an id the operator typed."""
+        return self.descriptor.model(model)
+
+    def output_budget(self, request: ChatRequest, model: str) -> int:
+        """The output-token budget this model can be asked for.
+
+        ``request.max_tokens`` is one deployment-wide number, but every
+        shortlisted model declares its own ceiling and a vendor answers 400 to
+        a request above it - terminal for the target, so a panel marker on such
+        a model always degraded. This is the one place the clamp is decided, so
+        every adapter (OpenAI-compatible, Anthropic, custom) shapes the budget
+        identically, per target: a fallback is clamped to *its* limit, not the
+        primary's. A model with no known limit keeps the configured value.
+        """
+        spec = self.model_spec(model)
+        limit = spec.max_output_tokens if spec is not None else 0
+        if limit > 0 and request.max_tokens > limit:
+            key = (self.descriptor.id, model, request.max_tokens)
+            if key not in _CLAMP_LOGGED:
+                _CLAMP_LOGGED.add(key)
+                logger.info(
+                    "Clamping max_tokens %d to %d, the output limit of %s/%s.",
+                    request.max_tokens,
+                    limit,
+                    self.descriptor.id,
+                    model,
+                )
+            return limit
+        return request.max_tokens
 
     def validate_content(
         self,

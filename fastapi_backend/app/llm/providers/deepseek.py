@@ -27,7 +27,7 @@ DESCRIPTOR = ProviderDescriptor(
             id="deepseek-reasoner",
             label="DeepSeek R1 (reasoner)",
             context_window=128_000,
-            max_output_tokens=8_192,
+            max_output_tokens=65_536,
             supports_reasoning_control=True,
             notes="Reasoning is returned separately from the answer, so it never truncates the JSON.",
         ),
