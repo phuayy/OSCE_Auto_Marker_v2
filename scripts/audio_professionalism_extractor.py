@@ -47,6 +47,9 @@ NOT_OBSERVABLE_FROM_AUDIO = [
 ]
 
 
+UNKNOWN_SPEAKER = "SPEAKER_UNKNOWN"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -74,7 +77,7 @@ def infer_speaker(segment: dict[str, Any]) -> str:
             if candidate:
                 return candidate
 
-    return "SPEAKER_UNKNOWN"
+    return UNKNOWN_SPEAKER
 
 
 def load_transcript_segments(transcript_path: Path) -> list[dict[str, Any]]:
@@ -145,41 +148,97 @@ def merge_segments(segments: Iterable[dict[str, Any]], max_gap: float) -> list[d
     return merged
 
 
+# Fewer questions than this is not evidence of who is taking the history: a
+# patient asks "what is it, doctor?" now and then.
+MIN_QUESTIONS_TO_DECIDE = 2
+# Confidence recorded when the choice rests on who spoke first, or on there
+# being nobody else to choose. Below the 0.3 warning line on purpose: it is a
+# guess the reader should verify.
+WEAK_SIGNAL_CONFIDENCE = 0.2
+
+
 def select_student_speaker(segments: list[dict[str, Any]], override: str | None) -> dict[str, Any]:
+    """Pick which diarised speaker is the student, and record why.
+
+    The transcript carries diarisation labels only (SPEAKER_00, ...); nothing
+    says which one is the clinician. Talk time is not a safe proxy -- in a
+    history-taking station the actor-patient often talks most -- so the
+    student is the speaker who asks the questions, which is what taking a
+    history is. When the questions do not separate the speakers (none asked,
+    or an equal number), the speaker who opens the station is taken, with a
+    confidence low enough to raise the "verify diarization" warning. The
+    ``speakers`` block lists the evidence for every speaker so the choice can
+    be audited from the output alone.
+    """
     if override:
         return {
             "id": override,
             "selection": "override",
+            "reason": "Student speaker was set by the operator.",
             "confidence": 1.0,
             "gap_seconds": 0.0,
+            "speakers": [],
         }
 
-    totals: dict[str, float] = {}
-    for seg in segments:
-        speaker = seg.get("speaker", "SPEAKER_UNKNOWN")
-        totals[speaker] = totals.get(speaker, 0.0) + max(0.0, seg["end"] - seg["start"])
+    stats: dict[str, dict[str, Any]] = {}
+    for seg in sorted(segments, key=lambda item: item["start"]):
+        speaker = seg.get("speaker") or UNKNOWN_SPEAKER
+        entry = stats.setdefault(
+            speaker, {"id": speaker, "questions": 0, "talk_seconds": 0.0, "first_start": seg["start"]}
+        )
+        entry["questions"] += str(seg.get("text", "")).count("?")
+        entry["talk_seconds"] += max(0.0, seg["end"] - seg["start"])
 
-    if not totals:
+    if not stats:
         return {
-            "id": "SPEAKER_UNKNOWN",
+            "id": UNKNOWN_SPEAKER,
             "selection": "fallback",
+            "reason": "The transcript has no speech to attribute.",
             "confidence": 0.0,
             "gap_seconds": 0.0,
+            "speakers": [],
         }
 
-    ordered = sorted(totals.items(), key=lambda item: item[1], reverse=True)
-    top_speaker, top_duration = ordered[0]
-    second_duration = ordered[1][1] if len(ordered) > 1 else 0.0
-    gap = max(0.0, top_duration - second_duration)
-    total = sum(totals.values()) or 1.0
-    confidence = round(min(1.0, max(0.1, gap / total)), 3)
+    speakers = [
+        {**entry, "talk_seconds": round(entry["talk_seconds"], 3), "first_start": round(entry["first_start"], 3)}
+        for entry in stats.values()
+    ]
+    opener = min(speakers, key=lambda entry: entry["first_start"])
 
-    return {
-        "id": top_speaker,
-        "selection": "max_total_duration",
-        "confidence": confidence,
-        "gap_seconds": round(gap, 3),
-    }
+    def chosen(entry: dict[str, Any], selection: str, reason: str, confidence: float, gap: float) -> dict[str, Any]:
+        return {
+            "id": entry["id"],
+            "selection": selection,
+            "reason": reason,
+            "confidence": round(confidence, 3),
+            "gap_seconds": round(gap, 3),
+            "speakers": speakers,
+        }
+
+    if len(speakers) == 1:
+        only = speakers[0]
+        if only["id"] == UNKNOWN_SPEAKER:
+            reason = "The transcript has no speaker labels, so all speech is treated as the student's."
+            return chosen(only, "no_speaker_labels", reason, 0.0, only["talk_seconds"])
+        reason = "Only one speaker was detected, so all speech is treated as the student's."
+        return chosen(only, "single_speaker", reason, WEAK_SIGNAL_CONFIDENCE, only["talk_seconds"])
+
+    by_questions = sorted(speakers, key=lambda entry: entry["questions"], reverse=True)
+    top, runner_up = by_questions[0], by_questions[1]
+    if top["questions"] >= MIN_QUESTIONS_TO_DECIDE and top["questions"] > runner_up["questions"]:
+        gap = top["questions"] - runner_up["questions"]
+        total = sum(entry["questions"] for entry in speakers)
+        reason = (
+            f"Asked the most questions ({top['questions']} against {runner_up['questions']}); "
+            "taking the history is the student's part."
+        )
+        return chosen(top, "most_questions", reason, max(0.1, min(1.0, gap / total)), gap)
+
+    reason = (
+        "Questions did not separate the speakers "
+        f"({top['questions']} against {runner_up['questions']}); took the speaker who opened the station."
+    )
+    return chosen(opener, "first_speaker", reason, WEAK_SIGNAL_CONFIDENCE, 0.0)
 
 
 def build_student_audio(
@@ -354,7 +413,7 @@ def compute_overlap_events(
                     "start": round(overlap_start, 3),
                     "end": round(overlap_end, 3),
                     "overlap_seconds": round(overlap, 3),
-                    "other_speaker": other.get("speaker", "SPEAKER_UNKNOWN"),
+                    "other_speaker": other.get("speaker", UNKNOWN_SPEAKER),
                 }
             )
 
