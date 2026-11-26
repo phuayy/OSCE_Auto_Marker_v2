@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.domain.communication_rubric import RubricValidationError, normalize_scoring_scale
+
 
 def clip_order(clips: list[dict[str, Any]], clip_id: str) -> int:
     """Index of ``clip_id`` in the parent's clip list, or -1 if not found."""
@@ -75,6 +77,15 @@ def _communication_criterion_point(index: int, criterion: Any) -> dict[str, Any]
     }
 
 
+def _sheet_scale(communication_scores: dict[str, Any]) -> dict[str, int]:
+    """The points per label the sheet was marked under; the default scale for a
+    sheet with none (or an unreadable one), as the scorer itself reads it."""
+    try:
+        return normalize_scoring_scale(communication_scores.get("scoring_scale"))
+    except RubricValidationError:
+        return normalize_scoring_scale(None)
+
+
 def summarize_communication_scores(communication_scores: dict[str, Any] | None) -> dict[str, Any] | None:
     """The communication tab's numbers, or None when the clip has no sheet yet."""
     if not communication_scores:
@@ -86,12 +97,14 @@ def summarize_communication_scores(communication_scores: dict[str, Any] | None) 
     # rubric renumbers them, so the cohort chart may only merge criteria from
     # sheets marked against the same revision; these say which that was.
     version = communication_scores.get("rubric_version")
+    scale = _sheet_scale(communication_scores)
     return {
+        "scoringScale": scale,
         "rubricRevision": communication_scores.get("rubric_revision") or None,
         "rubricVersionNumber": version.get("number") if isinstance(version, dict) else None,
         "totalCriteria": int(summary.get("total_criteria") or len(criteria)),
         "totalScore": float(summary.get("total_score") or 0),
-        "maxScore": float(summary.get("max_score") or len(criteria) * 3),
+        "maxScore": float(summary.get("max_score") or len(criteria) * scale["All"]),
         "passThreshold": float(summary.get("pass_threshold") or 0),
         "passFail": str(summary.get("pass_fail") or ""),
         "labelCounts": summary.get("label_counts") or {},

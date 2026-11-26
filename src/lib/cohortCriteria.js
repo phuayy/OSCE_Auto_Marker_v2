@@ -8,6 +8,8 @@
 // each sheet was marked against, and merged by id only inside one revision. A
 // sheet that records no revision (marked before revisions existed) forms its own
 // group, so a cohort that never saw an edit is one group, exactly as before.
+import { communicationScale } from './resultsModel.js';
+
 const LABELS = ['All', 'Most', 'Some', 'None'];
 
 function sortId(row) {
@@ -15,7 +17,7 @@ function sortId(row) {
 }
 
 /**
- * `[{ revision, versionNumber, studentCount, rows }]`, oldest rubric first.
+ * `[{ revision, versionNumber, maxPoints, studentCount, rows }]`, oldest rubric first.
  * Each row: `{ id, label, section, counts, totalPoints, studentCount }`, with the
  * label and section of that revision.
  */
@@ -34,6 +36,9 @@ export function groupCriteriaByRubricRevision(summaries) {
         versionNumber: Number.isFinite(Number(communication.rubricVersionNumber))
           ? Number(communication.rubricVersionNumber)
           : null,
+        // Per-criterion maximum of this revision's scale (the default scale's
+        // when the sheet recorded none), read the way the results view reads it.
+        maxPoints: communicationScale({ scoring_scale: communication.scoringScale }).All,
         studentCount: 0,
         rowsByKey: new Map(),
       });

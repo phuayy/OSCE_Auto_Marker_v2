@@ -81,3 +81,14 @@ test('an unknown label counts as None and a non-numeric points value as zero', (
   assert.deepEqual(group.rows[0].counts, { All: 0, Most: 0, Some: 0, None: 1 });
   assert.equal(group.rows[0].totalPoints, 0);
 });
+
+test('each group carries its own per-criterion maximum, defaulting for a legacy sheet', () => {
+  const edited = summary('r2', 2, [[1, 'A', 'All', 4]]);
+  edited.communication.scoringScale = { All: 4, Most: 3, Some: 1, None: 0 };
+  const standard = summary('r1', 1, [[1, 'A', 'All', 3]]);
+  standard.communication.scoringScale = { All: 3, Most: 2, Some: 1, None: 0 };
+  const legacy = summary(null, null, [[1, 'A', 'All', 3]]);
+  const groups = groupCriteriaByRubricRevision([edited, standard, legacy]);
+  assert.deepEqual(groups.map((group) => group.maxPoints), [3, 3, 4]);
+  assert.equal(groups[2].versionNumber, 2);
+});

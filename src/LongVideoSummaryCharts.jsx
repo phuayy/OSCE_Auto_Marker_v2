@@ -255,14 +255,18 @@ function CommunicationCriteriaChart({ summaries }) {
               {group.studentCount} {group.studentCount === 1 ? 'clip' : 'clips'}
             </div>
           ) : null}
-          <CriteriaRowsChart rows={group.rows} totalStudents={group.studentCount} />
+          <CriteriaRowsChart
+            rows={group.rows}
+            totalStudents={group.studentCount}
+            maxPoints={group.maxPoints}
+          />
         </div>
       ))}
     </div>
   );
 }
 
-function CriteriaRowsChart({ rows, totalStudents }) {
+function CriteriaRowsChart({ rows, totalStudents, maxPoints }) {
   const rowHeight = 42;
   const margin = { top: 28, right: 220, bottom: 28, left: 248 };
   const width = Math.max(1024, rows.length ? 980 : 400);
@@ -335,7 +339,7 @@ function CriteriaRowsChart({ rows, totalStudents }) {
                   y={rowHeight / 2 + 5}
                   className="fill-slate-700 text-[12px] font-semibold"
                 >
-                  avg {averagePoints.toFixed(2)} / 3
+                  avg {averagePoints.toFixed(2)} / {maxPoints}
                 </text>
               </g>
             );
