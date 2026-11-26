@@ -481,6 +481,7 @@ ensure_vm() {
     local status; status="$(gc compute instances describe "$INSTANCE" --zone "$ZONE" --format='value(status)')"
     if [[ "$status" == "RUNNING" ]]; then
       if confirm "The marker is running. Restart it now to apply the update? (Anyone using it is interrupted.)"; then
+        INSTALL_SINCE="$(date +%s)"
         gc compute instances stop "$INSTANCE" --zone "$ZONE" >/dev/null
         gc compute instances start "$INSTANCE" --zone "$ZONE" >/dev/null
         VM_STARTED=1
@@ -492,20 +493,24 @@ ensure_vm() {
       info "The marker is stopped; the update is applied the next time it starts from the gate."
     fi
   else
+    INSTALL_SINCE="$(date +%s)"
     create_vm
     VM_STARTED=1
   fi
   config_save
 }
 
-# The VM reports its install to the guest attribute osce/install.
+# The VM reports its install to the guest attribute osce/install. A report is
+# "ours" when it is newer than INSTALL_SINCE, taken just before the VM is
+# started or created: the VM can finish (or fail) long before wait_for_install
+# is reached, because the gate is deployed in between, and a reference time
+# taken at the wait would call that report an old one.
 wait_for_install() {
   [[ "${VM_STARTED:-0}" == 1 ]] || return 0
   step "Installing the app on the VM (first time: 15-30 minutes; updates: a few)"
   info "Safe to close this window: the install continues on its own."
   info "Log on the VM: sudo tail -f /var/log/osce-install.log"
-  local deadline=$(( $(date +%s) + 60 * 60 )) value="" last="" since
-  since="$(date +%s)"
+  local deadline=$(( $(date +%s) + 60 * 60 )) value="" last="" since="${INSTALL_SINCE:?ensure_vm marks the trigger time}"
   while (( $(date +%s) < deadline )); do
     value="$(gc compute instances get-guest-attributes "$INSTANCE" --zone "$ZONE" \
       --query-path=osce/install --format='value(value)' 2>/dev/null || true)"

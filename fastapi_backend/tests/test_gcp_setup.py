@@ -1,4 +1,4 @@
-"""deploy/gcp/setup.sh: GPU quota accounting.
+"""deploy/gcp/setup.sh: GPU quota accounting and the install wait.
 
 The script is sourced with OSCE_SETUP_SOURCE_ONLY=1 (which defines its functions without running
 ``main``) against a fake ``gcloud`` on PATH that answers from environment variables, so the
@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -40,12 +41,19 @@ esac
 exit 0
 """
 
+# Counts the waits and kills the script on the third: a loop that never sees its report is "stuck".
+FAKE_SLEEP = r"""#!/bin/bash
+echo x >>"$SANDBOX/sleeps"
+[[ "$(wc -l <"$SANDBOX/sleeps")" -ge 3 ]] && kill -9 "$PPID"
+exit 0
+"""
+
 
 @pytest.fixture()
 def sandbox(tmp_path: Path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for name, body in (("gcloud", FAKE_GCLOUD),):
+    for name, body in (("gcloud", FAKE_GCLOUD), ("sleep", FAKE_SLEEP)):
         (bin_dir / name).write_text(body)
         (bin_dir / name).chmod(0o755)
 
@@ -115,3 +123,47 @@ def test_a_vms_other_accelerator_is_not_credited_to_this_metric(sandbox) -> None
     assert "l4=1 t4=1" in result.stdout
 
 
+# --- M43: a report that lands before the wait starts is still seen --------------
+
+WAIT = """
+    VM_STARTED=1
+    INSTALL_SINCE=$(( $(date +%s) - 120 ))   # taken just before the VM was started
+    wait_for_install
+"""
+
+
+def _report(sandbox, text: str, age_seconds: int) -> None:
+    (sandbox.root / "install_value").write_text(f"{text} {int(time.time()) - age_seconds}\n")
+
+
+def test_a_done_report_from_before_the_wait_began_is_seen(sandbox) -> None:
+    _report(sandbox, "done g2-standard-8", 60)   # after the trigger (120 s ago), before the wait
+    result = sandbox(WAIT)
+    assert result.returncode == 0, result.stderr
+    assert "Installed" in result.stdout
+
+
+def test_a_report_from_a_previous_run_is_ignored(sandbox) -> None:
+    _report(sandbox, "done g2-standard-8", 3600)
+    result = sandbox(WAIT)
+    assert result.returncode != 0
+    assert "Installed" not in result.stdout
+    assert len((sandbox.root / "sleeps").read_text().splitlines()) >= 3, "kept waiting for this run's report"
+
+
+def test_a_failed_report_before_the_wait_is_reported_promptly(sandbox) -> None:
+    _report(sandbox, "failed python-dependencies", 60)
+    result = sandbox(WAIT)
+    assert result.returncode == 1
+    assert "failed at step 'python-dependencies'" in result.stderr
+    assert not (sandbox.root / "sleeps").exists(), "no waiting"
+
+
+def test_the_trigger_time_is_taken_before_each_way_of_starting_the_vm() -> None:
+    script = SCRIPT.read_text()
+    body = script[script.index("ensure_vm() {"):]
+    body = body[: body.index("\n}\n")]
+    mark = 'INSTALL_SINCE="$(date +%s)"'
+    assert body.count(mark) == 2
+    assert body.index(mark) < body.index("instances stop")
+    assert body.rindex(mark) < body.index("    create_vm")
