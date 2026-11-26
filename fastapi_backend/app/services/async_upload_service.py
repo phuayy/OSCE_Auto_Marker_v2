@@ -359,6 +359,11 @@ class AsyncUploadService:
         by asyncio.create_task, so we catch broadly and emit an SSE error event instead.
         """
         session_id: str | None = None
+        # Objects this run committed and still owns, by kind. If the run fails
+        # before the upload record is durable they are removed again (see
+        # _discard_committed_objects), so a rejected upload leaves nothing the
+        # media mount could serve or the bucket keep.
+        owned_refs: dict[str, dict[str, Any]] = {}
         try:
             upload = await self.repository.read(upload_id)
             session_id = str(upload["sessionId"])
@@ -367,6 +372,7 @@ class AsyncUploadService:
             for file_record in upload.get("files") or []:
                 storage_ref = await self.storage.complete_file(upload, file_record)
                 committed_refs[str(file_record["kind"])] = storage_ref
+                owned_refs[str(file_record["kind"])] = dict(storage_ref)
 
             video_ref = committed_refs.get("video")
             case_study_ref = committed_refs.get("caseStudy")
@@ -389,6 +395,10 @@ class AsyncUploadService:
                 public_url=public_url,
             )
             case_study_record["storageRef"] = case_study_ref
+            # From here the case study is a shared rubric asset (possibly
+            # another session's deduplicated object), no longer this upload's
+            # to delete.
+            owned_refs.pop("caseStudy", None)
             jobs = await self._commit_assembled(
                 upload, should_process, video_ref, case_study_ref, case_study_asset, case_study_deduplicated,
             )
@@ -407,7 +417,7 @@ class AsyncUploadService:
                 await self.jobs.start_job(job)
 
         except Exception as error:
-            await self._assembly_failed(upload_id, session_id, error)
+            await self._assembly_failed(upload_id, session_id, error, owned_refs=list(owned_refs.values()))
 
     async def _commit_assembled(
         self, upload: dict[str, Any], should_process: bool,
@@ -492,13 +502,43 @@ class AsyncUploadService:
             # Part files are only deleted once both records are durable.
             return [queued for queued in (job, media_job) if queued]
 
-    async def _assembly_failed(self, upload_id: str, session_id: str | None, error: Exception) -> None:
+    async def _discard_committed_objects(self, upload_id: str, refs: list[dict[str, Any]]) -> None:
+        """Remove objects a failed assembly committed.
+
+        ``abort_upload`` only reaches staging (and, on GCS, deliberately nothing
+        once committed), so without this a video that failed validation stays
+        under ``/media/source`` or in the bucket forever. Best effort: a
+        cleanup that cannot finish is logged and never replaces the error that
+        got us here.
+        """
+        for ref in refs:
+            try:
+                await self.storage.delete_committed_object(ref)
+            except Exception:
+                logger.warning(
+                    "Could not remove committed object %s of failed upload %s; it needs manual cleanup.",
+                    ref.get("key"),
+                    upload_id,
+                    exc_info=True,
+                )
+
+    async def _assembly_failed(
+        self,
+        upload_id: str,
+        session_id: str | None,
+        error: Exception,
+        *,
+        owned_refs: list[dict[str, Any]] | None = None,
+    ) -> None:
         logger.error("Upload assembly failed: %s", upload_id, exc_info=error)
         async with self.repository.locked(upload_id):
             current = await self.repository.read(upload_id)
             if current.get("status") != UploadStatus.ASSEMBLING:
                 logger.warning("Post-assembly operation failed for %s", upload_id, exc_info=error)
                 return
+            # Only while the upload is still assembling: once the commit is
+            # durable these objects belong to the session.
+            await self._discard_committed_objects(upload_id, owned_refs or [])
             # Mark the upload itself failed — leaving it on "assembling" would
             # make every retry of /complete hit the idempotency branch and
             # return "assembling" forever, with no way to recover client-side.
