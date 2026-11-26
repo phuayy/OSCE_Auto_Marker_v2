@@ -79,7 +79,7 @@ def mark_media_queued() -> SessionMutator:
     return update_media(status=MediaPreparationStatus.QUEUED, error=None)
 
 
-def _set_artifact(key: str, metadata: dict[str, Any]) -> SessionMutator:
+def set_video_artifact(key: str, metadata: dict[str, Any]) -> SessionMutator:
     def mutate(current: dict[str, Any]) -> Any:
         video = _source_video(current)
         if video is None or video.get(key) == metadata:
@@ -128,7 +128,7 @@ async def prepare_session_media(media: MediaPipeline, session: dict[str, Any], c
         poster = None
         logger.warning("Could not grab a poster frame for session %s.", session_id, exc_info=True, extra=context)
     if poster:
-        await commit(session, _set_artifact("poster", poster))
+        await commit(session, set_video_artifact("poster", poster))
 
     error: str | None = None
     try:
@@ -143,7 +143,7 @@ async def prepare_session_media(media: MediaPipeline, session: dict[str, Any], c
             extra=context,
         )
     if playback:
-        await commit(session, _set_artifact("playback", playback))
+        await commit(session, set_video_artifact("playback", playback))
 
     status = MediaPreparationStatus.FAILED if error else MediaPreparationStatus.READY
     await commit(session, update_media(status=status, error=error))
