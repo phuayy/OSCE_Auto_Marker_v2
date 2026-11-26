@@ -53,6 +53,8 @@ class FakeJobRepository:
         self.rows: dict[str, dict[str, Any]] = {}
 
     async def read(self, job_id: str) -> dict[str, Any]:
+        if job_id not in self.rows:
+            raise FileNotFoundError(f"Job not found: {job_id}")
         return self.rows[job_id]
 
     async def find_active(self, session_id: str, task_type: str) -> dict[str, Any] | None:

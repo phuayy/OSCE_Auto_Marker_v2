@@ -41,6 +41,7 @@ async def _export_job_is_active(jobs: Any, session_id: str, export: dict[str, An
         return await jobs.repository.find_active(session_id, TaskType.EXPORT_CLIPS) is not None
     try:
         job = await jobs.repository.read(job_id)
-    except Exception:
+    except FileNotFoundError:
+        # Only a missing row means the export is gone; a failed read says nothing.
         return False
     return str(job.get("status") or "") in ACTIVE_JOB_STATUSES

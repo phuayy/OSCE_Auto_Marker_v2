@@ -577,7 +577,9 @@ class SessionMaintenanceService:
             session_id,
             reset=reset,
             guard_clip_export=task_type == TaskType.AUTO_CROP,
-            settled_export=await settled_export_identity(self.jobs, session),
+            settled_export=(
+                await settled_export_identity(self.jobs, session) if task_type == TaskType.AUTO_CROP else None
+            ),
         )
 
         # From here on this call has won the run: nothing else can be scoring

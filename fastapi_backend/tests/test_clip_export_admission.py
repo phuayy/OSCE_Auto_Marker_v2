@@ -171,6 +171,21 @@ def test_a_record_whose_job_was_cancelled_is_not_live(tmp_path: Path) -> None:
     assert _export(service, (300.0,))["clipExport"]["jobId"] == "job-2"
 
 
+def test_an_unreadable_job_row_never_admits_a_second_export(tmp_path: Path) -> None:
+    service, sessions, _events, _media, jobs = _build(tmp_path)
+    _export(service)
+
+    async def broken_read(_job_id: str):
+        raise ConnectionError("pool timeout")
+
+    jobs.repository.read = broken_read  # type: ignore[method-assign]
+
+    with pytest.raises(ConnectionError):
+        _export(service, (300.0,))
+    assert len(jobs.enqueued) == 1
+    assert sessions.current["clipExport"]["jobId"] == "job-1"
+
+
 def test_a_record_whose_job_is_gone_is_not_live(tmp_path: Path) -> None:
     service, sessions, _events, _media, jobs = _build(tmp_path)
     _export(service)
