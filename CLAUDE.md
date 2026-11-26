@@ -1341,6 +1341,18 @@ is re-invited, not enabled — lives in
 [user_admin_service.py](fastapi_backend/app/services/user_admin_service.py) and
 the routes only translate.
 
+**Account safety rules worth knowing.** The last-admin check and the write are
+one transaction (`UserRepository.update/delete(..., guard=)`: SQLite
+`BEGIN IMMEDIATE`, PostgreSQL row locks on the admin rows), so two admins
+cannot remove each other concurrently. The reset email and the "password
+changed" notice go out from tracked background tasks (`UserAdminService.drain()`
+on shutdown), so a slow relay neither stalls the fresh token a password change
+returns nor lets a reset request's timing reveal whether an account exists. A
+reset request for an invited account does nothing (it must not void the
+invitation). `DEFAULT_ADMIN_PASSWORD` is held to the password policy plus a
+placeholder check (`bootstrap_password_problems`) when a bootstrap actually
+happens: `ENVIRONMENT=production` refuses to start, otherwise a warning.
+
 **Mail is a backend behind a Protocol** ([app/mail/](fastapi_backend/app/mail/)):
 `smtp` (aiosmtplib; `SMTP_HOST`, `EMAIL_FROM` required — the factory refuses to
 boot without them, like GCS without a bucket) or `console` (the default: the

@@ -6,6 +6,8 @@ they are all in one place so the routes stay thin:
 
 * **The last active admin is untouchable.** They cannot be demoted, disabled or
   deleted, because the next action would need an admin and there would be none.
+  The check and the write are one transaction (``UserRepository.update(...,
+  guard=)``), so two admins removing each other at once cannot both succeed.
 * **Nobody changes their own access.** An admin cannot disable, delete or
   demote themselves — a slip of the mouse would lock them out mid-session.
   Their own password is the one thing they may change.
@@ -19,7 +21,15 @@ they are all in one place so the routes stay thin:
   account already holds; verification compares the version on every request.
 * **Public endpoints never say whether an account exists.** A password-reset
   request for an unknown address is answered exactly like one for a known
-  address, and the mail failure — if any — goes to the log, not the caller.
+  address — in the same time, because the token and the email for a real
+  account are produced off the response path — and the mail failure, if any,
+  goes to the log, not the caller. A reset request never touches an
+  invitation: an invited account has no password to reset, and a stranger who
+  knows the address must not be able to void the link its owner is waiting on.
+* **No response waits on mail.** The "password changed" notice and the reset
+  email are sent by tracked background tasks, so a slow relay cannot stall the
+  fresh token a password change must hand back (the token version has already
+  moved; a tab that does not receive its new token is signed out).
 
 Delivery is best-effort at the *request* level: an invitation whose email
 bounced is still an invited account, reported as such, with "Resend" and (when
@@ -38,6 +48,7 @@ from typing import Any, Callable
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.json_utils import read_json_file
+from app.core.tasks import BackgroundTaskRegistry
 from app.core.security import hash_action_token, hash_password, new_action_token, verify_password
 from app.database.models import UserActionTokenRecord, UserRecord, utc_now
 from app.domain.users import (
@@ -45,6 +56,7 @@ from app.domain.users import (
     UserRole,
     UserStatus,
     UserVocabularyError,
+    bootstrap_password_problems,
     normalize_display_name,
     normalize_email,
     normalize_login_identifier,
@@ -53,7 +65,7 @@ from app.domain.users import (
 )
 from app.mail import EmailDeliveryError, EmailSender, templates
 from app.mail.links import invite_link, password_reset_link
-from app.repositories.user_repository import UserRepository, as_utc
+from app.repositories.user_repository import AdminGuard, UserRepository, as_utc
 from app.services.auth_service import AuthService
 from app.services.user_directory import UserDirectory
 
@@ -204,6 +216,12 @@ class UserAdminService:
         self.auth = auth
         self.mailer = mailer
         self._clock = clock
+        # Mail that must not hold a response up (see the module docstring).
+        self._tasks = BackgroundTaskRegistry()
+
+    async def drain(self) -> None:
+        """Await in-flight notices and reset emails. Called on shutdown."""
+        await self._tasks.drain()
 
     # --- startup ---------------------------------------------------------------
 
@@ -268,6 +286,7 @@ class UserAdminService:
                 "(and storage/auth/credentials.json is missing). Set it in .env or platform secrets."
             )
         username = normalize_username(self.settings.default_admin_username)
+        self._check_bootstrap_password(username)
         password_hash = await asyncio.to_thread(
             hash_password, self.settings.default_admin_password, self.settings.auth_bcrypt_rounds
         )
@@ -282,6 +301,28 @@ class UserAdminService:
         self.directory.invalidate("bootstrap admin created")
         logger.info("Created the administrator account '%s' from DEFAULT_ADMIN_*.", username)
         return BootstrapOutcome(action="created", username=username)
+
+    def _check_bootstrap_password(self, username: str) -> None:
+        """Hold ``DEFAULT_ADMIN_PASSWORD`` to the password policy and refuse the
+        placeholders the example files ship.
+
+        Judged here rather than in ``Settings.startup_fatal_errors`` because it
+        only matters when a bootstrap actually happens — an existing deployment
+        keeps whatever the variable still says. Production refuses to start
+        (before any account exists); anywhere else it is a warning, so the
+        portable bundle's documented first sign-in keeps working.
+        """
+        problems = bootstrap_password_problems(self.settings.default_admin_password, username=username)
+        if not problems:
+            return
+        message = (
+            "DEFAULT_ADMIN_PASSWORD is not acceptable for the first administrator: "
+            + " ".join(problems)
+            + " Set a strong password of your own before the first boot."
+        )
+        if self.settings.is_production:
+            raise RuntimeError(f"Refusing to start: {message}")
+        logger.warning("%s Change it on the Account page after signing in.", message)
 
     # --- reads -----------------------------------------------------------------
 
@@ -393,13 +434,12 @@ class UserAdminService:
         actor_id: str | None = None,
     ) -> dict[str, Any]:
         record = await self._require(user_id)
-        if role is not None and role.value != record.role and role is not UserRole.ADMIN:
-            # The last-admin guard runs first on purpose: a sole administrator
-            # demoting themselves should hear "promote someone else first",
-            # not "ask another administrator" when there is none.
-            await self._guard_last_admin(record, "demote")
-            if actor_id and actor_id == record.id:
-                raise SelfModificationError("change the role of")
+        guard = self._admin_guard(
+            action="demote",
+            self_action="change the role of",
+            actor_id=actor_id,
+            applies=lambda row: role is not None and role is not UserRole.ADMIN and role.value != row.role,
+        )
 
         def mutate(row: UserRecord) -> None:
             if role is not None:
@@ -407,9 +447,10 @@ class UserAdminService:
             if display_name is not None:
                 row.display_name = normalize_display_name(display_name)
 
-        updated = await self.repository.update(record.id, mutate)
+        updated = await self.repository.update(record.id, mutate, guard=guard)
+        if updated is None:
+            raise UserNotFoundError(record.id)
         self.directory.invalidate("account updated")
-        assert updated is not None
         invite = await self.repository.pending_token(updated.id, ActionTokenPurpose.INVITE)
         return self.repository.to_public(updated, invite=invite)
 
@@ -426,36 +467,57 @@ class UserAdminService:
             raise UserConflictError("An account can only be enabled or disabled here.")
         if status.value == record.status:
             return self.repository.to_public(record)
-        if status is UserStatus.DISABLED:
-            await self._guard_last_admin(record, "disable")
-            if actor_id and actor_id == record.id:
-                raise SelfModificationError("disable")
         if status is UserStatus.ACTIVE and not record.password_hash:
             raise UserConflictError("This account has not set a password yet; re-send its invitation instead.")
+
+        guard = self._admin_guard(
+            action="disable",
+            self_action="disable",
+            actor_id=actor_id,
+            applies=lambda row: status is UserStatus.DISABLED and row.status != UserStatus.DISABLED.value,
+        )
 
         def mutate(row: UserRecord) -> None:
             row.status = status.value
             if status is UserStatus.DISABLED:
                 row.token_version = int(row.token_version or 0) + 1
 
-        updated = await self.repository.update(record.id, mutate)
+        updated = await self.repository.update(record.id, mutate, guard=guard)
+        if updated is None:
+            raise UserNotFoundError(record.id)
         self.directory.invalidate(f"account {status.value}")
-        assert updated is not None
         return self.repository.to_public(updated)
 
     async def delete_user(self, user_id: str, *, actor_id: str | None = None) -> None:
         record = await self._require(user_id)
-        await self._guard_last_admin(record, "delete")
-        if actor_id and actor_id == record.id:
-            raise SelfModificationError("delete")
-        await self.repository.delete(record.id)
+        guard = self._admin_guard(action="delete", self_action="delete", actor_id=actor_id, applies=lambda row: True)
+        await self.repository.delete(record.id, guard=guard)
         self.directory.invalidate("account deleted")
 
-    async def _guard_last_admin(self, record: UserRecord, action: str) -> None:
-        if record.role != UserRole.ADMIN.value or record.status != UserStatus.ACTIVE.value:
-            return
-        if await self.repository.count_active_admins() <= 1:
-            raise LastAdminError(action)
+    @staticmethod
+    def _admin_guard(
+        *,
+        action: str,
+        self_action: str,
+        actor_id: str | None,
+        applies: Callable[[UserRecord], bool],
+    ) -> AdminGuard:
+        """The two rules about removing access, judged on the locked row.
+
+        The last-admin check answers first on purpose: a sole administrator
+        demoting themselves should hear "promote someone else first", not
+        "ask another administrator" when there is none.
+        """
+
+        def guard(row: UserRecord, other_admins: int) -> None:
+            if not applies(row):
+                return
+            if row.role == UserRole.ADMIN.value and row.status == UserStatus.ACTIVE.value and other_admins == 0:
+                raise LastAdminError(action)
+            if actor_id and actor_id == row.id:
+                raise SelfModificationError(self_action)
+
+        return guard
 
     async def _require(self, user_id: str) -> UserRecord:
         record = await self.repository.get(user_id)
@@ -477,22 +539,21 @@ class UserAdminService:
     async def request_password_reset(self, identifier: str) -> None:
         """Public: whoever holds the mailbox gets a link; everyone else learns nothing.
 
-        An invited-but-never-activated account is sent its invitation again —
-        it has no password to reset — and an unknown or disabled account is
-        silently ignored. The caller answers the same way in every case.
+        Only an active account with an address gets anything, and what it gets
+        — the token and the email — is produced after this returns, so the
+        caller spends one lookup whatever it asked about and cannot tell a
+        known address from an unknown one by how long the answer took. An
+        invited account is ignored like an unknown one: it has no password to
+        reset, and this endpoint is open to anyone who knows the address, so it
+        must not be able to void the invitation that account is waiting on.
         """
         record = await self.repository.find_by_login(normalize_login_identifier(identifier))
-        if record is None or not record.email:
+        if record is None or not record.email or record.status != UserStatus.ACTIVE.value:
             return
-        try:
-            if record.status == UserStatus.ACTIVE.value:
-                outcome = await self._send_reset(record, actor_id=None)
-            elif record.status == UserStatus.INVITED.value:
-                outcome = await self._send_invitation(record, actor_id=None, actor_name="")
-            else:
-                return
-        except UserAdminError:
-            return
+        self._tasks.spawn(self._send_requested_reset(record), name="password-reset-request")
+
+    async def _send_requested_reset(self, record: UserRecord) -> None:
+        outcome = await self._send_reset(record, actor_id=None)
         if not outcome.sent and outcome.error:
             logger.warning("Password-reset email to %s failed: %s", record.email, outcome.error)
 
@@ -585,7 +646,7 @@ class UserAdminService:
         updated = await self.repository.update(user.id, mutate)
         self.directory.invalidate("password reset")
         assert updated is not None
-        await self._notify_password_changed(updated)
+        self._tasks.spawn(self._notify_password_changed(updated), name="password-changed-notice")
         return self.repository.to_public(updated)
 
     async def change_own_password(self, user_id: str, *, current_password: str, new_password: str) -> dict[str, Any]:
@@ -607,7 +668,7 @@ class UserAdminService:
         self.directory.invalidate("password changed")
         snapshot = await self.directory.get(record.id)
         assert snapshot is not None
-        await self._notify_password_changed(record)
+        self._tasks.spawn(self._notify_password_changed(record), name="password-changed-notice")
         return self.auth.issue_session_token(snapshot)
 
     async def _checked_token(self, raw_token: str, purpose: ActionTokenPurpose) -> tuple[UserActionTokenRecord, UserRecord]:

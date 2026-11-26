@@ -298,6 +298,8 @@ class AppContainer:
         # Before the change feed stops and the engine is disposed: in-flight
         # webhook deliveries still need to write their delivery-log rows.
         await self.notifications.drain()
+        # Account mail (reset links, password-changed notices) in flight.
+        await self.user_admin.drain()
         await self.changes.stop()
         await self.orm_database.shutdown()
         if self._instance_lock is not None:

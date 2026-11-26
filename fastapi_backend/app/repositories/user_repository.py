@@ -18,6 +18,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import UserActionTokenRecord, UserRecord, utc_now
 from app.database.orm import OrmDatabase
@@ -39,9 +40,33 @@ def _iso(value: datetime | None) -> str:
     return normalised.isoformat().replace("+00:00", "Z") if normalised else ""
 
 
+# Called inside the transaction with the locked row and how many *other* active
+# administrators there are; raises to refuse the change.
+AdminGuard = Callable[[UserRecord, int], None]
+
+
 class UserRepository:
     def __init__(self, database: OrmDatabase) -> None:
         self.database = database
+
+    async def _lock_for_admin_change(self, db: AsyncSession, user_id: str) -> tuple[UserRecord | None, int]:
+        """The row to change, and the number of other active administrators,
+        read under a lock that no other administrative change can hold.
+
+        Counting administrators and then writing in two transactions let two
+        admins demote each other at once, each seeing the other still there.
+        SQLite takes its write lock up front (``BEGIN IMMEDIATE``), so a second
+        change waits for the first to commit; PostgreSQL locks every active
+        administrator row (in id order, so two changes cannot deadlock) and
+        re-reads the survivors once the first commits.
+        """
+        await self.database.ensure_write_locked(db)
+        active_admin = (UserRecord.role == UserRole.ADMIN.value) & (UserRecord.status == UserStatus.ACTIVE.value)
+        admin_ids = list(
+            (await db.scalars(select(UserRecord.id).where(active_admin).order_by(UserRecord.id).with_for_update())).all()
+        )
+        record = await db.get(UserRecord, str(user_id), with_for_update=True)
+        return record, len([admin_id for admin_id in admin_ids if admin_id != str(user_id)])
 
     # --- accounts -----------------------------------------------------------
 
@@ -115,31 +140,51 @@ class UserRepository:
             db.add(record)
         return record
 
-    async def update(self, user_id: str, mutate: Callable[[UserRecord], None]) -> UserRecord | None:
+    async def update(
+        self,
+        user_id: str,
+        mutate: Callable[[UserRecord], None],
+        *,
+        guard: AdminGuard | None = None,
+    ) -> UserRecord | None:
         """Apply ``mutate`` to the row inside one transaction.
 
         Every change to an account goes through here so ``updated_at`` moves
         with it and the caller never holds a detached copy it might write back
-        over someone else's edit.
+        over someone else's edit. A ``guard`` makes the change one that may
+        affect who can administer the deployment: it runs on the locked row
+        before ``mutate``, in the same transaction (see
+        ``_lock_for_admin_change``), so "is another administrator left?" and
+        the write cannot be separated by a competing change.
         """
         async with self.database.transaction() as db:
-            record = await db.get(UserRecord, str(user_id))
+            if guard is None:
+                record = await db.get(UserRecord, str(user_id))
+            else:
+                record, other_admins = await self._lock_for_admin_change(db, user_id)
+                if record is not None:
+                    guard(record, other_admins)
             if record is None:
                 return None
             mutate(record)
             record.updated_at = utc_now()
             return record
 
-    async def delete(self, user_id: str) -> bool:
+    async def delete(self, user_id: str, *, guard: AdminGuard | None = None) -> bool:
         """Remove the account and every token issued for it.
 
         The tokens are deleted explicitly rather than left to the foreign key:
         SQLite only honours ``ON DELETE CASCADE`` with a pragma this
         deployment does not set, and a live invitation surviving its account
         would be a link that activates nothing — or, if the id were reused,
-        the wrong thing.
+        the wrong thing. ``guard`` is as for :meth:`update`.
         """
         async with self.database.transaction() as db:
+            if guard is not None:
+                record, other_admins = await self._lock_for_admin_change(db, user_id)
+                if record is None:
+                    return False
+                guard(record, other_admins)
             await db.execute(delete(UserActionTokenRecord).where(UserActionTokenRecord.user_id == str(user_id)))
             result = await db.execute(delete(UserRecord).where(UserRecord.id == str(user_id)))
         return bool(result.rowcount)
