@@ -27,7 +27,7 @@ VIDEO = {
     "poster": {"url": "/media/playback/s1/s1-poster.jpg"},
     "playback": {"url": "/media/playback/s1/s1-playback.mp4"},
     "media": {
-        "status": "running", "stage": "converting", "progress": 0.42,
+        "status": "running", "stage": "converting", "progress": 0.42, "attempts": 2,
         "durationSeconds": 120.5, "browserPlayable": False, "width": 1920,
     },
 }
@@ -36,7 +36,7 @@ VIDEO = {
 def test_new_rows_carry_the_media_summary(tmp_path: Path) -> None:
     row = project(tmp_path, {"video": VIDEO})
     assert row["media"] == {
-        "status": "running", "stage": "converting", "progress": 0.42,
+        "status": "running", "stage": "converting", "progress": 0.42, "attempts": 2,
         "durationSeconds": 120.5, "browserPlayable": False,
     }
     assert row["posterUrl"] == "/media/playback/s1/s1-poster.jpg"
@@ -64,5 +64,6 @@ def test_ready_media_without_progress(tmp_path: Path) -> None:
     media = {"status": "ready", "durationSeconds": 10, "browserPlayable": True}
     row = project(tmp_path, {"video": {"absolutePath": "/x", "media": media}})
     assert row["media"] == {
-        "status": "ready", "stage": None, "progress": None, "durationSeconds": 10.0, "browserPlayable": True,
+        "status": "ready", "stage": None, "progress": None, "attempts": None,
+        "durationSeconds": 10.0, "browserPlayable": True,
     }

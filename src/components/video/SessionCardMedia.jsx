@@ -15,7 +15,7 @@ import { refreshMediaTicket, useMediaTicket } from '@/lib/useMediaTicket';
 // them. Nothing is drawn while the file is still being sent from this tab
 // (`uploading`): there is no video on the server to show.
 
-const CHIP_TONE = { converting: 'info', queued: 'neutral', failed: 'danger' };
+const CHIP_TONE = { checking: 'neutral', converting: 'info', queued: 'neutral', failed: 'danger' };
 
 export function SessionCardMedia({ entry, uploading = false, onWatch, onWatchIntent }) {
   const media = describeMediaState(entry);
@@ -65,7 +65,7 @@ export function SessionCardMedia({ entry, uploading = false, onWatch, onWatchInt
       </div>
       {chip ? (
         <Badge variant={CHIP_TONE[chip.state]} className="w-fit gap-1.5" title={chip.detail}>
-          {chip.state === 'converting' ? (
+          {chip.state === 'converting' || chip.state === 'checking' ? (
             <Loader2 aria-hidden="true" className="h-3 w-3 animate-spin motion-reduce:animate-none" />
           ) : null}
           {chip.label}

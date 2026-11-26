@@ -11,7 +11,7 @@
 //
 // Pure: no React, no DOM, no fetch (see test/videoMedia.test.mjs).
 
-import { MediaPreparationStatus } from './enums.js';
+import { MediaPreparationStage, MediaPreparationStatus } from './enums.js';
 
 // How often the open workspace re-reads the session while the job runs. The
 // poster and the duration land within seconds; the copy takes minutes.
@@ -126,7 +126,9 @@ export function describePreparationPanel(session, { playerFailed = false } = {})
  * `posterUrl`, `hasPlayback`) — they give the same result for the same video.
  *
  * state: plays (the original decodes in a browser) | converted (a playable
- * copy exists) | converting | queued | failed | unknown (legacy, or purged).
+ * copy exists) | checking (the job is still probing or grabbing a poster, so
+ * nothing is being converted yet) | converting | queued | failed | unknown
+ * (legacy, or purged).
  * `canWatch` means a playable source exists now, in-flight session or not.
  */
 export function describeMediaState(entry) {
@@ -155,6 +157,10 @@ export function describeMediaState(entry) {
       detail: retried ? 'The server retried automatically and could not make a playable copy.' : 'The server could not make a playable copy.',
       canWatch: false,
     };
+  }
+  const earlyStage = media?.stage === MediaPreparationStage.PROBING || media?.stage === MediaPreparationStage.POSTER;
+  if (status === MediaPreparationStatus.RUNNING && earlyStage) {
+    return { ...base, state: 'checking', label: 'Checking the video', detail: '', canWatch: false };
   }
   if (status === MediaPreparationStatus.RUNNING) {
     return {

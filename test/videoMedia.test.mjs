@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { MediaPreparationStage } from '../src/lib/enums.js';
 
 import {
   describeMediaState,
@@ -188,4 +189,35 @@ test('a purged list row (no media, no poster, no copy) is unknown, unwatchable, 
   assert.deepEqual([state.state, state.canWatch, state.posterUrl], ['unknown', false, null]);
   // SessionCardMedia returns null for exactly this: state unknown and no poster.
   assert.equal(state.state === 'unknown' && !state.posterUrl, true);
+});
+
+// The list projection exactly as GET /api/sessions writes it
+// (SessionRepository._video_summary; pinned by test_session_index_media.py).
+const PROJECTED = {
+  media: { status: 'running', stage: 'converting', progress: 0.42, attempts: 2, durationSeconds: 120.5, browserPlayable: false },
+  posterUrl: '/media/playback/s1/s1-poster.jpg',
+  hasPlayback: false,
+};
+
+test('a row as the server projects it is read field for field', () => {
+  const state = describeMediaState({ id: 's1', ...PROJECTED });
+  assert.deepEqual(
+    [state.state, state.percent, state.durationSeconds, state.posterUrl, state.canWatch],
+    ['converting', 42, 120.5, '/media/playback/s1/s1-poster.jpg', false],
+  );
+  const failed = describeMediaState({ id: 's1', ...PROJECTED, media: { ...PROJECTED.media, status: 'failed', stage: null, progress: null } });
+  assert.match(failed.detail, /retried automatically/, 'the projection carries attempts');
+});
+
+test('every stage the server reports has a reading; probing and the poster are not conversion', () => {
+  assert.deepEqual(Object.values(MediaPreparationStage).sort(), ['converting', 'poster', 'probing']);
+  for (const stage of [MediaPreparationStage.PROBING, MediaPreparationStage.POSTER]) {
+    const state = describeMediaState({ id: 's1', ...PROJECTED, media: { status: 'running', stage, progress: null } });
+    assert.deepEqual([state.state, state.label, state.canWatch], ['checking', 'Checking the video', false], stage);
+  }
+  const converting = describeMediaState({ id: 's1', ...PROJECTED, media: { status: 'running', stage: MediaPreparationStage.CONVERTING, progress: 0.1 } });
+  assert.equal(converting.state, 'converting');
+  // A browser-playable original is watchable whatever stage the job is in.
+  const early = describeMediaState({ id: 's1', ...PROJECTED, media: { status: 'running', stage: 'probing', browserPlayable: true } });
+  assert.equal(early.canWatch, true);
 });

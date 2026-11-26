@@ -130,6 +130,7 @@ def _video_summary(row: Any) -> dict[str, Any]:
             "status": row.media_status,
             "stage": row.media_stage or None,
             "progress": _optional_float(row.media_progress),
+            "attempts": _optional_int(row.media_attempts),
             "durationSeconds": _optional_float(row.media_duration),
             "browserPlayable": None if row.media_browser_playable is None else bool(row.media_browser_playable),
         },
@@ -406,6 +407,7 @@ class SessionRepository:
             payload["files", "video", "media", "status"].as_string().label("media_status"),
             payload["files", "video", "media", "stage"].as_string().label("media_stage"),
             payload["files", "video", "media", "progress"].as_float().label("media_progress"),
+            payload["files", "video", "media", "attempts"].as_float().label("media_attempts"),
             payload["files", "video", "media", "durationSeconds"].as_float().label("media_duration"),
             payload["files", "video", "media", "browserPlayable"].as_boolean().label("media_browser_playable"),
         ).order_by(SessionRecord.created_at.desc(), SessionRecord.id.desc())
