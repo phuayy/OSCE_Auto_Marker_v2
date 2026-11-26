@@ -12,6 +12,7 @@ import {
   describeUploadStage,
   isUploadActive,
   uploadElapsedSeconds,
+  uploadIdOf,
   withUploadNote,
   withUploadPhase,
 } from '../src/lib/uploadTracking.js';
@@ -159,4 +160,17 @@ test('a note describes a moment, so the next phase change clears it', () => {
 
   assert.equal(finalizing.note, '');
   assert.equal(describeUploadStage(finalizing, T0 + 1000).detail, '');
+});
+
+test('a track remembers the upload id it was opened with, as a string', () => {
+  const withId = createUploadTrack({ sessionId: 's1', totalBytes: 10, startedAtMs: T0, uploadId: 77 });
+  assert.equal(withId.uploadId, '77');
+  assert.equal(createUploadTrack({ sessionId: 's1', startedAtMs: T0 }).uploadId, null);
+});
+
+test('uploadIdOf answers the id for a tracked session and null for an unknown one', () => {
+  const tracks = { s1: createUploadTrack({ sessionId: 's1', startedAtMs: T0, uploadId: 'u1' }) };
+  assert.equal(uploadIdOf(tracks, 's1'), 'u1');
+  assert.equal(uploadIdOf(tracks, 'nope'), null);
+  assert.equal(uploadIdOf(undefined, 's1'), null);
 });
