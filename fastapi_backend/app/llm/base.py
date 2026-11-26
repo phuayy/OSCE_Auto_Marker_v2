@@ -186,6 +186,10 @@ class ReasoningPolicy:
     budget_tokens: int = 16_384
 
 
+# Router-call deadline when a request names none (see ChatRequest.deadline_seconds).
+DEFAULT_TOTAL_TIMEOUT_SECONDS = 900.0
+
+
 @dataclass
 class ChatRequest:
     """One completion, described independently of any vendor."""
@@ -383,8 +387,6 @@ class ProviderAvailability:
 
 
 # HTTP statuses where repeating the same request can plausibly succeed.
-DEFAULT_TOTAL_TIMEOUT_SECONDS = 900.0
-
 RETRYABLE_STATUS_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524})
 
 _RETRYABLE_TEXT_TOKENS = (
