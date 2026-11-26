@@ -2,6 +2,11 @@
 
 **Automated marking of OSCE (Objective Structured Clinical Examination) student videos** — a final-year project that turns a raw station recording into a fully scored assessment: speaker-diarised transcript, clinical-content checklist scoring, communication-skills scoring, and audio-professionalism metrics, streamed live to the browser.
 
+**Run it in your own Google Cloud account** (one command, no installs, written for non-technical users):
+
+[![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/phuayy/OSCE_Auto_Marker_v2&cloudshell_git_branch=main&cloudshell_tutorial=deploy/gcp/QUICKSTART.md&show=terminal)
+then `bash deploy/gcp/setup.sh`. Step-by-step guide: [deploy/gcp/QUICKSTART.md](deploy/gcp/QUICKSTART.md).
+
 ---
 
 ## 1. End Goal
@@ -536,6 +541,8 @@ npm run db:up|down|logs|ps|check|reset   # PostgreSQL helpers
 ```
 
 - All configuration lives in [.env.example](.env.example) (copy → `.env`).
+- One-command on-demand GPU deployment on Google Cloud: [deploy/gcp/QUICKSTART.md](deploy/gcp/QUICKSTART.md)
+  (`deploy/gcp/setup.sh`, `deploy/gcp/teardown.sh`; manual steps in [deploy/gcp/README.md](deploy/gcp/README.md)).
 - Putting it on a VM that other devices upload to: [docs/deployment-vm.md](docs/deployment-vm.md)
   (`API_HOST`, `SERVE_FRONTEND`, the reverse-proxy settings that matter).
 - Architecture deep-dive for contributors/AI agents: [CLAUDE.md](CLAUDE.md).

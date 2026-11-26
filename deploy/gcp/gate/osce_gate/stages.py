@@ -38,6 +38,10 @@ OFF_PATH: dict[str, str] = {
     "stopping": "Shutting down. You can start it again once it has stopped.",
     "unavailable": "The machine is under maintenance by Google Cloud. Try again in a few minutes.",
     "failed": "The machine could not be started.",
+    "boot-failed": (
+        "The marker did not finish starting. The machine switches itself off shortly "
+        "so it does not keep billing; start it again once it has stopped."
+    ),
 }
 
 _STOPPED = {"TERMINATED", "STOPPED", "SUSPENDED"}
@@ -51,6 +55,9 @@ _BOOT_TO_STEP = {
     "loading": "loading",
     "ready": "loading",
     "stopping": "stopping",
+    # Written by the VM's install script or boot watchdog when the app will
+    # not come up. The machine is about to power itself off.
+    "failed": "boot-failed",
 }
 # A guest attribute is kept across a stop/start, so a value written before
 # this run's start time is the previous run's and must be ignored. A little
