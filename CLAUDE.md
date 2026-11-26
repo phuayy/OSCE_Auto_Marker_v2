@@ -39,6 +39,9 @@ OSCE-AI-FYP/
 │   ├── CommunicationRubricPanel.jsx  # #/rubric — the active communication rubric; admins upload, AI-extract, edit (lazy)
 │   ├── CommunicationRubricEditor.jsx # Review/edit a rubric draft or the active rubric: criteria, indicators, points, pass mark
 │   ├── RubricVersionHistory.jsx # Rubric page card: every rubric version, view one, restore a retired one (admins)
+│   ├── dashboard/              # Presentational pieces of the dashboard list (entry chunk)
+│   │   ├── SessionCard.jsx         # One "Saved sessions" row; leading / media / body / trailing regions
+│   │   └── SessionCardActions.jsx  # Start / Re-run / Open / in-flight button for a row
 │   ├── workspace/              # The opened-session view — its own chunk, loaded by the click that opens a session
 │   │   ├── SessionWorkspace.jsx        # Chunk root: results model, player/download handlers, the whole subtree
 │   │   ├── ManualTimelineEditor.jsx    # Manual crop timeline (separators, labels, Export clips)
@@ -64,6 +67,7 @@ OSCE-AI-FYP/
 │   │   ├── format.js           # formatRuntime / prettySpeaker / evidence-timestamp parsing (pure)
 │   │   ├── download.js         # downloadBlob + the CSV encoder behind the score sheet (pure)
 │   │   ├── anchors.js          # DOM ids the dashboard scrolls to and the workspace renders
+│   │   ├── uploadSubmission.js # submitUpload: initiate -> per-file transfer (one resume) -> complete, all dependencies injected, no module state (pure)
 │   │   ├── clipAssessments.js  # Clip -> its newest child session, run status, stale-cut flag (pure)
 │   │   ├── coalesce.js         # Single-flight wrapper: a burst of refresh triggers = one run + one catch-up (pure)
 │   │   ├── clipExportOutcome.js # What the editor does when an export/recrop job lands (pure)
