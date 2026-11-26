@@ -57,7 +57,12 @@ import { describeClipExportOutcome } from '@/lib/clipExportOutcome';
 import { MEDIA_POLL_INTERVAL_MS, describeVideoMedia, effectiveVideoDuration, mergeSessionFiles } from '@/lib/videoMedia';
 import { creatorName } from '@/lib/provenance';
 import { canMutateSession } from '@/lib/authz';
-import { buildManualSplitPayload, seedTimelineFromClips } from '@/lib/timelineSeed';
+import {
+  buildManualSplitPayload,
+  clipListSignature,
+  planTimelineReseed,
+  seedTimelineFromClips,
+} from '@/lib/timelineSeed';
 import { indexClipAssessments } from '@/lib/clipAssessments';
 import { describeRerunAction } from '@/lib/rerunAction';
 import { describeStartAction } from '@/lib/sessionStartAction';
@@ -410,40 +415,56 @@ export default function OSCEAiMarkerMockup({
     return videoClips.find((clip) => String(clip.id) === String(selectedClipId)) || null;
   }, [selectedClipId, videoClips]);
 
+  // Keyed on the clip's range, not the clip object: every refresh rebuilds the
+  // objects, and re-seeding on identity discarded a crop the user was dragging.
+  const selectedClipStart = selectedClip?.start;
+  const selectedClipEnd = selectedClip?.end;
   useEffect(() => {
-    if (!selectedClip) {
+    if (!selectedClipId) {
       return;
     }
     setCropDraft({
-      start: Number(selectedClip.start || 0),
-      end: Number(selectedClip.end || 0),
+      start: Number(selectedClipStart || 0),
+      end: Number(selectedClipEnd || 0),
     });
-  }, [selectedClipId, selectedClip]);
+  }, [selectedClipId, selectedClipStart, selectedClipEnd]);
 
+  // Seed the manual timeline from the session's clips. Keyed on the clips'
+  // content (not the array, which every refresh replaces) and gated by
+  // `planTimelineReseed`: an identical refresh does nothing, and a separator
+  // the user moved and has not exported is never overwritten by one.
+  const clipSignature = useMemo(() => clipListSignature(videoClips), [videoClips]);
+  const lastTimelineSeedRef = useRef(null);
   useEffect(() => {
     if (!Number.isFinite(videoDurationSeconds) || videoDurationSeconds <= 0) {
       return;
     }
-
-    if (videoClips.length > 1) {
-      // Gaps between clips (bell detection) seed as intermissions, so an
-      // unchanged Export reproduces the detected clips; the person detector's
-      // full partition passes through as it always did.
-      const seed = seedTimelineFromClips({ clips: videoClips, duration: videoDurationSeconds });
-      setManualSegmentCount(seed.kinds.length);
-      setManualBoundaries(seed.boundaries);
-      setManualSegmentKinds(seed.kinds);
-      setManualLabels(seed.labels);
+    const key = `${videoDurationSeconds}|${clipSignature}`;
+    const current = {
+      boundaries: manualBoundaries,
+      kinds: manualSegmentKinds,
+      labels: manualLabels,
+    };
+    if (
+      !planTimelineReseed({
+        lastSeed: lastTimelineSeedRef.current,
+        sessionId: session?.id ?? null,
+        key,
+        current,
+      })
+    ) {
       return;
     }
-
-    if (manualSegmentCount < 2) {
-      setManualSegmentCount(2);
-      setManualBoundaries([videoDurationSeconds / 2]);
-      setManualSegmentKinds(['session', 'session']);
-      setManualLabels(['Student 1', 'Student 2']);
-    }
-  }, [videoClips, videoDurationSeconds]);
+    // Gaps between clips (bell detection) seed as intermissions, so an
+    // unchanged Export reproduces the detected clips; the person detector's
+    // full partition passes through as it always did.
+    const seed = seedTimelineFromClips({ clips: videoClips, duration: videoDurationSeconds });
+    lastTimelineSeedRef.current = { sessionId: session?.id ?? null, key, snapshot: seed };
+    setManualSegmentCount(seed.kinds.length);
+    setManualBoundaries(seed.boundaries);
+    setManualSegmentKinds(seed.kinds);
+    setManualLabels(seed.labels);
+  }, [session?.id, clipSignature, videoDurationSeconds]);
 
   useEffect(() => {
     if (!session?.id || isClipAssessmentView || videoClips.length === 0) {
@@ -1871,6 +1892,10 @@ export default function OSCEAiMarkerMockup({
       // queued either way, and the editor must reach the finished clips even if
       // this response says nothing about the export.
       setAwaitingClipExportFor(session.id);
+      // The draft is exported: the server's clips are now the truth, so the
+      // editor is clean again and the next clip list (drafts, then cut files)
+      // reseeds it instead of being held back as an unsaved edit.
+      lastTimelineSeedRef.current = null;
       if (body?.session) {
         setSession(body.session);
         const nextClips = Array.isArray(body.session?.outputs?.videoClips) ? body.session.outputs.videoClips : [];

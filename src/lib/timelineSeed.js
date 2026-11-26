@@ -88,3 +88,69 @@ export function buildManualSplitPayload({ boundaries, labels, kinds, includeKind
     ...(includeKinds || safeKinds.includes(INTERMISSION_KIND) ? { kinds: safeKinds } : {}),
   };
 }
+
+/**
+ * What about a clip list matters to the editor, as one string. The dashboard
+ * hands the editor a new array on every refresh (each session write, each 3 s
+ * export poll), so identity says nothing about whether the clips changed;
+ * this does. Covers everything an export or re-cut rewrites.
+ */
+export function clipListSignature(clips) {
+  return JSON.stringify(
+    (Array.isArray(clips) ? clips : []).map((clip) => [
+      clip?.id ?? null,
+      toFiniteNumber(clip?.start),
+      toFiniteNumber(clip?.end),
+      clip?.kind ?? null,
+      clip?.label ?? null,
+      clip?.planId ?? null,
+      clip?.revision ?? null,
+      Boolean(clip?.isDraft),
+    ])
+  );
+}
+
+/** Separator drift below this is float noise, not an edit by the user. */
+const BOUNDARY_EDIT_TOLERANCE_SECONDS = 1e-3;
+
+function sameArray(a, b, same) {
+  return a.length === b.length && a.every((value, index) => same(value, b[index]));
+}
+
+/** Has the user changed the editor since it was seeded with `seeded`? */
+function isEditedSince(seeded, current) {
+  return !(
+    sameArray(
+      seeded.boundaries,
+      current.boundaries,
+      (x, y) => Math.abs(Number(x) - Number(y)) <= BOUNDARY_EDIT_TOLERANCE_SECONDS
+    ) &&
+    sameArray(seeded.kinds, current.kinds, (x, y) => x === y) &&
+    sameArray(seeded.labels, current.labels, (x, y) => x === y)
+  );
+}
+
+/**
+ * Should the editor be (re)seeded from the clips now?
+ *
+ * `lastSeed` is `{ sessionId, key, snapshot }` from the previous seeding
+ * (`key` = session's duration + clip signature, `snapshot` = the state it
+ * produced), `current` the editor's `{ boundaries, kinds, labels }` right now.
+ *
+ *   - first seed, or another session  -> yes
+ *   - same key (an identical refresh) -> no
+ *   - the user has edited the draft   -> no: an unsaved separator is theirs,
+ *     whatever a background refresh brings. Exporting clears the edit by
+ *     making the server's clips match the draft (see saveManualSegments), so
+ *     the finished export still reaches a clean editor.
+ *   - otherwise (clips really changed under a clean editor) -> yes
+ */
+export function planTimelineReseed({ lastSeed, sessionId, key, current }) {
+  if (!lastSeed || lastSeed.sessionId !== sessionId) {
+    return true;
+  }
+  if (lastSeed.key === key) {
+    return false;
+  }
+  return !isEditedSince(lastSeed.snapshot, current);
+}
