@@ -1859,6 +1859,7 @@ recording; its Student column the scored subject.
 | `<PROVIDER>_BASE_URL` | vendor default | Endpoint override per provider (proxy, gateway, regional endpoint) |
 | `LLM_MAX_ATTEMPTS_PER_MODE` | `3` | Attempts per request shape before the router degrades the shape |
 | `LLM_INITIAL_BACKOFF_SECONDS` / `LLM_MAX_BACKOFF_SECONDS` / `LLM_BACKOFF_JITTER_RATIO` | `1.5` / `8` / `0.25` | Retry backoff. Jitter keeps the parallel content and communication branches from retrying in lockstep |
+| `LLM_TOTAL_TIMEOUT_SECONDS` | derived | Deadline for one whole router call (every target, mode, retry). Unset = `max(900, 2 x per-request timeout)` (`ChatRequest.deadline_seconds`), so the communication scorer's longer `timeout_seconds` is never cut by it and a fallback keeps time; set explicitly it is respected, and a value below the per-request timeout is a startup warning |
 | `LLM_CIRCUIT_FAILURE_THRESHOLD` / `LLM_CIRCUIT_COOLDOWN_SECONDS` | `6` / `60` | Consecutive failures before a provider is skipped, and for how long |
 | `LLM_TEMPERATURE` / `LLM_TOP_P` / `LLM_MAX_TOKENS` / `LLM_REQUEST_TIMEOUT_SECONDS` | `0.2` / `0.9` / `24576` / `360` | Sampling, shared by all providers — except that `max_tokens` is the *requested* budget: each target clamps it to its model's declared `ModelSpec.max_output_tokens` (`LLMProvider.output_budget`). The `NVIDIA_*` spellings still work |
 | `WHISPERX_HF_TOKEN` | — | HuggingFace token for pyannote diarisation |

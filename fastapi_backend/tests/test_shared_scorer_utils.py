@@ -52,7 +52,7 @@ def test_scorers_share_completion_and_preserve_validation_and_provenance(script,
 
     class Router:
         def complete(self, request, *, validate):
-            assert request.total_timeout_seconds > 0
+            assert request.deadline_seconds() > 0
             with pytest.raises(LLMValidationError):
                 validate('{"criteria": []}')
             validate('{"criteria": [{"id": 1}]}')

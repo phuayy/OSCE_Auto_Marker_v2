@@ -1044,6 +1044,16 @@ class Settings:
                     f"{variable} is not a safe ffmpeg filter chain and is passed to ffmpeg as "
                     f"written: {error}"
                 )
+        total_timeout = read_float_env("LLM_TOTAL_TIMEOUT_SECONDS", 0.0)
+        request_timeout = read_float_env(
+            "LLM_REQUEST_TIMEOUT_SECONDS", read_float_env("NVIDIA_REQUEST_TIMEOUT_SECONDS", 360.0)
+        )
+        if 0 < total_timeout < request_timeout:
+            warnings.append(
+                f"LLM_TOTAL_TIMEOUT_SECONDS ({total_timeout:g}) is below the per-request timeout "
+                f"({request_timeout:g}); every call is cut at the total, so the per-request value "
+                "is unreachable and a fallback gets no time. Raise the total or unset it to derive it."
+            )
         if "*" in self.cors_allow_origins:
             warnings.append(
                 "CORS_ALLOW_ORIGINS allows any origin ('*'); set explicit origins "

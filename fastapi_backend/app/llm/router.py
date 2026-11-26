@@ -96,10 +96,10 @@ class LLMRouter:
     def complete(self, request: ChatRequest, *, validate: Validator | None = None) -> ChatResponse:
         if any(
             not math.isfinite(value) or value <= 0
-            for value in (request.timeout_seconds, request.total_timeout_seconds)
+            for value in (request.timeout_seconds, request.deadline_seconds())
         ):
             raise LLMConfigError("LLM timeouts must be finite positive numbers.")
-        deadline = self._clock() + request.total_timeout_seconds
+        deadline = self._clock() + request.deadline_seconds()
         targets = self.resolved_targets()
         if not targets:
             raise LLMConfigError(
