@@ -13,12 +13,12 @@ from app.core.utils import utc_now_iso
 from app.domain.enums import TaskType, Workflow
 from app.domain.sessions import (
     IN_FLIGHT_STATUSES,
+    SOURCE_IN_USE_STATUSES,
     SessionStatus,
     clip_list_busy,
     session_clips,
     session_video_path,
 )
-from app.repositories.session_repository import SOURCE_IN_USE_STATUSES
 from app.repositories.notification_repository import NotificationRepository
 from app.repositories.video_repository import VideoRepository
 from app.services.assessment_service import AssessmentService

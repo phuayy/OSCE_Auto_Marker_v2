@@ -82,6 +82,17 @@ IN_FLIGHT_STATUSES: frozenset[str] = frozenset(
 # owned by the upload assembler, which has its own startup recovery.
 JOB_DRIVEN_STATUSES: frozenset[str] = frozenset({SessionStatus.QUEUED, SessionStatus.PROCESSING})
 
+# A session in one of these states is reading (or still receiving) its source
+# video, so nothing may delete it: a run (``queued``/``processing``), the upload
+# assembler, or a transfer that has not finished. The retention sweep consults
+# this both when it lists candidates and again just before it deletes one.
+SOURCE_IN_USE_STATUSES: frozenset[str] = IN_FLIGHT_STATUSES | frozenset(
+    {
+        SessionStatus.WAITING_FOR_UPLOAD,
+        SessionStatus.UPLOADING,
+    }
+)
+
 TERMINAL_STATUSES: frozenset[str] = frozenset(
     {SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED}
 )
@@ -193,6 +204,7 @@ __all__ = [
     "JOB_DRIVEN_STATUSES",
     "LIVE_EXPORT_STATUSES",
     "OUTPUT_KEYS",
+    "SOURCE_IN_USE_STATUSES",
     "SESSION_PAYLOAD_SCHEMA_VERSION",
     "SessionPayload",
     "SessionStatus",
