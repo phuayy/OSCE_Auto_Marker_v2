@@ -79,6 +79,18 @@ def write_checkpoint(
     write_text_atomic(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
 
 
+def clear_checkpoint(path: Path | None) -> None:
+    """Drop a checkpoint whose run is over, whichever way it ended.
+
+    A checkpoint resumes *interrupted* work. A run that finished -- or that
+    exhausted its repairs and is about to fail -- has nothing left to resume,
+    and a checkpoint left behind would replay that verdict on every retry
+    instead of asking the model again.
+    """
+    if path is not None:
+        path.unlink(missing_ok=True)
+
+
 def checkpoint_file_signature(path: Path) -> dict[str, Any]:
     stats = path.stat()
     return {
@@ -93,6 +105,7 @@ __all__ = [
     "checkpoint_file_signature",
     "checkpoint_matches",
     "checkpoint_path_for_output",
+    "clear_checkpoint",
     "read_checkpoint",
     "write_checkpoint",
 ]

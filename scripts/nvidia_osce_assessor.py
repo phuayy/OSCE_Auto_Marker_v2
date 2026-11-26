@@ -48,6 +48,7 @@ from scorer_checkpoint import (
     checkpoint_file_signature,
     checkpoint_matches,
     checkpoint_path_for_output,
+    clear_checkpoint,
     read_checkpoint,
     write_checkpoint,
 )
@@ -264,6 +265,17 @@ def main() -> int:
         elif not isinstance(normalized_payload, dict) or not isinstance(issues, list):
             checkpoint_state = None
 
+        if checkpoint_state and issues and repair_attempts >= max_repair_attempts:
+            # The run that wrote this had spent every repair and still had
+            # issues: a terminal verdict, not interrupted work. Resuming it
+            # would fail again without asking the model, so start over.
+            print(
+                "[nvidia_osce_assessor] discarding a checkpoint that already exhausted its repairs",
+                file=sys.stderr,
+            )
+            clear_checkpoint(checkpoint_path)
+            checkpoint_state = None
+
     if not checkpoint_state:
         first_message = create_completion(router, base_messages, expected_items=len(rubric_criteria))
         write_checkpoint(
@@ -363,6 +375,8 @@ def main() -> int:
         if issues:
             diagnostic += " Validator issues: " + "; ".join(str(item) for item in issues[:5])
         print(f"[nvidia_osce_assessor] {diagnostic}", file=sys.stderr)
+        # Terminal: the next attempt must call the model, not replay this.
+        clear_checkpoint(checkpoint_path)
         raise RuntimeError(diagnostic)
 
     normalized_payload["session_id"] = session_id
@@ -391,8 +405,7 @@ def main() -> int:
 
     if output_path is not None:
         write_text_atomic(output_path, output_json + "\n")
-        if checkpoint_path is not None:
-            checkpoint_path.unlink(missing_ok=True)
+        clear_checkpoint(checkpoint_path)
         print(f"Saved: {output_path}", file=sys.stderr)
 
     print(output_json)
