@@ -65,7 +65,14 @@ class _Notifications:
         return self.result
 
 
-def _build(tmp_path: Path, codec: str = "hevc", *, playback: dict[str, Any] | None = None, name: str | None = "Station 4"):
+def _build(
+    tmp_path: Path,
+    codec: str = "hevc",
+    *,
+    playback: dict[str, Any] | None = None,
+    media_status: str | None = None,
+    name: str | None = "Station 4",
+):
     settings = Settings(root_dir=tmp_path, backend_root=tmp_path, media_progress_write_interval_seconds=0.0)
     runner = _Runner(codec)
     media = MediaPipeline(settings, runner, events=None, auth=None, gpu=ResourceLease.unbounded())  # type: ignore[arg-type]
@@ -74,6 +81,8 @@ def _build(tmp_path: Path, codec: str = "hevc", *, playback: dict[str, Any] | No
     video: dict[str, Any] = {"absolutePath": str(source)}
     if playback:
         video["playback"] = playback
+    if media_status:
+        video["media"] = {"status": media_status}
     session: dict[str, Any] = {"id": "s1", "files": {"video": video}}
     if name:
         session["name"] = name
@@ -127,11 +136,24 @@ def test_a_browser_playable_upload_is_silent(tmp_path: Path) -> None:
     assert notes.emitted == []
 
 
-def test_an_already_recorded_copy_is_silent(tmp_path: Path) -> None:
-    media, _, session = _build(tmp_path, playback={"url": "/media/playback/s1/s1-playback.mp4", "absolutePath": "x"})
+_COPY = {"url": "/media/playback/s1/s1-playback.mp4", "absolutePath": "x"}
+
+
+def test_a_copy_already_ready_is_silent(tmp_path: Path) -> None:
+    media, _, session = _build(tmp_path, playback=_COPY, media_status=MediaPreparationStatus.READY)
     notes = _Notifications()
     _run(media, session, notes)
     assert notes.emitted == []
+
+
+@pytest.mark.parametrize("status", [MediaPreparationStatus.QUEUED, MediaPreparationStatus.FAILED])
+def test_a_copy_recorded_before_the_job_finished_is_announced(tmp_path: Path, status: str) -> None:
+    # An export can record ``playback`` while prepare_media is still queued; the
+    # conversion only reaches READY now, so that is when the user hears of it.
+    media, _, session = _build(tmp_path, playback=_COPY, media_status=status)
+    notes = _Notifications()
+    _run(media, session, notes)
+    assert [e[0] for e in notes.emitted] == [NotificationType.MEDIA_READY]
 
 
 def test_a_purged_video_is_silent(tmp_path: Path) -> None:
@@ -148,7 +170,7 @@ def test_a_purged_video_is_silent(tmp_path: Path) -> None:
         ("hevc", False, None, MediaPreparationOutcome.COPY_WRITTEN),
         ("hevc", True, None, MediaPreparationOutcome.FAILED),
         ("h264", False, None, MediaPreparationOutcome.NOT_NEEDED),
-        ("hevc", False, {"url": "u", "absolutePath": "x"}, MediaPreparationOutcome.NOT_NEEDED),
+        ("hevc", False, {"url": "u", "absolutePath": "x"}, MediaPreparationOutcome.COPY_WRITTEN),
     ],
 )
 def test_outcome_is_returned_by_the_job_step(tmp_path: Path, codec: str, fail: bool, playback: Any, expected: Any) -> None:

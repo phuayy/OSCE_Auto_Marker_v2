@@ -1067,10 +1067,11 @@ operation budget), offered as "Make a playable copy" under the player. Failures
 never fail the job: they land on `media.status = failed` / `media.error`.
 `prepare_session_media` returns a `MediaPreparationOutcome`, and
 `PipelineService.prepare_media_by_id` announces only two of them: `media.ready`
-("Video ready to watch") when this run recorded a playback copy the session did
-not have, and `media.failed` ("Video could not be converted") when the copy
-could not be made. A recording that plays as it is, a re-run that adopts a copy
-already recorded, a purged source, a cancelled run and the restart/exhausted
+("Video ready to watch") when this run ends `ready` with a playback copy and the
+record had not already been `ready` with one (an export may have recorded the
+copy while the job was still queued — that still announces), and `media.failed` ("Video could not be converted") when the copy
+could not be made. A recording that plays as it is, a re-run over a copy
+already `ready`, a purged source, a cancelled run and the restart/exhausted
 abandon paths raise nothing — an exam day of playable uploads must not be a
 notification each.
 

@@ -229,8 +229,13 @@ async def _prepare_session_media(
         return MediaPreparationOutcome.SKIPPED
     source_path = Path(str(video["absolutePath"]))
     # Read now: ``commit`` refreshes ``session`` in place, so later it cannot
-    # say whether this run or an earlier one recorded the copy.
-    had_playback = bool(video.get("playback"))
+    # say what the record was when this run started. A copy is "already
+    # announced" only when the record had reached READY with it: an export may
+    # have recorded ``playback`` while this job was still queued, and from the
+    # user's side that conversion finishes now.
+    already_ready = bool(video.get("playback")) and (
+        (video.get("media") or {}).get("status") == MediaPreparationStatus.READY
+    )
 
     await commit(
         session,
@@ -286,6 +291,6 @@ async def _prepare_session_media(
     await commit(session, update_media(status=status, error=error, stage=None, progress=None))
     if error:
         return MediaPreparationOutcome.FAILED
-    if playback and not had_playback:
+    if playback and not already_ready:
         return MediaPreparationOutcome.COPY_WRITTEN
     return MediaPreparationOutcome.NOT_NEEDED
