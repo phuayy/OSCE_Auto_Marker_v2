@@ -33,6 +33,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,22 @@ PENDING_MEDIA_STATUSES = frozenset({MediaPreparationStatus.QUEUED, MediaPreparat
 CANCELLED_MESSAGE = "Conversion was cancelled."
 INTERRUPTED_MESSAGE = "Interrupted by a server restart."
 COPY_FAILED_MESSAGE = "The server could not make a playable copy of this video."
+
+
+class MediaPreparationOutcome(str, Enum):
+    """What a finished ``prepare_media`` run did, for the caller to announce.
+
+    Only the two outcomes a person cares about are worth a notification: a copy
+    that was not there before (``COPY_WRITTEN``) and one that could not be made
+    (``FAILED``). A browser-playable upload (``NOT_NEEDED``) is the common case
+    on an exam day and must stay silent. A cancelled run has no outcome — it
+    raises.
+    """
+
+    COPY_WRITTEN = "copy_written"
+    FAILED = "failed"
+    NOT_NEEDED = "not_needed"
+    SKIPPED = "skipped"
 
 
 class TranscodeProgressReporter:
@@ -182,15 +199,18 @@ def _probe_facts(probe: dict[str, Any], *, browser_playable: bool | None) -> dic
     }
 
 
-async def prepare_session_media(media: MediaPipeline, session: dict[str, Any], commit: Commit) -> None:
+async def prepare_session_media(
+    media: MediaPipeline, session: dict[str, Any], commit: Commit
+) -> MediaPreparationOutcome:
     """Probe, poster, playable copy — in that order, each recorded as it lands,
     so the cheap facts reach the browser long before a transcode finishes.
+    Returns what the run amounted to (see ``MediaPreparationOutcome``).
 
     A cancelled run records ``failed`` (shielded, so the write survives the
     cancellation) before the cancellation propagates: nothing else would ever
     move a record left at ``running`` with a progress bar."""
     try:
-        await _prepare_session_media(media, session, commit)
+        return await _prepare_session_media(media, session, commit)
     except asyncio.CancelledError:
         try:
             await asyncio.shield(commit(session, abandon_media(CANCELLED_MESSAGE)))
@@ -199,13 +219,23 @@ async def prepare_session_media(media: MediaPipeline, session: dict[str, Any], c
         raise
 
 
-async def _prepare_session_media(media: MediaPipeline, session: dict[str, Any], commit: Commit) -> None:
+async def _prepare_session_media(
+    media: MediaPipeline, session: dict[str, Any], commit: Commit
+) -> MediaPreparationOutcome:
     session_id = str(session.get("id") or "")
     context = log_context(session_id, "prepare_media")
     video = _source_video(session)
     if video is None:
-        return
+        return MediaPreparationOutcome.SKIPPED
     source_path = Path(str(video["absolutePath"]))
+    # Read now: ``commit`` refreshes ``session`` in place, so later it cannot
+    # say what the record was when this run started. A copy is "already
+    # announced" only when the record had reached READY with it: an export may
+    # have recorded ``playback`` while this job was still queued, and from the
+    # user's side that conversion finishes now.
+    already_ready = bool(video.get("playback")) and (
+        (video.get("media") or {}).get("status") == MediaPreparationStatus.READY
+    )
 
     await commit(
         session,
@@ -259,3 +289,8 @@ async def _prepare_session_media(media: MediaPipeline, session: dict[str, Any], 
 
     status = MediaPreparationStatus.FAILED if error else MediaPreparationStatus.READY
     await commit(session, update_media(status=status, error=error, stage=None, progress=None))
+    if error:
+        return MediaPreparationOutcome.FAILED
+    if playback and not already_ready:
+        return MediaPreparationOutcome.COPY_WRITTEN
+    return MediaPreparationOutcome.NOT_NEEDED

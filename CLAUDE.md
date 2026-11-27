@@ -1065,6 +1065,15 @@ before this, or one whose copy failed, is (re)queued by
 `POST /api/sessions/{id}/prepare-media` (owner-gated, shares the expensive-
 operation budget), offered as "Make a playable copy" under the player. Failures
 never fail the job: they land on `media.status = failed` / `media.error`.
+`prepare_session_media` returns a `MediaPreparationOutcome`, and
+`PipelineService.prepare_media_by_id` announces only two of them: `media.ready`
+("Video ready to watch") when this run ends `ready` with a playback copy and the
+record had not already been `ready` with one (an export may have recorded the
+copy while the job was still queued — that still announces), and `media.failed` ("Video could not be converted") when the copy
+could not be made. A recording that plays as it is, a re-run over a copy
+already `ready`, a purged source, a cancelled run and the restart/exhausted
+abandon paths raise nothing — an exam day of playable uploads must not be a
+notification each.
 
 **`prepare_media` has its own lane, progress and a retry.** Task types belong to
 a `JobLane` (`JobTaskSpec.lane`): `main` (`JOB_WORKER_CONCURRENCY` slots) or
@@ -1238,7 +1247,7 @@ a stream open, so `POST /api/admin/webhooks` registers an outbound HTTP
 endpoint instead: [webhook_dispatcher.py](fastapi_backend/app/services/webhook_dispatcher.py)
 POSTs a signed JSON body to it whenever `NotificationService` records one of
 `SUBSCRIBABLE_EVENT_TYPES` (`scoring.completed`, `split.ready`, `clips.ready`,
-`session.failed` — [domain/notifications.py](fastapi_backend/app/domain/notifications.py)).
+`session.failed`, `media.ready`, `media.failed` — [domain/notifications.py](fastapi_backend/app/domain/notifications.py)).
 The whole `/api/admin/webhooks` router is admin-only, reads included — unlike
 corpora or the rubric, nothing here is a marker's input to a run, and a
 subscription's URL and secret are only the operator's to see.
