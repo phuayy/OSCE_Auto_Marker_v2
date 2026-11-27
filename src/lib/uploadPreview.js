@@ -369,3 +369,30 @@ export function assessPdfFile({ file, limits = null, headerOk = null }) {
   }
   return { ok: warnings.length === 0, warnings };
 }
+
+/**
+ * What the upload form hands its file preview. In batch mode the single-file
+ * state (a recording that is not part of the batch) is left alone but not
+ * shown: only the case study, which the batch shares, is judged.
+ */
+export function previewFiles({ batchMode, videoFile, videoUrl, caseStudyFile }) {
+  return batchMode
+    ? { videoFile: null, videoUrl: null, caseStudyFile }
+    : { videoFile, videoUrl, caseStudyFile };
+}
+
+/**
+ * Whether the preview shows the player or a placeholder card. A file this
+ * browser cannot decode (the element errored, loaded with no picture, or the
+ * verdict says it will be converted and the element has not shown a picture)
+ * would otherwise be an empty black box.
+ */
+export function previewSurface({ verdict, loaded = false, failed = false, videoWidth = 0 }) {
+  const hasPicture = Boolean(loaded) && Number(videoWidth) > 0;
+  if (failed || (loaded && !hasPicture)) return 'placeholder';
+  if (verdict === Verdict.WILL_CONVERT && !hasPicture) return 'placeholder';
+  return 'player';
+}
+
+export const PREVIEW_UNAVAILABLE_TEXT =
+  "Preview isn't available in this browser. It will be converted automatically after upload.";

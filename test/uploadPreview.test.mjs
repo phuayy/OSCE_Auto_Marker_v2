@@ -280,3 +280,21 @@ test('when both files are bad the reason names the recording first', () => {
   assert.match(startBlockingReason(badVideo, badPdf), /\.wmv files cannot be uploaded/);
   assert.match(startBlockingReason(assess({ browser: loaded }), badPdf), /PDF/);
 });
+
+test('batch mode shows only the case study; the single-file state is passed through otherwise', async () => {
+  const { previewFiles } = await import('../src/lib/uploadPreview.js');
+  const input = { videoFile: { name: 'a.mp4' }, videoUrl: 'blob:x', caseStudyFile: { name: 'c.pdf' } };
+  assert.deepEqual(previewFiles({ ...input, batchMode: true }), { videoFile: null, videoUrl: null, caseStudyFile: input.caseStudyFile });
+  assert.deepEqual(previewFiles({ ...input, batchMode: false }), input);
+});
+
+test('the preview shows a placeholder, not an empty black player, for a file that will not decode', async () => {
+  const { previewSurface, Verdict } = await import('../src/lib/uploadPreview.js');
+  const surface = (state) => previewSurface(state);
+  assert.equal(surface({ verdict: Verdict.PLAYS, loaded: true, videoWidth: 320 }), 'player');
+  assert.equal(surface({ verdict: Verdict.UNKNOWN }), 'player', 'still checking: the player stays');
+  assert.equal(surface({ verdict: Verdict.PLAYS, failed: true }), 'placeholder', 'the element errored');
+  assert.equal(surface({ verdict: Verdict.PLAYS, loaded: true, videoWidth: 0 }), 'placeholder', 'loaded with no picture');
+  assert.equal(surface({ verdict: Verdict.WILL_CONVERT }), 'placeholder', 'HEVC and similar, before any picture');
+  assert.equal(surface({ verdict: Verdict.WILL_CONVERT, loaded: true, videoWidth: 640 }), 'player', 'a conversion that this browser decodes anyway');
+});

@@ -21,8 +21,10 @@ import {
   canPlayTypeFor,
   describeCodecs,
   describeVerdict,
+  PREVIEW_UNAVAILABLE_TEXT,
   fetchUploadLimits,
   formatFileSize,
+  previewSurface,
   readPdfHeaderCheck,
   startBlockingReason,
   shouldReadContainer,
@@ -158,6 +160,13 @@ export default function UploadFilePreview({ videoFile, videoUrl, caseStudyFile, 
   const facts = assessment?.facts;
   const checking = assessment && verdict !== Verdict.REJECTED && !settled;
   const showPlayer = videoFile && videoUrl && !player?.failed;
+  const surface = videoFile ? previewSurface({
+    verdict,
+    loaded: player?.loaded,
+    failed: player?.failed,
+    videoWidth: player?.videoWidth,
+  }) : 'player';
+  const placeholder = surface === 'placeholder';
   const details = facts ? describeCodecs(facts) : '';
   const summary = facts && [
     facts.durationSeconds ? formatRuntime(facts.durationSeconds) : null,
@@ -178,7 +187,7 @@ export default function UploadFilePreview({ videoFile, videoUrl, caseStudyFile, 
               playsInline
               preload="metadata"
               aria-label={`Preview of ${videoFile.name}`}
-              className="block aspect-video w-full rounded-lg border border-slate-200 bg-black"
+              className={`${placeholder ? 'hidden' : 'block'} aspect-video w-full rounded-lg border border-slate-200 bg-black`}
               onLoadedMetadata={(event) => onPlayerEvent(event, {
                 loaded: true,
                 durationSeconds: event.currentTarget.duration,
@@ -187,6 +196,12 @@ export default function UploadFilePreview({ videoFile, videoUrl, caseStudyFile, 
               })}
               onError={(event) => onPlayerEvent(event, { failed: true })}
             />
+          ) : null}
+          {placeholder ? (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600" data-testid="preview-unavailable">
+              <p className="m-0">{PREVIEW_UNAVAILABLE_TEXT}</p>
+              {details ? <p className="m-0 mt-1 text-[11px] text-slate-500">{details}</p> : null}
+            </div>
           ) : null}
           <figcaption className="space-y-1.5">
             <div className="flex flex-wrap items-center gap-2">
@@ -197,7 +212,7 @@ export default function UploadFilePreview({ videoFile, videoUrl, caseStudyFile, 
               </span>
               <span className="text-xs text-slate-600">{summary}</span>
             </div>
-            {details ? <p className="text-[11px] text-slate-500">{details}</p> : null}
+            {details && !placeholder ? <p className="text-[11px] text-slate-500">{details}</p> : null}
             <WarningList warnings={assessment?.warnings || []} />
           </figcaption>
         </figure>

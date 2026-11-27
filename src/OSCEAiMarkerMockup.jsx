@@ -69,6 +69,7 @@ import { Progress } from '@/components/ui/progress';
 import { PageHeader } from '@/components/PageHeader.jsx';
 import RegionFocusPreview from '@/components/RegionFocusPreview.jsx';
 import UploadFilePreview from '@/components/upload/UploadFilePreview.jsx';
+import { previewFiles } from '@/lib/uploadPreview';
 import OccupancyPresetGlyph from '@/components/OccupancyPresetGlyph.jsx';
 import CorporaManager from './CorporaManager.jsx';
 import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
@@ -2626,9 +2627,7 @@ export default function OSCEAiMarkerMockup({
                 />
 
                 <UploadFilePreview
-                  videoFile={videoFile}
-                  videoUrl={localVideoUrl}
-                  caseStudyFile={caseStudyFile}
+                  {...previewFiles({ batchMode, videoFile, videoUrl: localVideoUrl, caseStudyFile })}
                   onBlockingReason={setStartBlockReason}
                 />
 
