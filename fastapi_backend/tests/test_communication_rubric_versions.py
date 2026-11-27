@@ -278,8 +278,13 @@ def test_upload_reset_draft_and_edit_each_retire_the_active_version(tmp_path: Pa
         runner.payload = _rubric("From draft")
         draft = await service.extract_draft(_upload(tmp_path, b"%PDF-1.4 draft"), mode="llm", actor=ACTOR)
         assert len(await service.list_versions()) == 3, "an extraction alone is not a version"
-        await service.save_edited(EDIT, draft_id=draft["draft"]["draftId"], actor=ACTOR)
-        edited = await service.save_edited({**EDIT, "title": "Edited again"}, actor=ACTOR)
+        base = (await service.current())["version"]["id"]
+        from_draft = await service.save_edited(
+            EDIT, base_version_id=base, draft_id=draft["draft"]["draftId"], actor=ACTOR
+        )
+        edited = await service.save_edited(
+            {**EDIT, "title": "Edited again"}, base_version_id=from_draft["version"]["id"], actor=ACTOR
+        )
 
         versions = await service.list_versions()
         assert [(v["versionNumber"], v["changeKind"], v["status"]) for v in versions] == [

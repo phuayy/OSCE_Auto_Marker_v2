@@ -11,13 +11,20 @@ from typing import Any
 from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import SessionWriteContractError, StaleSessionError
+from app.core.exceptions import SessionDeletedError, SessionWriteContractError, StaleSessionError
 from app.core.json_utils import read_json_file
 from app.core.utils import parse_iso, session_name_key
 from app.database.models import SessionRecord, utc_now
 from app.database.orm import OrmDatabase
 from app.domain.actors import PROVENANCE_KEY, provenance_of, provenance_user_id
-from app.domain.sessions import SESSION_PAYLOAD_SCHEMA_VERSION, SessionStatus, validate_session_payload
+from app.domain.enums import Workflow
+from app.domain.session_filters import SessionListFilter
+from app.domain.sessions import (
+    SESSION_PAYLOAD_SCHEMA_VERSION,
+    SOURCE_IN_USE_STATUSES,
+    SessionStatus,
+    validate_session_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +57,40 @@ def _version_token(updated_at: datetime | None) -> str | None:
     return dt.isoformat(timespec="microseconds")
 
 
+_LIKE_ESCAPE = "\\"
+
+
+def _contains_pattern(term: str) -> str:
+    """``term`` as a LIKE "contains" pattern with its own wildcards neutralised,
+    so a search for ``50%`` or ``a_b`` matches those characters literally."""
+    escaped = term.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2).replace("%", _LIKE_ESCAPE + "%").replace("_", _LIKE_ESCAPE + "_")
+    return f"%{escaped}%"
+
+
+def _filter_clauses(filters: SessionListFilter) -> list[Any]:
+    """The ``WHERE`` terms for the list filters; they combine with AND.
+
+    The name search is a scan (no index can serve a leading wildcard) and the
+    comparison is ``lower(name)`` against an already-lowercased term, which
+    folds only ASCII on SQLite and everything on PostgreSQL.
+    """
+    clauses: list[Any] = []
+    if filters.search:
+        clauses.append(func.lower(SessionRecord.name).like(_contains_pattern(filters.search), escape=_LIKE_ESCAPE))
+    if filters.statuses:
+        clauses.append(SessionRecord.status.in_(filters.statuses))
+    if filters.created_by:
+        clauses.append(SessionRecord.created_by == filters.created_by)
+    if filters.workflow is Workflow.LONG:
+        clauses.append(SessionRecord.payload["workflow"].as_string() == Workflow.LONG.value)
+    elif filters.workflow is Workflow.STANDARD:
+        # A session recorded before `workflow` existed is a standard one, as
+        # everywhere else (`_task_type_for` treats anything not long that way).
+        workflow = SessionRecord.payload["workflow"].as_string()
+        clauses.append(or_(workflow.is_(None), workflow != Workflow.LONG.value))
+    return clauses
+
+
 def _optional_int(value: Any) -> int | None:
     """Integer form of :func:`_optional_float`, for JSON-extracted counters."""
     number = _optional_float(value)
@@ -69,6 +110,33 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _video_summary(row: Any) -> dict[str, Any]:
+    """What the session card shows of the source video: the preparation job's
+    state, a poster and whether a playable copy exists.
+
+    A purged video offers nothing to watch, so its media facts, poster and copy
+    are all withheld (a stale ``browserPlayable`` must not offer Watch) even
+    though files may still be on disk. ``media`` is also ``None`` for a session
+    recorded before the prepare_media job existed. URLs are the stored
+    ones ``public_session`` serves for these artefacts.
+    """
+    purged = bool(row.video_purged_at)
+    return {
+        "media": None
+        if purged or row.media_status is None
+        else {
+            "status": row.media_status,
+            "stage": row.media_stage or None,
+            "progress": _optional_float(row.media_progress),
+            "attempts": _optional_int(row.media_attempts),
+            "durationSeconds": _optional_float(row.media_duration),
+            "browserPlayable": None if row.media_browser_playable is None else bool(row.media_browser_playable),
+        },
+        "posterUrl": None if purged else row.poster_url or None,
+        "hasPlayback": not purged and bool(row.playback_url),
+    }
 
 
 def _compact_steps(value: Any) -> dict[str, Any] | None:
@@ -135,8 +203,11 @@ class SessionRepository:
     async def write(self, session: dict[str, Any], *, allocate_name: Callable[[set[str]], str] | None = None) -> None:
         """Persist ``session`` whole, under the write contract.
 
-        * A row that does not exist yet is created from any dict — that is how
-          uploads and clip children are born.
+        * A row that does not exist yet is created from a dict that was never
+          read (no ``_loadedUpdatedAt``) — that is how uploads and clip
+          children are born. A *stamped* dict aimed at a missing row was read
+          from a row that has since been deleted; it raises
+          :class:`SessionDeletedError` instead of bringing the session back.
         * A row that exists is replaced only by a dict that was ``read`` from it
           (it carries ``_loadedUpdatedAt``) **and** whose stamp still matches
           the row. A mismatch means another writer committed in between, and
@@ -157,6 +228,8 @@ class SessionRepository:
                 names = await db_session.execute(select(SessionRecord.name))
                 session["name"] = allocate_name({session_name_key(name) for name in names.scalars() if name})
             existing = await db_session.get(SessionRecord, session_id)
+            if existing is None and loaded_version is not None:
+                raise SessionDeletedError(session_id)
             if existing is not None:
                 if loaded_version is None:
                     raise SessionWriteContractError(session_id)
@@ -293,6 +366,7 @@ class SessionRepository:
     async def read_index_projection(
         self, *, limit: int | None = None, after: tuple[datetime, str] | None = None,
         parent_session_id: str | None = None, roots_only: bool = False,
+        filters: SessionListFilter | None = None,
     ) -> list[dict[str, Any]]:
         """Read only the fields the session-list cards render.
 
@@ -325,11 +399,25 @@ class SessionRepository:
             payload["clipExport", "total"].as_float().label("clip_export_total"),
             payload["error"].as_string().label("error"),
             payload[PROVENANCE_KEY].as_json().label("created_by"),
+            # The video's preparation facts, path by path: the card shows a
+            # thumbnail and a duration, and nothing else of `files` is needed.
+            payload["files", "video", "purgedAt"].as_string().label("video_purged_at"),
+            payload["files", "video", "poster", "url"].as_string().label("poster_url"),
+            payload["files", "video", "playback", "url"].as_string().label("playback_url"),
+            payload["files", "video", "media", "status"].as_string().label("media_status"),
+            payload["files", "video", "media", "stage"].as_string().label("media_stage"),
+            payload["files", "video", "media", "progress"].as_float().label("media_progress"),
+            payload["files", "video", "media", "attempts"].as_float().label("media_attempts"),
+            payload["files", "video", "media", "durationSeconds"].as_float().label("media_duration"),
+            payload["files", "video", "media", "browserPlayable"].as_boolean().label("media_browser_playable"),
         ).order_by(SessionRecord.created_at.desc(), SessionRecord.id.desc())
         if roots_only:
             statement = statement.where(SessionRecord.parent_session_id.is_(None))
         elif parent_session_id is not None:
             statement = statement.where(SessionRecord.parent_session_id == parent_session_id)
+        if filters is not None:
+            for clause in _filter_clauses(filters):
+                statement = statement.where(clause)
         if after is not None:
             created_at, session_id = after
             statement = statement.where(or_(
@@ -379,6 +467,7 @@ class SessionRepository:
                     # Who created the session, as they were at the time (the
                     # card says "by Dr M"); None for a row that predates this.
                     "createdBy": provenance_of({PROVENANCE_KEY: row.created_by}),
+                    **_video_summary(row),
                 }
             )
         return projections
@@ -402,7 +491,8 @@ class SessionRepository:
         ``SessionMaintenanceService._delete_artifacts``) — so this never
         names one. Oldest first, so a sweep interrupted partway through a
         large backlog always makes progress on the sessions the policy has
-        waited longest for.
+        waited longest for. A session a run or an upload is still using
+        (``SOURCE_IN_USE_STATUSES``) is never a candidate, however old.
         """
         payload = SessionRecord.payload
         statement = (
@@ -410,6 +500,7 @@ class SessionRepository:
             .where(
                 SessionRecord.parent_session_id.is_(None),
                 SessionRecord.created_at < cutoff,
+                SessionRecord.status.not_in(sorted(SOURCE_IN_USE_STATUSES)),
                 payload["files", "video", "absolutePath"].as_string().isnot(None),
                 payload["files", "video", "purgedAt"].as_string().is_(None),
             )

@@ -133,10 +133,29 @@ enable_apis() {
 # ===========================================================================
 # 2. Settings: region, zone, GPU, name, who may start it
 # ===========================================================================
-gpu_quota() {  # gpu_quota METRIC → limit minus usage, region-level
-  gc compute regions describe "$REGION" --flatten=quotas \
+# GPUs this deployment's own VM holds against the quotas right now: a running
+# (or starting, or still stopping) VM is counted in the quota usage, but it is
+# the one that will use that GPU again, so a re-run must not see it as taken.
+# own_gpus_held [ACCEL] — those of type ACCEL (e.g. nvidia-l4), or all of them.
+own_gpus_held() {
+  local status
+  status="$(gc compute instances describe "$INSTANCE" --zone "${ZONE:-}" --format='value(status)' 2>/dev/null || true)"
+  case "$status" in
+    RUNNING|STAGING|PROVISIONING|STOPPING) ;;
+    *) printf '0'; return ;;
+  esac
+  gc compute instances describe "$INSTANCE" --zone "$ZONE" --flatten=guestAccelerators \
+    --format='value(guestAccelerators.acceleratorType.basename(),guestAccelerators.acceleratorCount)' 2>/dev/null |
+    awk -v want="${1:-}" '(want == "" || $1 == want) {n += $2} END {printf "%d", n}'
+}
+
+gpu_quota() {  # gpu_quota METRIC ACCEL → limit minus usage plus our own VM's share, region-level
+  local free
+  free="$(gc compute regions describe "$REGION" --flatten=quotas \
     --filter="quotas.metric=$1" --format='value(quotas.limit,quotas.usage)' 2>/dev/null |
-    awk '{printf "%d\n", $1 - $2}' | head -n1
+    awk '{printf "%d\n", $1 - $2}' | head -n1)"
+  [[ -n "$free" ]] || return 0   # metric absent: the caller reads that as none
+  printf '%d\n' $(( free + $(own_gpus_held "$2") ))
 }
 
 global_gpu_quota() {
@@ -144,7 +163,8 @@ global_gpu_quota() {
   v="$(gc compute project-info describe --flatten=quotas \
     --filter='quotas.metric=GPUS_ALL_REGIONS' --format='value(quotas.limit,quotas.usage)' 2>/dev/null |
     awk '{printf "%d\n", $1 - $2}' | head -n1)"
-  printf '%s' "${v:-1}"   # metric absent: no all-regions cap on this project
+  if [[ -z "$v" ]]; then printf '1'; return; fi   # metric absent: no all-regions cap on this project
+  printf '%d' $(( v + $(own_gpus_held) ))
 }
 
 zones_with() {  # zones_with ACCEL → zones in $REGION offering it
@@ -181,8 +201,8 @@ choose_region_and_gpu() {
   fi
 
   local l4 t4 all l4_here t4_here
-  l4="$(gpu_quota NVIDIA_L4_GPUS)"; l4="${l4:-0}"
-  t4="$(gpu_quota NVIDIA_T4_GPUS)"; t4="${t4:-0}"
+  l4="$(gpu_quota NVIDIA_L4_GPUS nvidia-l4)"; l4="${l4:-0}"
+  t4="$(gpu_quota NVIDIA_T4_GPUS nvidia-tesla-t4)"; t4="${t4:-0}"
   all="$(global_gpu_quota)"
   l4_here="$(zones_with nvidia-l4 | grep -cx "$ZONE" || true)"
   t4_here="$(zones_with nvidia-tesla-t4 | grep -cx "$ZONE" || true)"
@@ -193,8 +213,8 @@ choose_region_and_gpu() {
   if [[ "$t4_here" -gt 0 && "$t4" -gt 0 ]]; then profiles+=("$OSCE_T4_PROFILE"); fi
 
   if [[ "$all" -lt 1 || ${#profiles[@]} -eq 0 ]]; then
-    # An existing VM already holds its GPU's quota while running; only a
-    # brand-new VM needs free quota.
+    # Only a brand-new VM needs free quota (an existing one's own share is
+    # already counted as free above).
     if gc compute instances describe "$INSTANCE" --zone "$ZONE" >/dev/null 2>&1; then
       warn "No free GPU quota right now (the existing VM may be using it). Keeping the current GPU settings."
       return
@@ -461,6 +481,7 @@ ensure_vm() {
     local status; status="$(gc compute instances describe "$INSTANCE" --zone "$ZONE" --format='value(status)')"
     if [[ "$status" == "RUNNING" ]]; then
       if confirm "The marker is running. Restart it now to apply the update? (Anyone using it is interrupted.)"; then
+        INSTALL_SINCE="$(date +%s)"
         gc compute instances stop "$INSTANCE" --zone "$ZONE" >/dev/null
         gc compute instances start "$INSTANCE" --zone "$ZONE" >/dev/null
         VM_STARTED=1
@@ -472,20 +493,24 @@ ensure_vm() {
       info "The marker is stopped; the update is applied the next time it starts from the gate."
     fi
   else
+    INSTALL_SINCE="$(date +%s)"
     create_vm
     VM_STARTED=1
   fi
   config_save
 }
 
-# The VM reports its install to the guest attribute osce/install.
+# The VM reports its install to the guest attribute osce/install. A report is
+# "ours" when it is newer than INSTALL_SINCE, taken just before the VM is
+# started or created: the VM can finish (or fail) long before wait_for_install
+# is reached, because the gate is deployed in between, and a reference time
+# taken at the wait would call that report an old one.
 wait_for_install() {
   [[ "${VM_STARTED:-0}" == 1 ]] || return 0
   step "Installing the app on the VM (first time: 15-30 minutes; updates: a few)"
   info "Safe to close this window: the install continues on its own."
   info "Log on the VM: sudo tail -f /var/log/osce-install.log"
-  local deadline=$(( $(date +%s) + 60 * 60 )) value="" last="" since
-  since="$(date +%s)"
+  local deadline=$(( $(date +%s) + 60 * 60 )) value="" last="" since="${INSTALL_SINCE:?ensure_vm marks the trigger time}"
   while (( $(date +%s) < deadline )); do
     value="$(gc compute instances get-guest-attributes "$INSTANCE" --zone "$ZONE" \
       --query-path=osce/install --format='value(value)' 2>/dev/null || true)"
@@ -651,4 +676,4 @@ main() {
   summary
 }
 
-main "$@"
+if [[ "${OSCE_SETUP_SOURCE_ONLY:-0}" != 1 ]]; then main "$@"; fi

@@ -213,19 +213,19 @@ class JobRepository:
             )
             return _to_job_dict(row) if row is not None else None
 
-    async def active_session_ids(self) -> set[str]:
-        """Sessions that some job row still intends to run.
+    async def active_session_ids(self, task_type: str | None = None) -> set[str]:
+        """Sessions that some job row (of ``task_type``, when given) still
+        intends to run.
 
         The startup reconciliation compares this against sessions whose status
         claims a job is working on them; a session in that state with no row
         here has nothing left that could ever move it.
         """
         async with self.database.session() as db:
-            rows = await db.scalars(
-                select(JobRecord.session_id)
-                .where(JobRecord.status.in_(sorted(ACTIVE_JOB_STATUSES)))
-                .distinct()
-            )
+            statement = select(JobRecord.session_id).where(JobRecord.status.in_(sorted(ACTIVE_JOB_STATUSES)))
+            if task_type is not None:
+                statement = statement.where(JobRecord.task_type == str(task_type))
+            rows = await db.scalars(statement.distinct())
             return {str(session_id) for session_id in rows}
 
     async def count_in_statuses(self, statuses: frozenset[str]) -> int:

@@ -11,7 +11,9 @@ until the gate starts it again.
 
 * no person has acted (``ActivityTracker`` — requests a tab makes on its own
   are not counted, see ``core/activity.py``), and
-* no work is in flight: no job queued or running and no upload assembling.
+* no work is in flight: no job queued or running, no upload assembling and no
+  upload still inside its transfer window (a direct-to-bucket transfer sends
+  nothing through this API, so the open upload record is the only sign of it).
   Work counts as activity, so the window restarts when the last job finishes
   rather than when it started: a three-hour batch of clip assessments queued
   at five o'clock is never cut off, and its results stay up for a full window
@@ -45,6 +47,10 @@ class _StatusCounter(Protocol):
     async def count_in_statuses(self, statuses: frozenset[str]) -> int: ...
 
 
+class _TransferCounter(Protocol):
+    async def count_open_transfers(self) -> int: ...
+
+
 @dataclass(frozen=True)
 class IdleState:
     enabled: bool
@@ -71,6 +77,7 @@ class IdleShutdownService:
         activity: ActivityTracker,
         jobs: _StatusCounter,
         sessions: _StatusCounter,
+        uploads: _TransferCounter,
         boot_stage: BootStageReporter,
     ) -> None:
         self.threshold_seconds = max(0, idle_minutes) * 60
@@ -79,6 +86,7 @@ class IdleShutdownService:
         self.activity = activity
         self.jobs = jobs
         self.sessions = sessions
+        self.uploads = uploads
         self.boot_stage = boot_stage
         self._shutdown_issued = False
 
@@ -89,7 +97,9 @@ class IdleShutdownService:
     async def is_busy(self) -> bool:
         if await self.jobs.count_in_statuses(IN_PROGRESS_JOB_STATUSES):
             return True
-        return bool(await self.sessions.count_in_statuses(_BUSY_SESSION_STATUSES))
+        if await self.sessions.count_in_statuses(_BUSY_SESSION_STATUSES):
+            return True
+        return bool(await self.uploads.count_open_transfers())
 
     async def state(self) -> IdleState:
         busy = await self.is_busy()

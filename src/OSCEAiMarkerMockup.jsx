@@ -3,14 +3,34 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ensureStreamTicket } from '@/auth';
 import { useChangeStream } from '@/changeStream';
-import { ApiError, ERROR_KIND, apiJson } from '@/lib/apiFetch';
+import { apiJson } from '@/lib/apiFetch';
 import { WORKSPACE_LAYOUT, loadSessionWorkspace, workspaceLayoutFor } from '@/lib/sessionWorkspace';
 import { uploadFileToResumableSession } from '@/lib/resumableUpload';
-import { DEFAULT_PART_CONCURRENCY, recordedPartNumbers, uploadParts } from '@/lib/partUpload';
+import { recordedPartNumbers, uploadParts } from '@/lib/partUpload';
+import { submitUpload } from '@/lib/uploadSubmission';
 import { CONNECTION_STATUS, useConnectionStatus } from '@/lib/connectionStatus';
 import { CLIP_ASSESSMENTS_ANCHOR_ID } from '@/lib/anchors';
 import { coalesceAsync } from '@/lib/coalesce';
-import { fetchSessionPages } from '@/lib/sessionPages';
+import { createRequestSequence, fetchSessionPages } from '@/lib/sessionPages';
+import {
+  DEFAULT_FILTER,
+  couldHideInFlight,
+  describeEmptyResult,
+  filterKey,
+  readStoredChip,
+  toQueryParams,
+  writeStoredChip,
+} from '@/lib/sessionFilters';
+import {
+  clearSelection,
+  pruneSelection,
+  removeFromSelection,
+  selectAllVisible,
+  selectedEntries,
+  toggleSelection as toggleSessionSelection,
+} from '@/lib/sessionSelection';
+import { SessionListToolbar } from '@/dashboard/SessionListToolbar';
+import { BulkActionBar } from '@/dashboard/BulkActionBar';
 import { clampNumber, formatRuntime } from '@/lib/format';
 import { LazyBoundary, lazyComponent, preloadComponent } from '@/lib/lazyRoute';
 import { LoadingRegion, SessionRowsSkeleton, WorkspaceSkeleton } from '@/components/skeletons.jsx';
@@ -20,7 +40,10 @@ import {
   describeProcessingStage,
   formatProcessingStageLabel,
 } from '@/lib/processingStage';
-import { UPLOAD_PHASE, useUploadTracker } from '@/lib/uploadTracking';
+import { activeUploadTrack, useUploadTracker } from '@/lib/uploadTracking';
+import UploadProbeNotice from '@/components/upload/UploadProbeNotice.jsx';
+import { useBatchUpload } from '@/lib/useBatchUpload';
+import { BatchUploadPanel } from '@/components/upload/BatchUploadPanel.jsx';
 import {
   BarChart3,
   BellRing,
@@ -32,33 +55,42 @@ import {
   Film,
   Loader2,
   LogOut,
-  Play,
-  RotateCw,
   Settings,
-  Trash2,
   UploadCloud,
   User,
   Users,
   Video,
   Wand2,
 } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Modal } from '@/components/ui/dialog';
 import { Progress } from '@/components/ui/progress';
 import { PageHeader } from '@/components/PageHeader.jsx';
-import { SessionStatusBadge } from '@/components/SessionStatusBadge.jsx';
 import RegionFocusPreview from '@/components/RegionFocusPreview.jsx';
+import UploadFilePreview from '@/components/upload/UploadFilePreview.jsx';
+import { previewFiles } from '@/lib/uploadPreview';
 import OccupancyPresetGlyph from '@/components/OccupancyPresetGlyph.jsx';
 import CorporaManager from './CorporaManager.jsx';
 import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
 import { describeClipExportOutcome } from '@/lib/clipExportOutcome';
+import { hasPendingMedia } from '@/lib/mediaWatch';
 import { MEDIA_POLL_INTERVAL_MS, describeVideoMedia, effectiveVideoDuration, mergeSessionFiles } from '@/lib/videoMedia';
-import { creatorName } from '@/lib/provenance';
 import { canMutateSession } from '@/lib/authz';
+import {
+  buildManualSplitPayload,
+  clipListSignature,
+  planTimelineReseed,
+  seedTimelineFromClips,
+} from '@/lib/timelineSeed';
+import { SessionCard } from '@/dashboard/SessionCard.jsx';
+import { SessionCardMedia } from '@/components/video/SessionCardMedia.jsx';
+import { SessionCardActions } from '@/dashboard/SessionCardActions.jsx';
+import { workspaceBelongsToUpload } from '@/lib/uploadCompletion';
 import { indexClipAssessments } from '@/lib/clipAssessments';
 import { describeRerunAction } from '@/lib/rerunAction';
+import { describeRescoreResult } from '@/lib/rescoreAction';
+import { RescoreDialog } from '@/components/RescoreDialog.jsx';
 import { describeStartAction } from '@/lib/sessionStartAction';
 import {
   buildRegionFocusOptions,
@@ -71,7 +103,6 @@ import {
 import {
   INTERMISSION_KIND,
   MIN_BOUNDARY_GAP_SECONDS,
-  ensureKinds,
   hitTestTimeline,
   insertSeparator,
   normalizeLabels,
@@ -95,6 +126,8 @@ const LONG_VIDEO_THRESHOLD_SECONDS = 300;
 // cohort charts) is its own chunk, warmed the moment a load starts rather than
 // when it renders. Same contract AppShell uses for Settings/Analytics/Rubric.
 const SessionWorkspace = lazyComponent(() => import('@/workspace/SessionWorkspace.jsx'));
+// A read-only look at a video whose session is still processing; loaded by the Watch click.
+const WatchVideoDialog = lazyComponent(() => import('@/components/video/WatchVideoDialog.jsx'));
 
 // How often the open workspace re-reads a session while its clip export runs.
 // Faster than the in-flight heartbeat below because the user is watching this one
@@ -113,6 +146,9 @@ const CLIP_EXPORT_POLL_MS = 3000;
 // almost nothing: the session-index endpoint is served from a change-token
 // cache, so a tick that finds no change is a dictionary lookup.
 const IN_FLIGHT_HEARTBEAT_MS = 12000;
+
+// What `submitUpload` sends bytes with; the dashboard owns no transfer logic.
+const UPLOAD_TRANSPORTS = { uploadParts, recordedPartNumbers, uploadFileToResumableSession };
 
 function debugPipeline(message) {
   if (import.meta.env.DEV) {
@@ -140,6 +176,8 @@ export default function OSCEAiMarkerMockup({
   const [videoFile, setVideoFile] = useState(null);
   const [communicationScores, setCommunicationScores] = useState(null);
   const [caseStudyFile, setCaseStudyFile] = useState(null);
+  // Why the chosen files cannot be uploaded (the preview's one answer), which blocks Start.
+  const [startBlockReason, setStartBlockReason] = useState(null);
   const [showWorkspace, setShowWorkspace] = useState(false);
   const [uploadFlow, setUploadFlow] = useState(Workflow.STANDARD);
   // Long-workflow auto-crop method: 'bells' (audio bell detection) or
@@ -196,6 +234,12 @@ export default function OSCEAiMarkerMockup({
   const [sessionIndexLoading, setSessionIndexLoading] = useState(false);
   const [hasMoreSessions, setHasMoreSessions] = useState(false);
   const sessionPageCountRef = useRef(1);
+  // What the Saved sessions list is narrowed to (search text + status chip).
+  // Applied by the server on every page; the ref is what refreshSessionIndex
+  // reads, so a coalesced background refresh never runs with a stale filter.
+  const [sessionFilter, setSessionFilter] = useState(() => ({ ...DEFAULT_FILTER, chip: readStoredChip() }));
+  const sessionFilterRef = useRef(sessionFilter);
+  const [selectedSessionIds, setSelectedSessionIds] = useState(() => new Set());
   // False until the index has answered once. `sessionIndex` starts empty, and
   // "no sessions yet" and "not asked yet" must not look the same: the first
   // fetch draws rows in outline, and the empty state waits for a real answer.
@@ -208,8 +252,12 @@ export default function OSCEAiMarkerMockup({
   const connection = useConnectionStatus();
   const [sessionNameDrafts, setSessionNameDrafts] = useState({});
   const [renamingSessionId, setRenamingSessionId] = useState(null);
+  // Which session's video the Watch dialog is showing (read from the index, so it follows the row).
+  const [watchingSessionId, setWatchingSessionId] = useState(null);
   const [deletingSessionId, setDeletingSessionId] = useState(null);
   const [rerunningSessionId, setRerunningSessionId] = useState(null);
+  // The open Re-score dialog: { sessionId, clips } (clips = a whole recording's clips).
+  const [rescoreTarget, setRescoreTarget] = useState(null);
   const [startingSessionId, setStartingSessionId] = useState(null);
 
   const [session, setSession] = useState(null);
@@ -230,6 +278,22 @@ export default function OSCEAiMarkerMockup({
   // transfer keeps running and keeps reporting here, where the session card
   // reads it.
   const uploadTracker = useUploadTracker();
+  // Several recordings under one case study. Owned here, not by the panel, so a
+  // running batch survives the form unmounting while a session is open; it
+  // keeps its own per-item session ids and never touches
+  // `activeUploadSessionIdRef`, which belongs to the single-file flow.
+  const [batchMode, setBatchMode] = useState(false);
+  const batchUpload = useBatchUpload({
+    enabled: batchMode,
+    caseStudy: caseStudyFile,
+    buildRequest: buildUploadRequest,
+    tracker: uploadTracker,
+    transports: UPLOAD_TRANSPORTS,
+    // Each session appears in the list as soon as it exists, and again as each
+    // recording lands; the refresh is coalesced, so a burst is one request.
+    onSessionCreated: () => refreshSessionIndex({ silent: true }),
+    onItemFinished: () => refreshSessionIndex({ silent: true }),
+  });
   // Overlay visibility only. Deliberately separate from `isUploading`, which
   // means "a transfer is in flight" and still gates the upload form.
   const [uploadOverlayDismissed, setUploadOverlayDismissed] = useState(false);
@@ -296,8 +360,9 @@ export default function OSCEAiMarkerMockup({
   const videoInputRef = useRef(null);
   const caseStudyInputRef = useRef(null);
   const clipExportWasWatchedRef = useRef(false);
-  // Issue number of the newest GET /api/sessions; see refreshSessionIndex.
-  const sessionIndexRequestSeqRef = useRef(0);
+  // Issue numbers of GET /api/sessions; see refreshSessionIndex.
+  const sessionIndexRequestsRef = useRef(null);
+  if (!sessionIndexRequestsRef.current) sessionIndexRequestsRef.current = createRequestSequence();
   const videoPlayerRef = useRef(null);
   const videoPlayerSectionRef = useRef(null);
   const timelineContainerRef = useRef(null);
@@ -306,6 +371,10 @@ export default function OSCEAiMarkerMockup({
   // mousemove burst can queue several updates before React re-renders.
   const manualBoundariesRef = useRef([]);
   manualBoundariesRef.current = manualBoundaries;
+  // The open session as of the latest render, for async handlers (an upload
+  // settling minutes later) that must not act on a stale closure.
+  const openSessionIdRef = useRef(null);
+  openSessionIdRef.current = session?.id ?? null;
   const timelineMenuRef = useRef(null);
   const timelineSegmentRefs = useRef(new Map());
   const workspaceLoadRef = useRef(null);
@@ -324,6 +393,11 @@ export default function OSCEAiMarkerMockup({
   const videoClips = useMemo(() => {
     return Array.isArray(session?.outputs?.videoClips) ? session.outputs.videoClips : [];
   }, [session]);
+
+  const watchedEntry = useMemo(
+    () => (watchingSessionId ? sessionIndex.find((entry) => entry.id === watchingSessionId) || null : null),
+    [sessionIndex, watchingSessionId],
+  );
 
   const visibleSessions = useMemo(
     () => sessionIndex.filter((entry) => !entry.parentSessionId),
@@ -377,20 +451,6 @@ export default function OSCEAiMarkerMockup({
     [videoClips]
   );
   const intermissionClipCount = videoClips.length - sessionClipCount;
-  // The session/intermission distinction exists only for human-detection
-  // segmentation. Bell detection splits AT bells (its constraint) — every
-  // segment is a student clip, so the toggle is not offered there.
-  const isPersonSegmentedSession = useMemo(
-    () =>
-      Boolean(
-        session?.segmentation === SegmentationMethod.PERSON ||
-          videoClips.some(
-            (clip) =>
-              clip?.kind === INTERMISSION_KIND || clip?.source?.type === 'person_detection_rtdetr'
-          )
-      ),
-    [session?.segmentation, videoClips]
-  );
   // While viewing a session, the session's own workflow (or the presence of
   // detected clips) is the source of truth — NOT the transient upload-form tab,
   // which is only correct right after picking it. This guarantees a long session
@@ -410,50 +470,56 @@ export default function OSCEAiMarkerMockup({
     return videoClips.find((clip) => String(clip.id) === String(selectedClipId)) || null;
   }, [selectedClipId, videoClips]);
 
+  // Keyed on the clip's range, not the clip object: every refresh rebuilds the
+  // objects, and re-seeding on identity discarded a crop the user was dragging.
+  const selectedClipStart = selectedClip?.start;
+  const selectedClipEnd = selectedClip?.end;
   useEffect(() => {
-    if (!selectedClip) {
+    if (!selectedClipId) {
       return;
     }
     setCropDraft({
-      start: Number(selectedClip.start || 0),
-      end: Number(selectedClip.end || 0),
+      start: Number(selectedClipStart || 0),
+      end: Number(selectedClipEnd || 0),
     });
-  }, [selectedClipId, selectedClip]);
+  }, [selectedClipId, selectedClipStart, selectedClipEnd]);
 
+  // Seed the manual timeline from the session's clips. Keyed on the clips'
+  // content (not the array, which every refresh replaces) and gated by
+  // `planTimelineReseed`: an identical refresh does nothing, and a separator
+  // the user moved and has not exported is never overwritten by one.
+  const clipSignature = useMemo(() => clipListSignature(videoClips), [videoClips]);
+  const lastTimelineSeedRef = useRef(null);
   useEffect(() => {
     if (!Number.isFinite(videoDurationSeconds) || videoDurationSeconds <= 0) {
       return;
     }
-
-    if (videoClips.length > 1) {
-      const sortedClips = [...videoClips].sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
-      const nextBoundaries = [];
-      for (let index = 0; index < sortedClips.length - 1; index += 1) {
-        const boundary = Number(sortedClips[index].end || 0);
-        if (boundary > 0 && boundary < videoDurationSeconds) {
-          nextBoundaries.push(boundary);
-        }
-      }
-
-      // The person detector emits a full timeline partition — seed each
-      // segment's kind so intermissions render greyed from the first paint.
-      const nextKinds = sortedClips.map((clip) =>
-        clip.kind === INTERMISSION_KIND ? INTERMISSION_KIND : 'session'
-      );
-      setManualSegmentCount(sortedClips.length);
-      setManualBoundaries(nextBoundaries);
-      setManualSegmentKinds(nextKinds);
-      setManualLabels(normalizeLabels(sortedClips.map((clip) => String(clip.label || '')), nextKinds));
+    const key = `${videoDurationSeconds}|${clipSignature}`;
+    const current = {
+      boundaries: manualBoundaries,
+      kinds: manualSegmentKinds,
+      labels: manualLabels,
+    };
+    if (
+      !planTimelineReseed({
+        lastSeed: lastTimelineSeedRef.current,
+        sessionId: session?.id ?? null,
+        key,
+        current,
+      })
+    ) {
       return;
     }
-
-    if (manualSegmentCount < 2) {
-      setManualSegmentCount(2);
-      setManualBoundaries([videoDurationSeconds / 2]);
-      setManualSegmentKinds(['session', 'session']);
-      setManualLabels(['Student 1', 'Student 2']);
-    }
-  }, [videoClips, videoDurationSeconds]);
+    // Gaps between clips (bell detection) seed as intermissions, so an
+    // unchanged Export reproduces the detected clips; the person detector's
+    // full partition passes through as it always did.
+    const seed = seedTimelineFromClips({ clips: videoClips, duration: videoDurationSeconds });
+    lastTimelineSeedRef.current = { sessionId: session?.id ?? null, key, snapshot: seed };
+    setManualSegmentCount(seed.kinds.length);
+    setManualBoundaries(seed.boundaries);
+    setManualSegmentKinds(seed.kinds);
+    setManualLabels(seed.labels);
+  }, [session?.id, clipSignature, videoDurationSeconds]);
 
   useEffect(() => {
     if (!session?.id || isClipAssessmentView || videoClips.length === 0) {
@@ -572,29 +638,47 @@ export default function OSCEAiMarkerMockup({
 
   // The prepare_media job (poster, duration, playable copy) writes files.video
   // while the workspace is open. Re-read only the files, so nothing the user
-  // is editing — the timeline is seeded from outputs.videoClips — is replaced.
+  // is editing — the timeline is seeded from outputs.videoClips — is replaced
+  // (refreshOpenSession, which replaces the document, is never used here).
+  // Push plus floor: the change feed triggers the read, the interval is the
+  // floor under it, and coalescing keeps the two from overlapping. A read that
+  // began before refreshOpenSession adopted a fresher document is dropped
+  // (mediaReadsRef), so a late files-only merge cannot regress its files.
+  const mediaReadsRef = useRef(null);
+  if (!mediaReadsRef.current) mediaReadsRef.current = createRequestSequence();
+  const refreshMediaFilesRef = useRef(null);
+  const isWatchingMedia = Boolean(showWorkspace && session?.id && videoMedia.preparing);
+  const watchedSessionId = session?.id || null;
   useEffect(() => {
-    if (!showWorkspace || !session?.id || !videoMedia.preparing) {
+    if (!isWatchingMedia) {
       return undefined;
     }
     let cancelled = false;
-    const sessionId = session.id;
+    const sessionId = watchedSessionId;
 
-    async function pollMediaPreparation() {
+    const refreshMediaFiles = coalesceAsync(async () => {
+      const isCurrent = mediaReadsRef.current.issue();
       try {
         const body = await apiJson(`/api/sessions/${sessionId}`);
-        if (!cancelled) setSession((previous) => mergeSessionFiles(previous, body?.session));
+        if (!cancelled && isCurrent()) setSession((previous) => mergeSessionFiles(previous, body?.session));
       } catch {
-        // Transient: the next tick retries.
+        // Transient: the next change or tick retries.
       }
-    }
+    });
+    refreshMediaFilesRef.current = refreshMediaFiles;
 
-    const intervalId = window.setInterval(pollMediaPreparation, MEDIA_POLL_INTERVAL_MS);
+    const intervalId = window.setInterval(refreshMediaFiles, MEDIA_POLL_INTERVAL_MS);
+    refreshMediaFiles();
     return () => {
       cancelled = true;
+      refreshMediaFilesRef.current = null;
       window.clearInterval(intervalId);
     };
-  }, [showWorkspace, session?.id, videoMedia.preparing]);
+  }, [isWatchingMedia, watchedSessionId]);
+
+  useChangeStream(() => {
+    refreshMediaFilesRef.current?.();
+  }, ['sessions']);
 
   async function requestMediaPreparation() {
     const sessionId = session?.id;
@@ -808,14 +892,20 @@ export default function OSCEAiMarkerMockup({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, ['sessions', 'jobs']);
 
-  // Heartbeat floor for in-flight work. See IN_FLIGHT_HEARTBEAT_MS: the change
+  // Heartbeat floor for in-flight work — a session still converting its video
+  // counts too, though its status is terminal. See IN_FLIGHT_HEARTBEAT_MS: the change
   // stream is the primary signal, but it can only announce writes, and a
   // session can legitimately go minutes without one (auto-crop's person
   // detection, a long transcription). Recovery must not depend on the same
   // channel that just went quiet.
   const hasInFlightSessions = useMemo(
-    () => sessionIndex.some((entry) => IN_FLIGHT_STATUSES.has(String(entry?.status))),
-    [sessionIndex],
+    () =>
+      // A filter can hide the running sessions, so what is on screen no
+      // longer says whether anything is in flight: keep the floor under the
+      // change stream for as long as the filter might be hiding one.
+      couldHideInFlight(sessionFilter) ||
+      sessionIndex.some((entry) => IN_FLIGHT_STATUSES.has(String(entry?.status)) || hasPendingMedia(entry)),
+    [sessionIndex, sessionFilter],
   );
 
   useEffect(() => {
@@ -943,13 +1033,18 @@ export default function OSCEAiMarkerMockup({
     // still overlap them. Whichever request was *issued* last is the truth;
     // a response for an earlier request is dropped rather than allowed to
     // roll the cards back to a stage the run has already left.
-    const requestSeq = (sessionIndexRequestSeqRef.current += 1);
+    const isCurrent = sessionIndexRequestsRef.current.issue();
     try {
       const fetchPage = (url) => apiJson(url, { fallbackMessage: 'Failed to load sessions.' });
-      const isCurrent = () => requestSeq === sessionIndexRequestSeqRef.current;
       const parentId = showWorkspace && videoClips.length ? session?.id : null;
       const [body, children] = await Promise.all([
-        fetchSessionPages(fetchPage, sessionPageCountRef.current, isCurrent),
+        fetchSessionPages(
+          fetchPage,
+          sessionPageCountRef.current,
+          isCurrent,
+          null,
+          toQueryParams(sessionFilterRef.current),
+        ),
         parentId ? fetchSessionPages(fetchPage, Infinity, isCurrent, parentId) : null,
       ]);
       if (!body || !isCurrent()) {
@@ -961,6 +1056,7 @@ export default function OSCEAiMarkerMockup({
       setHasMoreSessions(body.hasMore);
       setSessionIndex(sessions);
       setHasLoadedSessionIndex(true);
+      setSelectedSessionIds((previous) => pruneSelection(previous, body.sessions));
       setSessionNameDrafts((previous) => {
         const next = { ...previous };
         sessions.forEach((sessionEntry) => {
@@ -994,6 +1090,29 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
+  // A new filter is a new list: back to the first page, nothing selected, and
+  // every request still in flight (it was issued for the old filter) retired
+  // before the new one is issued.
+  function changeSessionFilter(next) {
+    const current = sessionFilterRef.current;
+    if (filterKey(next) === filterKey(current) && next.chip === current.chip) return;
+    const chipChanged = next.chip !== current.chip;
+    sessionFilterRef.current = next;
+    setSessionFilter(next);
+    if (chipChanged) writeStoredChip(next.chip);
+    sessionPageCountRef.current = 1;
+    sessionIndexRequestsRef.current.invalidate();
+    setSelectedSessionIds(clearSelection());
+    refreshSessionIndex();
+  }
+
+  function toggleSelectAllSessions() {
+    setSelectedSessionIds((previous) => {
+      const all = selectAllVisible(visibleSessions, (id) => uploadTracker.isActive(id));
+      return previous.size >= all.size ? clearSelection() : all;
+    });
+  }
+
   // Re-read the open session and adopt it, ignoring a response that arrived
   // after the user moved on. Returns the fresh session so a caller can act on
   // what it says; null on any failure, which the callers treat as "try again".
@@ -1004,6 +1123,8 @@ export default function OSCEAiMarkerMockup({
       if (!fresh || String(fresh.id) !== String(sessionId)) {
         return null;
       }
+      // A files-only read still in flight is older than this document.
+      mediaReadsRef.current?.invalidate();
       setSession((previous) => (previous?.id === sessionId ? fresh : previous));
       return fresh;
     } catch {
@@ -1097,102 +1218,6 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
-  // Renders the action control for a saved-session row. In-flight sessions
-  // (assembling/queued/processing) are deliberately NOT enterable — opening a
-  // half-processed session would show empty/partial results. The card itself
-  // gauges the current stage (see describeProcessingStage); this button
-  // unlocks once processing reaches a terminal state.
-  function renderSessionAction(sessionEntry) {
-    // An upload still in flight in this tab is as un-enterable as a running
-    // pipeline — the session has no video on disk yet — but the server still
-    // reports it as `waiting_for_upload`, so the status alone cannot say so.
-    const uploading = uploadTracker.isActive(sessionEntry.id);
-    const inFlight = uploading || IN_FLIGHT_STATUSES.has(sessionEntry.status);
-
-    if (inFlight) {
-      return (
-        <Button
-          size="sm"
-          variant="outline"
-          disabled
-          className="gap-1"
-          title={
-            uploading
-              ? 'Available once the upload finishes. Progress is shown on this card.'
-              : 'Available when processing completes. Progress is shown on this card.'
-          }
-        >
-          <Loader2 className="h-3 w-3 animate-spin" />
-          {uploading ? 'Uploading…' : 'Processing…'}
-        </Button>
-      );
-    }
-
-    // Sources committed, run never queued (an upload completed with
-    // autoProcess off). The only thing to do with such a session is start it,
-    // so the card offers exactly that — the endpoint behind this button had no
-    // caller in the browser at all, which is what made `uploaded` a dead end.
-    // The server enforces this regardless (owner or admin only); disabling
-    // here just keeps the click from happening in the first place, with the
-    // same reason a 403 would have given.
-    const mayMutate = canMutateSession(authUser, sessionEntry);
-    const notOwnerTitle = 'Only this session’s creator or an administrator may do this.';
-
-    const start = describeStartAction(sessionEntry);
-    if (start) {
-      return (
-        <>
-          <Button
-            size="sm"
-            onClick={() => startSession(sessionEntry)}
-            disabled={startingSessionId === sessionEntry.id || !mayMutate}
-            className="gap-1"
-            title={mayMutate ? start.title : notOwnerTitle}
-          >
-            {startingSessionId === sessionEntry.id ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <Play className="h-3 w-3" />
-            )}
-            {start.label}
-          </Button>
-          <OpenSessionButton onOpen={() => openExistingSession(sessionEntry.id)} />
-        </>
-      );
-    }
-
-    if (sessionEntry.status === SessionStatus.FAILED) {
-      // A failed session opens (its partial artefacts are worth seeing), and it
-      // can be re-run in place: same id, fresh job. The reason it failed is
-      // rendered on the card itself — see the session list. What the re-run
-      // *is* depends on the workflow (a long recording re-runs segmentation,
-      // not the pipeline), so the button says which: lib/rerunAction.js.
-      const rerun = describeRerunAction(sessionEntry);
-      return (
-        <>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => rerunSession(sessionEntry)}
-            disabled={rerunningSessionId === sessionEntry.id || !mayMutate}
-            className="gap-1"
-            title={mayMutate ? rerun.title : notOwnerTitle}
-          >
-            {rerunningSessionId === sessionEntry.id ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <RotateCw className="h-3 w-3" />
-            )}
-            {rerun.label}
-          </Button>
-          <OpenSessionButton onOpen={() => openExistingSession(sessionEntry.id)} />
-        </>
-      );
-    }
-
-    return <OpenSessionButton onOpen={() => openExistingSession(sessionEntry.id)} />;
-  }
-
   // Queue the first run of a session whose files are already on the server.
   // Deliberately NOT the re-run endpoint: re-run deletes the previous run's
   // artefacts and assessment rows, and this session has none to delete — while
@@ -1233,6 +1258,26 @@ export default function OSCEAiMarkerMockup({
     } finally {
       setRerunningSessionId(null);
     }
+  }
+
+  // The server accepted a re-score. A single session is now in flight, which
+  // the workspace cannot show: an opened clip child hands back to its
+  // recording's clip list (restoreParentSession: the in-memory snapshot, else a
+  // reopen by id), where the clip's row gauges the run; any other opened
+  // session goes to the list, where its card does. A clip batch stays on the
+  // clip list, whose rows follow the session index.
+  function finishRescore(response) {
+    const leavesWorkspace = showWorkspace && !rescoreTarget?.clips;
+    setRescoreTarget(null);
+    if (leavesWorkspace) {
+      if (session?.parentSessionId) {
+        restoreParentSession();
+      } else {
+        goHome();
+      }
+    }
+    setNotice(describeRescoreResult(response));
+    refreshSessionIndex({ silent: true });
   }
 
   function goHome() {
@@ -1332,168 +1377,60 @@ export default function OSCEAiMarkerMockup({
     }
   }
 
-  async function uploadFileParts(file, fileUpload, onProgress, { completedParts } = {}) {
-    // The backend picks the transport at initiate: parts relayed through this
-    // API on a local deployment, straight at the bucket on a cloud one.
-    if (fileUpload.strategy === 'gcs_resumable') {
-      return uploadFileToResumableSession(file, fileUpload, onProgress);
-    }
-    if (fileUpload.strategy !== 'local_multipart') {
-      throw new Error(`Unsupported upload strategy: ${fileUpload.strategy || 'unknown'}.`);
-    }
-    if (!fileUpload.partUrlTemplate) {
-      throw new Error('Upload plan did not include a part URL template.');
-    }
-    const partSize = Number(fileUpload.partSizeBytes || 0);
-    if (!Number.isFinite(partSize) || partSize <= 0) {
-      throw new Error('Upload plan did not include a valid part size.');
-    }
-
-    // Parts go through the same door as every other API call: a 502 from the
-    // proxy or a dropped socket is retried with jitter instead of ending the
-    // transfer, and storing a part is idempotent on the server, so a retry of
-    // a part whose response was lost is safe. Several parts are in flight at
-    // once — the server serialises them per upload, so none can be lost.
-    return uploadParts({
-      file,
-      partSize,
-      completedParts,
-      concurrency: DEFAULT_PART_CONCURRENCY,
-      putPart: (partNumber, chunk) =>
-        apiJson(fileUpload.partUrlTemplate.replace('{partNumber}', String(partNumber)), {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: chunk,
-          idempotent: true,
-          fallbackMessage: `Upload part ${partNumber} failed.`,
-        }),
-      onProgress: (uploadedBytes) => onProgress?.(uploadedBytes, file.size, fileUpload),
-    });
-  }
-
-  // One transfer of one file, resumed once from the server's own ledger if it
-  // breaks. `GET /uploads/{id}` says exactly which parts arrived, so an outage
-  // in the middle of a 2 GB video costs the parts in flight, not the file.
-  // A 4xx is the server refusing the request itself and is not retried.
-  async function uploadFileWithResume(uploadId, file, fileUpload, onProgress, sessionId) {
-    try {
-      return await uploadFileParts(file, fileUpload, onProgress);
-    } catch (error) {
-      const refused = error instanceof ApiError && (error.kind === ERROR_KIND.CLIENT || error.kind === ERROR_KIND.ABORT);
-      if (refused || fileUpload.strategy !== 'local_multipart') {
-        throw error;
-      }
-      // Recorded on the track, not in overlay state: the user may well have
-      // dismissed the overlay, and the note has to reach the session card too.
-      uploadTracker.note(sessionId, 'Connection interrupted — resuming from the last saved part.');
-      const status = await apiJson(`/api/uploads/${uploadId}`, {
-        fallbackMessage: 'Could not read the upload status to resume.',
-      });
-      return uploadFileParts(file, fileUpload, onProgress, {
-        completedParts: recordedPartNumbers(status, fileUpload.fileId),
-      });
-    }
+  // The upload options shared by the single form and the batch panel; the
+  // session name is the one thing each supplies for itself.
+  function buildUploadRequest() {
+    return {
+      workflow: uploadFlow,
+      autoProcess: true,
+      segmentation: uploadFlow === Workflow.LONG ? segmentationMethod : null,
+      segmentationOptions: buildSegmentationOptions(),
+      regionFocusOptions: buildRegionFocusOptionsForUpload(),
+      corpusId: selectedCorpusId || null,
+    };
   }
 
   async function runAsyncUploadAssessment() {
-    const initiateBody = await apiJson('/api/uploads/initiate', {
-      method: 'POST',
-      fallbackMessage: 'Async upload initiation failed.',
-      json: {
-        workflow: uploadFlow,
-        autoProcess: true,
-        sessionName: sessionNameInput.trim() || null,
-        segmentation: uploadFlow === Workflow.LONG ? segmentationMethod : null,
-        segmentationOptions: buildSegmentationOptions(),
-        regionFocusOptions: buildRegionFocusOptionsForUpload(),
-        corpusId: selectedCorpusId || null,
-        files: [
-          {
-            kind: 'video',
-            originalName: videoFile.name,
-            mimeType: videoFile.type || 'video/mp4',
-            sizeBytes: videoFile.size,
-          },
-          {
-            kind: 'caseStudy',
-            originalName: caseStudyFile.name,
-            mimeType: caseStudyFile.type || 'application/pdf',
-            sizeBytes: caseStudyFile.size,
-          },
-        ],
+    const { sessionId } = await submitUpload({
+      request: { ...buildUploadRequest(), sessionName: sessionNameInput.trim() || null },
+      files: { video: videoFile, caseStudy: caseStudyFile },
+      tracker: uploadTracker,
+      api: { apiJson },
+      transports: UPLOAD_TRANSPORTS,
+      onSessionCreated: (created) => {
+        // The track is open and the session exists server-side: remember which
+        // one this tab is sending (a failure marks its card) and pull it into
+        // the list so the card is there if the overlay is dismissed.
+        setSession(created);
+        activeUploadSessionIdRef.current = created.id;
+        refreshSessionIndex();
       },
     });
 
-    const sessionId = initiateBody.session?.id;
-    if (!sessionId) {
-      throw new Error('Async upload initiation did not return a session.');
-    }
-    setSession(initiateBody.session);
-
-    const filePlans = initiateBody.fileUploads || [];
-    const videoPlan = filePlans.find((item) => item.kind === 'video');
-    const caseStudyPlan = filePlans.find((item) => item.kind === 'caseStudy');
-    if (!videoPlan || !caseStudyPlan) {
-      throw new Error('Async upload initiation did not return both file upload plans.');
-    }
-
-    // The session now exists server-side (status `waiting_for_upload`), so it
-    // can carry the transfer's progress on its own card. Open the track before
-    // the first byte and pull the session into the list right away, so the card
-    // is already there if the user dismisses the overlay a second later.
-    activeUploadSessionIdRef.current = sessionId;
-    uploadTracker.begin(sessionId, videoFile.size + caseStudyFile.size);
-    refreshSessionIndex();
-
-    // Both files are one transfer as far as the user is concerned, so progress
-    // is reported against their combined size rather than restarting at 0% for
-    // the second file.
-    let bytesFromCompletedFiles = 0;
-    const updateUploadProgress = (uploadedBytes, totalBytes, plan) => {
-      const label = plan.kind === 'caseStudy' ? 'case study' : 'video';
-      uploadTracker.reportProgress(sessionId, bytesFromCompletedFiles + uploadedBytes, label);
-    };
-
-    await uploadFileWithResume(initiateBody.uploadId, videoFile, videoPlan, updateUploadProgress, sessionId);
-    bytesFromCompletedFiles += videoFile.size;
-    await uploadFileWithResume(
-      initiateBody.uploadId,
-      caseStudyFile,
-      caseStudyPlan,
-      updateUploadProgress,
-      sessionId,
-    );
-
-    uploadTracker.setPhase(sessionId, UPLOAD_PHASE.FINALIZING);
-    // `complete` is idempotent on the server (a repeat returns the same
-    // assembling/committed record), so a lost response is safe to retry.
-    await apiJson(`/api/uploads/${initiateBody.uploadId}/complete`, {
-      method: 'POST',
-      json: { autoProcess: true },
-      idempotent: true,
-      fallbackMessage: 'Upload finalization failed.',
-    });
     // Upload is committed and the job is queued. Return the user to the main
     // page: the session card shows the live stage, other sessions stay fully
     // browsable, and this session unlocks when processing completes.
-    //
-    // The server's status now describes the session better than this tab can,
-    // so the client-side track stands down and `describeProcessingStage` takes
-    // the card back over.
-    uploadTracker.setPhase(sessionId, UPLOAD_PHASE.DONE);
-    uploadTracker.forget(sessionId);
     activeUploadSessionIdRef.current = null;
-    setSession(null);
+    // Return to the list only if the screen is still this upload's: a session
+    // the user opened while it transferred stays open (the card in the list
+    // tracks the upload either way). Read again after the refresh below,
+    // since another session can be opened while that runs.
+    if (workspaceBelongsToUpload(openSessionIdRef.current, sessionId)) {
+      setSession(null);
+    }
     setIsUploading(false);
     setSessionNameInput('');
     setNotice('Assessment started. Track its stage on the session card — it unlocks when finished.');
     await refreshSessionIndex();
-    setShowWorkspace(false);
+    if (workspaceBelongsToUpload(openSessionIdRef.current, sessionId)) {
+      setShowWorkspace(false);
+    }
   }
 
   // Opens the pre-flight confirmation overlay (after validating the inputs).
   // The actual upload/processing only begins once the user confirms.
   function requestStartAssessment() {
+    if (startBlockReason) return;
     if (!videoFile) {
       setError('Upload a station video first.');
       return;
@@ -1555,9 +1492,12 @@ export default function OSCEAiMarkerMockup({
       // The overlay may well be dismissed by now, so the failure has to be
       // legible from the session card too: mark the track rather than only
       // raising a banner the user might not be looking at.
-      uploadTracker.fail(activeUploadSessionIdRef.current, message);
+      const failedSessionId = activeUploadSessionIdRef.current;
+      uploadTracker.fail(failedSessionId, message);
       setError(`Upload failed: ${message}`);
-      setShowWorkspace(false);
+      if (workspaceBelongsToUpload(openSessionIdRef.current, failedSessionId)) {
+        setShowWorkspace(false);
+      }
     } finally {
       activeUploadSessionIdRef.current = null;
       setIsUploading(false);
@@ -1757,10 +1697,6 @@ export default function OSCEAiMarkerMockup({
     }
 
     if (action === 'toggle' && hit.segmentIndex !== null) {
-      if (!isPersonSegmentedSession) {
-        // Bell-segmented sessions split at bells only — no intermission concept.
-        return;
-      }
       const next = toggleSegmentKind({
         labels: manualLabels,
         kinds: manualSegmentKinds,
@@ -1860,17 +1796,13 @@ export default function OSCEAiMarkerMockup({
     setIsSavingManualSegments(true);
     setError('');
     try {
-      const sortedBoundaries = [...manualBoundaries].sort((a, b) => a - b).map((value) => Number(value));
-      const expectedSegmentCount = sortedBoundaries.length + 1;
-      const kinds = ensureKinds(manualSegmentKinds, expectedSegmentCount);
-      const payload = {
-        boundaries: sortedBoundaries,
-        labels: normalizeLabels(manualLabels, kinds),
-        // Kinds are a human-detection concept: intermission segments export as
-        // greyed markers — no MP4 is cut, no downstream compute is spent. Bell
-        // splits have no intermissions, so the field is omitted (all sessions).
-        ...(isPersonSegmentedSession ? { kinds } : {}),
-      };
+      const payload = buildManualSplitPayload({
+        boundaries: manualBoundaries,
+        labels: manualLabels,
+        kinds: manualSegmentKinds,
+        // Intermission segments export as greyed markers — no MP4 is cut, no
+        // downstream compute is spent — on any split, bell or person.
+      });
       const body = await apiJson(`/api/sessions/${session.id}/clips/manual`, {
         method: 'POST',
         json: payload,
@@ -1883,6 +1815,10 @@ export default function OSCEAiMarkerMockup({
       // queued either way, and the editor must reach the finished clips even if
       // this response says nothing about the export.
       setAwaitingClipExportFor(session.id);
+      // The draft is exported: the server's clips are now the truth, so the
+      // editor is clean again and the next clip list (drafts, then cut files)
+      // reseeds it instead of being held back as an unsaved edit.
+      lastTimelineSeedRef.current = null;
       if (body?.session) {
         setSession(body.session);
         const nextClips = Array.isArray(body.session?.outputs?.videoClips) ? body.session.outputs.videoClips : [];
@@ -2193,7 +2129,6 @@ export default function OSCEAiMarkerMockup({
     hasDraftClips,
     intermissionClipCount,
     isClipExportRunning,
-    isPersonSegmentedSession,
     isSavingManualSegments,
     manualBoundaries,
     manualLabels,
@@ -2651,19 +2586,47 @@ export default function OSCEAiMarkerMockup({
                   </div>
                 )}
 
+                <div className="flex flex-wrap items-center gap-2" role="radiogroup" aria-label="How many recordings">
+                  {[
+                    { value: false, label: 'One recording' },
+                    { value: true, label: 'Several recordings' },
+                  ].map((option) => (
+                    <button
+                      key={option.label}
+                      type="button"
+                      role="radio"
+                      aria-checked={batchMode === option.value}
+                      onClick={() => setBatchMode(option.value)}
+                      className={`rounded-full border px-3 py-1 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 ${
+                        batchMode === option.value
+                          ? 'border-cyan-600 bg-cyan-50 text-cyan-800'
+                          : 'border-slate-300 bg-white text-slate-600 hover:border-cyan-500'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                  <UploadCard
-                    icon={<Video className="h-5 w-5" />}
-                    title={uploadFlow === Workflow.LONG ? 'Long station recording' : 'Station recording'}
-                    subtitle={uploadFlow === Workflow.LONG ? 'MP4, MOV or MKV — usually 5 minutes or longer' : 'MP4, MOV or MKV'}
-                    fileName={videoFile?.name || null}
-                    onPick={() => videoInputRef.current?.click()}
-                  />
+                  {!batchMode && (
+                    <UploadCard
+                      icon={<Video className="h-5 w-5" />}
+                      title={uploadFlow === Workflow.LONG ? 'Long station recording' : 'Station recording'}
+                      subtitle={uploadFlow === Workflow.LONG ? 'MP4, MOV or MKV — usually 5 minutes or longer' : 'MP4, MOV or MKV'}
+                      fileName={videoFile?.name || null}
+                      onPick={() => videoInputRef.current?.click()}
+                    />
+                  )}
 
                   <UploadCard
                     icon={<FileSpreadsheet className="h-5 w-5" />}
                     title="Case study"
-                    subtitle="PDF. The rubric is read from its closing checklist section"
+                    subtitle={
+                      batchMode
+                        ? 'PDF, shared by every recording below. The rubric is read from its closing checklist section'
+                        : 'PDF. The rubric is read from its closing checklist section'
+                    }
                     fileName={caseStudyFile?.name || null}
                     onPick={() => caseStudyInputRef.current?.click()}
                   />
@@ -2685,22 +2648,33 @@ export default function OSCEAiMarkerMockup({
                   onChange={(event) => setCaseStudyFile(event.target.files?.[0] || null)}
                 />
 
-                <div className="flex flex-wrap items-center gap-3 pt-2">
-                  <Button
-                    size="lg"
-                    className="gap-2"
-                    onClick={requestStartAssessment}
-                    disabled={!videoFile || !caseStudyFile || isUploading || isLoadingWorkspace}
-                  >
-                    <Wand2 className="h-4 w-4" aria-hidden="true" />
-                    {uploadFlow === Workflow.LONG ? 'Upload and split into clips' : 'Upload and start assessment'}
-                  </Button>
-                  <span className="text-sm text-slate-500" role="status">
-                    {videoFile && caseStudyFile
-                      ? 'Both files chosen. Marking runs on this machine.'
-                      : 'Choose a recording and a case study PDF to start.'}
-                  </span>
-                </div>
+                <UploadFilePreview
+                  {...previewFiles({ batchMode, videoFile, videoUrl: localVideoUrl, caseStudyFile })}
+                  onBlockingReason={setStartBlockReason}
+                />
+
+                {batchMode ? (
+                  <BatchUploadPanel batch={batchUpload} caseStudy={caseStudyFile} />
+                ) : (
+                  <div className="flex flex-wrap items-center gap-3 pt-2">
+                    <Button
+                      size="lg"
+                      className="gap-2"
+                      onClick={requestStartAssessment}
+                      disabled={!videoFile || !caseStudyFile || startBlockReason || isUploading || isLoadingWorkspace}
+                    >
+                      <Wand2 className="h-4 w-4" aria-hidden="true" />
+                      {uploadFlow === Workflow.LONG ? 'Upload and split into clips' : 'Upload and start assessment'}
+                    </Button>
+                    <span className="text-sm text-slate-500" role="status">
+                      {startBlockReason
+                        ? startBlockReason
+                        : videoFile && caseStudyFile
+                        ? 'Both files chosen. Marking runs on this machine.'
+                        : 'Choose a recording and a case study PDF to start.'}
+                    </span>
+                  </div>
+                )}
 
                 {error && (
                   <div role="alert" className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-sm text-rose-700">
@@ -2723,6 +2697,25 @@ export default function OSCEAiMarkerMockup({
                   <CardDescription>Open, rename or delete any session on this machine.</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
+                  <SessionListToolbar
+                    filter={sessionFilter}
+                    onFilterChange={changeSessionFilter}
+                    shownCount={visibleSessions.length}
+                    hasMore={hasMoreSessions}
+                    selectableCount={visibleSessions.filter((entry) => !uploadTracker.isActive(entry.id)).length}
+                    selectedCount={selectedSessionIds.size}
+                    onToggleSelectAll={toggleSelectAllSessions}
+                  />
+                  <BulkActionBar
+                    entries={selectedEntries(selectedSessionIds, visibleSessions)}
+                    identity={authUser}
+                    onClear={() => setSelectedSessionIds(clearSelection())}
+                    onSettled={(doneIds) => {
+                      setSelectedSessionIds((previous) => removeFromSelection(previous, doneIds));
+                      refreshSessionIndex();
+                    }}
+                  />
+
                   {/* First load only: rows in outline until the index answers.
                       A later refresh keeps the rows it has and dims the list
                       (below); the coalesced background refreshes are silent
@@ -2756,7 +2749,7 @@ export default function OSCEAiMarkerMockup({
                       failed first fetch the error above is the whole story. */}
                   {hasLoadedSessionIndex && !sessionIndexLoading && visibleSessions.length === 0 ? (
                     <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
-                      No saved sessions yet. Upload a video to create one.
+                      {describeEmptyResult(sessionFilter)}
                     </div>
                   ) : null}
 
@@ -2768,145 +2761,51 @@ export default function OSCEAiMarkerMockup({
                     aria-label="Saved sessions"
                   >
                     {visibleSessions.map((sessionEntry) => (
-                      <li
+                      <SessionCard
                         key={sessionEntry.id}
-                        className="rounded-xl border border-slate-200 bg-slate-50 p-3"
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0 flex-1">
-                            <input
-                              type="text"
-                              value={sessionNameDrafts[sessionEntry.id] ?? sessionEntry.name ?? ''}
-                              onChange={(event) =>
-                                setSessionNameDrafts((previous) => ({
-                                  ...previous,
-                                  [sessionEntry.id]: event.target.value,
-                                }))
-                              }
-                              onBlur={(event) => {
-                                const nextValue = event.target.value.trim();
-                                const currentValue = String(sessionEntry.name || '').trim();
-                                if (nextValue && nextValue !== currentValue) {
-                                  renameSessionName(sessionEntry.id, nextValue);
-                                }
-                              }}
-                              onKeyDown={(event) => {
-                                if (event.key === 'Enter') {
-                                  event.preventDefault();
-                                  event.currentTarget.blur();
-                                }
-                              }}
-                              disabled={renamingSessionId === sessionEntry.id}
-                              aria-label="Session name"
-                              className="w-full rounded-lg border border-transparent bg-white px-2 py-1.5 text-sm font-semibold text-slate-800 shadow-sm focus:border-cyan-400 focus:outline-none focus:ring-2 focus:ring-cyan-400/30"
-                            />
-                            <div className="mt-1 truncate text-[11px] text-slate-500" title={sessionEntry.id}>
-                              {sessionEntry.id}
-                              {/* Who uploaded it (the list projection carries the
-                                  snapshot); a session from before creators were
-                                  recorded shows nothing rather than a guess. */}
-                              {creatorName(sessionEntry) ? (
-                                <span className="text-slate-500"> · by {creatorName(sessionEntry)}</span>
-                              ) : null}
-                            </div>
-                            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                              {/* The status as a word, in its tone, from one
-                                  table (lib/sessionStatus.js). An upload still
-                                  leaving this tab is busy whatever the server
-                                  calls the row. */}
-                              <SessionStatusBadge
-                                status={sessionEntry.status}
-                                busy={uploadTracker.isActive(sessionEntry.id) || undefined}
-                              />
-                              {sessionEntry.hasVideoClips || sessionEntry.status === SessionStatus.CROPPED ? (
-                                <Badge variant="accent">Several students</Badge>
-                              ) : null}
-                            </div>
-                            {(() => {
-                              // Stage gauge for in-flight sessions: the row is
-                              // not enterable, so the card is where the user
-                              // tracks how far along the run is.
-                              //
-                              // Two sources, one gauge. While this tab is still
-                              // sending bytes the server knows nothing but
-                              // "waiting_for_upload", so the client-side track
-                              // answers; once the upload is committed it stands
-                              // down and the server-derived stage takes over.
-                              const uploadStage = uploadTracker.describe(sessionEntry.id);
-                              const stage = uploadStage || describeProcessingStage(sessionEntry);
-                              if (!stage) return null;
-                              const failed = Boolean(stage.failed);
-                              return (
-                                <div className="mt-2">
-                                  <div className="flex items-center justify-between gap-2 text-[11px] text-slate-600">
-                                    {/* The stage's own percentage when the step
-                                        streams one (upload bytes, WhisperX),
-                                        next to the elapsed clock and the
-                                        completion on the right. */}
-                                    <span className={failed ? 'text-rose-600' : undefined}>
-                                      {formatProcessingStageLabel(stage)}
-                                      {failed ? '' : '…'}
-                                    </span>
-                                    <span className="flex shrink-0 items-center gap-1">
-                                      {stage.elapsedSeconds === undefined ? null : (
-                                        <>
-                                          <Clock3 className="h-3 w-3 text-slate-500" aria-hidden="true" />
-                                          <span className="tabular-nums">
-                                            {formatRuntime(stage.elapsedSeconds)}
-                                          </span>
-                                          <span className="text-slate-300" aria-hidden="true">·</span>
-                                        </>
-                                      )}
-                                      <span className="tabular-nums">{Math.round(stage.fraction * 100)}%</span>
-                                    </span>
-                                  </div>
-                                  <Progress
-                                    value={stage.fraction * 100}
-                                    className="mt-1 h-1.5"
-                                    label={`${formatProcessingStageLabel(stage)} progress`}
-                                  />
-                                  {failed && uploadTracker.tracks[sessionEntry.id]?.error ? (
-                                    <div className="mt-1 text-[11px] text-rose-600">
-                                      {uploadTracker.tracks[sessionEntry.id].error}
-                                    </div>
-                                  ) : null}
-                                </div>
-                              );
-                            })()}
-                            {sessionEntry.status === SessionStatus.FAILED && sessionEntry.error ? (
-                              // The list projection carries the failure reason so a
-                              // session the user cannot usefully open still says why —
-                              // including "interrupted by a server restart", which the
-                              // startup reconciliation writes for jobs that died.
-                              <div className="mt-2 rounded border border-rose-100 bg-rose-50 px-2 py-1 text-[11px] leading-snug text-rose-700">
-                                {sessionEntry.error}
-                              </div>
-                            ) : null}
-                          </div>
-                          <div className="flex shrink-0 items-center gap-1">
-                            {renderSessionAction(sessionEntry)}
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => deleteSession(sessionEntry.id)}
-                              disabled={deletingSessionId === sessionEntry.id || !canMutateSession(authUser, sessionEntry)}
-                              aria-label={`Delete session ${sessionEntry.name || sessionEntry.id}`}
-                              title={
-                                canMutateSession(authUser, sessionEntry)
-                                  ? 'Delete this session and all student assessments under it'
-                                  : 'Only this session’s creator or an administrator may delete it.'
-                              }
-                              className="text-rose-600 hover:bg-rose-50 hover:text-rose-700 focus-visible:ring-rose-500"
-                            >
-                              {deletingSessionId === sessionEntry.id ? (
-                                <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-                              ) : (
-                                <Trash2 className="h-4 w-4" aria-hidden="true" />
-                              )}
-                            </Button>
-                          </div>
-                        </div>
-                      </li>
+                        entry={sessionEntry}
+                        uploading={uploadTracker.isActive(sessionEntry.id)}
+                        // Two sources, one gauge. While this tab is still
+                        // sending bytes the server knows nothing but
+                        // "waiting_for_upload", so the client-side track
+                        // answers; once the upload is committed it stands
+                        // down and the server-derived stage takes over.
+                        stage={uploadTracker.describe(sessionEntry.id) || describeProcessingStage(sessionEntry)}
+                        uploadError={uploadTracker.tracks[sessionEntry.id]?.error}
+                        nameDraft={sessionNameDrafts[sessionEntry.id]}
+                        renaming={renamingSessionId === sessionEntry.id}
+                        onNameDraftChange={(value) =>
+                          setSessionNameDrafts((previous) => ({ ...previous, [sessionEntry.id]: value }))
+                        }
+                        onRename={(value) => renameSessionName(sessionEntry.id, value)}
+                        mayMutate={canMutateSession(authUser, sessionEntry)}
+                        deleting={deletingSessionId === sessionEntry.id}
+                        onDelete={() => deleteSession(sessionEntry.id)}
+                        media={
+                          <SessionCardMedia
+                            entry={sessionEntry}
+                            uploading={uploadTracker.isActive(sessionEntry.id)}
+                            onWatch={() => setWatchingSessionId(sessionEntry.id)}
+                            onWatchIntent={() => preloadComponent(WatchVideoDialog)}
+                          />
+                        }
+                        selected={selectedSessionIds.has(sessionEntry.id)}
+                        onToggleSelected={() => setSelectedSessionIds((previous) => toggleSessionSelection(previous, sessionEntry.id))}
+                        actions={
+                          <SessionCardActions
+                            entry={sessionEntry}
+                            authUser={authUser}
+                            uploading={uploadTracker.isActive(sessionEntry.id)}
+                            startingSessionId={startingSessionId}
+                            rerunningSessionId={rerunningSessionId}
+                            onStart={startSession}
+                            onRerun={rerunSession}
+                            onRescore={(entry) => setRescoreTarget({ sessionId: entry.id, clips: false })}
+                            onOpen={openExistingSession}
+                            onPreloadWorkspace={() => preloadComponent(SessionWorkspace)}
+                          />
+                        }
+                      />
                     ))}
                   </ul>
                   {hasMoreSessions && (
@@ -3004,6 +2903,8 @@ export default function OSCEAiMarkerMockup({
               runSelectedClipAssessments={runSelectedClipAssessments}
               runClipAssessment={runClipAssessment}
               rerunClipAssessment={rerunClipAssessment}
+              authUser={authUser}
+              onRequestRescore={setRescoreTarget}
               deleteClipAssessment={deleteClipAssessment}
               openClipAssessmentView={openClipAssessmentView}
               deletingSessionId={deletingSessionId}
@@ -3017,6 +2918,17 @@ export default function OSCEAiMarkerMockup({
         )}
         </AnimatePresence>
       </main>
+
+      <AnimatePresence>
+        {rescoreTarget && (
+          <RescoreDialog
+            sessionId={rescoreTarget.sessionId}
+            clips={rescoreTarget.clips}
+            onClose={() => setRescoreTarget(null)}
+            onDone={finishRescore}
+          />
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {showConfirmStart && (
@@ -3167,6 +3079,20 @@ export default function OSCEAiMarkerMockup({
       </AnimatePresence>
 
       <AnimatePresence>
+        {watchedEntry ? (
+          <LazyBoundary fallback={null}>
+            <WatchVideoDialog
+              key={watchedEntry.id}
+              sessionId={watchedEntry.id}
+              sessionName={watchedEntry.name}
+              entry={watchedEntry}
+              onClose={() => setWatchingSessionId(null)}
+            />
+          </LazyBoundary>
+        ) : null}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {showCorpusManager && (
           <Modal
             onClose={() => setShowCorpusManager(false)}
@@ -3249,6 +3175,8 @@ export default function OSCEAiMarkerMockup({
                         ) : null}
                       </div>
 
+                      <UploadProbeNotice uploadId={activeUploadTrack(uploadTracker.tracks)?.uploadId ?? null} />
+
                       <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
                         Marking starts on the server once the files land. The session card
                         gauges every step and unlocks when the run finishes.
@@ -3282,19 +3210,6 @@ export default function OSCEAiMarkerMockup({
           WorkspaceSkeleton in the main slot, drawn in the outline of the view
           about to open, so nothing pops up and nothing is dimmed. */}
     </div>
-  );
-}
-
-// Opening a session is what needs the workspace chunk, so hovering or tabbing
-// to the button that does it starts the fetch. By the time the click lands the
-// chunk is normally parsed — the same preload-on-intent the dashboard's nav
-// buttons use for Settings, Analytics and the Rubric.
-function OpenSessionButton({ onOpen }) {
-  const warm = () => preloadComponent(SessionWorkspace);
-  return (
-    <Button size="sm" variant="outline" onClick={onOpen} onMouseEnter={warm} onFocus={warm}>
-      Open
-    </Button>
   );
 }
 

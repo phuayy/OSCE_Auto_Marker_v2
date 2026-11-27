@@ -139,11 +139,24 @@ export function describeSessionSelection(filter, catalog) {
   return `${filter.sessionIds.length} selected`;
 }
 
+/**
+ * The time window a filter keeps, as instants: `from` (inclusive) and `to`
+ * (inclusive), either may be null. One definition for `applyFilter` and for the
+ * export's parameters, so the file can never cover a different window than the
+ * page shows. A custom range's `from` is the typed date at 00:00 UTC; its `to`
+ * is the end of the typed day on the browser's clock, so a same-day range
+ * includes that day's sessions.
+ */
+export function filterWindow(filter, now = new Date()) {
+  const custom = filter.preset === 'custom';
+  const from = custom ? (filter.dateFrom ? new Date(filter.dateFrom) : null) : presetRange(filter.preset, now);
+  const to = custom && filter.dateTo ? new Date(`${filter.dateTo}T23:59:59.999`) : null;
+  return { from, to };
+}
+
 /** The rows a filter set keeps: date window, recording, student. */
 export function applyFilter(rows, filter, now = new Date()) {
-  const from = filter.preset === 'custom' ? (filter.dateFrom ? new Date(filter.dateFrom) : null) : presetRange(filter.preset, now);
-  // End of the "to" day, so a same-day range includes that day's sessions.
-  const to = filter.preset === 'custom' && filter.dateTo ? new Date(`${filter.dateTo}T23:59:59.999`) : null;
+  const { from, to } = filterWindow(filter, now);
   const sessionIds = filter.sessionIds.length ? new Set(filter.sessionIds) : null;
   return rows.filter((row) => {
     const created = row.createdAt ? new Date(row.createdAt) : null;

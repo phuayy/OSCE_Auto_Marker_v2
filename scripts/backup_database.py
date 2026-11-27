@@ -8,7 +8,8 @@ docs/deployment-vm.md "Backup and data retention"). PostgreSQL shells out to
 Exit codes:
   0  success
   1  backup produced but failed integrity_check (SQLite only)
-  2  usage error (missing --confirm on restore, missing pg_dump/pg_restore binary)
+  2  usage error (missing --confirm on restore, missing pg_dump/pg_restore binary,
+     or a SQLite backup that is empty, corrupt or not an app database)
   5  SQLite restore refused because the API port is currently serving (use --force)
 """
 
@@ -56,6 +57,9 @@ except Exception:  # noqa: BLE001 - fall back to a small local probe
 
 
 SCHEMA_VERSION = 1
+# Each SQLite restore leaves a whole-database safety copy beside the live file;
+# keeping a few covers "I restored the wrong backup, twice" without unbounded growth.
+SAFETY_COPIES_KEPT = 3
 FILENAME_PREFIX = "osce-db-"
 
 
@@ -229,9 +233,75 @@ def do_backup(dest_dir: Path) -> dict:
     return backup_postgres(dest_dir)
 
 
-def restore_sqlite(backup_file: Path, *, force: bool) -> None:
+def validate_sqlite_backup(backup_file: Path) -> None:
+    """Refuse a file that cannot be this app's database before anything is overwritten.
+
+    ``sqlite3.connect`` happily "opens" an empty file or a missing one, and a
+    backup copied onto the live database would then replace it with nothing:
+    the file must be non-empty, a SQLite database that passes
+    ``integrity_check``, and carry an ``alembic_version`` row (every database
+    this app has ever written does).
+    """
+    if backup_file.stat().st_size == 0:
+        raise BackupError(f"Backup file is empty: {backup_file}")
+    # mode=ro: validating must never create or modify the file being validated.
+    conn = sqlite3.connect(f"{backup_file.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        try:
+            verdict = conn.execute("PRAGMA integrity_check").fetchone()
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            revision_rows = (
+                conn.execute("SELECT COUNT(*) FROM alembic_version").fetchone()[0] if "alembic_version" in tables else 0
+            )
+        except sqlite3.DatabaseError as exc:
+            raise BackupError(f"Backup file is not a readable SQLite database ({exc}): {backup_file}") from exc
+    finally:
+        conn.close()
+    if not verdict or verdict[0] != "ok":
+        raise BackupError(f"Backup file failed integrity_check ({verdict[0] if verdict else 'no result'}): {backup_file}")
+    if not revision_rows:
+        raise BackupError(f"Backup file has no alembic_version row, so it is not an OSCE Marker database: {backup_file}")
+
+
+def _safety_copy_sqlite(live_path: Path) -> Path | None:
+    """Copy the current database aside, WAL contents included, before a restore replaces it.
+
+    Uses the online backup API rather than a file copy, so rows still in
+    ``-wal`` are in the copy. ``None`` when there is no current database.
+    """
+    if not live_path.exists():
+        return None
+    safety_path = live_path.with_name(f"{live_path.name}.pre-restore-{_timestamp()}.sqlite3")
+    src_conn = sqlite3.connect(str(live_path))
+    try:
+        dst_conn = sqlite3.connect(str(safety_path))
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+    except sqlite3.DatabaseError as exc:
+        safety_path.unlink(missing_ok=True)
+        raise BackupError(f"Could not keep a safety copy of the current database ({exc}); nothing was restored.") from exc
+    finally:
+        src_conn.close()
+    _assert_integrity_ok(safety_path)
+    return safety_path
+
+
+def _prune_safety_copies(live_path: Path, keep_path: Path | None) -> None:
+    """Delete all but the newest SAFETY_COPIES_KEPT safety copies of this database (never ``keep_path``)."""
+    # Timestamps are fixed-width UTC, so the name order is the age order.
+    copies = sorted(live_path.parent.glob(f"{live_path.name}.pre-restore-*.sqlite3"), reverse=True)
+    for stale in copies[SAFETY_COPIES_KEPT:]:
+        if stale != keep_path:
+            stale.unlink(missing_ok=True)
+
+
+def restore_sqlite(backup_file: Path, *, force: bool) -> Path | None:
+    """Restore ``backup_file`` over the live database; returns the safety copy of what it replaced."""
     if not backup_file.exists():
         raise BackupError(f"Backup file does not exist: {backup_file}")
+    validate_sqlite_backup(backup_file)
 
     host, port = server_bind_from_env()
     if port_already_serving(host, port) and not force:
@@ -243,6 +313,8 @@ def restore_sqlite(backup_file: Path, *, force: bool) -> None:
     normalized_url = OrmDatabase._normalize_url(settings.resolved_database_source)
     live_path = _sqlite_path(normalized_url)
     live_path.parent.mkdir(parents=True, exist_ok=True)
+
+    safety_path = _safety_copy_sqlite(live_path)
 
     backup_conn = sqlite3.connect(str(backup_file))
     try:
@@ -265,6 +337,8 @@ def restore_sqlite(backup_file: Path, *, force: bool) -> None:
             sidecar.unlink()
 
     _assert_integrity_ok(live_path)
+    _prune_safety_copies(live_path, safety_path)
+    return safety_path
 
 
 def restore_postgres(backup_file: Path) -> None:
@@ -298,12 +372,13 @@ class PortServingError(RuntimeError):
     """Exit code 5: a live API is holding the SQLite file."""
 
 
-def do_restore(backup_file: Path, *, force: bool) -> None:
+def do_restore(backup_file: Path, *, force: bool) -> Path | None:
+    """Restore into the live database; returns the SQLite safety copy (``None`` for PostgreSQL or a fresh restore)."""
     backend, _ = _resolve_backend_and_url()
     if backend == "sqlite":
-        restore_sqlite(backup_file, force=force)
-    else:
-        restore_postgres(backup_file)
+        return restore_sqlite(backup_file, force=force)
+    restore_postgres(backup_file)
+    return None
 
 
 def prune(dest_dir: Path, days: int) -> list[Path]:
@@ -349,7 +424,7 @@ def main() -> int:
             )
             return 2
         try:
-            do_restore(args.restore, force=args.force)
+            safety_copy = do_restore(args.restore, force=args.force)
         except PortServingError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 5
@@ -366,7 +441,16 @@ def main() -> int:
             # different database than the app actually uses.
             print(f"Error: {exc}", file=sys.stderr)
             return 2
-        print(json.dumps({"schema": SCHEMA_VERSION, "ok": True, "restored": str(args.restore)}))
+        print(
+            json.dumps(
+                {
+                    "schema": SCHEMA_VERSION,
+                    "ok": True,
+                    "restored": str(args.restore),
+                    "safetyCopy": str(safety_copy) if safety_copy else None,
+                }
+            )
+        )
         return 0
 
     if args.dest is None:

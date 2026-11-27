@@ -273,6 +273,11 @@ class GcsObjectStorageService:
         mark_file_committed(file_record, storage_ref, actual_size)
         return storage_ref
 
+    async def read_received_head(self, upload: dict[str, Any], file_id: str, max_bytes: int) -> bytes | None:
+        """Always ``None``: a resumable upload's object is not readable until
+        the session is finalised, so there is no head to look at mid-transfer."""
+        return None
+
     async def abort_upload(self, upload: dict[str, Any]) -> None:
         """Delete every object this upload may have created.
 
@@ -349,6 +354,12 @@ class GcsObjectStorageService:
     # ------------------------------------------------------------------
     # Read side
     # ------------------------------------------------------------------
+
+    def playback_url(self, storage_ref: dict[str, Any]) -> str | None:
+        key = str(storage_ref.get("key") or "")
+        if str(storage_ref.get("provider") or "") != self.provider or not key:
+            return None
+        return self.public_url_for_key(key)
 
     def public_url_for_key(self, key: str) -> str:
         """A time-limited V4 signed URL the browser can read the object from.

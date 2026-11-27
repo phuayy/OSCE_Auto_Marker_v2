@@ -126,6 +126,16 @@ class ObjectStorage(Protocol):
         the client declared one, the declared SHA-256.
         """
 
+    async def read_received_head(self, upload: dict[str, Any], file_id: str, max_bytes: int) -> bytes | None:
+        """The first bytes of a file that is still arriving, for an early look.
+
+        Read-only and bounded by ``max_bytes``. Only a *contiguous* prefix is
+        meaningful, so a backend that relays parts returns the run of parts
+        starting at part 1 and stops at the first gap. ``None`` when there is
+        no head to read: part 1 has not arrived, or the backend cannot read an
+        object that is still being written.
+        """
+
     async def abort_upload(self, upload: dict[str, Any]) -> None:
         """Discard partial data for an abandoned (never committed) upload."""
 
@@ -149,6 +159,16 @@ class ObjectStorage(Protocol):
 
     def public_url_for_key(self, key: str) -> str:
         """A URL the browser can read the object from."""
+
+    def playback_url(self, storage_ref: dict[str, Any]) -> str | None:
+        """The URL the browser plays a committed object from, *right now*.
+
+        A read-time capability, never persisted: on a cloud backend it is a
+        time-limited signature, so it is minted whenever a session is served
+        rather than stored at commit, where it would expire. ``None`` when the
+        ref is not this backend's (a deployment that switched backends), so the
+        caller keeps whatever it already has.
+        """
 
     async def materialize(self, storage_ref: dict[str, Any]) -> Path:
         """Return a local path holding the object's bytes, fetching if needed."""

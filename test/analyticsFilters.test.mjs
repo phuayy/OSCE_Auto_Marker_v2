@@ -9,6 +9,7 @@ import {
   buildFilterCatalog,
   describeSessionSelection,
   emptyFilter,
+  filterWindow,
   patchFilter,
   presetRange,
   reconcileFilter,
@@ -282,4 +283,29 @@ test('a row with no date is excluded by any window but kept by "all time"', () =
   assert.equal(applyFilter([undated], { ...emptyFilter(), preset: '7d' }).length, 0);
   assert.equal(applyFilter([undated], { ...emptyFilter(), preset: 'custom', dateTo: '2026-09-03' }).length, 0);
   assert.equal(applyFilter([undated], emptyFilter()).length, 1);
+});
+
+test('a 23:30Z row is judged on its UTC instant in a UTC+8 browser, as the server judges it', () => {
+  const previous = process.env.TZ;
+  process.env.TZ = 'Asia/Singapore';
+  try {
+    // The server stamps every analytics timestamp with Z (naive SQLite values
+    // are UTC). Without the Z this string would be read as 23:30 *local*.
+    const late = row({ sessionId: 'late', rootSessionId: 'late', createdAt: '2026-01-10T23:30:00Z' });
+    const early = row({ sessionId: 'early', rootSessionId: 'early', createdAt: '2026-01-10T10:00:00Z' });
+    assert.equal(new Date(late.createdAt).getTime(), Date.UTC(2026, 0, 10, 23, 30));
+    const filter = { ...emptyFilter(), preset: 'custom', dateFrom: '2026-01-10', dateTo: '2026-01-10' };
+    const { from, to } = filterWindow(filter);
+    const serverKeeps = (r) => {
+      const created = Date.parse(r.createdAt);
+      return created >= from.getTime() && created <= to.getTime();
+    };
+    const page = applyFilter([late, early], filter).map((r) => r.sessionId);
+    assert.deepEqual(page, [late, early].filter(serverKeeps).map((r) => r.sessionId));
+    // The end of 10 January in Singapore is 15:59 UTC: the late row belongs to the 11th there.
+    assert.deepEqual(page, ['early']);
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
 });

@@ -70,3 +70,65 @@ def test_apply_replacements_to_subtitle_file(tmp_path: Path) -> None:
     # Second application is a no-op (already corrected).
     assert apply_replacements_to_file(srt_path, corrections) is False
     assert apply_replacements_to_file(tmp_path / "missing.srt", corrections) is False
+
+
+# -- real clinical words must not be rewritten into a different real term ------
+
+CONFUSABLE_PAIRS = [
+    ("hypoglycaemia", "hyperglycaemia"),
+    ("dysphasia", "dysphagia"),
+    ("prednisone", "prednisolone"),
+]
+
+
+def test_a_correct_clinical_word_is_not_rewritten_into_its_confusable_sibling() -> None:
+    for spoken, corpus_term in CONFUSABLE_PAIRS:
+        segment = make_segment(f"The patient has {spoken} today.")
+        assert correct_segments([segment], [corpus_term]) == [], (spoken, corpus_term)
+        assert spoken in segment["text"]
+
+
+def test_the_confusable_pairs_are_protected_in_both_directions() -> None:
+    for left, right in CONFUSABLE_PAIRS:
+        for spoken, corpus_term in ((left, right), (right, left)):
+            segment = make_segment(f"History of {spoken}.")
+            assert correct_segments([segment], [corpus_term]) == [], (spoken, corpus_term)
+
+
+def test_a_protected_word_inside_a_multi_word_window_is_left_alone() -> None:
+    segment = make_segment("Is it hypoglycaemia or something else?")
+    assert correct_segments([segment], ["hyperglycaemia", "something else"]) == []
+    assert segment["text"] == "Is it hypoglycaemia or something else?"
+
+
+def test_case_and_punctuation_variants_of_a_lexicon_word_stay_protected() -> None:
+    for text in ("Hypoglycaemia, again.", "HYPOGLYCAEMIA!", "(dysphasia)"):
+        segment = make_segment(text)
+        assert correct_segments([segment], ["hyperglycaemia", "dysphagia"]) == [], text
+        assert segment["text"] == text
+
+
+def test_genuine_misspellings_are_still_corrected() -> None:
+    segment = make_segment("He took paracetemol and para set a mole.")
+    corrections = correct_segments([segment], ["paracetamol"])
+
+    assert segment["text"] == "He took paracetamol and paracetamol."
+    assert len(corrections) == 2
+
+
+def test_a_misspelling_next_to_a_protected_word_is_still_corrected() -> None:
+    segment = make_segment("Hypoglycaemia was treated with paracetemol.")
+    correct_segments([segment], ["hyperglycaemia", "paracetamol"])
+
+    assert segment["text"] == "Hypoglycaemia was treated with paracetamol."
+
+
+def test_subtitle_patching_does_not_touch_a_protected_word(tmp_path: Path) -> None:
+    segment = make_segment("Hypoglycaemia and parasitamol.")
+    corrections = correct_segments([segment], ["hyperglycaemia", "paracetamol"])
+    subtitle = tmp_path / "a.srt"
+    subtitle.write_text("1\n00:00:00,000 --> 00:00:02,000\nHypoglycaemia and parasitamol.\n", encoding="utf-8")
+
+    apply_replacements_to_file(subtitle, corrections)
+
+    assert subtitle.read_text(encoding="utf-8").splitlines()[2] == "Hypoglycaemia and paracetamol."

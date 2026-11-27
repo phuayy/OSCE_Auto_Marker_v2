@@ -186,6 +186,10 @@ class ReasoningPolicy:
     budget_tokens: int = 16_384
 
 
+# Router-call deadline when a request names none (see ChatRequest.deadline_seconds).
+DEFAULT_TOTAL_TIMEOUT_SECONDS = 900.0
+
+
 @dataclass
 class ChatRequest:
     """One completion, described independently of any vendor."""
@@ -194,8 +198,12 @@ class ChatRequest:
     temperature: float = 0.2
     top_p: float = 0.9
     max_tokens: int = 24_576
+    # Bound on ONE attempt against one provider.
     timeout_seconds: float = 360.0
-    total_timeout_seconds: float = 900.0
+    # Bound on the whole router call (every target, mode and retry). ``None``
+    # derives it from ``timeout_seconds`` — see :meth:`deadline_seconds` — so a
+    # caller that needs a longer per-attempt timeout never has to know about it.
+    total_timeout_seconds: float | None = None
     # Ask for a single JSON object. Providers that expose a JSON mode get it;
     # the rest are steered by the prompt and the ladder.
     json_mode: bool = True
@@ -209,6 +217,17 @@ class ChatRequest:
     # reasoning enabled, asking for JSON on the first attempt made Nemotron emit
     # an empty {"schema": ""} scaffold, so that caller tries plain text first.
     mode_ladder: tuple[RequestMode, ...] | None = None
+
+    def deadline_seconds(self) -> float:
+        """The router's total budget: explicit if set, else derived.
+
+        The derived value is the standard budget, raised to two attempts' worth
+        of ``timeout_seconds`` when that is longer, so one slow call leaves room
+        for a fallback instead of consuming the whole deadline.
+        """
+        if self.total_timeout_seconds is not None:
+            return self.total_timeout_seconds
+        return max(DEFAULT_TOTAL_TIMEOUT_SECONDS, 2 * self.timeout_seconds)
 
     def modes(self) -> tuple[RequestMode, ...]:
         if self.mode_ladder:

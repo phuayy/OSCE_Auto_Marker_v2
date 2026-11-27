@@ -29,7 +29,14 @@ from typing import Any, Callable, Iterable, Mapping
 
 from app.llm import registry
 from app.llm.base import LLMProvider, ProviderCredentials, ProviderDescriptor
-from app.llm.custom import CustomProviderError, CustomProviderSpec, key_env_name
+from app.llm.custom import (
+    CustomProviderError,
+    CustomProviderSpec,
+    extras_env_name,
+    key_env_name,
+    SECRET_BEARING_CONNECTION_FIELDS,
+    redact_connection_secrets,
+)
 from app.llm.providers.custom import build_custom_provider
 
 logger = logging.getLogger(__name__)
@@ -157,19 +164,30 @@ class ProviderCatalog:
 
     # -- subprocess handoff -------------------------------------------------
 
-    def to_env(self) -> dict[str, str]:
-        """The custom definitions, for a subprocess's environment.
+    def to_env(self, provider_ids: Iterable[str]) -> dict[str, str]:
+        """The *routed* custom definitions, for a subprocess's environment.
 
-        Omitted entirely when there are none, so a deployment that never defines
-        a provider hands its scorers exactly the environment it always did.
+        Only providers the routing names travel: a scorer has no business with
+        another vendor's connection details. The definitions blob is
+        credential-free (safe to log); each provider's extra headers/query/body
+        — where a gateway token lives — go in a variable of their own, the way
+        its key does, and only when it has any. Omitted entirely when nothing
+        routed is custom, so a deployment that never defines a provider hands
+        its scorers exactly the environment it always did.
         """
-        if not self.custom:
+        routed = [self.custom[pid] for pid in dict.fromkeys(provider_ids) if pid in self.custom]
+        if not routed:
             return {}
         payload = {
             "schema": SCHEMA,
-            "providers": [spec.to_public() for spec in self.custom.values()],
+            "providers": [redact_connection_secrets(spec.to_public()) for spec in routed],
         }
-        return {CUSTOM_PROVIDERS_ENV_VAR: json.dumps(payload, separators=(",", ":"))}
+        env = {CUSTOM_PROVIDERS_ENV_VAR: json.dumps(payload, separators=(",", ":"))}
+        for spec in routed:
+            extras = spec.connection_extras()
+            if extras:
+                env[extras_env_name(spec.id)] = json.dumps(extras, separators=(",", ":"))
+        return env
 
 
 def _factory_for(spec: CustomProviderSpec) -> ProviderFactory:
@@ -191,7 +209,7 @@ def builtin_catalog() -> ProviderCatalog:
     )
 
 
-def specs_from_raw(raw: Any) -> list[CustomProviderSpec]:
+def specs_from_raw(raw: Any, env: Mapping[str, str] | None = None) -> list[CustomProviderSpec]:
     """Parse a serialised definition list, skipping entries that no longer parse.
 
     Tolerant on purpose. These definitions outlive the release that wrote them,
@@ -205,10 +223,33 @@ def specs_from_raw(raw: Any) -> list[CustomProviderSpec]:
     specs: list[CustomProviderSpec] = []
     for entry in entries:
         try:
-            specs.append(CustomProviderSpec.from_raw(entry))
+            specs.append(CustomProviderSpec.from_raw(_with_extras_from_env(entry, env)))
         except CustomProviderError as error:
             logger.warning("Skipping an unusable custom provider definition: %s", error)
     return specs
+
+
+def _with_extras_from_env(entry: Any, env: Mapping[str, str] | None) -> Any:
+    """``entry`` with its connection extras read back from their own variable.
+
+    Counterpart of :meth:`ProviderCatalog.to_env`. A missing or unreadable
+    variable leaves the definition without extras rather than failing: the
+    provider then calls its vendor without them, which the vendor refuses
+    loudly, instead of the whole catalogue becoming unreadable.
+    """
+    if env is None or not isinstance(entry, Mapping):
+        return entry
+    raw = str(env.get(extras_env_name(str(entry.get("id") or ""))) or "").strip()
+    if not raw:
+        return entry
+    try:
+        extras = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("The connection extras for custom provider '%s' are not valid JSON; ignoring them.", entry.get("id"))
+        return entry
+    if not isinstance(extras, Mapping):
+        return entry
+    return {**entry, **{key: extras[key] for key in SECRET_BEARING_CONNECTION_FIELDS if key in extras}}
 
 
 def catalog_from_env(env: Mapping[str, str] | None = None) -> ProviderCatalog:
@@ -235,4 +276,4 @@ def catalog_from_env(env: Mapping[str, str] | None = None) -> ProviderCatalog:
             error,
         )
         return builtin_catalog()
-    return builtin_catalog().with_custom(specs_from_raw(parsed))
+    return builtin_catalog().with_custom(specs_from_raw(parsed, source))

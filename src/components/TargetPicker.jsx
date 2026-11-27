@@ -12,12 +12,13 @@
 // provider dropdown into "may be empty", for the roles where nothing is a
 // legitimate choice.
 import React from 'react';
-import { CheckCircle2, Loader2, PlugZap, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Loader2, PlugZap, XCircle } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { apiJson } from '@/lib/apiFetch';
 import {
   CUSTOM_MODEL,
+  describeTestFailure,
   findModelSpec,
   findProvider,
   formatContextWindow,
@@ -39,6 +40,7 @@ export default function TargetPicker({
   testing = false,
   testResult = null,
   onTest = null,
+  canTest = true,
   disabled = false,
 }) {
   const provider = findProvider(description, target?.providerId);
@@ -80,7 +82,14 @@ export default function TargetPicker({
           <div className="text-sm font-semibold text-slate-800">{title}</div>
           {hint ? <div className="text-[11px] text-slate-500">{hint}</div> : null}
         </div>
-        {onTest ? (
+        {onTest && !canTest ? (
+          // The live probe is a billable call on the deployment's key, so the
+          // server only lets an administrator make it; offering the button to
+          // anyone else would only ever answer 403.
+          <span className="max-w-[12rem] text-right text-[11px] text-slate-500">
+            Connection tests are run by an administrator.
+          </span>
+        ) : onTest ? (
           <Button
             variant="outline"
             size="sm"
@@ -182,11 +191,15 @@ export default function TargetPicker({
           className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-[11px] ${
             testResult.ok
               ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-              : 'border-rose-200 bg-rose-50 text-rose-700'
+              : testResult.denied
+                ? 'border-amber-200 bg-amber-50 text-amber-800'
+                : 'border-rose-200 bg-rose-50 text-rose-700'
           }`}
         >
           {testResult.ok ? (
             <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          ) : testResult.denied ? (
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           ) : (
             <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           )}
@@ -203,7 +216,8 @@ export default function TargetPicker({
 
 // The one POST behind every Test button: probe exactly the pair on screen.
 // Returns a `{ ok, ... }` result the picker renders; never throws, because a
-// failed probe is a result to show, not an error to recover from.
+// failed probe is a result to show, not an error to recover from. A 403 comes
+// back `denied` (see `describeTestFailure`): the caller's role, not the provider.
 export async function testTarget(target) {
   try {
     return await apiJson('/api/admin/settings/llm-providers/test', {
@@ -212,6 +226,6 @@ export async function testTarget(target) {
       fallbackMessage: 'The connection test could not be run.',
     });
   } catch (error) {
-    return { ok: false, error: error.message || 'The connection test could not be run.' };
+    return describeTestFailure(error);
   }
 }

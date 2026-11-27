@@ -14,4 +14,7 @@ class CommunicationRubricSaveRequest(BaseModel):
     """
 
     rubric: dict[str, Any]
+    # The id of the active version the editor was opened on. Required: the save
+    # is refused with 409 when it is no longer the active one.
+    baseVersionId: str
     draftId: str | None = None

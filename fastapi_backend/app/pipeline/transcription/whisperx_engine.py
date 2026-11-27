@@ -9,6 +9,7 @@ router.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from app.pipeline.audio_filters import validate_filter_chain
@@ -25,6 +26,8 @@ from app.pipeline.transcription.base import (
     TranscriptionRequest,
     TranscriptionResult,
 )
+
+logger = logging.getLogger(__name__)
 
 ENGINE_ID = "whisperx"
 
@@ -149,6 +152,27 @@ class WhisperXEngine(TranscriptionEngine):
             return EngineAvailability(False, "WHISPERX_BIN is not configured.")
         return EngineAvailability(True)
 
+    @staticmethod
+    def _speaker_bounds(options: dict[str, Any], deployment: WhisperxRunOptions) -> dict[str, int]:
+        """The option's bounds, or none when the pair contradicts itself.
+
+        0 means "let clustering estimate" and is respected. A minimum above a
+        set maximum is an invalid combination; like any invalid option it
+        degrades to the deployment default rather than failing the run.
+        """
+        minimum = options.get("minSpeakers")
+        maximum = options.get("maxSpeakers")
+        if minimum is not None and maximum is not None and 0 < maximum < minimum:
+            logger.warning(
+                "WhisperX minSpeakers (%s) exceeds maxSpeakers (%s); using the deployment defaults (%s/%s).",
+                minimum,
+                maximum,
+                deployment.min_speakers,
+                deployment.max_speakers,
+            )
+            return {}
+        return {"min_speakers": minimum, "max_speakers": maximum}
+
     async def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
         options = request.options
         run_options = WhisperxRunOptions.from_settings(self.media.settings).with_overrides(
@@ -156,20 +180,14 @@ class WhisperXEngine(TranscriptionEngine):
             compute_type=options.get("computeType"),
             batch_size=options.get("batchSize"),
             chunk_size=options.get("chunkSize"),
-            min_speakers=options.get("minSpeakers"),
-            max_speakers=options.get("maxSpeakers"),
             audio_filters=options.get("audioFilters"),
             initial_prompt=options.get("initialPrompt"),
             language=request.language or None,
         )
-        # Speaker bounds set on the request — the station's known cast — win
-        # over the engine option, so one source of truth governs diarisation
-        # whichever engine runs.
-        if request.min_speakers or request.max_speakers:
-            run_options = run_options.with_overrides(
-                min_speakers=request.min_speakers or None,
-                max_speakers=request.max_speakers or None,
-            )
+        # Speaker bounds: the account's option (already layered over the
+        # WHISPERX_* defaults by ``resolve_options``) is the whole answer. The
+        # request's own bounds are those same defaults and must not override it.
+        run_options = run_options.with_overrides(**self._speaker_bounds(options, run_options))
 
         session = {
             "id": request.session_id,

@@ -68,6 +68,28 @@ export const MediaPreparationStatus = Object.freeze({
   "FAILED": "failed"
 });
 
+export const MediaPreparationStage = Object.freeze({
+  "PROBING": "probing",
+  "POSTER": "poster",
+  "CONVERTING": "converting"
+});
+
+export const UploadProbeStatus = Object.freeze({
+  "PENDING": "pending",
+  "READY": "ready",
+  "INCONCLUSIVE": "inconclusive",
+  "UNAVAILABLE": "unavailable",
+  "COMPLETE": "complete"
+});
+
+export const UploadProbeWarning = Object.freeze({
+  "NO_VIDEO_STREAM": "no_video_stream",
+  "NO_AUDIO_STREAM": "no_audio_stream",
+  "MULTIPLE_AUDIO_STREAMS": "multiple_audio_streams",
+  "WILL_CONVERT": "will_convert",
+  "ROTATED": "rotated"
+});
+
 export const JobStatus = Object.freeze({
   "WAITING_FOR_UPLOAD": "waiting_for_upload",
   "QUEUED": "queued",
@@ -141,6 +163,21 @@ export const UserStatus = Object.freeze({
 export const ScoreDisplay = Object.freeze({
   "PERCENT": "percent",
   "RAW": "raw"
+});
+
+export const ScoringBranch = Object.freeze({
+  "CONTENT": "content",
+  "COMMUNICATION": "communication"
+});
+
+export const RescoreCode = Object.freeze({
+  "OK": "ok",
+  "IN_FLIGHT": "in_flight",
+  "NO_TRANSCRIPT": "no_transcript",
+  "NOT_ASSESSED": "not_assessed",
+  "NOT_FOUND": "not_found",
+  "NOT_RESCORABLE": "not_rescorable",
+  "FAILED": "failed"
 });
 
 export const RubricVersionStatus = Object.freeze({

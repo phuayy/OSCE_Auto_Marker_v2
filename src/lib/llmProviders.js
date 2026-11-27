@@ -92,6 +92,76 @@ export function shouldShowCustomModelField(provider, storedModel, customSelected
   return Boolean(customSelected) || isCustomModel(provider, storedModel);
 }
 
+// The routing form's initial state from the server description: the stored
+// primary (else the deployment default) and the first stored fallback.
+export function resolveRoutingState(description) {
+  const primaryProviderId = resolvePrimaryProviderId(description);
+  const primaryProvider = findProvider(description, primaryProviderId);
+  const storedFallback = resolveFallbackTarget(description);
+  const fallbackProvider = findProvider(description, storedFallback.providerId);
+  return {
+    primary: {
+      providerId: primaryProviderId,
+      model: resolveModelId(primaryProvider, description?.selected?.primary?.model),
+    },
+    fallback: {
+      providerId: storedFallback.providerId,
+      model: fallbackProvider ? resolveModelId(fallbackProvider, storedFallback.model) : '',
+    },
+  };
+}
+
+// --- Merging a catalogue refresh into a form that may have unsaved edits ----
+//
+// A card resets its form from the server only on first load and after its own
+// save. Any other refresh (another card saved a key or a model) re-reads the
+// catalogue underneath a form the operator may be halfway through, so it is
+// merged: a field still equal to what was last loaded is clean and takes the
+// refreshed value; a field the operator changed keeps their edit. The one
+// thing a kept edit cannot survive is its provider leaving the catalogue — it
+// is cleared to the role's empty value, which the validators then flag.
+
+function sameValue(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function reconcileTarget(target, description, empty) {
+  if (target?.providerId && !findProvider(description, target.providerId)) return empty;
+  return target;
+}
+
+// One provider+model choice. `empty` is the role's "nothing chosen" value
+// (no provider for a marker, NO_FALLBACK for the fallback, ...).
+export function settleTarget(current, baseline, fresh, description, empty) {
+  const next = sameValue(current, baseline) ? fresh : current;
+  return reconcileTarget(next, description, empty);
+}
+
+// The panel's marker list, which is edited and saved as one unit.
+export function settleMarkers(current, baseline, fresh, description) {
+  if (sameValue(current, baseline)) return fresh;
+  return (current || []).map((target) => reconcileTarget(target, description, { providerId: '', model: '' }));
+}
+
+// Plain values (the marking mode, the tie-break policy).
+export function settleValue(current, baseline, fresh) {
+  return sameValue(current, baseline) ? fresh : current;
+}
+
+// What a failed Test probe means to the screen. A 403 is the caller's role
+// (the live test is a billable call on the deployment's key and is
+// administrator-only), not the provider failing, so it is marked `denied`.
+export function describeTestFailure(error) {
+  if (error?.status === 403) {
+    return {
+      ok: false,
+      denied: true,
+      error: 'Only an administrator can run a connection test.',
+    };
+  }
+  return { ok: false, error: error?.message || 'The connection test could not be run.' };
+}
+
 // Things worth telling the operator before they save this pairing.
 export function routingWarnings({ description, primary, fallback }) {
   const warnings = [];

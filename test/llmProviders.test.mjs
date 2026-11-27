@@ -212,3 +212,74 @@ test('formatOutputLimit names a model\'s output ceiling and stays silent when un
   assert.equal(formatOutputLimit({ maxOutputTokens: 0 }), '');
   assert.equal(formatOutputLimit(null), '');
 });
+
+// ---- Merging a catalogue refresh into a form (M30) --------------------------
+
+import {
+  describeTestFailure,
+  resolveRoutingState,
+  settleMarkers,
+  settleTarget,
+} from '../src/lib/llmProviders.js';
+
+const EMPTY = { providerId: '', model: '' };
+const t = (providerId, model) => ({ providerId, model });
+
+test('settleTarget: a clean field takes the refreshed value', () => {
+  const baseline = t('nvidia', 'a');
+  const out = settleTarget(t('nvidia', 'a'), baseline, t('openai', 'gpt-4.1'), { providers: [NVIDIA, OPENAI] }, EMPTY);
+  assert.deepEqual(out, t('openai', 'gpt-4.1'));
+});
+
+test('settleTarget: a dirty field keeps the unsaved edit', () => {
+  const out = settleTarget(t('openai', 'gpt-4.1'), t('nvidia', 'a'), t('nvidia', 'b'), { providers: [NVIDIA, OPENAI] }, EMPTY);
+  assert.deepEqual(out, t('openai', 'gpt-4.1'));
+});
+
+test('settleTarget: a dirty selection whose provider left the catalogue is cleared', () => {
+  const out = settleTarget(t('gone', 'x'), t('nvidia', 'a'), t('nvidia', 'a'), { providers: [NVIDIA] }, EMPTY);
+  assert.deepEqual(out, EMPTY);
+  // and the form rules flag it rather than keeping it silently
+  assert.ok(validateRouting({ description: { providers: [NVIDIA] }, primary: out }).primaryProvider);
+});
+
+test('settleTarget: the fallback role clears to its own none value', () => {
+  const out = settleTarget(t('gone', 'x'), t('nvidia', 'a'), t('nvidia', 'a'), { providers: [NVIDIA] }, t(NO_FALLBACK, ''));
+  assert.deepEqual(out, t(NO_FALLBACK, ''));
+});
+
+test('settleMarkers: clean list refreshes, dirty list is kept minus removed providers', () => {
+  const description = { providers: [NVIDIA, OPENAI] };
+  const baseline = [t('nvidia', 'a'), t('openai', 'gpt-4.1')];
+  const fresh = [t('nvidia', 'b'), t('openai', 'gpt-4.1')];
+  assert.deepEqual(settleMarkers(baseline, baseline, fresh, description), fresh);
+  const dirty = [t('nvidia', 'a'), t('gone', 'z')];
+  assert.deepEqual(settleMarkers(dirty, baseline, fresh, description), [t('nvidia', 'a'), EMPTY]);
+});
+
+test('resolveRoutingState matches what the card shows on load', () => {
+  const description = {
+    providers: [NVIDIA, OPENAI],
+    defaultProviderId: 'nvidia',
+    selected: { primary: t('openai', ''), fallbacks: [t('nvidia', 'm')] },
+  };
+  const state = resolveRoutingState(description);
+  assert.deepEqual(state.primary, t('openai', 'gpt-4.1'));
+  assert.deepEqual(state.fallback, t('nvidia', 'm'));
+});
+
+// ---- A Test that the caller may not run (M32) -------------------------------
+
+test('describeTestFailure: a 403 is a permission message, not a provider failure', () => {
+  const out = describeTestFailure({ status: 403, message: 'Forbidden' });
+  assert.equal(out.ok, false);
+  assert.equal(out.denied, true);
+  assert.match(out.error, /administrator/i);
+});
+
+test('describeTestFailure: any other error stays a failed probe', () => {
+  const out = describeTestFailure({ status: 502, message: 'Bad gateway' });
+  assert.equal(out.denied, undefined);
+  assert.equal(out.error, 'Bad gateway');
+  assert.match(describeTestFailure(new Error('')).error, /could not be run/);
+});

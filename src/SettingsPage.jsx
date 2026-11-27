@@ -122,12 +122,14 @@ export default function SettingsPage({ onBack, isAdmin = false }) {
             version={providersVersion}
             onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
             onSettingsChanged={adoptSettings}
+            isAdmin={isAdmin}
           />
 
           <MarkingModeSettings
             version={providersVersion}
             onProvidersChanged={() => setProvidersVersion((current) => current + 1)}
             onSettingsChanged={adoptSettings}
+            isAdmin={isAdmin}
           />
 
           <Card className="border-slate-200 bg-white shadow-sm">

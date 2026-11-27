@@ -31,6 +31,11 @@ _DEFAULT_MAX_CAPTURE_CHARS = 5_000_000
 # during the run instead of accumulating one-per-line until the process exits.
 _DEFAULT_MAX_PENDING_CALLBACKS = 2_000
 
+# Output/progress callbacks are observers. One that raises is logged, but only
+# this many times per run: a callback that fails on every line of a chatty
+# subprocess would otherwise log thousands of tracebacks.
+_MAX_LOGGED_CALLBACK_ERRORS = 3
+
 # Watchdog for a child that never exits. Deliberately generous — a CPU WhisperX
 # run on a long recording legitimately takes hours — because its job is to end
 # a *hung* process, not to bound a slow one. Without it a stuck child pins the
@@ -89,15 +94,31 @@ class CommandRunner:
         callback_futures: list[Future[None]] = []
         callback_lock = threading.Lock()
         process_holder: dict[str, subprocess.Popen[bytes]] = {}
+        # Touched only on the event loop (inside ``invoke_callback``).
+        callback_errors = {"count": 0}
 
         def submit_output(stream_name: str, text: str) -> None:
             if on_output is None:
                 return
 
             async def invoke_callback() -> None:
-                result = on_output(stream_name, text)
-                if asyncio.iscoroutine(result):
-                    await result
+                # An observer must never decide the run's result: an error in
+                # it (a 409 from a session write, say) used to surface from the
+                # final gather and fail a subprocess that had succeeded. Only
+                # ``Exception`` is caught, so cancellation still propagates.
+                try:
+                    result = on_output(stream_name, text)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception as error:
+                    callback_errors["count"] += 1
+                    if callback_errors["count"] <= _MAX_LOGGED_CALLBACK_ERRORS:
+                        logger.warning(
+                            "%s — output callback failed (the run continues): %s",
+                            label,
+                            error,
+                            exc_info=True,
+                        )
 
             future = asyncio.run_coroutine_threadsafe(invoke_callback(), loop)
             with callback_lock:
@@ -201,6 +222,12 @@ class CommandRunner:
         if pending_callbacks:
             await asyncio.gather(*(asyncio.wrap_future(future) for future in pending_callbacks))
 
+        if callback_errors["count"] > _MAX_LOGGED_CALLBACK_ERRORS:
+            logger.warning(
+                "%s — %d further output-callback errors suppressed.",
+                label,
+                callback_errors["count"] - _MAX_LOGGED_CALLBACK_ERRORS,
+            )
         stdout = "".join(stdout_chunks).strip()
         stderr = "".join(stderr_chunks).strip()
         elapsed = time.monotonic() - started_at

@@ -5,13 +5,18 @@ from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import current_actor, get_container, require_expensive_operation, require_session_owner
 from app.api.errors import http_error
+from app.domain.session_filters import SessionListFilter
+from app.domain.actors import Actor
 from app.domain.sessions import session_video_path
 from app.schemas.sessions import (
     AssessClipsRequest,
+    BulkSessionsRequest,
     ManualClipsRequest,
     RecropClipRequest,
     RenameClipRequest,
     RenameSessionRequest,
+    RescoreClipsRequest,
+    RescoreRequest,
 )
 from app.services.container import AppContainer
 
@@ -24,14 +29,47 @@ async def list_sessions(
     cursor: str | None = Query(None, max_length=512),
     parent_session_id: str | None = Query(None, alias="parentSessionId", max_length=36),
     roots_only: bool = Query(False, alias="rootsOnly"),
+    search: str | None = Query(None, alias="q"),
+    statuses: list[str] = Query(default_factory=list, alias="status"),
+    created_by: str | None = Query(None, alias="createdBy", max_length=36),
+    workflow: str | None = Query(None),
+    actor: Actor | None = Depends(current_actor),
     container: AppContainer = Depends(get_container),
 ) -> dict[str, object]:
+    if created_by == "me":
+        if actor is None:
+            raise HTTPException(status_code=401, detail="Authentication required.")
+        created_by = actor.user_id
     try:
+        filters = SessionListFilter.parse(search=search, statuses=statuses, created_by=created_by, workflow=workflow)
         return await container.sessions.list_page(
-            limit=limit, cursor=cursor, parent_session_id=parent_session_id, roots_only=roots_only,
+            limit=limit, cursor=cursor, parent_session_id=parent_session_id, roots_only=roots_only, filters=filters,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.post("/bulk")
+async def bulk_sessions(
+    payload: BulkSessionsRequest,
+    request: Request,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Apply one action to up to 100 sessions; each answers for itself (always 200).
+
+    Not behind ``require_session_owner`` (there is no ``{session_id}`` to read):
+    the creator-or-admin gate runs per item inside the service, and the
+    expensive-operation budget is spent here, once, only for an action that
+    spends it — after validation, so a rejected request costs nothing.
+    """
+    try:
+        plan = container.session_bulk.prepare(payload.action, payload.session_ids, payload.options)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if plan.charges_budget:
+        require_expensive_operation(request, container)
+    response = await container.session_bulk.run(plan, current_actor(request))
+    return response.model_dump(by_alias=True, exclude_none=True)
 
 
 @router.patch("/{session_id}/name", dependencies=[Depends(require_session_owner)])
@@ -87,6 +125,49 @@ async def rerun_session(session_id: str, container: AppContainer = Depends(get_c
         raise HTTPException(status_code=404, detail="Session not found.") from error
     except Exception as error:
         raise http_error(error, fallback_message="Failed to re-run session.", not_found_message="Session not found.") from error
+
+
+@router.post(
+    "/{session_id}/rescore",
+    status_code=202,
+    dependencies=[Depends(require_session_owner), Depends(require_expensive_operation)],
+)
+async def rescore_session(
+    session_id: str,
+    payload: RescoreRequest,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Redo the chosen scoring branches on the transcript already on disk.
+
+    The cheap alternative to ``/rerun``: no transcription, so it is what to
+    offer after a rubric edit or a change of scoring model. Answers 202 with the
+    session already ``queued`` and its job.
+    """
+    try:
+        return await container.session_maintenance.rescore_session(session_id, frozenset(payload.branches))
+    except Exception as error:
+        raise http_error(error, fallback_message="Failed to re-score session.", not_found_message="Session not found.") from error
+
+
+@router.post(
+    "/{session_id}/clips/rescore",
+    status_code=202,
+    dependencies=[Depends(require_session_owner), Depends(require_expensive_operation)],
+)
+async def rescore_clips(
+    session_id: str,
+    payload: RescoreClipsRequest,
+    container: AppContainer = Depends(get_container),
+) -> dict[str, object]:
+    """Re-score a long recording's clip assessments as **one** admission, like
+    ``/clips/assess``: marking a cohort is one action against the hourly
+    budget, and each clip is answered on its own in ``results[]``."""
+    try:
+        return await container.session_maintenance.rescore_clips(
+            session_id, frozenset(payload.branches), payload.clip_ids,
+        )
+    except Exception as error:
+        raise http_error(error, fallback_message="Clips could not be re-scored.", not_found_message="Session not found.") from error
 
 
 @router.get("/{session_id}/transcript")

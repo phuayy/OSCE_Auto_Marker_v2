@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -13,7 +14,7 @@ from app.core.locks import KeyedLocks
 from app.core.tasks import BackgroundTaskRegistry
 from app.core.utils import parse_iso, utc_now_iso
 from app.domain.actors import PROVENANCE_KEY, Actor
-from app.domain.enums import MediaPreparationStatus, TaskType, UploadStatus, Workflow
+from app.domain.enums import MediaPreparationStatus, TaskType, UploadFileKind, UploadProbeStatus, UploadStatus, Workflow
 from app.domain.session_lifecycle import fail_session
 from app.domain.sessions import SessionStatus, empty_outputs
 from app.pipeline.media import MediaPipeline
@@ -21,10 +22,12 @@ from app.repositories.corpus_repository import CorpusRepository
 from app.repositories.upload_repository import UploadRepository
 from app.repositories.video_repository import VideoRepository
 from app.schemas.uploads import CompleteUploadRequest, InitiateUploadRequest
+from app.services.artifact_service import ensure_pdf_file
 from app.services.event_service import EventService
 from app.services.job_queue_service import JobQueueService
 from app.services.rubric_asset_service import RubricAssetService
 from app.services.session_service import SessionService
+from app.services.upload_probe import HEAD_MAX_BYTES, ProbeVerdict, UploadHeadProber, facts_from_media
 from app.storage import ObjectStorage
 
 logger = logging.getLogger(__name__)
@@ -71,6 +74,7 @@ class AsyncUploadService:
         # Holds strong references to background assembly tasks so the event loop
         # cannot garbage-collect them mid-execution (see BackgroundTaskRegistry).
         self._background_tasks = BackgroundTaskRegistry()
+        self._head_prober = UploadHeadProber(media)
 
     async def initiate(self, payload: InitiateUploadRequest, *, actor: Actor | None = None) -> dict[str, Any]:
         if actor is not None:
@@ -357,6 +361,11 @@ class AsyncUploadService:
         by asyncio.create_task, so we catch broadly and emit an SSE error event instead.
         """
         session_id: str | None = None
+        # Objects this run committed and still owns, by kind. If the run fails
+        # before the upload record is durable they are removed again (see
+        # _discard_committed_objects), so a rejected upload leaves nothing the
+        # media mount could serve or the bucket keep.
+        owned_refs: dict[str, dict[str, Any]] = {}
         try:
             upload = await self.repository.read(upload_id)
             session_id = str(upload["sessionId"])
@@ -365,6 +374,7 @@ class AsyncUploadService:
             for file_record in upload.get("files") or []:
                 storage_ref = await self.storage.complete_file(upload, file_record)
                 committed_refs[str(file_record["kind"])] = storage_ref
+                owned_refs[str(file_record["kind"])] = dict(storage_ref)
 
             video_ref = committed_refs.get("video")
             case_study_ref = committed_refs.get("caseStudy")
@@ -387,6 +397,10 @@ class AsyncUploadService:
                 public_url=public_url,
             )
             case_study_record["storageRef"] = case_study_ref
+            # From here the case study is a shared rubric asset (possibly
+            # another session's deduplicated object), no longer this upload's
+            # to delete.
+            owned_refs.pop("caseStudy", None)
             jobs = await self._commit_assembled(
                 upload, should_process, video_ref, case_study_ref, case_study_asset, case_study_deduplicated,
             )
@@ -405,7 +419,7 @@ class AsyncUploadService:
                 await self.jobs.start_job(job)
 
         except Exception as error:
-            await self._assembly_failed(upload_id, session_id, error)
+            await self._assembly_failed(upload_id, session_id, error, owned_refs=list(owned_refs.values()))
 
     async def _commit_assembled(
         self, upload: dict[str, Any], should_process: bool,
@@ -490,13 +504,43 @@ class AsyncUploadService:
             # Part files are only deleted once both records are durable.
             return [queued for queued in (job, media_job) if queued]
 
-    async def _assembly_failed(self, upload_id: str, session_id: str | None, error: Exception) -> None:
+    async def _discard_committed_objects(self, upload_id: str, refs: list[dict[str, Any]]) -> None:
+        """Remove objects a failed assembly committed.
+
+        ``abort_upload`` only reaches staging (and, on GCS, deliberately nothing
+        once committed), so without this a video that failed validation stays
+        under ``/media/source`` or in the bucket forever. Best effort: a
+        cleanup that cannot finish is logged and never replaces the error that
+        got us here.
+        """
+        for ref in refs:
+            try:
+                await self.storage.delete_committed_object(ref)
+            except Exception:
+                logger.warning(
+                    "Could not remove committed object %s of failed upload %s; it needs manual cleanup.",
+                    ref.get("key"),
+                    upload_id,
+                    exc_info=True,
+                )
+
+    async def _assembly_failed(
+        self,
+        upload_id: str,
+        session_id: str | None,
+        error: Exception,
+        *,
+        owned_refs: list[dict[str, Any]] | None = None,
+    ) -> None:
         logger.error("Upload assembly failed: %s", upload_id, exc_info=error)
         async with self.repository.locked(upload_id):
             current = await self.repository.read(upload_id)
             if current.get("status") != UploadStatus.ASSEMBLING:
                 logger.warning("Post-assembly operation failed for %s", upload_id, exc_info=error)
                 return
+            # Only while the upload is still assembling: once the commit is
+            # durable these objects belong to the session.
+            await self._discard_committed_objects(upload_id, owned_refs or [])
             # Mark the upload itself failed — leaving it on "assembling" would
             # make every retry of /complete hit the idempotency branch and
             # return "assembling" forever, with no way to recover client-side.
@@ -948,6 +992,10 @@ class AsyncUploadService:
         storage_ref["localPath"] = str(path)
         if path.suffix.lower() != ".pdf":
             raise AppError("Committed caseStudy is not a PDF file.", status_code=400)
+        # The declaration only vouches for a name and a MIME type; this is the
+        # first point the stored bytes can be judged, and it runs before any
+        # job is queued, so a non-PDF never reaches GPU transcription.
+        await asyncio.to_thread(ensure_pdf_file, path)
 
     def _committed_file_meta(
         self,
@@ -966,8 +1014,9 @@ class AsyncUploadService:
             "mimeType": storage_ref.get("mimeType"),
             "storageRef": storage_ref,
         }
-        if kind == "video":
-            meta["url"] = self.storage.public_url_for_key(str(storage_ref.get("key") or ""))
+        # No playback URL here: for a signed one that would be a string with an
+        # expiry, persisted. SessionService.public_session resolves it from the
+        # storage ref each time the session is served.
         if rubric_asset:
             meta["rubricAssetId"] = rubric_asset["id"]
             meta["rubricDeduplicated"] = rubric_deduplicated
@@ -1018,3 +1067,54 @@ class AsyncUploadService:
         if self._is_expired(upload):
             upload["status"] = UploadStatus.EXPIRED
             raise AppError("Upload session has expired.", status_code=410)
+
+    async def probe_upload(self, upload_id: str) -> dict[str, Any]:
+        """What ffprobe makes of the video's first bytes while it is still arriving.
+
+        Advisory and read-only: it never takes the upload's part lock, so a
+        probe cannot slow a transfer down, and an answer it cannot give is
+        ``pending`` / ``inconclusive`` / ``unavailable``, not an error. A
+        committed upload is ``complete`` — the session's own ``files.video.media``
+        is the place to look from then on.
+        """
+        upload = await self.repository.read(upload_id)
+        if upload.get("status") in {UploadStatus.ABORTED, UploadStatus.EXPIRED}:
+            raise AppError("Upload is no longer active.", status_code=409)
+        self._assert_not_expired(upload)
+        video = self._file_by_kind(upload.get("files") or [], UploadFileKind.VIDEO)
+        if not video:
+            raise AppError("Upload has no video file.", status_code=404)
+        received = int(video.get("uploadedBytes") or 0)
+
+        if upload.get("status") == UploadStatus.COMMITTED:
+            return await self._committed_probe(upload, received)
+        if not self.storage.relays_parts:
+            return self._probe_response(ProbeVerdict(UploadProbeStatus.UNAVAILABLE), received)
+        head = await self.storage.read_received_head(upload, str(video["fileId"]), HEAD_MAX_BYTES)
+        if head is None:
+            # Part 1 has not arrived — or the upload committed and released its
+            # staging between the read above and this one.
+            if (await self.repository.read(upload_id)).get("status") == UploadStatus.COMMITTED:
+                return await self._committed_probe(upload, received)
+            return self._probe_response(ProbeVerdict(UploadProbeStatus.PENDING), received)
+        verdict = await self._head_prober.inspect(
+            upload_id, str(video["fileId"]), str(video.get("originalName") or ""), head
+        )
+        return self._probe_response(verdict, received)
+
+    async def _committed_probe(self, upload: dict[str, Any], received: int) -> dict[str, Any]:
+        try:
+            session = await self.sessions.read(str(upload["sessionId"]))
+        except FileNotFoundError:
+            session = {}
+        media = ((session.get("files") or {}).get("video") or {}).get("media")
+        return self._probe_response(ProbeVerdict(UploadProbeStatus.COMPLETE, facts_from_media(media)), received)
+
+    @staticmethod
+    def _probe_response(verdict: ProbeVerdict, received_bytes: int) -> dict[str, Any]:
+        return {
+            "status": verdict.status,
+            "receivedBytes": received_bytes,
+            "facts": verdict.facts,
+            "warnings": [str(code) for code in verdict.warnings],
+        }

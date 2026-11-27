@@ -23,12 +23,13 @@ from app.domain.enums import (
     StepStatus,
     TaskType,
 )
-from app.domain.jobs import ACTIVE_JOB_STATUSES
 from app.domain.notifications import NotificationType
 from app.domain.session_lifecycle import fail_session, record_progress, sync_current_step
 from app.domain.sessions import (
     IN_FLIGHT_STATUSES,
+    JOB_DRIVEN_STATUSES,
     SessionStatus,
+    clip_list_busy,
     empty_outputs,
     existing_file,
     find_clip,
@@ -38,6 +39,7 @@ from app.domain.sessions import (
 from app.pipeline import person_presets
 from app.pipeline import region_focus
 from app.pipeline.media import MediaPipeline
+from app.services.clip_export_admission import settled_export_identity
 from app.services.event_service import EventService
 from app.services.media_preparation import set_video_artifact
 from app.services.pipeline_service import PipelineService
@@ -62,7 +64,6 @@ EXPORT_QUEUED = ClipExportStatus.QUEUED
 EXPORT_RUNNING = ClipExportStatus.RUNNING
 EXPORT_COMPLETED = ClipExportStatus.COMPLETED
 EXPORT_FAILED = ClipExportStatus.FAILED
-LIVE_EXPORT_STATUSES = frozenset({EXPORT_QUEUED, EXPORT_RUNNING})
 
 # What one export job was asked to cut, recorded on ``session.clipExport``.
 # A recrop is an export of a single clip: same job, same progress record, same
@@ -111,6 +112,11 @@ class ClipService:
         # one. Per process, which is where the API accepts requests; a Hatchet
         # worker takes none.
         self._assess_locks = KeyedLocks()
+        # One export or recrop request at a time per session, from the check
+        # for a live export to the job id being attached: the record a request
+        # writes carries no ``jobId`` until its job exists, and in that window
+        # a second request must wait rather than judge it stale.
+        self._export_locks = KeyedLocks()
 
     # ------------------------------------------------------------------
     # Document updates
@@ -481,16 +487,23 @@ class ClipService:
         the session immediately, so the timeline renders the new segmentation
         while the MP4s are still being cut.
         """
+        async with self._export_locks.hold(session_id):
+            return await self._plan_clip_export(session_id, boundaries, labels, kinds)
+
+    async def _plan_clip_export(
+        self,
+        session_id: str,
+        boundaries: list[float],
+        labels: list[str],
+        kinds: list[str] | None,
+    ) -> dict[str, Any]:
         session = await self.sessions.read(session_id)
-        if session.get("status") == SessionStatus.PROCESSING:
-            raise AppError("This session is already being processed.", status_code=409)
         if self.jobs is None:
             raise RuntimeError("Durable job queue is not configured for clip export.")
-        if await self._has_live_export(session):
-            raise AppError(
-                "A clip export is already running for this session. Wait for it to finish before re-splitting.",
-                status_code=409,
-            )
+        settled = await settled_export_identity(self.jobs, session)
+        # The cheap refusal, before the duration probe; the mutator below is
+        # the one that is exact.
+        self._ensure_clip_list_free(session, settled, then="re-splitting")
 
         video_path = session_video_path(session)
         video_duration = await self.media.get_video_duration_seconds(video_path)
@@ -535,6 +548,7 @@ class ClipService:
         requested_at = self.pipeline.now_iso()
 
         def plan(current: dict[str, Any]) -> Any:
+            self._ensure_clip_list_free(current, settled, then="re-splitting")
             current.setdefault("outputs", {})["videoClips"] = clips
             current["clipExport"] = {
                 "planId": plan_id,
@@ -554,10 +568,10 @@ class ClipService:
 
         await self._commit(session, plan)
 
-        job = await self.jobs.enqueue(
+        job = await self._enqueue_export(
             session_id,
-            TaskType.EXPORT_CLIPS,
             {"clipCount": pending_total, "planId": plan_id, "scope": str(EXPORT_SCOPE_PLAN)},
+            requested_at,
         )
         job_id = job.get("id")
 
@@ -886,35 +900,82 @@ class ClipService:
                 extra=log_context(session_id, "clip_plan_prune"),
             )
 
-    @staticmethod
-    def _active_export(session: dict[str, Any]) -> dict[str, Any] | None:
-        """The clip export this session believes is in flight, if any."""
-        export = session.get("clipExport")
-        if isinstance(export, dict) and str(export.get("status")) in LIVE_EXPORT_STATUSES:
-            return export
-        return None
+    def _ensure_clip_list_free(
+        self,
+        session: dict[str, Any],
+        settled_export: tuple[str, str, str] | None,
+        *,
+        then: str,
+    ) -> None:
+        """Refuse (409) when work in flight owns the clip list.
 
-    async def _has_live_export(self, session: dict[str, Any]) -> bool:
-        """Whether an export is genuinely still running for this session.
-
-        The session's own record is only a claim. A worker killed between
-        starting a clip and finishing one leaves ``clipExport`` reading
-        "running" forever, and trusting that alone would lock the user out of
-        re-exporting with a 409 they can never clear. The job row is the
-        authority: an export whose job has reached a terminal state (or vanished)
-        is stale, and a fresh request is allowed to replace it.
+        Used twice per request: on the session as first read, to fail before
+        any ffmpeg probe, and inside the admitting mutator on the freshly read
+        document, which is what makes admission exact — of two concurrent
+        requests, the one that loses the write re-reads the other's record
+        and lands here.
         """
-        export = self._active_export(session)
-        if export is None:
-            return False
-        job_id = str(export.get("jobId") or "")
-        if not job_id:
-            return True
+        if not clip_list_busy(session, settled_export=settled_export):
+            return
+        if str(session.get("status") or "").lower() in JOB_DRIVEN_STATUSES:
+            raise AppError("This session is already being processed.", status_code=409)
+        raise AppError(
+            f"A clip export is already running for this session. Wait for it to finish before {then}.",
+            status_code=409,
+        )
+
+    async def _enqueue_export(
+        self,
+        session_id: str,
+        payload: dict[str, Any],
+        requested_at: str,
+    ) -> dict[str, Any]:
+        """Enqueue the ``export_clips`` job for a record admission just wrote.
+
+        A failed enqueue must not leave that record ``queued`` with no job: a
+        record nothing will ever finish. It is marked failed with the reason,
+        guarded on it still being the record this request wrote, and the error
+        goes back to the caller (a 503 the client may retry unless the queue
+        raised its own refusal).
+        """
         try:
-            job = await self.jobs.repository.read(job_id)
-        except Exception:
-            return False
-        return str(job.get("status") or "") in ACTIVE_JOB_STATUSES
+            return await self.jobs.enqueue(session_id, TaskType.EXPORT_CLIPS, payload)
+        except Exception as error:
+            logger.error(
+                "Failed to enqueue the clip export for session %s; marking its record failed.",
+                session_id,
+                exc_info=True,
+                extra=log_context(session_id, "clip_export_enqueue"),
+            )
+            message = (
+                error.message if isinstance(error, AppError) else "Could not queue the clip export; try again."
+            )
+            ended_at = self.pipeline.now_iso()
+
+            def release(current: dict[str, Any]) -> Any:
+                export = current.get("clipExport")
+                if (
+                    not isinstance(export, dict)
+                    or export.get("status") != EXPORT_QUEUED
+                    or export.get("jobId")
+                    or export.get("requestedAt") != requested_at
+                ):
+                    return False
+                export.update({"status": EXPORT_FAILED, "phase": None, "endedAt": ended_at, "error": message})
+                return None
+
+            try:
+                await self.sessions.update(session_id, release)
+            except Exception:
+                logger.error(
+                    "Could not release the clip export record of session %s.",
+                    session_id,
+                    exc_info=True,
+                    extra=log_context(session_id, "clip_export_enqueue"),
+                )
+            if isinstance(error, AppError):
+                raise
+            raise AppError(message, status_code=503, retryable=True) from error
 
     async def request_clip_recrop(self, session_id: str, clip_id: str, start: float, end: float) -> dict[str, Any]:
         """Move one clip's boundaries and queue the job that re-cuts its MP4.
@@ -935,6 +996,10 @@ class ClipService:
         never exported has no cut to replace, so only its range moves and the
         answer carries ``job: None``.
         """
+        async with self._export_locks.hold(session_id):
+            return await self._plan_clip_recrop(session_id, clip_id, start, end)
+
+    async def _plan_clip_recrop(self, session_id: str, clip_id: str, start: float, end: float) -> dict[str, Any]:
         session = await self.sessions.read(session_id)
         clip = find_clip(session, clip_id)
         if str(clip.get("kind") or ClipKind.SESSION) == ClipKind.INTERMISSION:
@@ -944,13 +1009,10 @@ class ClipService:
             )
         if end <= start:
             raise AppError("`end` must be greater than `start`.", status_code=400)
-        if session.get("status") == SessionStatus.PROCESSING:
-            raise AppError("This session is already being processed.", status_code=409)
-        if await self._has_live_export(session):
-            raise AppError(
-                "A clip export is already running for this session. Wait for it to finish before re-cutting.",
-                status_code=409,
-            )
+        settled = (
+            await settled_export_identity(self.jobs, session) if self.jobs is not None else None
+        )
+        self._ensure_clip_list_free(session, settled, then="re-cutting")
 
         video_path = session_video_path(session)
         video_duration = await self.media.get_video_duration_seconds(video_path)
@@ -967,6 +1029,7 @@ class ClipService:
             # here resolved every such clip to the same file name (see
             # ``MediaPipeline.materialize_clip``) and one clip adopted another's.
             def move_draft(current: dict[str, Any]) -> Any:
+                self._ensure_clip_list_free(current, settled, then="re-cutting")
                 target = find_clip(current, clip_id)
                 target["start"] = start_seconds
                 target["end"] = end_seconds
@@ -1000,6 +1063,7 @@ class ClipService:
         requested_at = self.pipeline.now_iso()
 
         def replan(current: dict[str, Any]) -> Any:
+            self._ensure_clip_list_free(current, settled, then="re-cutting")
             target = find_clip(current, clip_id)
             target["start"] = start_seconds
             target["end"] = end_seconds
@@ -1029,15 +1093,15 @@ class ClipService:
 
         await self._commit(session, replan)
 
-        job = await self.jobs.enqueue(
+        job = await self._enqueue_export(
             session_id,
-            TaskType.EXPORT_CLIPS,
             {
                 "clipCount": 1,
                 "planId": plan_id or None,
                 "scope": str(EXPORT_SCOPE_CLIP),
                 "clipIds": [str(clip_id)],
             },
+            requested_at,
         )
         job_id = job.get("id")
 

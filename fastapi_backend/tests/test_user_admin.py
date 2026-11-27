@@ -55,6 +55,16 @@ def _accept(client, token: str, password: str = GOOD_PASSWORD, **extra):
     return client.post(f"/api/auth/invitations/{token}/accept", json={"password": password, **extra})
 
 
+def _settle_mail(client) -> None:
+    """Wait for the mail a request handed to a background task.
+
+    The mail is deliberately off the response path, so a test must say when it
+    expects it. ``client`` has to be entered (``with client:``) so its event
+    loop outlives each request and the task has somewhere to run.
+    """
+    client.portal.call(client.app.state.container.user_admin.drain)
+
+
 def _activate_marker(client, admin_token: str, email: str = MARKER_EMAIL) -> dict:
     """Invite + accept, returning the created account's public projection."""
     created = _invite(client, admin_token, email)
@@ -489,8 +499,10 @@ def test_forgot_password_answers_identically_for_known_and_unknown_accounts(tmp_
     _activate_marker(client, admin_token)
     sent_before = len(mailer.sent)
 
-    unknown = client.post("/api/auth/password-reset/request", json={"identifier": "nobody@example.edu"})
-    known = client.post("/api/auth/password-reset/request", json={"identifier": MARKER_EMAIL})
+    with client:
+        unknown = client.post("/api/auth/password-reset/request", json={"identifier": "nobody@example.edu"})
+        known = client.post("/api/auth/password-reset/request", json={"identifier": MARKER_EMAIL})
+        _settle_mail(client)
     assert unknown.status_code == known.status_code == 200
     assert unknown.json() == known.json()
     # Only the known address got a message.
@@ -499,17 +511,19 @@ def test_forgot_password_answers_identically_for_known_and_unknown_accounts(tmp_
     assert mailer.last_link().startswith("http://localhost:5173/#/reset-password/")
 
 
-def test_forgot_password_for_an_invited_account_resends_the_invitation(tmp_path) -> None:
+def test_forgot_password_for_an_invited_account_issues_nothing_and_keeps_the_invitation(tmp_path) -> None:
+    """There is no password to reset; the invitation is the way in, and a
+    stranger who knows the address must not be able to void it."""
     client = build_test_client(tmp_path)
     mailer = _mailer(client)
     admin_token = _token(client)
     _invite(client, admin_token)
     first = mailer.last_token()
+    sent = len(mailer.sent)
 
     assert client.post("/api/auth/password-reset/request", json={"identifier": MARKER_EMAIL}).status_code == 200
-    assert "accept-invite" in mailer.last_link()
-    assert mailer.last_token() != first
-    assert _accept(client, mailer.last_token()).status_code == 200
+    assert len(mailer.sent) == sent
+    assert _accept(client, first).status_code == 200
 
 
 def test_reset_link_sets_a_new_password_ends_other_sessions_and_notifies(tmp_path) -> None:
@@ -519,13 +533,16 @@ def test_reset_link_sets_a_new_password_ends_other_sessions_and_notifies(tmp_pat
     _activate_marker(client, admin_token)
     old_session = _headers(_token(client, MARKER_EMAIL, GOOD_PASSWORD))
 
-    client.post("/api/auth/password-reset/request", json={"identifier": MARKER_EMAIL})
-    token = mailer.last_token()
-    described = client.get(f"/api/auth/password-reset/{token}").json()
-    assert described["valid"] is True and described["email"] == MARKER_EMAIL
+    with client:
+        client.post("/api/auth/password-reset/request", json={"identifier": MARKER_EMAIL})
+        _settle_mail(client)
+        token = mailer.last_token()
+        described = client.get(f"/api/auth/password-reset/{token}").json()
+        assert described["valid"] is True and described["email"] == MARKER_EMAIL
 
-    confirmed = client.post(f"/api/auth/password-reset/{token}/confirm", json={"password": "brand-new-password-1"})
-    assert confirmed.status_code == 200, confirmed.text
+        confirmed = client.post(f"/api/auth/password-reset/{token}/confirm", json={"password": "brand-new-password-1"})
+        assert confirmed.status_code == 200, confirmed.text
+        _settle_mail(client)
 
     assert client.get("/api/sessions", headers=old_session).status_code == 401
     assert _login(client, MARKER_EMAIL, GOOD_PASSWORD).status_code == 401
@@ -573,12 +590,14 @@ def test_change_own_password_keeps_this_session_and_ends_the_others(tmp_path) ->
     )
     assert weak.status_code == 422
 
-    changed = client.post(
-        "/api/auth/password",
-        json={"currentPassword": GOOD_PASSWORD, "newPassword": "brand-new-password-1"},
-        headers=_headers(this_tab),
-    )
-    assert changed.status_code == 200, changed.text
+    with client:
+        changed = client.post(
+            "/api/auth/password",
+            json={"currentPassword": GOOD_PASSWORD, "newPassword": "brand-new-password-1"},
+            headers=_headers(this_tab),
+        )
+        assert changed.status_code == 200, changed.text
+        _settle_mail(client)
     fresh = changed.json()["token"]
     assert fresh != this_tab
 

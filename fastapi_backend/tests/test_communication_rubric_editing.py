@@ -15,7 +15,13 @@ from fastapi import UploadFile
 from app.core.config import Settings
 from app.domain.communication_rubric import RubricValidationError, rubric_fingerprint
 from app.services.artifact_service import ArtifactService
-from app.services.rubric_service import DRAFT_TTL_SECONDS, RubricDraftNotFound, RubricParseError, RubricService
+from app.services.rubric_service import (
+    DRAFT_TTL_SECONDS,
+    RubricDraftNotFound,
+    RubricParseError,
+    RubricService,
+    RubricVersionConflict,
+)
 from tests.fixtures.rubric_versions import InMemoryRubricVersions
 from tests.test_routes import build_test_client
 
@@ -100,6 +106,11 @@ def _active(svc: RubricService) -> dict[str, Any]:
     return json.loads(svc.settings.paths.communication_rubric_json_path.read_text())
 
 
+def _base(svc: RubricService) -> str:
+    """The id of the active version, as the editor reads it when it opens."""
+    return asyncio.run(svc.current())["version"]["id"]
+
+
 def _drafts(svc: RubricService) -> list[Path]:
     return list(svc.drafts_dir.glob("*")) if svc.drafts_dir.exists() else []
 
@@ -154,7 +165,7 @@ def test_invalid_draft_ids_are_not_found_without_touching_fs(tmp_path: Path, bad
     with pytest.raises(RubricDraftNotFound):
         asyncio.run(svc.discard_draft(bad))
     with pytest.raises(RubricDraftNotFound):
-        asyncio.run(svc.save_edited(EDIT, draft_id=bad))
+        asyncio.run(svc.save_edited(EDIT, base_version_id="x", draft_id=bad))
     assert outside.is_dir()
     assert not svc.drafts_dir.exists()
 
@@ -188,7 +199,7 @@ def test_saving_expired_draft_is_not_found(tmp_path: Path) -> None:
     draft_id = asyncio.run(svc.extract_draft(_upload(tmp_path)))["draft"]["draftId"]
     _age(svc, draft_id)
     with pytest.raises(RubricDraftNotFound):
-        asyncio.run(svc.save_edited(EDIT, draft_id=draft_id))
+        asyncio.run(svc.save_edited(EDIT, base_version_id="x", draft_id=draft_id))
 
 
 # --- save_edited ------------------------------------------------------------
@@ -198,7 +209,7 @@ def test_save_edited_with_draft_activates_pdf_and_json(tmp_path: Path) -> None:
     svc = _service(tmp_path, FakeRunner())
     _seed_active(svc)
     draft_id = asyncio.run(svc.extract_draft(_upload(tmp_path)))["draft"]["draftId"]
-    result = asyncio.run(svc.save_edited(EDIT, draft_id=draft_id, actor=ACTOR))
+    result = asyncio.run(svc.save_edited(EDIT, base_version_id=_base(svc), draft_id=draft_id, actor=ACTOR))
     stored = _active(svc)
     assert svc.settings.paths.communication_rubric_pdf_path.read_bytes() == b"%PDF-1.4 new"
     assert stored["title"] == "Edited" and len(stored["criteria"]) == 2
@@ -215,7 +226,7 @@ def test_save_edited_with_draft_activates_pdf_and_json(tmp_path: Path) -> None:
 def test_save_edited_in_place_keeps_asset_and_source(tmp_path: Path) -> None:
     svc = _service(tmp_path, FakeRunner())
     _seed_active(svc)
-    result = asyncio.run(svc.save_edited(EDIT, actor=ACTOR))
+    result = asyncio.run(svc.save_edited(EDIT, base_version_id=_base(svc), actor=ACTOR))
     stored = _active(svc)
     assert stored["rubric_asset_id"] == "old-asset" and stored["source_pdf"] == "/x/old.pdf"
     assert stored["rubric_content_sha256"] == "oldsha"
@@ -230,7 +241,7 @@ def test_validation_error_leaves_active_unchanged(tmp_path: Path) -> None:
     _seed_active(svc)
     before = _active(svc)
     with pytest.raises(RubricValidationError) as err:
-        asyncio.run(svc.save_edited({"title": "", "criteria": []}))
+        asyncio.run(svc.save_edited({"title": "", "criteria": []}, base_version_id="x"))
     assert err.value.issues
     assert _active(svc) == before
 
@@ -238,7 +249,7 @@ def test_validation_error_leaves_active_unchanged(tmp_path: Path) -> None:
 def test_in_place_save_without_active_rubric(tmp_path: Path) -> None:
     svc = _service(tmp_path, FakeRunner())
     with pytest.raises(RubricParseError, match="no active"):
-        asyncio.run(svc.save_edited(EDIT))
+        asyncio.run(svc.save_edited(EDIT, base_version_id="x"))
 
 
 def test_upload_and_reset_stamp_revision(tmp_path: Path) -> None:
@@ -252,20 +263,72 @@ def test_upload_and_reset_stamp_revision(tmp_path: Path) -> None:
         assert stored["rubric_revision"] == rubric_fingerprint(stored)
 
 
-def test_concurrent_saves_do_not_interleave(tmp_path: Path) -> None:
+def test_concurrent_saves_from_one_base_apply_exactly_one(tmp_path: Path) -> None:
     svc = _service(tmp_path, FakeRunner())
     _seed_active(svc)
+    base = _base(svc)
     a = {"title": "A", "criteria": [{"label": "a1", "indicators": ["x"]}, {"label": "a2", "indicators": ["y"]}]}
     b = {"title": "B", "criteria": [{"label": "b1", "indicators": ["x"]}, {"label": "b2", "indicators": ["y"]}, {"label": "b3"}]}
 
-    async def both() -> None:
-        await asyncio.gather(svc.save_edited(a), svc.save_edited(b))
+    async def both() -> list[Any]:
+        return await asyncio.gather(
+            svc.save_edited(a, base_version_id=base),
+            svc.save_edited(b, base_version_id=base),
+            return_exceptions=True,
+        )
 
-    asyncio.run(both())
+    results = asyncio.run(both())
+    assert sum(isinstance(r, RubricVersionConflict) for r in results) == 1
     stored = _active(svc)
     labels = [c["label"] for c in stored["criteria"]]
     assert (stored["title"], labels) in [("A", ["a1", "a2"]), ("B", ["b1", "b2", "b3"])]
     assert stored["rubric_revision"] == rubric_fingerprint(stored)
+
+
+def test_stale_base_is_refused_and_nothing_is_written(tmp_path: Path) -> None:
+    svc = _service(tmp_path, FakeRunner())
+    _seed_active(svc)
+    stale = _base(svc)
+    asyncio.run(svc.save_edited({**EDIT, "title": "Other admin"}, base_version_id=stale, actor=ACTOR))
+    before = _active(svc)
+    versions_before = len(asyncio.run(svc.list_versions()))
+    with pytest.raises(RubricVersionConflict) as conflict:
+        asyncio.run(svc.save_edited({**EDIT, "title": "Mine"}, base_version_id=stale, actor=ACTOR))
+    assert conflict.value.current["versionNumber"] == 2
+    assert _active(svc) == before and _active(svc)["title"] == "Other admin"
+    assert len(asyncio.run(svc.list_versions())) == versions_before
+
+
+def test_current_base_is_saved_and_the_version_advances(tmp_path: Path) -> None:
+    svc = _service(tmp_path, FakeRunner())
+    _seed_active(svc)
+    first = asyncio.run(svc.save_edited(EDIT, base_version_id=_base(svc), actor=ACTOR))
+    second = asyncio.run(
+        svc.save_edited({**EDIT, "title": "Again"}, base_version_id=first["version"]["id"], actor=ACTOR)
+    )
+    assert second["version"]["versionNumber"] == first["version"]["versionNumber"] + 1
+    assert second["rubric"]["title"] == "Again"
+
+
+def test_stale_base_also_guards_a_draft_save_and_keeps_the_draft(tmp_path: Path) -> None:
+    svc = _service(tmp_path, FakeRunner())
+    _seed_active(svc)
+    stale = _base(svc)
+    draft_id = asyncio.run(svc.extract_draft(_upload(tmp_path)))["draft"]["draftId"]
+    asyncio.run(svc.save_edited(EDIT, base_version_id=stale, actor=ACTOR))
+    with pytest.raises(RubricVersionConflict):
+        asyncio.run(svc.save_edited(EDIT, base_version_id=stale, draft_id=draft_id))
+    assert svc.settings.paths.communication_rubric_pdf_path.read_bytes() == b"OLD PDF"
+    assert len(_drafts(svc)) == 1
+
+
+def test_an_upload_between_open_and_save_is_a_conflict(tmp_path: Path) -> None:
+    svc = _service(tmp_path, FakeRunner())
+    _seed_active(svc)
+    stale = _base(svc)
+    asyncio.run(svc.upload(_upload(tmp_path)))
+    with pytest.raises(RubricVersionConflict):
+        asyncio.run(svc.save_edited(EDIT, base_version_id=stale))
 
 
 # --- routes -----------------------------------------------------------------
@@ -294,6 +357,10 @@ def _marker_headers(client, admin: dict[str, str]) -> dict[str, str]:
     return _login(client, "m@example.edu", "correct-horse-battery")
 
 
+def _route_base(client, headers) -> str:
+    return client.get("/api/communication-rubric", headers=headers).json()["version"]["id"]
+
+
 def _post_draft(client, headers, mode: str | None = None, name="r.pdf", ctype="application/pdf"):
     url = "/api/admin/communication-rubric/drafts" + (f"?mode={mode}" if mode else "")
     return client.post(url, files={"rubric": (name, b"%PDF-1.4 x", ctype)}, headers=headers)
@@ -303,15 +370,25 @@ def test_route_draft_save_flow(tmp_path: Path) -> None:
     runner = FakeRunner()
     client, svc = _client(tmp_path, runner)
     admin = _login(client)
+    _seed_active(svc)
+    base = _route_base(client, admin)
     r = _post_draft(client, admin)
     assert r.status_code == 201, r.text
     assert "--force-llm" in runner.calls[0]
     draft_id = r.json()["draft"]["draftId"]
-    saved = client.put("/api/admin/communication-rubric", json={"rubric": EDIT, "draftId": draft_id}, headers=admin)
+    saved = client.put(
+        "/api/admin/communication-rubric",
+        json={"rubric": EDIT, "draftId": draft_id, "baseVersionId": base},
+        headers=admin,
+    )
     assert saved.status_code == 200, saved.text
     assert saved.json()["rubric"]["extraction"]["edited_by"]["username"] == "admin"
     assert client.get("/api/communication-rubric", headers=admin).json()["rubric"]["title"] == "Edited"
-    again = client.put("/api/admin/communication-rubric", json={"rubric": EDIT, "draftId": draft_id}, headers=admin)
+    again = client.put(
+        "/api/admin/communication-rubric",
+        json={"rubric": EDIT, "draftId": draft_id, "baseVersionId": _route_base(client, admin)},
+        headers=admin,
+    )
     assert again.status_code == 404 and "expired" in again.json()["detail"]
 
 
@@ -349,18 +426,53 @@ def test_route_validation_error_lists_issues_and_keeps_active(tmp_path: Path) ->
     client, svc = _client(tmp_path)
     admin = _login(client)
     _seed_active(svc)
+    base = _route_base(client, admin)  # adopts the seeded file as version 1
     before = _active(svc)
-    r = client.put("/api/admin/communication-rubric", json={"rubric": {"title": "", "criteria": []}}, headers=admin)
+    r = client.put(
+        "/api/admin/communication-rubric",
+        json={"rubric": {"title": "", "criteria": []}, "baseVersionId": base},
+        headers=admin,
+    )
     assert r.status_code == 422
     detail = r.json()["detail"]
     assert detail["message"].startswith("The rubric has problems") and detail["issues"]
     assert _active(svc) == before
 
 
+def test_route_stale_base_is_409_naming_the_current_version(tmp_path: Path) -> None:
+    client, svc = _client(tmp_path)
+    admin = _login(client)
+    _seed_active(svc)
+    stale = _route_base(client, admin)
+    ok = client.put("/api/admin/communication-rubric", json={"rubric": EDIT, "baseVersionId": stale}, headers=admin)
+    assert ok.status_code == 200, ok.text
+    before = _active(svc)
+    r = client.put(
+        "/api/admin/communication-rubric",
+        json={"rubric": {**EDIT, "title": "Late"}, "baseVersionId": stale},
+        headers=admin,
+    )
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert "changed by someone else" in detail["message"] and detail["currentVersion"]["versionNumber"] == 2
+    assert _active(svc) == before
+
+
+def test_route_save_without_a_base_version_is_rejected(tmp_path: Path) -> None:
+    client, svc = _client(tmp_path)
+    admin = _login(client)
+    _seed_active(svc)
+    _route_base(client, admin)
+    before = _active(svc)
+    r = client.put("/api/admin/communication-rubric", json={"rubric": EDIT}, headers=admin)
+    assert r.status_code == 400  # the API's validation error
+    assert _active(svc) == before
+
+
 def test_route_in_place_save_without_rubric_is_422(tmp_path: Path) -> None:
     client, _ = _client(tmp_path)
     admin = _login(client)
-    r = client.put("/api/admin/communication-rubric", json={"rubric": EDIT}, headers=admin)
+    r = client.put("/api/admin/communication-rubric", json={"rubric": EDIT, "baseVersionId": "x"}, headers=admin)
     assert r.status_code == 422 and "no active" in r.json()["detail"]
 
 
@@ -373,7 +485,7 @@ def test_routes_forbidden_for_marker_and_unauthenticated(tmp_path: Path) -> None
             "/api/admin/communication-rubric/drafts", files={"rubric": ("r.pdf", b"%PDF", "application/pdf")}, headers=h
         ),
         lambda h: client.delete(f"/api/admin/communication-rubric/drafts/{did}", headers=h),
-        lambda h: client.put("/api/admin/communication-rubric", json={"rubric": EDIT}, headers=h),
+        lambda h: client.put("/api/admin/communication-rubric", json={"rubric": EDIT, "baseVersionId": "x"}, headers=h),
     ]
     for call in calls:
         assert call(marker).status_code == 403

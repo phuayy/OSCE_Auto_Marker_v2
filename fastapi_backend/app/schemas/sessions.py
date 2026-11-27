@@ -4,7 +4,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.domain.enums import ClipKind
+from app.domain.enums import ClipKind, ScoringBranch
 
 
 class RenameSessionRequest(BaseModel):
@@ -60,6 +60,20 @@ class RecropClipRequest(BaseModel):
 MAX_BATCH_ASSESS_CLIPS = 200
 
 
+def _clean_clip_ids(value: list[str]) -> list[str]:
+    """Trimmed, de-duplicated clip ids in request order; at least one must remain."""
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        clip_id = str(item or "").strip()
+        if clip_id and clip_id not in seen:
+            seen.add(clip_id)
+            cleaned.append(clip_id)
+    if not cleaned:
+        raise ValueError("`clipIds` must name at least one clip.")
+    return cleaned
+
+
 class AssessClipsRequest(BaseModel):
     """``POST /sessions/{id}/clips/assess`` — queue several clips as one action."""
 
@@ -70,16 +84,36 @@ class AssessClipsRequest(BaseModel):
     @field_validator("clip_ids", mode="after")
     @classmethod
     def dedupe_non_empty(cls, value: list[str]) -> list[str]:
-        cleaned: list[str] = []
-        seen: set[str] = set()
-        for item in value:
-            clip_id = str(item or "").strip()
-            if clip_id and clip_id not in seen:
-                seen.add(clip_id)
-                cleaned.append(clip_id)
-        if not cleaned:
-            raise ValueError("`clipIds` must name at least one clip.")
-        return cleaned
+        return _clean_clip_ids(value)
+
+
+class RescoreRequest(BaseModel):
+    """``POST /sessions/{id}/rescore`` — which scoring branches to redo."""
+
+    branches: list[ScoringBranch] = Field(min_length=1)
+
+    @field_validator("branches", mode="after")
+    @classmethod
+    def no_repeats(cls, value: list[ScoringBranch]) -> list[ScoringBranch]:
+        if len(set(value)) != len(value):
+            raise ValueError("`branches` must not repeat a branch.")
+        return value
+
+
+class RescoreClipsRequest(RescoreRequest):
+    """``POST /sessions/{id}/clips/rescore`` — the same, for a recording's clips.
+
+    Without ``clipIds`` every assessable clip is considered.
+    """
+
+    clip_ids: list[str] | None = Field(None, alias="clipIds", min_length=1, max_length=MAX_BATCH_ASSESS_CLIPS)
+
+    model_config = {"populate_by_name": True}
+
+    @field_validator("clip_ids", mode="after")
+    @classmethod
+    def dedupe_non_empty(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else _clean_clip_ids(value)
 
 
 class RenameClipRequest(BaseModel):
@@ -100,3 +134,42 @@ class PublicSessionResponse(BaseModel):
 
 class SessionListResponse(BaseModel):
     sessions: list[dict[str, Any]]
+
+
+class BulkSessionsRequest(BaseModel):
+    """``POST /sessions/bulk`` — one action applied to several sessions.
+
+    Only shapes are checked here. Which actions exist, how many ids one
+    request may carry and what ``options`` an action takes are the bulk
+    service's registry (``app.services.session_bulk_service``), so adding an
+    action never touches this model.
+    """
+
+    action: str
+    session_ids: list[str] = Field(alias="sessionIds")
+    options: dict[str, Any] | None = None
+
+    model_config = {"populate_by_name": True}
+
+
+class BulkSessionResult(BaseModel):
+    """One session's outcome. ``status`` is the HTTP status the single-session
+    route would have answered; ``error`` / ``code`` are present only on failure,
+    ``note`` only where success needs explaining."""
+
+    session_id: str = Field(serialization_alias="sessionId")
+    ok: bool
+    status: int
+    error: str | None = None
+    code: str | None = None
+    note: str | None = None
+
+
+class BulkSessionsSummary(BaseModel):
+    ok: int
+    failed: int
+
+
+class BulkSessionsResponse(BaseModel):
+    results: list[BulkSessionResult]
+    summary: BulkSessionsSummary

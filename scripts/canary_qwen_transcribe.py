@@ -6,10 +6,12 @@ request and tie the API's lifetime to a model's memory. Reads a 16 kHz mono
 WAV, writes a JSON document of timed segments.
 
 Canary-Qwen was trained on utterances of up to 40 seconds, so a consultation is
-decoded in overlapping windows and each window's text becomes one segment. The
-window boundaries are the segment boundaries — this model returns no internal
-timestamps — which is precise enough for the diarisation merge and the subtitle
-track that follow.
+decoded in overlapping windows. The model returns no internal timestamps, so
+the windows are stitched afterwards (``stitch_windows``): the words each
+overlap decoded twice are kept once, and the text is cut into sentences whose
+times are interpolated inside the window. Sentence-sized segments are what let
+the diarisation merge give the student and the simulated patient their own
+labels, where one 30 s window would carry a single label for both.
 
 Usage:
     python scripts/canary_qwen_transcribe.py --audio in.wav --output out.json
@@ -22,9 +24,12 @@ import argparse
 import contextlib
 import faulthandler
 import json
+import math
 import os
+import re
 import sys
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -240,6 +245,145 @@ def plan_windows(duration: float, chunk_seconds: float, overlap_seconds: float) 
             break
         start += stride
     return windows or [(0.0, float(duration))]
+
+
+@dataclass(frozen=True)
+class WindowText:
+    """One decoded window: the audio span it covered and the text it produced."""
+
+    start: float
+    end: float
+    text: str
+
+
+# A seam is only recognised from at least this many repeated words: a single
+# repeated word is as likely to be the speaker saying "no, no" as a decoded
+# overlap, and deleting a real repeat would change what the student said.
+MIN_SEAM_WORDS = 2
+# The two decodings of an overlap rarely agree word for word; this is the share
+# of the seam's words that must match (difflib ratio over the word lists).
+MIN_SEAM_SIMILARITY = 0.8
+# Upper bound on spoken words per second of overlap (fast speech is ~4-5), used
+# to bound how far into a window a seam can reach.
+SEAM_WORDS_PER_SECOND = 5.0
+SEAM_WORD_SLACK = 2
+
+_SENTENCE_END = re.compile(r"[.?!\u2026][\"')\]]*$")
+_NON_ALNUM = re.compile(r"[^\w]+")
+# A period after these does not end a sentence ("Dr. Smith", "e.g. aspirin").
+_ABBREVIATIONS = frozenset({"dr", "mr", "mrs", "ms", "prof", "st", "vs", "eg", "ie", "etc", "approx", "no"})
+
+
+def _normalise_word(word: str) -> str:
+    return _NON_ALNUM.sub("", word.casefold())
+
+
+def seam_word_count(previous_words: list[str], words: list[str], overlap_seconds: float) -> int:
+    """How many leading ``words`` repeat the end of ``previous_words``.
+
+    The overlap is decoded by both windows, so the head of the later one is the
+    tail of the earlier one, give or take a mis-heard word. Candidates are the
+    equal-length tail/head pairs up to what the overlap could hold; the most
+    similar pair wins and, on a tie, the longer one (the whole overlap rather
+    than a lucky fragment of it). 0 when nothing is similar enough.
+    """
+    if overlap_seconds <= 0:
+        return 0
+    longest = min(
+        len(previous_words),
+        len(words),
+        math.ceil(overlap_seconds * SEAM_WORDS_PER_SECOND) + SEAM_WORD_SLACK,
+    )
+    tail_norm = [_normalise_word(word) for word in previous_words[-longest:]] if longest else []
+    head_norm = [_normalise_word(word) for word in words[:longest]]
+    best_count, best_score = 0, 0.0
+    for count in range(MIN_SEAM_WORDS, longest + 1):
+        tail = tail_norm[len(tail_norm) - count :]
+        head = head_norm[:count]
+        score = 1.0 if tail == head else SequenceMatcher(None, tail, head, autojunk=False).ratio()
+        if score >= MIN_SEAM_SIMILARITY and score >= best_score:
+            best_count, best_score = count, score
+    return best_count
+
+
+def _ends_sentence(word: str) -> bool:
+    if not _SENTENCE_END.search(word):
+        return False
+    core = _normalise_word(word)
+    if core in _ABBREVIATIONS:
+        return False
+    # A lone initial ("J. Smith"); "I." can still close a sentence.
+    return not (len(core) == 1 and core != "i")
+
+
+def split_sentences(words: list[str]) -> list[list[str]]:
+    sentences: list[list[str]] = []
+    current: list[str] = []
+    for word in words:
+        current.append(word)
+        if _ends_sentence(word):
+            sentences.append(current)
+            current = []
+    if current:
+        sentences.append(current)
+    return sentences
+
+
+def _carry_sentence_end(segments: list[dict[str, Any]], last_dropped_word: str) -> None:
+    """Keep a full stop the later window heard at the seam.
+
+    The earlier window ends mid-sentence by construction, so its text stops
+    without punctuation; the later window decoded the same words and often
+    closed the sentence. Dropping them with the overlap would lose that.
+    """
+    match = _SENTENCE_END.search(last_dropped_word)
+    if match is None or not segments or _SENTENCE_END.search(segments[-1]["text"]):
+        return
+    segments[-1]["text"] += match.group(0)
+
+
+def stitch_windows(windows: list[WindowText], overlap_seconds: float) -> list[dict[str, Any]]:
+    """Turn overlapping window decodings into one run of sentence segments.
+
+    Words the previous window already produced are dropped from the head of the
+    next; what remains is cut at sentence ends, with each sentence's time
+    interpolated inside its window by the share of the window's characters it
+    holds. Segments never run backwards or outside the windows: a start is
+    pushed past the end of the previous segment, which is where the dropped
+    overlap ended.
+    """
+    segments: list[dict[str, Any]] = []
+    previous_words: list[str] = []
+    cursor = 0.0
+    for window in windows:
+        words = window.text.split()
+        if not words:
+            # Not a neighbour of the next window any more, so nothing to borrow.
+            previous_words = []
+            continue
+        dropped = seam_word_count(previous_words, words, overlap_seconds)
+        if dropped:
+            _carry_sentence_end(segments, words[dropped - 1])
+        previous_words = words
+        kept = words[dropped:]
+        if not kept:
+            continue
+        weights = [len(word) + 1 for word in words]
+        total = float(sum(weights))
+        duration = max(window.end - window.start, 0.0)
+        position = window.start + duration * (sum(weights[:dropped]) / total)
+        position = min(max(position, cursor), window.end)
+        span = window.end - position
+        kept_weight = float(sum(weights[dropped:]))
+        for sentence in split_sentences(kept):
+            share = sum(len(word) + 1 for word in sentence) / kept_weight
+            sentence_end = min(position + span * share, window.end)
+            segments.append(
+                {"start": round(position, 3), "end": round(sentence_end, 3), "text": " ".join(sentence)}
+            )
+            position = sentence_end
+        cursor = position
+    return segments
 
 
 def load_audio(path: Path) -> tuple[Any, int]:
@@ -707,7 +851,7 @@ def run(args: argparse.Namespace) -> int:
     )
 
     batch_size = max(int(getattr(args, "batch_size", 1) or 1), 1)
-    segments: list[dict[str, Any]] = []
+    decoded: list[WindowText] = []
     with tempfile.TemporaryDirectory(prefix="canary-") as temp_dir:
         for batch_start in range(0, len(windows), batch_size):
             batch = windows[batch_start : batch_start + batch_size]
@@ -719,12 +863,12 @@ def run(args: argparse.Namespace) -> int:
                 soundfile.write(str(window_path), samples[first:last], sample_rate)
                 window_paths.append(window_path)
             texts = transcribe_batch(model, window_paths, args.prompt, generation_config)
-            for (start, end), text in zip(batch, texts):
-                if text:
-                    segments.append({"start": round(start, 3), "end": round(end, 3), "text": text})
+            decoded.extend(WindowText(start, end, text) for (start, end), text in zip(batch, texts))
             # Parsed by the engine's output handler into live step progress.
             done = min(batch_start + batch_size, len(windows))
             print(f"Progress: {(done / len(windows)) * 100:.2f}%...", flush=True)
+
+    segments = stitch_windows(decoded, args.overlap_seconds)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(

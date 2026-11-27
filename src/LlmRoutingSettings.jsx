@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Brain, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -9,11 +9,9 @@ import {
   buildSettingsPayload,
   describeRouting,
   effectiveDiffers,
-  findProvider,
-  resolveFallbackTarget,
-  resolveModelId,
-  resolvePrimaryProviderId,
+  resolveRoutingState,
   routingWarnings,
+  settleTarget,
   validateRouting,
 } from '@/lib/llmProviders';
 import { apiJson } from '@/lib/apiFetch';
@@ -27,7 +25,7 @@ import { apiJson } from '@/lib/apiFetch';
 // this file. The choice applies to every future run: content scoring,
 // communication scoring and transcript preprocessing, including per-clip runs
 // and the Hatchet worker.
-export default function LlmRoutingSettings({ version = 0, onProvidersChanged, onSettingsChanged }) {
+export default function LlmRoutingSettings({ version = 0, onProvidersChanged, onSettingsChanged, isAdmin = false }) {
   const [description, setDescription] = useState(null); // null = never loaded
   const [loadError, setLoadError] = useState('');
   const [saveError, setSaveError] = useState('');
@@ -38,26 +36,34 @@ export default function LlmRoutingSettings({ version = 0, onProvidersChanged, on
   const [testing, setTesting] = useState('');
   const [testResults, setTestResults] = useState({});
 
-  async function loadProviders() {
+  // What the form held when it was last set from the server. A field still
+  // equal to this is clean; one that differs is an edit the operator has not
+  // saved. null until the first load.
+  const baselineRef = useRef(null);
+
+  // `reset` puts the form back to the server's state — the first load and this
+  // card's own save. Any other refresh (another card saved a key or a model)
+  // only updates the catalogue and merges: unsaved edits survive, and one whose
+  // provider left the catalogue is cleared (see `settleTarget`).
+  async function loadProviders({ reset = false } = {}) {
     setLoadError('');
     try {
       const body = await apiJson('/api/settings/llm-providers', {
         fallbackMessage: 'Failed to load scoring providers.',
       });
 
+      const fresh = resolveRoutingState(body);
+      const baseline = baselineRef.current;
+      baselineRef.current = fresh;
       setDescription(body);
-      const primaryProviderId = resolvePrimaryProviderId(body);
-      const primaryProvider = findProvider(body, primaryProviderId);
-      setPrimary({
-        providerId: primaryProviderId,
-        model: resolveModelId(primaryProvider, body.selected?.primary?.model),
-      });
-      const storedFallback = resolveFallbackTarget(body);
-      const fallbackProvider = findProvider(body, storedFallback.providerId);
-      setFallback({
-        providerId: storedFallback.providerId,
-        model: fallbackProvider ? resolveModelId(fallbackProvider, storedFallback.model) : '',
-      });
+      if (reset || !baseline) {
+        setPrimary(fresh.primary);
+        setFallback(fresh.fallback);
+      } else {
+        const none = { providerId: NO_FALLBACK, model: '' };
+        setPrimary((current) => settleTarget(current, baseline.primary, fresh.primary, body, { providerId: '', model: '' }));
+        setFallback((current) => settleTarget(current, baseline.fallback, fresh.fallback, body, none));
+      }
     } catch (error) {
       setLoadError(error.message || 'Failed to load scoring providers.');
     }
@@ -91,7 +97,7 @@ export default function LlmRoutingSettings({ version = 0, onProvidersChanged, on
       setSavedAt(Date.now());
       // Re-read so the "what will actually run" line reflects the server's own
       // filtering rather than what this form believes it just saved.
-      await loadProviders();
+      await loadProviders({ reset: true });
       if (onProvidersChanged) onProvidersChanged();
       if (onSettingsChanged) onSettingsChanged(body.settings);
     } catch (error) {
@@ -128,7 +134,7 @@ export default function LlmRoutingSettings({ version = 0, onProvidersChanged, on
         {loadError ? (
           <div className="flex items-center justify-between rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
             <span>{loadError}</span>
-            <Button variant="outline" size="sm" onClick={loadProviders}>
+            <Button variant="outline" size="sm" onClick={() => loadProviders()}>
               Retry
             </Button>
           </div>
@@ -148,6 +154,7 @@ export default function LlmRoutingSettings({ version = 0, onProvidersChanged, on
               error={errors.primaryModel || ''}
               testing={testing === 'primary'}
               testResult={testResults.primary}
+              canTest={isAdmin}
               onTest={() => runTest('primary')}
             />
             <TargetPicker
@@ -160,6 +167,7 @@ export default function LlmRoutingSettings({ version = 0, onProvidersChanged, on
               noneOption={{ value: NO_FALLBACK, label: 'None — fail instead of switching' }}
               testing={testing === 'fallback'}
               testResult={testResults.fallback}
+              canTest={isAdmin}
               onTest={() => runTest('fallback')}
             />
 

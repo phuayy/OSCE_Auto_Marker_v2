@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, StrictInt, field_validator, model_validator
 
 from app.domain.enums import SegmentationMethod, UploadFileKind, Workflow
 from app.pipeline import person_presets
@@ -276,6 +276,12 @@ class InitiateUploadRequest(UploadMetadataMixin):
 
 class CompleteUploadRequest(BaseModel):
     autoProcess: bool | None = None
+
+
+class OpenUploadBatchRequest(BaseModel):
+    # Strict: "5" or 5.0 is a client bug, not a count. The upper bound is a
+    # setting, so the service enforces it.
+    count: StrictInt
 
 
 class UploadInitiateResponse(BaseModel):

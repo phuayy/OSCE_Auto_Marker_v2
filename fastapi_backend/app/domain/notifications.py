@@ -22,6 +22,11 @@ class NotificationType(str, Enum):
     SPLIT_READY = "split.ready"
     CLIPS_READY = "clips.ready"
     SESSION_FAILED = "session.failed"
+    # The browser-playable copy of an upload that no browser could decode is
+    # ready (or could not be made). Never raised for an upload that plays as it
+    # is: on an exam day that would be one notification per recording.
+    MEDIA_READY = "media.ready"
+    MEDIA_FAILED = "media.failed"
     # Emitted only by the "send test event" action on a webhook subscription.
     # Never persisted as a user-facing notification.
     WEBHOOK_TEST = "webhook.test"
@@ -34,6 +39,8 @@ SUBSCRIBABLE_EVENT_TYPES: tuple[str, ...] = (
     NotificationType.SPLIT_READY.value,
     NotificationType.CLIPS_READY.value,
     NotificationType.SESSION_FAILED.value,
+    NotificationType.MEDIA_READY.value,
+    NotificationType.MEDIA_FAILED.value,
 )
 
 # Wildcard accepted in a subscription's event_types, meaning "every subscribable

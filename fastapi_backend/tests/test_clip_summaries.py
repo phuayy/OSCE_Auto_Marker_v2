@@ -168,3 +168,26 @@ def test_unplaced_clips_sort_after_placed_ones() -> None:
     placed = {"sessionId": "s-placed", "clipOrder": 0, "content": None, "communication": None}
     result = aggregate_clip_summaries(parent_id="p", clips=CLIPS, rows=[unplaced, placed], child_count=2)
     assert [row["sessionId"] for row in result["summaries"]] == ["s-placed", "s-unplaced"]
+
+
+def test_summarize_communication_scores_names_the_rubric_revision_it_was_marked_against() -> None:
+    marked = summarize_communication_scores(
+        {"criteria": [], "rubric_revision": "abc123", "rubric_version": {"id": "v-id", "number": 4}}
+    )
+    assert marked["rubricRevision"] == "abc123" and marked["rubricVersionNumber"] == 4
+    # A sheet from before revisions existed carries neither.
+    legacy = summarize_communication_scores({"criteria": []})
+    assert legacy["rubricRevision"] is None and legacy["rubricVersionNumber"] is None
+
+
+def test_summarize_communication_scores_carries_the_sheets_own_scale() -> None:
+    edited = summarize_communication_scores(
+        {"criteria": [{"label": "A"}], "scoring_scale": {"All": 4, "Most": 3, "Some": 1, "None": 0}}
+    )
+    assert edited["scoringScale"] == {"All": 4, "Most": 3, "Some": 1, "None": 0}
+    assert edited["maxScore"] == 4.0, "the max fallback uses the scale, not a literal 3"
+    default = summarize_communication_scores({"criteria": [{"label": "A"}]})
+    assert default["scoringScale"] == {"All": 3, "Most": 2, "Some": 1, "None": 0}
+    assert default["maxScore"] == 3.0
+    # An unreadable scale reads as the default, as the scorer reads it.
+    assert summarize_communication_scores({"criteria": [], "scoring_scale": {"All": "x"}})["scoringScale"]["All"] == 3

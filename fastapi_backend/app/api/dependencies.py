@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ipaddress import ip_address, ip_network
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from fastapi import Depends, HTTPException, Request, status
 
@@ -116,6 +116,40 @@ def require_expensive_operation(
     if actor is None:
         raise HTTPException(status_code=401, detail="Authentication required.")
     container.expensive_operation_rate_limiter.check(actor.user_id)
+
+
+# Sent by the browser's batch upload with every initiate of one batch; names an
+# allowance opened by POST /api/uploads/batches (app/services/upload_batches.py).
+UPLOAD_BATCH_HEADER = "X-Upload-Batch"
+
+
+def require_upload_admission(
+    request: Request, container: AppContainer = Depends(get_container)
+) -> Iterator[None]:
+    """Admission for ``POST /api/uploads/initiate``.
+
+    Without the batch header this is exactly ``require_expensive_operation``.
+    With it, the initiate spends one unit of the caller's own batch instead of
+    the hourly budget — and a batch that cannot be spent (unknown, someone
+    else's, expired, used up) is refused outright, never answered by quietly
+    charging the hourly budget. The unit is handed back if the initiate then
+    fails (the concurrent-uploads cap, a bad file), so a client waiting out
+    "uploads in flight" does not burn its allowance by retrying.
+    """
+    batch_id = request.headers.get(UPLOAD_BATCH_HEADER)
+    if batch_id is None:
+        require_expensive_operation(request, container)
+        yield
+        return
+    actor = current_actor(request)
+    if actor is None:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    container.upload_batches.consume(actor.user_id, batch_id)
+    try:
+        yield
+    except Exception:
+        container.upload_batches.release(actor.user_id, batch_id)
+        raise
 
 
 def require_role(*roles: UserRole) -> Callable[[Request], dict[str, Any]]:

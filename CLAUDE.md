@@ -39,6 +39,9 @@ OSCE-AI-FYP/
 │   ├── CommunicationRubricPanel.jsx  # #/rubric — the active communication rubric; admins upload, AI-extract, edit (lazy)
 │   ├── CommunicationRubricEditor.jsx # Review/edit a rubric draft or the active rubric: criteria, indicators, points, pass mark
 │   ├── RubricVersionHistory.jsx # Rubric page card: every rubric version, view one, restore a retired one (admins)
+│   ├── dashboard/              # Presentational pieces of the dashboard list (entry chunk)
+│   │   ├── SessionCard.jsx         # One "Saved sessions" row; leading / media / body / trailing regions
+│   │   └── SessionCardActions.jsx  # Start / Re-run / Open / in-flight button for a row
 │   ├── workspace/              # The opened-session view — its own chunk, loaded by the click that opens a session
 │   │   ├── SessionWorkspace.jsx        # Chunk root: results model, player/download handlers, the whole subtree
 │   │   ├── ManualTimelineEditor.jsx    # Manual crop timeline (separators, labels, Export clips)
@@ -46,8 +49,10 @@ OSCE-AI-FYP/
 │   │   ├── StudentClipSplitterCard.jsx # Auto-split clip list + per-clip trim
 │   │   └── primitives.jsx              # StatusRow / Metric / FeedbackBlock / ContentSheetEmptyState / IndicatorList
 │   ├── components/
+│   │   ├── upload/BatchUploadPanel.jsx # "Several recordings": multi-select/drop zone, per-row name/status/progress, Start / Cancel / Retry failed
 │   │   ├── AuthShell.jsx       # The dark pre-login frame + its fields/buttons; every pre-login screen composes it
 │   │   ├── AuthNewPasswordFields.jsx # "New password" + "Confirm" on that frame (invitation and reset screens)
+│   │   ├── upload/UploadFilePreview.jsx # Upload form: player + verdict chip + warnings for the chosen recording, PDF check; reports why Start must be blocked (rejected recording, unusable PDF)
 │   │   ├── TargetPicker.jsx    # One provider+model choice; shared by every settings card that asks for one
 │   │   ├── PageHeader.jsx      # The sticky page bar every route shares (h1, Back, actions, theme toggle) + SkipToContent
 │   │   ├── ThemeToggle.jsx     # One click between light and dark, rendered by PageHeader
@@ -56,6 +61,8 @@ OSCE-AI-FYP/
 │   │   ├── ui/dialog.jsx       # Modal: dialog semantics, Escape, focus trap + restore, backdrop
 │   │   └── ui/skeleton.jsx     # The one bone every skeleton is built from
 │   ├── lib/
+│   │   ├── uploadPreview.js    # What the upload form says about a chosen file: verdict (plays / will-convert / unknown / rejected), warnings, limits fetch (pure)
+│   │   ├── isoBmff.js          # Read-only MP4/MOV `moov` reader (duration, tracks, rotation, codecs); never throws (pure)
 │   │   ├── llmProviders.js     # Routing + marking-mode form logic (pure)
 │   │   ├── panelReport.js      # Reads a sheet's `panel` block for the results view (pure)
 │   │   ├── resultsModel.js     # Score sheets -> what the tabs and the CSV both read (pure)
@@ -64,6 +71,9 @@ OSCE-AI-FYP/
 │   │   ├── format.js           # formatRuntime / prettySpeaker / evidence-timestamp parsing (pure)
 │   │   ├── download.js         # downloadBlob + the CSV encoder behind the score sheet (pure)
 │   │   ├── anchors.js          # DOM ids the dashboard scrolls to and the workspace renders
+│   │   ├── uploadSubmission.js # submitUpload: initiate -> per-file transfer (one resume) -> complete, all dependencies injected, no module state (pure)
+│   │   ├── batchUpload.js      # Batch upload queue: planBatch / runBatch / resetFailed / summarizeBatch (pure, DI; reserves one allowance, 2 recordings at a time, waits out the in-flight 429)
+│   │   ├── useBatchUpload.js   # React binding the dashboard calls, so a running batch outlives the upload form
 │   │   ├── clipAssessments.js  # Clip -> its newest child session, run status, stale-cut flag (pure)
 │   │   ├── coalesce.js         # Single-flight wrapper: a burst of refresh triggers = one run + one catch-up (pure)
 │   │   ├── clipExportOutcome.js # What the editor does when an export/recrop job lands (pure)
@@ -107,6 +117,7 @@ OSCE-AI-FYP/
 │       ├── core/
 │       │   ├── config.py       # Settings (pydantic-settings), all env vars
 │       │   ├── process.py      # CommandRunner — async subprocess wrapper
+│       │   ├── error_mapping.py # classify_error: exception -> (status, public message); http_error wraps it
 │       │   ├── rate_limit.py   # FixedWindowRateLimiter (login + the public link endpoints)
 │       │   ├── security.py     # bcrypt, HMAC tokens (TokenSubject), action-token mint/hash
 │       │   ├── secret_box.py   # AES-256-GCM for operator-entered secrets at rest
@@ -129,7 +140,8 @@ OSCE-AI-FYP/
 │       │   ├── access.py       # may_mutate / ensure_may_mutate — creator-or-admin gate on a provenance-bearing record
 │       │   ├── settings_scope.py  # USER_SCOPED_KEYS — which settings keys are per-account vs. deployment-wide
 │       │   ├── communication_rubric.py  # The communication-rubric-v1 document: scale, max, pass mark, validation of an edited rubric
-│       │   └── clip_summaries.py  # Pure cohort-summary rows for a long recording's Analytics view
+│       │   ├── clip_summaries.py  # Pure cohort-summary rows for a long recording's Analytics view
+│       │   └── results_export.py  # Whole-exam CSV export: filter, rows, long/wide layouts (pure)
 │       ├── mail/               # Outbound email: one contract, one backend per deployment
 │       │   ├── base.py             # EmailMessage, EmailSender Protocol, EmailDeliveryError
 │       │   ├── smtp.py             # SmtpEmailSender (aiosmtplib)
@@ -159,9 +171,11 @@ OSCE-AI-FYP/
 │       │   ├── preferences_service.py   # Merges deployment defaults with an account's overrides (see Two-tier settings)
 │       │   ├── webhook_dispatcher.py    # Signed HMAC delivery to registered endpoints, retried with the job queue's backoff
 │       │   ├── session_service.py
+│       │   ├── session_bulk_service.py  # POST /api/sessions/bulk: action registry, per-item ownership + results
 │       │   ├── pipeline_service.py      # Orchestrates full assessment pipeline
 │       │   ├── clip_service.py          # Auto-crop, clip export planning/execution, clip assessment
 │       │   ├── async_upload_service.py  # Chunked multipart upload + assembly
+│       │   ├── upload_batches.py        # Per-account batch-upload allowances (one hourly-budget charge for N initiates)
 │       │   ├── job_queue_service.py     # Local asyncio + Hatchet dispatch
 │       │   ├── job_tasks.py             # Job task-type registry (handler + status ownership)
 │       │   ├── event_service.py         # In-process SSE pub/sub
@@ -375,6 +389,10 @@ Then asyncio.gather over TWO branches (PARALLEL_SCORING env var, default true):
         stepProgress: 80% shared by the markers, 100% after adjudication
 
   If PARALLEL_SCORING=false: fully sequential (audio_prof -> communication -> content).
+  When a branch fails, the branch's own exception is raised (never a wrapper):
+  the queue judges retryability from its type (`is_retryable_failure`, in
+  `core/exceptions.py`). If both fail, a non-retryable one decides and the other
+  is logged.
 
   SSE milestone: scored
 
@@ -414,6 +432,16 @@ a corpus later never changes what an already-uploaded session corrects
 against. The same term list also biases WhisperX's own decoding
 (`--hotwords`) before `transcript_correction.py`'s orthographic/phonetic
 passes run over the result.
+
+**Correction is for mis-renderings, never for swapping one real word for
+another.** A window that spells a corpus term, or a word in the bundled
+clinical lexicon ([clinical_lexicon.py](fastapi_backend/app/pipeline/clinical_lexicon.py):
+both sides of each confusable pair — hypo-/hyperglycaemia, dysphasia/dysphagia,
+prednisone/prednisolone) is protected by the one `_ProtectedTerms` check and is
+never rewritten, so a student's correct "hypoglycaemia" cannot become a corpus
+"hyperglycaemia" at 0.889 similarity. Raising the threshold is not the fix: it
+would drop legitimate corrections. Add to the lexicon real terms only, never
+misspellings.
 
 ---
 
@@ -573,6 +601,20 @@ footage it is replacing. Once the new cut is durable the old file is deleted —
 unless a child session's video still is that file, the same rule
 `_prune_stale_plan_dirs` applies to whole plan directories.
 
+**Admission to the clip list is one rule, checked and claimed in one write.**
+Export, recrop and an auto-crop (re)run all rewrite the clip list, so each
+refuses (409) while `clip_list_busy` ([domain/sessions.py](fastapi_backend/app/domain/sessions.py))
+holds: a job-driven status (`queued` counts, not only `processing`) or a live
+`clipExport`. The check runs again inside the `SessionService.update` mutator
+that writes the new record, on the freshly read document — the same shape as
+`SessionMaintenanceService._admit` — and a per-session lock covers the window
+before the job id is attached. A `clipExport` record is only a claim; the job
+row decides ([services/clip_export_admission.py](fastapi_backend/app/services/clip_export_admission.py)):
+a record whose job is terminal, missing, or (with no `jobId`) has no active
+`export_clips` job is stale and may be replaced. If the enqueue fails after
+admission the record is marked `failed` with the error (guarded on it still
+being that request's record), so a failed start never locks exports out.
+
 The export job deliberately does **not** own `session.status` (see
 `app/services/job_tasks.py`). The user sits inside the timeline editor while
 clips are cut, and flipping the session to `processing` would eject them — the
@@ -686,6 +728,56 @@ committed, because on GCS it deletes the objects by key, which after a commit
 are the session's source files. `delete_committed_object(storageRef)` removes
 one committed source (GCS: generation-scoped; `NotFound` counts as done), and
 is what retention and session deletion call. Session state: `waiting_for_upload -> assembling -> uploaded -> queued -> processing -> completed`.
+
+**An early look at the video while it uploads.** `GET /api/uploads/{id}/probe`
+(owner-gated like its siblings, not an expensive operation) runs ffprobe over
+the first `HEAD_MAX_BYTES` (16 MiB) of the video as the local backend already
+holds it: `ObjectStorage.read_received_head` returns the contiguous parts from
+part 1 and stops at the first gap (`None` before part 1; always `None` on GCS,
+whose resumable object is unreadable until finalised). The answer is
+`{status, receivedBytes, facts, warnings}` with `status` one of
+`UploadProbeStatus` (`pending`, `ready`, `inconclusive` — ffprobe could not read
+the head, typically an MP4 index at the end —, `unavailable` — GCS —, `complete`
+— committed; read `files.video.media`) and `warnings` from `UploadProbeWarning`
+(`no_video_stream`, `no_audio_stream`, `multiple_audio_streams`, `will_convert`,
+`rotated`). It is advisory: the full check at assembly is unchanged. It never
+takes the part lock, so a probe cannot slow a transfer; `UploadHeadProber`
+([services/upload_probe.py](fastapi_backend/app/services/upload_probe.py))
+serialises probes per upload and caches verdicts per (upload, file, head
+length), LRU-bounded. It reuses `MediaPipeline.probe_video_stream`, which now
+also reports `audioStreams` and `rotation`. The browser side is
+[lib/uploadProbe.js](src/lib/uploadProbe.js) (describe + poll schedule) and
+`components/upload/UploadProbeNotice.jsx` in the upload overlay and, per transferring row, in `BatchUploadPanel`.
+
+**Many recordings: limits and batches.** `GET /api/uploads/limits` (any signed-in
+user) publishes what the server will accept — `maxVideoBytes`, `maxPdfBytes`,
+`videoExtensions` (read from `VIDEO_EXTENSIONS`, never copied), `maxConcurrentUploads`,
+`maxBatchSize` — so the browser vets files before sending any. An exam day is 10-60
+recordings, and a loop of initiates dies on the hourly expensive-operation budget
+(`RATE_LIMIT_RERUN_PER_HOUR`) after ten. `POST /api/uploads/batches {count}` charges
+that budget **once** and returns `{batchId, count, remaining, expiresAt}`
+([upload_batches.py](fastapi_backend/app/services/upload_batches.py)); each initiate then
+carries `X-Upload-Batch: <batchId>` and `require_upload_admission` spends one unit of
+the caller's batch instead of the hourly budget. A batch that cannot be spent (unknown,
+another account's, expired, used up) is a 409 — never silently charged to the hourly
+budget — and the unit is handed back when the initiate fails (the
+`MAX_CONCURRENT_UPLOADS_PER_USER` 429, a rejected file), so waiting out "uploads in
+flight" costs nothing. The concurrent-uploads cap applies to batched initiates too. The
+store is in process and keyed by account id, the same single-process scope as the rate
+limiters; ids are 128-bit random and compared in constant time among the account's own
+batches; expired and spent batches are pruned on access.
+
+The browser side is `lib/batchUpload.js` (see its header; it judges files with `uploadPreview`'s `assessVideoFile` / `assessPdfFile` and the shared `fetchUploadLimits`, so there is one rule for an acceptable file): the dashboard's
+"Several recordings" toggle shows one shared case-study picker and a
+`BatchUploadPanel`; the workflow / segmentation / corpus options are the form's own
+(`buildUploadRequest`), and each recording goes through `submitUpload` with
+`initiateHeaders: {X-Upload-Batch}`, at most two at a time. A recording refused
+with "uploads in flight" waits and retries with bounded backoff; any other failure
+marks that row failed and aborts its upload (a failed upload otherwise keeps
+holding a concurrent-upload slot) without stopping the rest. Cancel stops
+*starting* recordings; a transfer already under way finishes. A lone recording
+takes no allowance (the server refuses a batch of one). Each rubric asset is
+deduplicated by content hash server-side, so one PDF per session costs one asset.
 
 **Parts are serialised per upload, so the client may send them in parallel.**
 The upload record is a JSON file rewritten on every part; without a lock, two
@@ -858,7 +950,8 @@ browser. The store therefore enforces a contract rather than trusting callers:
 
 | Write | Outcome |
 |---|---|
-| Row does not exist | Created from a validated session document — how uploads and clip children are born |
+| Row does not exist, dict carries **no stamp** | Created from a validated session document — how uploads and clip children are born |
+| Row does not exist, dict carries a stamp | `SessionDeletedError` (404, non-retryable) — it was read from a row since deleted; a pipeline step landing after Delete must not resurrect the session. `SessionService.update` does not retry it, and the job queue treats it as a permanent failure |
 | Row exists, dict carries the `_loadedUpdatedAt` it was `read` with, row unchanged since | Replaced |
 | Row exists, dict carries a stamp, row **changed** since | `StaleSessionError` (409) — the other writer's change is not overwritten |
 | Row exists, dict carries **no stamp** | `SessionWriteContractError` — a projection or hand-built dict can never replace a payload |
@@ -972,6 +1065,42 @@ before this, or one whose copy failed, is (re)queued by
 `POST /api/sessions/{id}/prepare-media` (owner-gated, shares the expensive-
 operation budget), offered as "Make a playable copy" under the player. Failures
 never fail the job: they land on `media.status = failed` / `media.error`.
+`prepare_session_media` returns a `MediaPreparationOutcome`, and
+`PipelineService.prepare_media_by_id` announces only two of them: `media.ready`
+("Video ready to watch") when this run ends `ready` with a playback copy and the
+record had not already been `ready` with one (an export may have recorded the
+copy while the job was still queued — that still announces), and `media.failed` ("Video could not be converted") when the copy
+could not be made. A recording that plays as it is, a re-run over a copy
+already `ready`, a purged source, a cancelled run and the restart/exhausted
+abandon paths raise nothing — an exam day of playable uploads must not be a
+notification each.
+
+**The open workspace watches its own video's conversion, push plus floor.** While `describeVideoMedia(session).preparing`, the dashboard reads the session once at once, again on every change-feed `sessions` event and on a `MEDIA_POLL_INTERVAL_MS` (10 s) floor, through one coalesced, files-only read (`mergeSessionFiles`; never `refreshOpenSession`, which replaces the document the timeline editor and the clip-export watch own). A read issued before `refreshOpenSession` adopted a fresher document is dropped. The workspace turns the transition into a cue with `describeMediaArrival` ([lib/mediaWatch.js](src/lib/mediaWatch.js)): a dismissible `role="status"` "The playable copy is ready…" beside the player (a failure is worded by the preparation panel), and a new player source always clears the old "cannot play" alert. The dashboard's heartbeat floor also counts a card whose projection says `hasPendingMedia`, though its status is terminal.
+
+**`prepare_media` has its own lane, progress and a retry.** Task types belong to
+a `JobLane` (`JobTaskSpec.lane`): `main` (`JOB_WORKER_CONCURRENCY` slots) or
+`media` (`MEDIA_JOB_CONCURRENCY`), one semaphore each in the local backend, so a
+transcode starts at once beside a full set of scoring jobs. Lanes are a
+local-backend concept; Hatchet bounds the machine through worker slots. The
+transcode runs ffmpeg with `-progress pipe:1` (`pipeline/ffmpeg_progress.py`
+reads `out_time_us` through `CommandRunner`'s observer callback) and writes
+`files.video.media.progress` (fraction 0..1, capped at 0.99 until published),
+`.stage` (`MediaPreparationStage`) and `.attempts` through
+`TranscodeProgressReporter`, throttled by `MEDIA_PROGRESS_WRITE_INTERVAL_SECONDS`;
+progress and stage are cleared on `ready`/`failed`. A failed first attempt is
+retried once with a conservative ffmpeg profile (regenerated timestamps, first
+audio stream, stereo, a deeper muxing queue; the 2 s keyframes and `faststart`
+stay); cancellation is never retried, and is recorded: a cancelled run writes
+`failed` / "Conversion was cancelled." (shielded) before re-raising. Because
+`prepare_media` does not own `session.status`, the session reconciliation never
+sees it, so `JobQueueService.reconcile_orphaned_media()` (startup, API role,
+after `reconcile_orphaned_sessions`) fails any `queued`/`running` media record
+with no active `prepare_media` job row ("Interrupted by a server restart."),
+and a job whose claim comes back `exhausted` ends its record the same way —
+both through `JobTaskSpec.abandon` (`abandon_media`), which only acts while the
+record is still pending. The session-list projection carries
+`media {status, stage, progress, durationSeconds, browserPlayable}`,
+`posterUrl` and `hasPlayback`, all null/false for a purged video.
 
 `export_clips` carries a **scope**: a whole split (`plan`, queued by "Export
 clips") or a re-cut of named clips (`clip`, queued by a recrop). The payload's
@@ -979,6 +1108,13 @@ clips") or a re-cut of named clips (`clip`, queued by a recrop). The payload's
 asked for even if the user has dragged another separator since; the progress
 record counts only those clips, and only a `plan` run prunes superseded plan
 directories.
+
+"Queue owns session status" also governs cancellation: `cancel()` moves a
+session that is still `queued`/`processing` *and still points at that job* to
+`cancelled` (error = the cancel reason) through `_sync_session_job`, on both
+backends — startup reconciliation never runs on a Hatchet worker, so nothing
+else would — and the session is re-runnable like any terminal one. A newer
+job's session, and a task type that does not own status, are left alone.
 
 "Queue owns session status" also governs failure: for an owned task, exhausted
 retries mark the session terminally failed. `export_clips` opts out because a
@@ -1003,6 +1139,30 @@ and the job; `SessionMaintenanceService.start_processing` / `start_auto_crop`
 job record through `update`). A handler that awaited the pipeline held the
 connection for as long as transcription took, and a restart mid-way left the
 session `processing` with no job row for recovery to find.
+
+**Re-score is the cheap redo; Re-run is the expensive one.** A rubric edit or a
+different scoring model changes what the scorers say about a transcript that is
+still good, so `POST /sessions/{id}/rescore` `{branches: ["content",
+"communication"]}` (`SessionMaintenanceService.rescore_session`, `ScoringBranch`)
+removes just those branches' sheets (content: `scores` + `scores/panel/<id>/`;
+communication: `communicationScores`; each with its checkpoint sidecar, at the
+recorded *and* the conventional path, since the pipeline adopts an unrecorded
+sheet), drops the assessment rows, pops the branches' and the persistence step
+from `pipeline.steps`, and queues `process_session` with `{rescore: true,
+branches}`. The pipeline's cached-transcript path then reuses the transcript, the
+audio, the audio-professionalism sheet (not a branch: it depends only on audio +
+transcript) and any branch not chosen, regenerating only what is missing. It is
+admitted like a re-run — eligibility (409: in flight, a long recording, no
+transcript on disk; 422: no branch) is re-checked inside the admission mutator on
+the fresh row, so racing requests admit one — except that the assessment rows go
+*before* the files, and the file deletion is verified: a sheet (or checkpoint, or panel directory) that survives it would be adopted by output discovery and quietly re-record the old marks, so the session is released as `failed` with a retryable 500 instead of being queued.
+`POST /sessions/{id}/clips/rescore` `{branches, clipIds?}` does the same for each
+clip child of a long recording as one budget charge, answering per clip in
+`results[]` (`{clipId, sessionId, ok, code, error?, statusCode?, job?}`, `code` a `RescoreCode`: the browser summarises by it, never by the message); a child in
+flight or without a transcript is reported, not failed. The browser side is
+[lib/rescoreAction.js](src/lib/rescoreAction.js) + `components/RescoreDialog.jsx`,
+offered on the session card (beside Open), in the workspace header and on the
+Clip Assessments card.
 
 **A session in flight must always have a job row that can move it.** Two
 guarantees keep that true across restarts:
@@ -1072,6 +1232,12 @@ the person detector's `stream_progress` — stays installed whatever SSE is
 doing, because `on_progress` drives the session card's gauge; those guard their
 own publish calls, which `publish` no-ops anyway.
 
+**Callbacks are observers.** `CommandRunner` catches an `Exception` raised by an
+`on_output` callback (a 409 from a session write, say), logs the first few and a
+suppressed-count summary, and carries on: the subprocess's exit status alone
+decides the result, so a finished multi-hour run is never failed by its
+progress reporting. Cancellation still propagates.
+
 ---
 
 ## Webhooks
@@ -1083,7 +1249,7 @@ a stream open, so `POST /api/admin/webhooks` registers an outbound HTTP
 endpoint instead: [webhook_dispatcher.py](fastapi_backend/app/services/webhook_dispatcher.py)
 POSTs a signed JSON body to it whenever `NotificationService` records one of
 `SUBSCRIBABLE_EVENT_TYPES` (`scoring.completed`, `split.ready`, `clips.ready`,
-`session.failed` — [domain/notifications.py](fastapi_backend/app/domain/notifications.py)).
+`session.failed`, `media.ready`, `media.failed` — [domain/notifications.py](fastapi_backend/app/domain/notifications.py)).
 The whole `/api/admin/webhooks` router is admin-only, reads included — unlike
 corpora or the rubric, nothing here is a marker's input to a run, and a
 subscription's URL and secret are only the operator's to see.
@@ -1313,6 +1479,18 @@ first"); nobody disables, deletes or demotes *themselves*; an invited account
 is re-invited, not enabled — lives in
 [user_admin_service.py](fastapi_backend/app/services/user_admin_service.py) and
 the routes only translate.
+
+**Account safety rules worth knowing.** The last-admin check and the write are
+one transaction (`UserRepository.update/delete(..., guard=)`: SQLite
+`BEGIN IMMEDIATE`, PostgreSQL row locks on the admin rows), so two admins
+cannot remove each other concurrently. The reset email and the "password
+changed" notice go out from tracked background tasks (`UserAdminService.drain()`
+on shutdown), so a slow relay neither stalls the fresh token a password change
+returns nor lets a reset request's timing reveal whether an account exists. A
+reset request for an invited account does nothing (it must not void the
+invitation). `DEFAULT_ADMIN_PASSWORD` is held to the password policy plus a
+placeholder check (`bootstrap_password_problems`) when a bootstrap actually
+happens: `ENVIRONMENT=production` refuses to start, otherwise a warning.
 
 **Mail is a backend behind a Protocol** ([app/mail/](fastapi_backend/app/mail/)):
 `smtp` (aiosmtplib; `SMTP_HOST`, `EMAIL_FROM` required — the factory refuses to
@@ -1652,6 +1830,21 @@ rules it is built on, and what `test/skeletons.test.mjs` pins:
   `test/bundleSplit.test.mjs` asserts it is reachable from the entry and would
   fail the moment it dragged a lazy module in with it.
 
+**Filtering and bulk actions on the Saved sessions list.** The list is paged, so
+a search box and a status chip (`lib/sessionFilters.js`: all, mine, in progress,
+failed, completed, long) are sent to `GET /api/sessions` on every page
+(`fetchSessionPages`' `filterParams`), never applied to the rows already loaded.
+Changing the filter resets paging and the selection and retires every request in
+flight (`createRequestSequence`), so a slow unfiltered answer cannot overwrite a
+newer filtered one; the chip (not the text) is remembered in localStorage. A
+filter that can hide a running session keeps the in-flight heartbeat on
+(`couldHideInFlight`), since the screen no longer says whether anything runs.
+Selection (`lib/sessionSelection.js`) is a Set of ids pruned on every refresh;
+`bulkAvailability` mirrors the server's owner/status rules per action, and
+`BulkActionBar` runs re-run/delete through `POST /api/sessions/bulk` (per-item
+results; successes leave the selection) and exports the selected recordings via
+`GET /api/analytics/export`, capped at `MAX_EXPORT_SESSIONS` ids per request.
+
 **Key state flows:**
 
 - `openExistingSession(id)` — open a session; bounces in-flight sessions back
@@ -1765,7 +1958,10 @@ result, and two different things are called a "session" on it: the *scored*
 session (`sessionId` — a clip child of a long recording, the upload itself
 otherwise; one per `studentId`) and the *recording* it belongs to
 (`rootSessionId` / `rootSessionName` / `rootSessionCreatedAt` — the parent of a
-clip child, the session itself otherwise). The recording of a long workflow is
+clip child, the session itself otherwise). Every timestamp on a row is UTC ISO-8601 with `Z`
+(`core.utils.utc_iso`: SQLite's naive stored values are UTC), because a browser reads an
+offset-less string as local time and the page's date window would then disagree with the
+export's UTC comparison. The recording of a long workflow is
 never scored, so it has no `assessment_sessions` row and its name exists only
 in `sessions`; `AssessmentRepository.list_result_rows` resolves it with a LEFT
 OUTER JOIN on `coalesce(parent_session_id, id)`, which is why the page can list
@@ -1782,6 +1978,38 @@ render against the freshly loaded catalog (a refresh can delete what a stored
 filter names), never in an effect — so no frame is drawn from a selection the
 controls could not show. The results table's Session column names the
 recording; its Student column the scored subject.
+
+**The marks leave the page two ways, and only one asks the server.** "Download
+results (CSV)" is built in the browser from the rows the primary filter keeps
+([lib/analyticsExport.js](src/lib/analyticsExport.js) `resultRowsToCsv`: BOM,
+raw numbers whatever the score-display preference, formula-escaped by the
+existing `csvCell`). "Download per-criterion marks" calls `GET
+/api/analytics/export` (`format=long|wide`, `resultType`, repeatable
+`rootSessionIds` ≤ 500 / `sessionIds` ≤ 2000 / `studentIds` ≤ 2000, `from`/`to` on the assessment's `created_at`, each a date (a whole UTC day) or
+an ISO-8601 instant with an offset such as `2026-11-20T00:00:00+08:00`; both
+ends are inclusive, an instant to the microsecond; any bad value is a 422, open
+to every marker) because `assessment_criteria` is not in the rows the page
+loaded; `criteriaExportParams` maps the page's filter onto those parameters,
+sending `filterWindow` (the window `applyFilter` itself uses) as exact instants,
+so a preset or a custom range in any browser time zone yields exactly the rows
+the page shows. The response is a streamed attachment (BOM once, CRLF,
+`osce-criteria-<day>.csv`): `AssessmentRepository.stream_criterion_export_rows`
+selects columns only (never `payload_json`) with `yield_per`, and
+`AssessmentService.open_results_export` counts first — over `MAX_EXPORT_ROWS`
+(250,000, `app/domain/results_export.py`) is a 422 "Narrow the filter" before a
+byte is sent, since a truncated CSV looks finished. A scored result with no
+criterion rows still appears (blank criterion cells). **Wide** columns are keyed
+by (result type, criterion number, label), never by position, in order of first
+appearance, so a reworded or renumbered rubric gets its own column; the layout
+is learnt by a first pass and written by a second (only the column map is held),
+both inside one `OrmDatabase.read_snapshot()` (SQLite WAL snapshot, PostgreSQL
+REPEATABLE READ; no write lock) so a re-score between them cannot add a row
+under a column the header lacks,
+and a `Rubric` column numbers the criteria sets (`Content 2`) when any result
+type has more than one. Cells are escaped by `app/core/csv_export.py`, the
+server twin of `csvCell`. Only content and communication results are exported
+(`ScoredResultType`). `apiBlob` in `lib/apiFetch.js` is `apiJson` for a file.
+
 
 ---
 
@@ -1810,7 +2038,7 @@ recording; its Student column the scored subject.
 | `TRANSCRIPT_HALLUCINATION_MIN_AVG_LOGPROB` | `-1.0` | Segments below this decoder confidence are flagged (only engines that report one) |
 | `TRANSCRIPT_HALLUCINATION_MAX_COMPRESSION_RATIO` | `2.4` | gzip ratio above this = verbatim repetition |
 | `TRANSCRIPT_HALLUCINATION_MAX_NGRAM_REPEATS` | `2` | Consecutive repeats of one n-gram tolerated before flagging |
-| `CANARY_CHUNK_SECONDS` | `30` | Canary decodes in overlapping windows; the model was trained on ≤40 s |
+| `CANARY_CHUNK_SECONDS` | `30` | Canary decodes in overlapping windows; the model was trained on ≤40 s. The script then stitches them (`stitch_windows`): words an overlap decoded twice are kept once, and the text is cut into sentence segments with times interpolated inside the window, so the pyannote overlap assignment labels each sentence rather than a whole window |
 | `DIARIZATION_MODEL` | `pyannote/speaker-diarization-community-1` | Standalone diarisation for engines that cannot label speakers |
 | `WHISPERX_MIN_SPEAKERS` / `WHISPERX_MAX_SPEAKERS` | `2` / `2` | Known cast of an OSCE station; 0 lets clustering estimate |
 | `WHISPERX_CHUNK_SIZE` | `20` | Seconds of VAD audio merged into one decode |
@@ -1828,14 +2056,18 @@ recording; its Student column the scored subject.
 | `PLAYBACK_COPY_ENABLED` / `PLAYBACK_COPY_MAX_HEIGHT` | `true` / `720` | A source the browser cannot decode (HEVC, 10-bit H.264, ProRes, G.711 audio) gets an H.264/AAC copy at `output/playback/<session>/`, written by the `prepare_media` job, recorded on `files.video.playback` and played by the workspace in place of the original (`app/services/media_preparation.py`); clips of such a source are stream-copied from that copy (one transcode per recording; the copy has a keyframe every 2 s), and the re-encode fallback is capped at the same height. The max height also bounds the poster frame. Processing always reads the original |
 | `RUBRIC_LLM_FALLBACK` | `true` | When deterministic rubric extraction fails on a new/changed PDF, let an LLM extract it instead (`scripts/rubric_llm_fallback.py`). `false` = fail as before. See **Rubric extraction LLM fallback** |
 | `PARALLEL_SCORING` | `true` | Run content branch parallel to communication branch |
+| `MAX_UPLOAD_BATCH_SIZE` / `UPLOAD_BATCH_TTL_SECONDS` / `MAX_OPEN_UPLOAD_BATCHES_PER_USER` | `50` / `21600` / `2` | Batch upload allowances: most recordings one `POST /api/uploads/batches` may reserve, how long it stays spendable, and unspent batches an account may hold at once. See **Upload Flow** |
 | `GPU_SLOTS` | `1` | Jobs that may hold the accelerator at once (transcription, person detection). 0 = unbounded. Per process |
 | `JOB_QUEUE_BACKEND` | `local` | `local` or `hatchet` |
+| `MEDIA_JOB_CONCURRENCY` | `1` | Local backend: slots of the separate lane `prepare_media` runs in, so a transcode never waits behind scoring runs or takes their `JOB_WORKER_CONCURRENCY` slots. Below 1 reads as 1 |
+| `MEDIA_PROGRESS_WRITE_INTERVAL_SECONDS` | `5` | At most one `media.progress` session write per this many seconds during a transcode (and only when it moved by 0.01), since each write wakes the change feed |
 | `JOB_HEARTBEAT_INTERVAL_SECONDS` | `60` | How often a genuinely-running job refreshes `jobs.locked_at`, proving the worker executing it is still alive |
 | `JOB_STALE_RUNNING_TIMEOUT_SECONDS` | `900` | How long `running` with no heartbeat before the periodic reaper treats a job as orphaned and requeues it |
 | `JOB_REAPER_INTERVAL_SECONDS` | `300` | How often the reaper scans for stale-running jobs; `0` disables it (startup-only recovery, as before) |
 | `SESSION_VIDEO_RETENTION_DAYS` | `365` | Delete a top-level session's stored video (not its transcript/scores) this many days after it was created. `0` disables the policy outright |
 | `SESSION_RETENTION_SWEEP_INTERVAL_SECONDS` | `21600` (6h) | How often the video-retention sweep runs after the one it always does at startup; `0` disables the periodic timer (startup-only sweep, as before) |
-| `IDLE_SHUTDOWN_MINUTES` | `0` | On-demand hosting ([deploy/gcp/README.md](deploy/gcp/README.md)): after this many minutes with no signed-in user acting and no job queued/running or upload assembling, the API runs `IDLE_SHUTDOWN_COMMAND`. Work in flight restarts the window. `0` = always on. API role only (`services/idle_shutdown_service.py`) |
+| `IDLE_SHUTDOWN_MINUTES` | `0` | On-demand hosting ([deploy/gcp/README.md](deploy/gcp/README.md)): after this many minutes with no signed-in user acting and no job queued/running, upload assembling or upload still inside its transfer window (a direct-to-GCS transfer never touches the API), the API runs `IDLE_SHUTDOWN_COMMAND`. Work in flight restarts the window. `0` = always on. API role only (`services/idle_shutdown_service.py`) |
+| `UPLOAD_EXPIRY_SWEEP_INTERVAL_SECONDS` | `3600` (1h) | How often the API reclaims uploads abandoned mid-transfer (`AsyncUploadService.recover_expired_uploads`) after the one it always runs at startup; `0` disables the timer. API role only; shares `core.tasks.periodic_loop` with the video-retention sweep |
 | `IDLE_SHUTDOWN_CHECK_INTERVAL_SECONDS` / `IDLE_SHUTDOWN_COMMAND` | `60` / `sudo -n /usr/sbin/shutdown -h now` | How often the idle check runs, and what it runs (shlex-split, no shell; a failure is retried next tick) |
 | `BOOT_STAGE_REPORTING` | `false` | Write `"<stage> <unix seconds>"` to the GCE guest attribute `osce/boot` at each startup step (`app-starting`, `database`, `loading`, `ready`, and `stopping` before an idle shutdown), so the Cloud Run start gate can show the boot while HTTP is not up. Best effort; GCE only. The VM's install script and boot watchdog also write `failed <unix seconds>` there when the app will not come up; the gate shows it as `boot-failed` |
 | `STORAGE_BACKEND` | `local` | `local` (parts through the API) or `gcs` (direct-to-bucket resumable uploads) |
@@ -1859,6 +2091,7 @@ recording; its Student column the scored subject.
 | `<PROVIDER>_BASE_URL` | vendor default | Endpoint override per provider (proxy, gateway, regional endpoint) |
 | `LLM_MAX_ATTEMPTS_PER_MODE` | `3` | Attempts per request shape before the router degrades the shape |
 | `LLM_INITIAL_BACKOFF_SECONDS` / `LLM_MAX_BACKOFF_SECONDS` / `LLM_BACKOFF_JITTER_RATIO` | `1.5` / `8` / `0.25` | Retry backoff. Jitter keeps the parallel content and communication branches from retrying in lockstep |
+| `LLM_TOTAL_TIMEOUT_SECONDS` | derived | Deadline for one whole router call (every target, mode, retry). Unset = `max(900, 2 x per-request timeout)` (`ChatRequest.deadline_seconds`), so the communication scorer's longer `timeout_seconds` is never cut by it and a fallback keeps time; set explicitly it is respected, and a value below the per-request timeout is a startup warning |
 | `LLM_CIRCUIT_FAILURE_THRESHOLD` / `LLM_CIRCUIT_COOLDOWN_SECONDS` | `6` / `60` | Consecutive failures before a provider is skipped, and for how long |
 | `LLM_TEMPERATURE` / `LLM_TOP_P` / `LLM_MAX_TOKENS` / `LLM_REQUEST_TIMEOUT_SECONDS` | `0.2` / `0.9` / `24576` / `360` | Sampling, shared by all providers — except that `max_tokens` is the *requested* budget: each target clamps it to its model's declared `ModelSpec.max_output_tokens` (`LLMProvider.output_budget`). The `NVIDIA_*` spellings still work |
 | `WHISPERX_HF_TOKEN` | — | HuggingFace token for pyannote diarisation |
@@ -2034,6 +2267,8 @@ All three scorers are independent Python subprocesses. Read from disk, write JSO
 | `audio_professionalism_extractor.py` | `--audio` MP3 + `--transcript` normalised JSON | `audio_professionalism/<id>.json` |
 | `nvidia_osce_communication.py` | `--transcript` normalised JSON + parsed rubric JSON + optional `--audio-professionalism` JSON | `communication_scores/<id>.json` |
 
+The audio-professionalism script has no role mapping to read (the transcript carries diarisation labels only), so it picks "the student" as the speaker who asks the most questions (at least two, strictly more than anyone else), else the speaker who opened the station, at a confidence below its low-confidence warning line. Talk time is not used: in a history-taking station the actor-patient often talks most. `student_speaker` in its output records `selection`, a plain-words `reason` and per-speaker evidence (`speakers[]`).
+
 Communication scorer takes audio professionalism as optional input — must run after it. Content scorer is independent, runs parallel to the whole communication branch.
 
 **Every input is handed over; none is guessed.** `ScoringPipeline` passes the
@@ -2049,14 +2284,14 @@ was missing (another session's rubric, silently). Those fallbacks are gone:
 optional input that is named but missing is still an error, exit code 2 on
 usage errors, which the job queue does not retry.
 
-Content scorer has checkpoint/repair: saves after each LLM call, up to 2 repair passes on bad JSON output, resumes from checkpoint on crash.
+Content scorer has checkpoint/repair: saves after each LLM call, up to 2 repair passes on bad JSON output, resumes from checkpoint on crash. A checkpoint resumes *interrupted* work only: a run that exhausts its repairs clears it before failing (`scorer_checkpoint.clear_checkpoint`), and a resume that finds one already at the repair limit with issues outstanding starts fresh, so the queue's retry never replays the failure without calling the model.
 
 **The rubric is extracted from the case-study PDF once, not once per marker.**
 Pulling the clinical context, the rubric section and the criteria out of a PDF
 is a pure function of that file's bytes, so `scripts/case_study_rubric.py`
 caches the result under `storage/output/case_study_rubrics/`, keyed by a SHA-256
 of the file plus an `EXTRACTOR_VERSION` covering the parsing itself. A
-deterministic entry cannot go stale: different bytes are a different key. An
+deterministic entry cannot go stale: different bytes are a different key (a parser change bumps `EXTRACTOR_VERSION`, so older entries are never looked up). Criterion numbering counts only as list structure: a number-and-dot must open a line *and* be the next number in sequence from 1, so "aged 65. " in a criterion's prose, or a figure a line wrap left at a line start, never splits it. An
 LLM-produced entry has more inputs than the bytes, so it is judged on read
 (see **Rubric extraction LLM fallback**). A panel of N markers used to pay
 N+1 identical pypdf passes (the adjudicator repeats the extraction so its
@@ -2381,9 +2616,13 @@ Five properties the design rests on:
 * **Definitions travel with the routing.** `subprocess_env()` serialises them
   into `OSCE_LLM_CUSTOM_PROVIDERS` alongside `OSCE_LLM_ROUTING`, from the same
   resolved snapshot, so a scorer told to call `campus-gateway` can find out what
-  that means and cannot disagree with the settings screen about it. The blob is
-  credential-free and safe to log. Unset, a scorer sees exactly the six shipped
-  providers, as before.
+  that means and cannot disagree with the settings screen about it. Only the
+  providers the routing *names* travel (`ProviderCatalog.to_env(provider_ids)`),
+  and the blob is credential-free and safe to log: the extra headers/query/body
+  are stripped from it and sent in a variable of their own per routed provider
+  (`OSCE_LLM_EXTRAS_<ID>`, `extras_env_name` — same slug and so same collision
+  rule as the key variable), rehydrated by `catalog_from_env`. Unset, a scorer
+  sees exactly the six shipped providers, as before.
 * **A connection can carry a second credential, and only an admin reads it
   back.** `extraHeaders` / `extraQuery` / `extraBody` are the escape hatch a
   corporate gateway's own auth token, a repeated Azure key, or a signed
@@ -2491,7 +2730,10 @@ owns it for both rubric kinds.
   deployment-wide, so its parser gets the deployment-default routing. With no
   usable model, or the switch off, behaviour is exactly as before the
   fallback existed (a communication parse that only failed the quality gate
-  is then kept, with a warning on stderr).
+  is then kept, with a warning on stderr). The fallback only augments: when the
+  parser produced a rubric that merely failed the gate and the LLM call then
+  *fails*, the deterministic rubric is kept with the failure recorded in
+  `extraction.warnings`; the upload errors only when there is nothing usable.
 * **Prompt-injection guard.** The PDF text is delimited as untrusted data in
   the user message, and the system prompt tells the model to ignore any
   instruction inside it; the output is schema-validated, never executed.
@@ -2538,7 +2780,7 @@ the admin-only `/api/admin/communication-rubric` router
 | Route | What it does |
 |---|---|
 | `POST /drafts?mode=llm\|auto` (multipart `rubric`) | Parses the PDF into a **draft** under `auth/communication_rubric_drafts/<32-hex id>/` and answers 201 `{draft, rubric}`. `llm` (the screen's **Upload for AI extraction**) runs the parser with `--force-llm`: the deterministic parser is skipped and the model reads the PDF; a refusal (`RUBRIC_LLM_FALLBACK=false`, no usable model, an ungrounded reply) is a 422 with the reason. The active rubric is never touched. Drafts expire after 24 h and are swept on the next extraction |
-| `PUT ""` `{rubric, draftId?}` | Saves an edited rubric. With `draftId` it also activates the draft's PDF (registered as a rubric asset, like an upload); without, it edits the active rubric in place and keeps its PDF/asset. 422 `{message, issues[]}` lists every problem at once; 404 for an expired/discarded draft |
+| `PUT ""` `{rubric, baseVersionId, draftId?}` | Saves an edited rubric. `baseVersionId` (required; the editor sends the active version it opened on) is compared with the active version under the service lock, so a save made after another administrator's save, upload, reset or restore is a 409 `{message, currentVersion}` and writes nothing; the editor offers "Reload the latest rubric". A request without it is a validation error. With `draftId` it also activates the draft's PDF (registered as a rubric asset, like an upload); without, it edits the active rubric in place and keeps its PDF/asset. 422 `{message, issues[]}` lists every problem at once; 404 for an expired/discarded draft |
 | `DELETE /drafts/{id}` | Discards a draft (204) |
 
 **One module owns the document.**
@@ -2568,6 +2810,14 @@ assessment in every process with no restart; a session already scored keeps
 its sheet until it is re-run. Every write of that file stamps
 `rubric_revision` (`rubric_fingerprint`: SHA-256 over criteria, scale and pass
 mark), which changes on an in-place edit even though the PDF asset does not.
+
+**Criterion ids are positions, not identities.** Every save renumbers them, so
+the cohort chart (`lib/cohortCriteria.js`) never merges criteria across rubric
+revisions: `summarize_communication_scores` carries `rubricRevision` /
+`rubricVersionNumber`, and rows merge by id only inside one revision (one block
+per revision when a recording's clips span an edit; sheets with no revision form
+one earlier block). `assessment_criteria.criterion_key` is stored per result and
+never aggregated across results.
 
 **Provenance.** A saved rubric's `extraction` becomes
 `{method: "edited", edited_by, edited_at, source}` where `source` is how the
@@ -2672,12 +2922,14 @@ marker's input to a run.
 
 ### Session storage lifecycle contracts
 
+- A re-run keeps what is derived from the source video: `SessionArtifacts.owned_paths(keep_source=True)` skips the upload records and `output/playback/<id>/` (playback copy + poster, which `files.video` still points at); delete removes them.
 - `SessionArtifacts` owns convention-based cleanup: new per-session output types belong under `output/<category>/<session-id>/`. Shared case-study rubric caches are excluded; clips and source videos retain their separate ownership rules. Flat legacy outputs and scorer checkpoint sidecars remain supported.
 - Upload metadata lives in `UploadRecord` (`uploads`, migration `0012`, following user preferences in `0011`). API startup imports valid legacy JSON after session migration and archives it as `.json.migrated`; malformed and orphaned records are retained with warnings for operator review.
 - `OrmDatabase.unit_of_work()` joins repository operations in the current task into one transaction. Participating repositories must use `transaction()` and flush rather than calling `commit()` themselves. Child tasks do not inherit the transaction. Upload initiation, assembly transitions, final upload/session/job/video persistence, and expiry state changes use this boundary; heavy file assembly stays outside it.
 - Lock order is database transaction before the queue's enqueue lock. Upload mutations lock the session before its upload row on PostgreSQL; SQLite uses `BEGIN IMMEDIATE`. Dispatch assembly/processing only after commit.
 - `GET /api/sessions` defaults to 200 rows, with bounded `limit` and opaque `cursor`, ordered by `(created_at DESC, id DESC)`. `rootsOnly` serves dashboard pages; `parentSessionId` independently pages the open recording's child assessments. Internal recovery still uses the unbounded service projection. Page cache keys include filters and cursor and retain session change-feed invalidation.
+- **List filters and bulk actions.** `GET /api/sessions` also takes `q` (case-insensitive name substring, trimmed, at most 100 chars, LIKE wildcards escaped; a scan, folding only ASCII case on SQLite), repeatable `status` (any of), `createdBy` (`me` or a user id, on the indexed `created_by`) and `workflow` (`standard` also matches a session with none recorded). They are parsed once into `SessionListFilter` ([domain/session_filters.py](fastapi_backend/app/domain/session_filters.py)); bad values are 422, and the page-cache key includes the whole normalised filter. `POST /api/sessions/bulk` `{action, sessionIds (1-100, unique), options?}` answers 200 `{results: [{sessionId, ok, status, error?, code?}], summary}`: items run sequentially in request order, each behind `ensure_may_mutate` (the route has no `{session_id}`, so `test_session_routes_are_guarded.py` allowlists it) and the same service call as the single route; one failure never stops the rest (a clip ticked beside its recording that the recording's delete already removed reports `ok` with `note: "Deleted with its recording."`). Per-item status/message come from `core/error_mapping.classify_error`, which `api/errors.http_error` also wraps. Actions are the `BULK_SESSION_ACTIONS` registry in [session_bulk_service.py](fastapi_backend/app/services/session_bulk_service.py) (`BulkAction(handler, charges_budget, options_model)`); `rerun` spends the expensive-operation budget once per request, after validation, `delete` none. `rescore` (options `{branches}`, the single route's body; `RescoreRequest`) also spends it once and reports a refused item with R's `RescoreCode` in `code` (`in_flight`, `no_transcript`, `not_rescorable`) instead of the generic status code; the bar's **Re-score** opens `RescoreDialog` in bulk mode. A bulk **Export** is the Analytics export request (`requestCriteriaExport`), and `test/dashboardServerContract.test.mjs` pins the list-filter, bulk-answer and export parameters against the server's limits.
 - Targeted verification: `cd fastapi_backend && uv run --no-sync pytest tests/test_upload_records.py tests/test_session_pagination.py tests/test_session_maintenance.py tests/test_routes.py tests/test_alembic_migrations.py`; frontend pagination: `node --test test/sessionPages.test.mjs`.
 - Resource admission: `require_expensive_operation` shares one per-account hourly budget across upload initiation and session/clip/job compute entry points. Upload service admission locks the account and counts persisted active uploads in the creation transaction; retryable failed uploads retain a slot until abort/expiry, and assembly consumes capacity even after transfer expiry. Migration `0013` indexes the admission query. Verify with `uv run --no-sync pytest fastapi_backend/tests/test_resource_admission.py fastapi_backend/tests/test_auth_security.py` and `node --test test/streamTicket.test.mjs`.
 - Bearer credentials belong only in Authorization headers. Media/SSE use short-lived tickets; failed minting must never add a bearer query parameter. Query strings can still contain ticket credentials, so logs are not credential-free.
-- **Video retention**: `SessionMaintenanceService.run_video_retention_sweep()` deletes a top-level session's stored video (`files.video.absolutePath`) once it is older than `SESSION_VIDEO_RETENTION_DAYS` (default 365; `0` disables), leaving transcript/scores/feedback untouched — see `session_video_retention_days` in `core/config.py` and **Backup and data retention** in [docs/deployment-vm.md](docs/deployment-vm.md). Runs once at API startup and then on a timer (`SESSION_RETENTION_SWEEP_INTERVAL_SECONDS`, default 6h; `AppContainer.startup`, API role only). Candidates come from `SessionRepository.list_video_retention_candidates` (parent-less sessions only — a clip child's `files.video` is its parent's exported clip, never its own to delete); `SessionMaintenanceService.purge_expired_video` deletes the committed object through `storage.delete_committed_object` (the bucket object on GCS) and the local copy, and records `purgedAt` only after that succeeded — a failed delete is retried by the next sweep — idempotent via the `files.video.purgedAt` field the browser reads to explain an empty player (`SessionWorkspace.jsx`). Verify with `uv run --no-sync pytest fastapi_backend/tests/test_session_maintenance.py -k retention`.
+- **Video retention**: `SessionMaintenanceService.run_video_retention_sweep()` deletes a top-level session's stored video (`files.video.absolutePath`) once it is older than `SESSION_VIDEO_RETENTION_DAYS` (default 365; `0` disables), leaving transcript/scores/feedback untouched — see `session_video_retention_days` in `core/config.py` and **Backup and data retention** in [docs/deployment-vm.md](docs/deployment-vm.md). Runs once at API startup and then on a timer (`SESSION_RETENTION_SWEEP_INTERVAL_SECONDS`, default 6h; `AppContainer.startup`, API role only). Candidates come from `SessionRepository.list_video_retention_candidates` (parent-less sessions only — a clip child's `files.video` is its parent's exported clip, never its own to delete); `SessionMaintenanceService.purge_expired_video` deletes the committed object through `storage.delete_committed_object` (the bucket object on GCS) and the local copy, and records `purgedAt` only after that succeeded — a failed delete is retried by the next sweep — never for a session in `SOURCE_IN_USE_STATUSES` (in flight, `waiting_for_upload`, `uploading`) — excluded from the candidate query and re-checked on the freshly read row in `purge_expired_video`; the boot sweep runs after job recovery and orphan reconciliation — idempotent via the `files.video.purgedAt` field the browser reads to explain an empty player (`SessionWorkspace.jsx`). Verify with `uv run --no-sync pytest fastapi_backend/tests/test_session_maintenance.py -k retention`.

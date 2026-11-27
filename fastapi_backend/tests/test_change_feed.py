@@ -147,6 +147,9 @@ def test_index_projection_matches_legacy_full_read_shape(tmp_path) -> None:
                 "clipExportTotal",
                 "error",
                 "createdBy",
+                "media",
+                "posterUrl",
+                "hasPlayback",
             }
         finally:
             await changes.stop()
@@ -203,6 +206,93 @@ def test_service_without_cache_still_lists_sessions(tmp_path) -> None:
             rows = await service.list_sessions()
             assert [row["id"] for row in rows] == ["s1"]
         finally:
+            await database.shutdown()
+
+    asyncio.run(_run())
+
+
+async def _drain(queue: asyncio.Queue, *, quiet_for: float) -> list[dict]:
+    events: list[dict] = []
+    while True:
+        try:
+            events.append(await asyncio.wait_for(queue.get(), timeout=quiet_for))
+        except asyncio.TimeoutError:
+            return events
+
+
+def test_watch_loop_publishes_even_when_requests_refresh_the_counters(tmp_path) -> None:
+    """Every authenticated request calls token(); that must not swallow a change
+    before the watcher's next tick diffs it."""
+
+    async def _run() -> None:
+        database = OrmDatabase(tmp_path / "app.sqlite3")
+        await database.initialize()
+        await install_change_tracking(database.engine)
+        changes = ChangeFeedService(database, poll_interval_seconds=0.3)
+        await changes.start(push_enabled=False)
+        repository = SessionRepository(database)
+        queue = changes.subscribe()
+        try:
+            await repository.write(_session("s1", "Alpha"))
+            token = await changes.token()  # a request lands between write and tick
+            assert dict(token)["sessions"] >= 1
+            events = await _drain(queue, quiet_for=1.0)
+            assert [e for e in events if e["table"] == "sessions"] == [
+                {"type": "change", "table": "sessions", "version": dict(token)["sessions"]}
+            ]
+        finally:
+            changes.unsubscribe(queue)
+            await changes.stop()
+            await database.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_watch_loop_publishes_a_table_changed_twice_once_with_the_latest_version(tmp_path) -> None:
+    async def _run() -> None:
+        database = OrmDatabase(tmp_path / "app.sqlite3")
+        await database.initialize()
+        await install_change_tracking(database.engine)
+        changes = ChangeFeedService(database, poll_interval_seconds=0.4)
+        await changes.start(push_enabled=False)
+        repository = SessionRepository(database)
+        queue = changes.subscribe()
+        try:
+            await repository.write(_session("s1", "Alpha"))
+            await changes.token()
+            await repository.write(_session("s2", "Beta"))
+            latest = dict(await changes.token())["sessions"]
+            events = [e for e in await _drain(queue, quiet_for=1.0) if e["table"] == "sessions"]
+            assert len(events) == 1
+            assert events[0]["version"] == latest
+        finally:
+            changes.unsubscribe(queue)
+            await changes.stop()
+            await database.shutdown()
+
+    asyncio.run(_run())
+
+
+def test_restarted_watcher_does_not_replay_old_changes(tmp_path) -> None:
+    async def _run() -> None:
+        database = OrmDatabase(tmp_path / "app.sqlite3")
+        await database.initialize()
+        await install_change_tracking(database.engine)
+        changes = ChangeFeedService(database, poll_interval_seconds=0.05)
+        await changes.start(push_enabled=False)
+        repository = SessionRepository(database)
+        try:
+            await repository.write(_session("s1", "Alpha"))
+            await asyncio.sleep(0.3)
+            await changes.stop()
+            await changes.start(push_enabled=False)
+            queue = changes.subscribe()
+            assert await _drain(queue, quiet_for=0.4) == []
+            await repository.write(_session("s2", "Beta"))
+            event = await asyncio.wait_for(queue.get(), timeout=5.0)
+            assert event["table"] == "sessions"
+        finally:
+            await changes.stop()
             await database.shutdown()
 
     asyncio.run(_run())

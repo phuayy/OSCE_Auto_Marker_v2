@@ -239,6 +239,23 @@ def test_backup_is_taken_with_the_old_app_stopped_and_before_the_swap(sandbox: S
     assert stop < backup < restart
 
 
+def test_an_update_tells_the_gate_before_it_stops_the_app_a_first_install_does_not(sandbox: Sandbox) -> None:
+    # The old app answers its probe until it is stopped; "updating" keeps the gate from calling that ready.
+    sandbox.installed("old")
+    sandbox.new_tree("new", good=True)
+    assert sandbox.run(UPDATE).returncode == 0
+    assert any(line.startswith("osce/boot updating ") for line in sandbox.guest())
+    script = SCRIPT.read_text()
+    body = script[script.index("replace_app_code() {"):]
+    assert body.index("report_boot updating") < body.index("systemctl stop osce-marker")
+
+
+def test_first_install_does_not_report_updating(sandbox: Sandbox) -> None:
+    sandbox.new_tree("new", good=True)
+    assert sandbox.run(FIRST_INSTALL).returncode == 0
+    assert not any(line.startswith("osce/boot updating") for line in sandbox.guest())
+
+
 def test_backup_failure_aborts_the_update_and_the_old_app_keeps_serving(sandbox: Sandbox) -> None:
     sandbox.installed("old")
     sandbox.new_tree("new", good=True, migrates=True)

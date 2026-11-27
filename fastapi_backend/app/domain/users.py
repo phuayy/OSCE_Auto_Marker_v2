@@ -138,3 +138,23 @@ def password_policy_errors(password: str, *, forbidden: tuple[str, ...] = ()) ->
             errors.append("The password must not be your username or email address.")
             break
     return errors
+
+
+# Values an example file or a README ships and an operator forgets to replace.
+# Matched as substrings, case-insensitively: "ChangeMe-2024" is as good as
+# "change-me" to anyone who has read the example.
+_PLACEHOLDER_MARKERS = ("<generate", "change-me", "changeme", "password")
+
+
+def bootstrap_password_problems(password: str, *, username: str) -> list[str]:
+    """Why ``DEFAULT_ADMIN_PASSWORD`` is not fit to guard the first account.
+
+    The same policy every other password meets, plus the placeholders the
+    shipped examples carry. The bootstrap value is the one password nobody
+    typed into a form that enforces the policy, so it is judged here instead.
+    """
+    problems = password_policy_errors(password, forbidden=(username,))
+    lowered = str(password or "").lower()
+    if any(marker in lowered for marker in _PLACEHOLDER_MARKERS):
+        problems.append("It looks like a placeholder from an example file.")
+    return problems

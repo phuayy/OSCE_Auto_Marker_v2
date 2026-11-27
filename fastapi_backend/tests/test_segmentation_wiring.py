@@ -484,7 +484,7 @@ def test_public_session_projects_clip_kinds() -> None:
             ]
         },
     }
-    clips = SessionService.public_session(session)["outputs"]["videoClips"]
+    clips = SessionService(None, None).public_session(session)["outputs"]["videoClips"]
     assert [(clip["kind"], clip["personCount"]) for clip in clips] == [
         ("session", 2),
         ("intermission", 1),

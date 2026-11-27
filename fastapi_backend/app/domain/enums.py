@@ -78,6 +78,38 @@ class MediaPreparationStatus(StrEnum):
     FAILED = "failed"
 
 
+class UploadProbeStatus(StrEnum):
+    """What ``GET /api/uploads/{id}/probe`` can say about a video that is still
+    arriving: nothing yet, a verdict, no verdict (the head alone is not enough,
+    or this backend cannot read one), or that the upload has since committed."""
+
+    PENDING = "pending"
+    READY = "ready"
+    INCONCLUSIVE = "inconclusive"
+    UNAVAILABLE = "unavailable"
+    COMPLETE = "complete"
+
+
+class UploadProbeWarning(StrEnum):
+    """Findings the early probe raises about a video's head, as codes the
+    browser words itself."""
+
+    NO_VIDEO_STREAM = "no_video_stream"
+    NO_AUDIO_STREAM = "no_audio_stream"
+    MULTIPLE_AUDIO_STREAMS = "multiple_audio_streams"
+    WILL_CONVERT = "will_convert"
+    ROTATED = "rotated"
+
+
+class MediaPreparationStage(StrEnum):
+    """What a running ``prepare_media`` job is doing, as ``media.stage`` says it
+    (null when the job is not running)."""
+
+    PROBING = "probing"
+    POSTER = "poster"
+    CONVERTING = "converting"
+
+
 class AssessmentResultStatus(StrEnum):
     """Status of one scorer's row in ``assessment_results`` — a vocabulary of
     its own, not ``SessionStatus``/``StepStatus``: by the time a scorer's
@@ -92,6 +124,19 @@ class TaskType(StrEnum):
     AUTO_CROP = "auto_crop"
     EXPORT_CLIPS = "export_clips"
     PREPARE_MEDIA = "prepare_media"
+
+
+class JobLane(StrEnum):
+    """Which pool of local worker slots a task type runs in.
+
+    ``main`` is the pipeline work (``JOB_WORKER_CONCURRENCY`` slots); ``media``
+    is the side task that prepares a video for the browser, which must never
+    wait behind — or take a slot from — a scoring run. A local-backend concept:
+    Hatchet bounds its workers through their own slots.
+    """
+
+    MAIN = "main"
+    MEDIA = "media"
 
 
 class Workflow(StrEnum):
@@ -112,6 +157,33 @@ class ClipKind(StrEnum):
 class UploadFileKind(StrEnum):
     VIDEO = "video"
     CASE_STUDY = "caseStudy"
+
+
+class ScoringBranch(StrEnum):
+    """A scoring branch a re-score may redo (``POST /sessions/{id}/rescore``).
+
+    Audio professionalism is deliberately not a branch: it is a pure function
+    of the audio and the transcript, neither of which a re-score changes (a
+    rubric edit or a different scoring model only affects the two LLM-marked
+    branches), so a re-score always keeps it.
+    """
+
+    CONTENT = "content"
+    COMMUNICATION = "communication"
+
+
+class RescoreCode(StrEnum):
+    """Why one session of a re-score did or did not get queued: the stable
+    ``code`` on each ``results[]`` entry of ``POST /sessions/{id}/clips/rescore``,
+    which the browser summarises by instead of reading the message."""
+
+    OK = "ok"
+    IN_FLIGHT = "in_flight"
+    NO_TRANSCRIPT = "no_transcript"
+    NOT_ASSESSED = "not_assessed"
+    NOT_FOUND = "not_found"
+    NOT_RESCORABLE = "not_rescorable"
+    FAILED = "failed"
 
 
 class ScoreDisplay(StrEnum):

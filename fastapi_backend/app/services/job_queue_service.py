@@ -11,11 +11,12 @@ from typing import Any
 from uuid import uuid4
 
 from app.core.config import Settings
-from app.core.exceptions import AppError
+from app.core.exceptions import AppError, is_retryable_failure
 from app.core.logging_utils import log_context
 from app.core.pagination_cursor import decode_cursor as decode_page_cursor
 from app.core.pagination_cursor import encode_cursor as encode_page_cursor
 from app.core.utils import exception_message, parse_iso, utc_now_iso
+from app.domain.enums import JobLane, TaskType
 from app.domain.jobs import (
     ACTIVE_JOB_STATUSES,
     FINISHED_JOB_STATUSES,
@@ -27,7 +28,8 @@ from app.domain.session_lifecycle import fail_session
 from app.domain.sessions import JOB_DRIVEN_STATUSES, SessionStatus
 from app.repositories.job_repository import DISPATCH_PAYLOAD_KEY, LEGACY_DISPATCH_RUN_ID_KEY, JobRepository
 from app.services.event_service import EventService
-from app.services.job_tasks import get_task_spec, queue_mirrors_session_job, queue_owns_session_status
+from app.services.media_preparation import INTERRUPTED_MESSAGE, PENDING_MEDIA_STATUSES
+from app.services.job_tasks import get_task_spec, queue_mirrors_session_job, queue_owns_session_status, task_abandon, task_lane
 from app.services.session_service import SessionService
 from app.storage import ObjectStorage
 
@@ -63,23 +65,6 @@ class FinalJobFailure(RuntimeError):
     good: the session is already failed and no further attempt should run.
     The Hatchet task turns it into a non-retryable error; any other exception
     that escapes means the row was requeued and Hatchet should retry."""
-
-
-def is_retryable_failure(error: BaseException) -> bool:
-    """Whether a failed job execution is worth running again.
-
-    An :class:`AppError` below 500 is a deliberate, caller-visible rejection —
-    an unsupported task type, a missing source file, a transcript with no
-    speech. Re-running it burns the job's remaining attempts and delays the
-    error the user needs to see. A few 5xx conditions are permanent for the
-    same reason even though the server is at fault (a model the host has no
-    memory to load), and say so through ``AppError.retryable``. Everything else
-    (subprocess crash, upstream 5xx, transient I/O) is treated as transient and
-    retried.
-    """
-    if isinstance(error, AppError):
-        return error.retryable
-    return True
 
 
 @dataclass(frozen=True)
@@ -118,7 +103,7 @@ class JobQueueService:
         self.clips: Any = None
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._worker_id = f"{socket.gethostname()}:{uuid4()}"
-        self._semaphore: asyncio.Semaphore | None = None
+        self._lane_semaphores: dict[JobLane, asyncio.Semaphore] = {}
         # Serialises the find_active -> insert critical section so two concurrent
         # enqueue/create calls for the same session cannot both create a job.
         self._enqueue_lock = asyncio.Lock()
@@ -137,6 +122,7 @@ class JobQueueService:
             # recovery (so requeued rows count as active) and before dispatch
             # (so a job that fails on claim finds its session already reconciled).
             await self.reconcile_orphaned_sessions()
+            await self.reconcile_orphaned_media()
         else:
             queued_jobs = await self.repository.list_queued()
         if dispatch_queued:
@@ -180,6 +166,50 @@ class JobQueueService:
                 ", ".join(orphaned),
             )
         return orphaned
+
+    async def reconcile_orphaned_media(self) -> list[str]:
+        """End the media preparation of sessions whose ``prepare_media`` job is gone.
+
+        ``prepare_media`` does not own ``session.status``, so the session
+        reconciliation above never sees it: a restart (or a job lost some other
+        way) would leave ``files.video.media`` at ``queued``/``running`` — a
+        spinner and a progress bar nothing will ever finish. The job table is
+        the authority: a session claiming a pending preparation with no active
+        ``prepare_media`` row is marked failed, which the workspace answers with
+        its "Try again" button. A purged video or a session with no ``media``
+        projects ``media: null`` and is skipped. Same gating as
+        ``reconcile_orphaned_sessions`` (only the process that owns recovery).
+        """
+        active = await self.repository.active_session_ids(TaskType.PREPARE_MEDIA)
+        reset: list[str] = []
+        for entry in await self.sessions.list_sessions():
+            session_id = str(entry.get("id") or "")
+            media = entry.get("media") or {}
+            if not session_id or session_id in active or media.get("status") not in PENDING_MEDIA_STATUSES:
+                continue
+            if await self._abandon_task_record(session_id, TaskType.PREPARE_MEDIA, INTERRUPTED_MESSAGE):
+                reset.append(session_id)
+        if reset:
+            logger.warning(
+                "Startup reconciliation: %d session(s) had a media preparation with no active job and were marked failed: %s",
+                len(reset),
+                ", ".join(reset),
+            )
+        return reset
+
+    async def _abandon_task_record(self, session_id: str, task_type: str, message: str) -> bool:
+        """End a self-reporting task's record as failed (see ``JobTaskSpec.abandon``).
+        Best effort: a session deleted meanwhile, or a write that keeps losing
+        its race, is logged and must not stop startup or a job's own failure path."""
+        abandon = task_abandon(task_type)
+        if abandon is None:
+            return False
+        try:
+            await self.sessions.update(session_id, abandon(message))
+        except Exception:
+            logger.warning("Could not end the %s record of session %s.", task_type, session_id, exc_info=True)
+            return False
+        return True
 
     async def shutdown(self) -> None:
         tasks = list(self._tasks.values())
@@ -416,10 +446,18 @@ class JobQueueService:
             return max(1, self.settings.hatchet_job_retries + 1)
         return 3
 
-    async def run_job(self, job_id: str, *, raise_on_error: bool = False) -> JobRunResult:
-        if self._semaphore is None:
-            self._semaphore = asyncio.Semaphore(max(1, self.settings.job_worker_concurrency))
-        async with self._semaphore:
+    def _lane_semaphore(self, lane: JobLane) -> asyncio.Semaphore:
+        """The slots of one lane, created on first use inside the running loop."""
+        semaphore = self._lane_semaphores.get(lane)
+        if semaphore is None:
+            size = self.settings.media_job_concurrency if lane == JobLane.MEDIA else self.settings.job_worker_concurrency
+            semaphore = self._lane_semaphores[lane] = asyncio.Semaphore(max(1, size))
+        return semaphore
+
+    async def run_job(
+        self, job_id: str, *, raise_on_error: bool = False, lane: JobLane = JobLane.MAIN
+    ) -> JobRunResult:
+        async with self._lane_semaphore(lane):
             return await self._execute_job(job_id, raise_on_error=raise_on_error)
 
     async def prepare_hatchet_retry_attempt(self, job_id: str, retry_count: int) -> bool:
@@ -580,7 +618,9 @@ class JobQueueService:
             return
         upcoming_attempt = int(job.get("attempts") or 0) + 1
         try:
-            self._tasks[job_id] = asyncio.create_task(self._run_local(job_id, upcoming_attempt))
+            self._tasks[job_id] = asyncio.create_task(
+                self._run_local(job_id, upcoming_attempt, task_lane(str(job.get("taskType"))))
+            )
         except RuntimeError:
             return
 
@@ -653,7 +693,7 @@ class JobQueueService:
                 return str(value)
         return None
 
-    async def _run_local(self, job_id: str, attempt: int = 1) -> None:
+    async def _run_local(self, job_id: str, attempt: int = 1, lane: JobLane = JobLane.MAIN) -> None:
         """Execute a job in-process, retrying transient failures.
 
         The retry loop lives in the runner rather than in ``_execute_job``
@@ -675,7 +715,7 @@ class JobQueueService:
                     )
                     await asyncio.sleep(backoff_seconds)
                 try:
-                    result = await self.run_job(job_id)
+                    result = await self.run_job(job_id, lane=lane)
                 except Exception:
                     # _execute_job already turns every failure it recognises
                     # into a JobRunResult; reaching here means something raised
@@ -865,6 +905,8 @@ class JobQueueService:
             error = AppError(message, status_code=500, retryable=False)
             if queue_owns_session_status(exhausted_type):
                 await self._fail_session(exhausted_session, error, message)
+            else:
+                await self._abandon_task_record(exhausted_session, exhausted_type, message)
             if raise_on_error:
                 raise FinalJobFailure(message) from error
             return JobRunResult(job=failed, error=error)
@@ -1119,6 +1161,11 @@ class JobQueueService:
         job_status = str(job.get("status") or "")
 
         def mutate(session: dict[str, Any]) -> Any:
+            current_job_id = (session.get("job") or {}).get("id")
+            if job_status == JobStatus.CANCELLED and current_job_id not in (None, public_job["id"]):
+                # A newer run owns the session now; the old job's cancellation
+                # must neither displace its record nor end it.
+                return False
             session["job"] = public_job
             if not owns_status:
                 # The handler reports its own progress (see app.services.job_tasks).
@@ -1131,6 +1178,13 @@ class JobQueueService:
             elif job_status == JobStatus.QUEUED and session.get("status") != SessionStatus.COMPLETED:
                 session["status"] = SessionStatus.QUEUED
                 session["error"] = None
+            elif job_status == JobStatus.CANCELLED and session.get("status") in JOB_DRIVEN_STATUSES:
+                # The run was stopped on purpose: nothing will move this
+                # session out of queued/processing otherwise (startup
+                # reconciliation never runs on a Hatchet worker), and a
+                # cancelled session is re-runnable like any terminal one.
+                session["status"] = SessionStatus.CANCELLED
+                session["error"] = job.get("error") or "Job cancelled."
             return None
 
         try:

@@ -17,6 +17,12 @@ job (``auto_crop`` or ``process_session``), so it does not even take over
 ``session.job`` — the card's gauge and the Re-run button read that record, and
 a side task finishing first must not replace the job they describe.
 
+Each task also belongs to a **lane** (``JobLane``): the pool of local worker
+slots it runs in. ``prepare_media`` has its own, so a transcode starts at once
+instead of queueing behind the scoring runs that hold every main slot, and never
+takes a main slot from them. Lanes are a local-backend concept — under Hatchet
+the worker's own slots bound the machine, and nothing here is consulted.
+
 Adding a task type means adding one entry here — the executor has no per-type
 branches left to edit.
 """
@@ -27,7 +33,9 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from app.core.exceptions import AppError
-from app.domain.enums import TaskType
+from app.domain.enums import JobLane, TaskType
+from app.services.media_preparation import abandon_media
+from app.services.session_service import SessionMutator
 
 # (pipeline, clips, session_id, job_payload) -> None
 JobHandler = Callable[[Any, Any, str, dict[str, Any]], Awaitable[None]]
@@ -44,6 +52,12 @@ class JobTaskSpec:
     # True when the queue mirrors the job record onto ``session.job``. False
     # for a side task that runs alongside the session's main job.
     mirrors_session_job: bool = True
+    # The pool of local worker slots the task runs in.
+    lane: JobLane = JobLane.MAIN
+    # For a task that reports on its own record: the mutator that ends that
+    # record as failed (given the reason) when its job can never run again
+    # (attempts exhausted at claim, or no job row left after a restart).
+    abandon: Callable[[str], SessionMutator] | None = None
 
 
 async def _run_process_session(pipeline: Any, _clips: Any, session_id: str, _payload: dict[str, Any]) -> None:
@@ -73,6 +87,8 @@ JOB_TASK_TYPES: dict[str, JobTaskSpec] = {
             run=_run_prepare_media,
             owns_session_status=False,
             mirrors_session_job=False,
+            lane=JobLane.MEDIA,
+            abandon=abandon_media,
         ),
     )
 }
@@ -101,6 +117,8 @@ __all__ = [
     "JobTaskSpec",
     "get_task_spec",
     "queue_owns_session_status",
+    "task_abandon",
+    "task_lane",
 ]
 
 
@@ -109,3 +127,16 @@ def queue_mirrors_session_job(task_type: str) -> bool:
     for an unknown type, like ``queue_owns_session_status``."""
     spec = JOB_TASK_TYPES.get(str(task_type))
     return True if spec is None else spec.mirrors_session_job
+
+
+def task_abandon(task_type: str) -> Callable[[str], SessionMutator] | None:
+    """How this task type's own record is failed when its job is gone, or None."""
+    spec = JOB_TASK_TYPES.get(str(task_type))
+    return None if spec is None else spec.abandon
+
+
+def task_lane(task_type: str) -> JobLane:
+    """The worker-slot lane for this task type. Lenient for an unknown type, like
+    ``queue_owns_session_status``: it runs in the main lane."""
+    spec = JOB_TASK_TYPES.get(str(task_type))
+    return JobLane.MAIN if spec is None else spec.lane

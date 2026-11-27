@@ -122,8 +122,24 @@ def key_env_name(provider_id: str) -> str:
     existed, dropped at catalogue construction
     (``ProviderCatalog.with_custom``) — see both for the collision rule.
     """
+    return f"OSCE_LLM_KEY_{_env_slug(provider_id)}"
+
+
+def extras_env_name(provider_id: str) -> str:
+    """The variable a custom provider's connection extras travel in.
+
+    The extra headers, query and body are where a gateway's own token lives, so
+    they travel like the key: one generated variable per *routed* provider,
+    never inside the loggable definitions blob. It shares :func:`key_env_name`'s
+    slug, hence its collision rule — the catalogue never holds two providers
+    that spell one slug, so one extras variable never serves two vendors.
+    """
+    return f"OSCE_LLM_EXTRAS_{_env_slug(provider_id)}"
+
+
+def _env_slug(provider_id: str) -> str:
     slug = re.sub(r"[^A-Z0-9]+", "_", str(provider_id or "").upper()).strip("_")
-    return f"OSCE_LLM_KEY_{slug or 'CUSTOM'}"
+    return slug or "CUSTOM"
 
 
 def _text(value: Any, *, limit: int = MAX_TEXT_LENGTH) -> str:
@@ -292,11 +308,21 @@ class CustomProviderSpec:
 
     # -- serialisation ------------------------------------------------------
 
-    def to_public(self) -> dict[str, Any]:
-        """The definition as the API and the subprocess handoff carry it.
+    def connection_extras(self) -> dict[str, Any]:
+        """The fields that may carry a second credential, only those set."""
+        extras = {
+            "extraHeaders": dict(self.extra_headers or {}),
+            "extraQuery": dict(self.extra_query or {}),
+            "extraBody": dict(self.extra_body or {}),
+        }
+        return {key: value for key, value in extras.items() if value}
 
-        Contains no credential, which is what makes it safe to put in an
-        environment variable and in a log line.
+    def to_public(self) -> dict[str, Any]:
+        """The definition as the API carries it, extras included.
+
+        Unredacted on purpose (the operator's edit form pre-fills from it); the
+        subprocess handoff strips :data:`SECRET_BEARING_CONNECTION_FIELDS` and
+        sends them separately, so the blob that is logged holds no credential.
         """
         return {
             "id": self.id,

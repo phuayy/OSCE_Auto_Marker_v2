@@ -9,7 +9,31 @@ from uuid import uuid4
 from fastapi import UploadFile
 
 from app.core.config import Settings
+from app.core.exceptions import AppError
 from app.core.utils import sanitize_file_name
+
+# A PDF reader accepts the ``%PDF-`` marker anywhere in the first kilobyte (a
+# preamble some generators emit), so the content check does the same.
+PDF_MAGIC = b"%PDF-"
+PDF_HEADER_WINDOW_BYTES = 1024
+
+
+def ensure_pdf_file(path: Path) -> None:
+    """Refuse a file that is not a PDF by its *bytes*, whatever it is named.
+
+    The upload's name and declared MIME type are the browser's claim; this is
+    the one check made against what was actually stored. Raises a 400
+    ``AppError`` (non-retryable, and its message is what the browser shows).
+    """
+    with path.open("rb") as source:
+        head = source.read(PDF_HEADER_WINDOW_BYTES)
+    if not head:
+        raise AppError("The case study file is empty.", status_code=400)
+    if PDF_MAGIC not in head:
+        raise AppError(
+            "The case study is not a valid PDF file. Upload the case study as a PDF.",
+            status_code=400,
+        )
 
 
 class ArtifactService:

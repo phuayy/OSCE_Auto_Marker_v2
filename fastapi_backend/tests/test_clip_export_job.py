@@ -17,6 +17,7 @@ from typing import Any
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.resources import ResourceLease
+from app.domain.jobs import ACTIVE_JOB_STATUSES
 from app.pipeline.media import MediaPipeline
 from app.services.clip_service import ClipService
 from app.services.job_tasks import get_task_spec, queue_owns_session_status
@@ -52,15 +53,32 @@ class FakeJobRepository:
         self.rows: dict[str, dict[str, Any]] = {}
 
     async def read(self, job_id: str) -> dict[str, Any]:
+        if job_id not in self.rows:
+            raise FileNotFoundError(f"Job not found: {job_id}")
         return self.rows[job_id]
+
+    async def find_active(self, session_id: str, task_type: str) -> dict[str, Any] | None:
+        return next(
+            (
+                row
+                for row in self.rows.values()
+                if row["sessionId"] == session_id
+                and row["taskType"] == task_type
+                and row["status"] in ACTIVE_JOB_STATUSES
+            ),
+            None,
+        )
 
 
 class FakeJobs:
     def __init__(self) -> None:
         self.enqueued: list[tuple[str, str, dict[str, Any]]] = []
         self.repository = FakeJobRepository()
+        self.enqueue_error: Exception | None = None
 
     async def enqueue(self, session_id: str, task_type: str, payload: dict[str, Any] | None = None):
+        if self.enqueue_error is not None:
+            raise self.enqueue_error
         self.enqueued.append((session_id, task_type, payload or {}))
         job = {
             "id": f"job-{len(self.enqueued)}",

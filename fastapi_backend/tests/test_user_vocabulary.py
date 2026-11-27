@@ -76,3 +76,14 @@ def test_password_may_not_be_the_accounts_own_identifier() -> None:
     assert password_policy_errors("marker@example.edu-plus", forbidden=forbidden) == []
     # A blank forbidden entry (no email) is ignored rather than matching "".
     assert password_policy_errors("x" * 12, forbidden=("", None)) == []
+
+
+def test_bootstrap_password_problems_add_placeholders_to_the_policy() -> None:
+    from app.domain.users import bootstrap_password_problems
+
+    assert bootstrap_password_problems("k7Vq-2mXw9-Zt4Rb-pL8s", username="admin") == []
+    for placeholder in ("change-me", "<generate: openssl rand>", "CHANGEME-please-1", "my-Password-12345"):
+        assert bootstrap_password_problems(placeholder, username="admin"), placeholder
+    # The ordinary policy still applies: too short, or equal to the username.
+    assert bootstrap_password_problems("short", username="admin")
+    assert bootstrap_password_problems("administrator-1", username="administrator-1")

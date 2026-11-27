@@ -12,16 +12,19 @@
 // everything only this view uses: the results model derived from the score
 // sheets, the player and download handlers, and the three effects that are
 // meaningless with no player mounted.
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { ensureStreamTicket, resolveMediaUrl } from '@/auth';
 import { ApiError, ERROR_KIND, apiJson } from '@/lib/apiFetch';
 import { describeMediaError } from '@/lib/mediaError';
-import { describePreparation } from '@/lib/videoMedia';
+import { PLAYABLE_COPY_READY_MESSAGE, describeMediaArrival } from '@/lib/mediaWatch';
+import { describePreparationPanel } from '@/lib/videoMedia';
 import { SessionStatus } from '@/lib/enums';
 import { CLIP_ASSESSMENTS_ANCHOR_ID } from '@/lib/anchors';
 import { describeProcessingStage, formatProcessingStageLabel } from '@/lib/processingStage';
 import { describeCreator } from '@/lib/provenance';
+import { canMutateSession } from '@/lib/authz';
+import { rescoreAvailability } from '@/lib/rescoreAction';
 import { INTERMISSION_KIND } from '@/lib/manualTimeline.js';
 import { DRAFT_CLIP_REASON, isDraftClip } from '@/lib/clipSelection';
 import { formatMetricValue, formatRuntime, prettySpeaker } from '@/lib/format';
@@ -37,6 +40,7 @@ import {
   buildKeepStartStop,
   buildScoringSummary,
   communicationScale,
+  buildCommunicationCsvRows,
 } from '@/lib/resultsModel';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -46,12 +50,14 @@ import { SessionStatusBadge } from '@/components/SessionStatusBadge.jsx';
 import { AudioProfessionalismSkeleton, CohortSummarySkeleton, LoadingRegion } from '@/components/skeletons.jsx';
 import {
   Brain,
+  CheckCircle2,
   ClipboardCheck,
   Clock3,
   Download,
   Loader2,
   MessageSquare,
   PlayCircle,
+  RefreshCw,
   RotateCw,
   Scissors,
   Sparkles,
@@ -122,6 +128,8 @@ export default function SessionWorkspace({
   runSelectedClipAssessments,
   runClipAssessment,
   rerunClipAssessment,
+  authUser,
+  onRequestRescore,
   deleteClipAssessment,
   openClipAssessmentView,
   deletingSessionId,
@@ -132,6 +140,14 @@ export default function SessionWorkspace({
   // Who uploaded the recording (or queued this clip's assessment), as the
   // server snapshotted them; null for a session recorded before creators were.
   const creator = describeCreator(session);
+  // Re-score redoes the marking on the transcript already held — offered for
+  // a finished standard session or clip child, to whoever may change it.
+  const mayMutate = canMutateSession(authUser, session);
+  const rescoreOffered = mayMutate && rescoreAvailability(session).available;
+  // The same, for a long recording's clips: any clip with a finished child.
+  const rescoreClipsOffered =
+    mayMutate &&
+    Object.values(clipAssessmentRuns || {}).some((run) => run?.status === SessionStatus.COMPLETED && run?.sessionId);
   const transcriptSegments = useMemo(() => {
     const segmentList = Array.isArray(transcript?.segments) ? transcript.segments : [];
     return segmentList
@@ -218,6 +234,10 @@ export default function SessionWorkspace({
   const serverVideoUrl = session?.files?.video?.playback?.url || session?.files?.video?.url;
   const videoPurgedAt = session?.files?.video?.purgedAt || null;
   useEffect(() => {
+    // A new source always starts clean: the old one's "cannot play" alert says
+    // nothing about it, and only a /media/ URL goes through the ticket below
+    // (a signed storage URL has no ticket to clear it).
+    setMediaState({ error: null });
     if (!serverVideoUrl?.startsWith('/media/')) return;
     let active = true;
     ensureStreamTicket().then(
@@ -226,6 +246,22 @@ export default function SessionWorkspace({
     );
     return () => { active = false; };
   }, [serverVideoUrl]);
+
+  // The playable copy landing while the user is elsewhere on the page (the
+  // timeline, usually) changes nothing they can see but the player's source,
+  // so say so next to the player. The watch only ever merges `files`, so the
+  // transition is read between successive documents of the same session.
+  const previousSessionRef = useRef(null);
+  const [copyReadyDismissed, setCopyReadyDismissed] = useState(true);
+  useEffect(() => {
+    const arrival = describeMediaArrival(previousSessionRef.current, session);
+    previousSessionRef.current = session;
+    if (arrival?.kind === 'ready') setCopyReadyDismissed(false);
+  }, [session]);
+  const copyReadyId = session?.id || null;
+  useEffect(() => {
+    setCopyReadyDismissed(true);
+  }, [copyReadyId]);
 
   // The clip timeline and Export clips need the video's length. The player's
   // loadedmetadata used to be the only source, so a recording the browser
@@ -256,13 +292,8 @@ export default function SessionWorkspace({
   // The server's still frame: what the player shows instead of a black box
   // while a playable copy is made, or when the browser cannot decode the file.
   const posterUrl = resolveMediaUrl(videoMedia?.posterUrl) || undefined;
-  const preparationNote = describePreparation(session);
-  // Say what the server is doing when the browser could not play the video,
-  // or before it tries, when the server already knows it cannot.
-  const showPreparation =
-    Boolean(mediaState.error) || videoMedia?.browserPlayable === false || Boolean(videoMedia?.failed);
-  const offerPreparation =
-    showPreparation && Boolean(videoMedia?.canRequest) && !videoMedia?.playbackUrl && typeof onPrepareMedia === 'function';
+  const preparation = describePreparationPanel(session, { playerFailed: Boolean(mediaState.error) });
+  const offerPreparation = preparation.offer && typeof onPrepareMedia === 'function';
   const currentSubtitleUrl = resolveMediaUrl(session?.outputs?.subtitleTrack?.url) || null;
 
 
@@ -530,82 +561,18 @@ export default function SessionWorkspace({
       return contentRows;
     };
 
-    const buildCommunicationRows = () => {
-      const labelCounts = communicationSummary?.labelCounts || {};
-      const labelDistribution = `${labelCounts.All ?? 0} / ${labelCounts.Most ?? 0} / ${labelCounts.Some ?? 0} / ${labelCounts.None ?? 0}`;
-      const labelToPoints = { All: 3, Most: 2, Some: 1, None: 0 };
-      const joinIndicators = (items) => (
-        Array.isArray(items) && items.length ? `- ${items.join('\n- ')}` : ''
-      );
-      const communicationRows = [
-        ['OSCE Rubric Score Sheet - Communication'],
-        [],
-        ['Student Name', ''],
-        ['Student ID', ''],
-        ['Session ID', communicationScores?.session_id || session?.id || ''],
-        [],
-        ['Scoring Scale'],
-        ['Label', 'Marks', 'Meaning'],
-        ['All', 3, 'Student consistently demonstrated EVERY observable indicator'],
-        ['Most', 2, 'Student consistently demonstrated MOST observable indicators'],
-        ['Some', 1, 'Student demonstrated ONLY SOME observable indicators'],
-        ['None', 0, 'Student demonstrated NONE of the observable indicators'],
-        [],
-        ['Communication Scoring Summary'],
-        ['Result', 'Total', 'Max', 'Pass threshold', 'All / Most / Some / None'],
-        [
-          communicationSummary?.passFail || (communicationCriteria.length ? 'Pending' : 'N/A'),
-          communicationSummary?.totalScore ?? 0,
-          communicationSummary?.maxScore ?? communicationCriteria.length * 3,
-          communicationSummary?.passThreshold
-            ?? (communicationCriteria.length === 7 ? 11 : Math.ceil((communicationCriteria.length * 3) / 2)),
-          labelDistribution,
-        ],
-        [],
-        ['Communication Criteria'],
-        ['ID', 'Criterion', 'Section', 'Score Label', 'Marks', 'Timestamp'],
-      ];
-
-      communicationCriteria.forEach((criterion) => {
-        communicationRows.push([
-          criterion.id || '',
-          criterion.label || '',
-          criterion.section || '',
-          criterion.scoreLabel || 'None',
-          labelToPoints[criterion.scoreLabel] ?? 0,
-          criterion.timestamp || '',
-        ]);
-      });
-
-      communicationRows.push(
-        [],
-        ['Evidence & Indicators'],
-        ['ID', 'Criterion', 'Evidence', 'Indicators observed', 'Indicators missing', 'Not observable'],
-      );
-
-      communicationCriteria.forEach((criterion) => {
-        communicationRows.push([
-          criterion.id || '',
-          criterion.label || '',
-          criterion.evidence || '',
-          joinIndicators(criterion.indicatorsObserved),
-          joinIndicators(criterion.indicatorsMissing),
-          joinIndicators(criterion.indicatorsNotObservable),
-        ]);
-      });
-
-      if (communicationPayload?.overall_summary) {
-        communicationRows.push([], ['Overall Communication Summary'], ['Summary', communicationPayload.overall_summary]);
-      }
-
-      return communicationRows;
-    };
-
     if (aiCriteria.length > 0 || keepStartStop) {
       appendSection(buildContentRows());
     }
     if (communicationCriteria.length > 0) {
-      appendSection(buildCommunicationRows());
+      appendSection(
+        buildCommunicationCsvRows({
+          sessionId: communicationScores?.session_id || session?.id || '',
+          payload: communicationPayload,
+          criteria: communicationCriteria,
+          summary: communicationSummary,
+        }),
+      );
     }
 
     const blob = new Blob([`\uFEFF${rowsToCsv(rows)}\r\n`], { type: 'text/csv;charset=utf-8' });
@@ -656,11 +623,24 @@ export default function SessionWorkspace({
                     </dd>
                   </div>
                 </dl>
-                {isClipAssessmentView ? (
-                  <div className="mt-4">
-                    <Button variant="outline" onClick={restoreParentSession}>
-                      Back to clip list
-                    </Button>
+                {isClipAssessmentView || rescoreOffered ? (
+                  <div className="mt-4 flex flex-wrap items-center gap-2">
+                    {isClipAssessmentView ? (
+                      <Button variant="outline" onClick={restoreParentSession}>
+                        Back to clip list
+                      </Button>
+                    ) : null}
+                    {rescoreOffered ? (
+                      <Button
+                        variant="outline"
+                        className="gap-2"
+                        onClick={() => onRequestRescore({ sessionId: session.id, clips: false })}
+                        title="Redo the content and/or communication marking on the existing transcript."
+                      >
+                        <RefreshCw className="h-4 w-4" aria-hidden="true" />
+                        Re-score
+                      </Button>
+                    ) : null}
                   </div>
                 ) : null}
               </CardContent>
@@ -768,6 +748,7 @@ export default function SessionWorkspace({
                             });
                             if (message) setMediaState({ error: new ApiError(message, { kind: ERROR_KIND.CLIENT }) });
                           }}
+                          onPlay={() => setCopyReadyDismissed(true)}
                           onTimeUpdate={handleVideoTimeUpdate}
                           className="aspect-video w-full rounded-2xl border border-slate-200/90 bg-black shadow-inner"
                           src={currentVideoUrl}
@@ -786,16 +767,29 @@ export default function SessionWorkspace({
                         {mediaState.error ? (
                           <p role="alert" className="text-sm text-rose-600">{mediaState.error.message}</p>
                         ) : null}
-                        {showPreparation && (preparationNote || offerPreparation) ? (
+                        {!copyReadyDismissed ? (
+                          <div
+                            role="status"
+                            aria-live="polite"
+                            className="flex flex-wrap items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800"
+                          >
+                            <CheckCircle2 aria-hidden="true" className="h-4 w-4 shrink-0" />
+                            <span className="min-w-0 flex-1">{PLAYABLE_COPY_READY_MESSAGE}</span>
+                            <Button size="sm" variant="outline" onClick={() => setCopyReadyDismissed(true)}>
+                              Dismiss
+                            </Button>
+                          </div>
+                        ) : null}
+                        {preparation.show && (preparation.note || offerPreparation) ? (
                           <div
                             role="status"
                             className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700"
                           >
-                            {videoMedia?.preparing ? (
+                            {preparation.preparing ? (
                               <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin text-slate-500 motion-reduce:animate-none" />
                             ) : null}
                             <span className="min-w-0 flex-1">
-                              {preparationNote ||
+                              {preparation.note ||
                                 'This session has no playable copy yet. The server can make one; once it has read the video, the timeline and Export clips work even before the copy is ready.'}
                             </span>
                             {offerPreparation ? (
@@ -805,7 +799,7 @@ export default function SessionWorkspace({
                                 onClick={onPrepareMedia}
                                 disabled={isRequestingMediaPreparation}
                               >
-                                {videoMedia?.failed ? 'Try again' : 'Make a playable copy'}
+                                {preparation.failed ? 'Try again' : 'Make a playable copy'}
                               </Button>
                             ) : null}
                           </div>
@@ -1366,6 +1360,18 @@ export default function SessionWorkspace({
                           Run Selected Assessments
                           {selectedRunnableClipIds.length > 0 ? ` (${selectedRunnableClipIds.length})` : ''}
                         </Button>
+                        {rescoreClipsOffered ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => onRequestRescore({ sessionId: session.id, clips: true })}
+                            disabled={isLoadingWorkspace || isQueueingSelectedClips}
+                            title="Redo the marking of every assessed clip on its existing transcript."
+                          >
+                            <RefreshCw className="mr-1 h-3.5 w-3.5" aria-hidden="true" />
+                            Re-score all clips
+                          </Button>
+                        ) : null}
                       </div>
                     </CardHeader>
                     <CardContent className="space-y-3">

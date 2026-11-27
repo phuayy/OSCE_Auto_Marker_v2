@@ -148,6 +148,8 @@ def test_probe_reports_duration_and_frame_size(tmp_path: Path) -> None:
         "codec": "hevc",
         "pixelFormat": "yuvj420p",
         "audioCodec": "pcm_mulaw",
+        "audioStreams": 1,
+        "rotation": 0,
         "width": 2560,
         "height": 1440,
         "durationSeconds": 3605.5,
@@ -197,7 +199,7 @@ def test_prepare_media_skips_the_copy_for_a_playable_source(tmp_path: Path) -> N
 def test_a_failed_transcode_is_reported_not_raised(tmp_path: Path) -> None:
     media, _ = make_media(tmp_path, {"codec_name": "hevc", "pix_fmt": "yuv420p"})
 
-    async def broken_copy(_session: dict[str, Any]) -> None:
+    async def broken_copy(_session: dict[str, Any], **_: Any) -> None:
         raise RuntimeError("ffmpeg died")
 
     media.ensure_playback_copy = broken_copy  # type: ignore[method-assign]

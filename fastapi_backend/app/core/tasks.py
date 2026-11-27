@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -63,3 +63,22 @@ class BackgroundTaskRegistry:
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+
+
+async def periodic_loop(interval_seconds: float, sweep: Callable[[], Awaitable[Any]], *, description: str) -> None:
+    """Run ``sweep`` every ``interval_seconds``, forever.
+
+    The shared shape of this app's housekeeping timers (the stale-job reaper's
+    siblings: the video-retention and upload-expiry sweeps): sleep first — the
+    caller has usually just run one sweep at boot — then log and continue past
+    a sweep that raised, so one bad pass never ends the loop. There is
+    deliberately no ``CancelledError`` handler: shutdown
+    (:meth:`BackgroundTaskRegistry.cancel_all`) cancels it cleanly out of the
+    sleep.
+    """
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await sweep()
+        except Exception:
+            logger.exception("%s failed; will retry on the next interval.", description)

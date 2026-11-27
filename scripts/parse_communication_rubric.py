@@ -321,9 +321,19 @@ def build_payload(
         payload["extraction"] = deterministic_provenance()
         return payload
     except RubricLlmFallbackFailed as error:
-        raise RuntimeError(
-            f"Deterministic parser: {deterministic_error}. LLM extraction fallback: {error}"
-        ) from error
+        if payload is None:
+            raise RuntimeError(
+                f"Deterministic parser: {deterministic_error}. LLM extraction fallback: {error}"
+            ) from error
+        # The fallback only augments: a deterministic parse exists, so an LLM
+        # failure must not reject the upload. Say so in the provenance.
+        warning = (
+            f"Rubric looks incomplete ({deterministic_error}) and the AI extraction fallback "
+            f"failed ({error}); this is the standard parser's result. Check it against the PDF."
+        )
+        print(f"Warning: {warning}", file=sys.stderr)
+        payload["extraction"] = {**deterministic_provenance(), "warnings": [warning]}
+        return payload
 
     llm_payload = payload_from_llm(extraction.payload)
     llm_payload["extraction"] = extraction.provenance(deterministic_error=deterministic_error)

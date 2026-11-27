@@ -31,7 +31,6 @@ export default function ManualTimelineEditor({
   hasDraftClips,
   intermissionClipCount,
   isClipExportRunning,
-  isPersonSegmentedSession,
   isSavingManualSegments,
   manualBoundaries,
   manualLabels,
@@ -218,12 +217,10 @@ export default function ManualTimelineEditor({
         >
           {(() => {
             const actions = contextMenuActions(timelineMenu.hit.target);
-            // Session/intermission marking is a human-detection feature; bell
-            // detection splits at bells only, so the toggle stays blocked.
-            const toggleAllowed = actions.toggleEnabled && isPersonSegmentedSession;
-            const toggleBlockedHint = !actions.toggleEnabled
-              ? 'Right-click a clip area to switch its type.'
-              : 'Available for human-detection sessions only (bell splits have no intermissions).';
+            // Any segment can be a student clip or an intermission (not cut),
+            // whichever method proposed the split.
+            const toggleAllowed = actions.toggleEnabled;
+            const toggleBlockedHint = 'Right-click a clip area to switch its type.';
             const segmentKind =
               timelineMenu.hit.segmentIndex !== null
                 ? ensureKinds(manualSegmentKinds, manualBoundaries.length + 1)[timelineMenu.hit.segmentIndex]

@@ -280,7 +280,10 @@ printed. Manual: `Rollback-Release.ps1`.
 `pg_dump -Fc`) and `robocopy /MIR` of `STORAGE_ROOT` to a different disk;
 prune by `backupRetentionDays`. Copy off-site weekly. **Test a restore
 monthly** onto a scratch database (`backup_database.py --restore … --confirm`
-against a scratch `DATABASE_URL`). `AUTH_SECRET` + `CREDENTIAL_ENCRYPTION_KEY`
+against a scratch `DATABASE_URL`). A SQLite restore first refuses a backup that is
+empty, corrupt or lacks an `alembic_version` row (exit 2, nothing changed), then keeps
+a safety copy of the current database as `<db>.pre-restore-<UTC time>.sqlite3` (path
+reported as `safetyCopy`; the newest 3 are kept). `AUTH_SECRET` + `CREDENTIAL_ENCRYPTION_KEY`
 live in the password manager — without them a restored DB's saved provider
 keys are unreadable (`docs/deployment-vm.md`).
 

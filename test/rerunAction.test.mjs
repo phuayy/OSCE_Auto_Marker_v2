@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { describeRerunAction, isLongEntry } from '../src/lib/rerunAction.js';
+import { describeRerunAction, isLongEntry, offersRerun } from '../src/lib/rerunAction.js';
 
 test('a long recording gets segmentation wording', () => {
   const action = describeRerunAction({ id: 's1', workflow: 'long' });
@@ -46,4 +46,23 @@ test('describeRerunAction(undefined) falls back to the standard wording without 
   const action = describeRerunAction(undefined);
   assert.equal(action.long, false);
   assert.equal(action.label, 'Re-run');
+});
+
+test('only a session that ended without a result offers Re-run', () => {
+  const expected = {
+    waiting_for_upload: false,
+    uploading: false,
+    assembling: false,
+    uploaded: false,
+    queued: false,
+    processing: false,
+    cropped: false,
+    completed: false,
+    failed: true,
+    cancelled: true,
+  };
+  for (const [status, offers] of Object.entries(expected)) {
+    assert.equal(offersRerun(status), offers, status);
+  }
+  assert.equal(offersRerun(undefined), false);
 });

@@ -256,6 +256,34 @@ class LocalObjectStorageService:
                 status_code=400,
             )
 
+    async def read_received_head(self, upload: dict[str, Any], file_id: str, max_bytes: int) -> bytes | None:
+        """Parts 1..n as one buffer, up to ``max_bytes``, stopping at the first
+        part the ledger does not list. The ledger, not the directory listing, is
+        the authority: a part file is on disk a moment before it is recorded, and
+        a part whose file has vanished (the upload committed and released its
+        staging meanwhile) ends the head like any other gap."""
+        if max_bytes <= 0:
+            return None
+        recorded = {int(part.get("partNumber") or 0) for part in find_upload_file(upload, file_id).get("parts") or []}
+        upload_id = str(upload["id"])
+
+        def _read() -> bytes:
+            chunks: list[bytes] = []
+            remaining = max_bytes
+            part_number = 1
+            while remaining > 0 and part_number in recorded:
+                try:
+                    with self._part_path(upload_id, file_id, part_number).open("rb") as source:
+                        chunk = source.read(remaining)
+                except FileNotFoundError:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+                part_number += 1
+            return b"".join(chunks)
+
+        return await asyncio.to_thread(_read) or None
+
     async def abort_upload(self, upload: dict[str, Any]) -> None:
         upload_dir = self.settings.object_storage_staging_root / str(upload["id"])
         await asyncio.to_thread(lambda: shutil.rmtree(upload_dir, ignore_errors=True))
@@ -296,6 +324,12 @@ class LocalObjectStorageService:
         if not normalized or ".." in normalized.split("/"):
             raise AppError("Invalid object key.", status_code=400)
         return self.settings.object_storage_root / normalized
+
+    def playback_url(self, storage_ref: dict[str, Any]) -> str | None:
+        key = str(storage_ref.get("key") or "")
+        if str(storage_ref.get("provider") or "") != self.provider or not key:
+            return None
+        return self.public_url_for_key(key)
 
     def public_url_for_key(self, key: str) -> str:
         normalized_key = key.replace("\\", "/")

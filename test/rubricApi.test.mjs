@@ -4,6 +4,7 @@ import {
   AI_DRAFT_ENDPOINT,
   draftEndpoint,
   extractRubricIssues,
+  isVersionConflict,
   formatWhen,
 } from '../src/lib/rubricApi.js';
 
@@ -38,4 +39,10 @@ test('formatWhen', () => {
   assert.equal(formatWhen(''), '');
   assert.equal(formatWhen('not a date'), 'not a date');
   assert.ok(formatWhen('2026-01-02T03:04:05Z').length > 4);
+});
+
+test('isVersionConflict is a 409 and nothing else', () => {
+  assert.equal(isVersionConflict({ status: 409 }), true);
+  assert.equal(isVersionConflict({ status: 422 }), false);
+  assert.equal(isVersionConflict(null), false);
 });

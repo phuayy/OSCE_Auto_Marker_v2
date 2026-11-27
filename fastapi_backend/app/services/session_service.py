@@ -14,6 +14,7 @@ from app.core.versioned_cache import VersionedCache
 from app.core.session_cursor import decode_cursor, encode_cursor
 from app.domain.actors import PROVENANCE_KEY, provenance_of
 from app.domain.constants import SESSION_NAME_ADJECTIVES, SESSION_NAME_NOUNS
+from app.domain.session_filters import SessionListFilter
 from app.domain.sessions import validate_session_payload
 from app.repositories.session_repository import SessionEntry, SessionRepository
 from app.services.change_feed_service import ChangeFeedService
@@ -27,6 +28,10 @@ SESSION_INDEX_CACHE_KEY = "session_index"
 # commits. Must be synchronous and side-effect free apart from the document:
 # it is re-run from scratch when another writer got in first.
 SessionMutator = Callable[[dict[str, Any]], Any]
+
+# storage ref -> the URL to play it from now, or None when the ref is not one
+# the resolver owns.
+PlaybackUrlResolver = Callable[[dict[str, Any]], "str | None"]
 
 # How many times ``update`` re-reads and re-applies before giving up. Contention
 # on one session is a handful of writers (pipeline, queue, the user), so a
@@ -42,9 +47,14 @@ class SessionService:
         *,
         cache: VersionedCache | None = None,
         changes: ChangeFeedService | None = None,
+        playback_url: PlaybackUrlResolver | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository
+        # Turns a committed object's storage ref into the URL the player loads
+        # (the storage backend's ``playback_url``). Optional like the cache: a
+        # bare service serves whatever URL the document carries.
+        self._playback_url = playback_url
         # Both optional so a bare SessionService (tests, scripts) still works —
         # it just rebuilds the index on every call, as it always did.
         self.cache = cache
@@ -169,13 +179,17 @@ class SessionService:
     async def list_page(
         self, *, limit: int = 200, cursor: str | None = None,
         parent_session_id: str | None = None, roots_only: bool = False,
+        filters: SessionListFilter | None = None,
     ) -> dict[str, Any]:
         if not 1 <= limit <= 200:
             raise ValueError("Session limit must be between 1 and 200.")
         after = decode_cursor(cursor)
         if roots_only and parent_session_id is not None:
             raise ValueError("Root and child session filters cannot be combined.")
-        query = dict(limit=limit + 1, after=after, parent_session_id=parent_session_id, roots_only=roots_only)
+        filters = filters or SessionListFilter()
+        query = dict(
+            limit=limit + 1, after=after, parent_session_id=parent_session_id, roots_only=roots_only, filters=filters,
+        )
 
         async def build() -> dict[str, Any]:
             rows = await self.repository.read_index_projection(**query)
@@ -189,9 +203,11 @@ class SessionService:
         if self.cache is None or self.changes is None:
             return await build()
         token = await self.changes.token(("sessions",))
-        return await self.cache.get_or_build(
-            f"{SESSION_INDEX_CACHE_KEY}:{limit}:{after}:{parent_session_id}:{roots_only}", token, build, tables=("sessions",),
-        )
+        # A repr of the normalised request, not a joined string: a search term
+        # may contain any character, and an unfiltered page must never share a
+        # key with a filtered one.
+        key = repr((limit, after, parent_session_id, roots_only, filters))
+        return await self.cache.get_or_build(f"{SESSION_INDEX_CACHE_KEY}:{key}", token, build, tables=("sessions",))
 
     async def list_sessions(self) -> list[dict[str, Any]]:
         """The session-list projection, served from cache while nothing changed.
@@ -272,8 +288,28 @@ class SessionService:
     def generate_random_session_name() -> str:
         return f"{random.choice(SESSION_NAME_ADJECTIVES)} {random.choice(SESSION_NAME_NOUNS)} {random.randint(100, 999)}"
 
-    @staticmethod
-    def public_session(session: dict[str, Any]) -> dict[str, Any]:
+    def video_playback_url(self, video: dict[str, Any]) -> Any:
+        """The URL the player should load for a session's source video.
+
+        A signed URL is a read-time capability: it is resolved from the stored
+        storage ref on every serve, so one persisted at commit by an earlier
+        version (and long expired) is replaced too. A video with no ref (a
+        clip child's, pointing at its parent's exported MP4), one the retention
+        sweep purged, or a ref the resolver does not own keeps the stored URL.
+        A signing failure must not take the whole session read down with it, so
+        it also falls back to the stored URL.
+        """
+        stored = video.get("url")
+        storage_ref = video.get("storageRef")
+        if self._playback_url is None or video.get("purgedAt") or not isinstance(storage_ref, dict):
+            return stored
+        try:
+            return self._playback_url(storage_ref) or stored
+        except Exception:
+            logger.warning("Could not resolve a playback URL; serving the stored one.", exc_info=True)
+            return stored
+
+    def public_session(self, session: dict[str, Any]) -> dict[str, Any]:
         files = session.get("files") or {}
         outputs = session.get("outputs") or {}
         video = files.get("video") or {}
@@ -388,7 +424,7 @@ class SessionService:
                 "video": {
                     "originalName": video.get("originalName"),
                     "fileName": video.get("fileName"),
-                    "url": video.get("url"),
+                    "url": self.video_playback_url(video),
                     "sizeBytes": video.get("sizeBytes"),
                     "mimeType": video.get("mimeType"),
                     "uploadStatus": video.get("uploadStatus"),
@@ -481,6 +517,9 @@ PUBLIC_MEDIA_FACT_KEYS = (
     "videoCodec",
     "audioCodec",
     "browserPlayable",
+    "stage",
+    "progress",
+    "attempts",
     "updatedAt",
 )
 

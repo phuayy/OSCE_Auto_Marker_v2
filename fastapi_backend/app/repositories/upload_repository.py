@@ -50,6 +50,19 @@ class UploadRepository:
             ))
             yield int(count or 0)
 
+    async def count_open_transfers(self) -> int:
+        """Uploads whose bytes may still be arriving: started, not committed,
+        aborted or expired, and inside their expiry window. A direct-to-bucket
+        transfer never touches this API between ``initiate`` and ``complete``,
+        so this record is the only trace of it; the window bound is what keeps
+        an abandoned upload from counting as live forever."""
+        async with self.database.session() as db:
+            count = await db.scalar(select(func.count()).select_from(UploadRecord).where(
+                UploadRecord.status.in_([UploadStatus.INITIATED, UploadStatus.UPLOADING]),
+                UploadRecord.expires_at > utc_now(),
+            ))
+            return int(count or 0)
+
     @asynccontextmanager
     async def locked(self, upload_id: str):
         async with self.database.unit_of_work() as db:

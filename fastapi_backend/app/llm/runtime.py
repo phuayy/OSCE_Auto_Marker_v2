@@ -23,7 +23,7 @@ from app.llm.router import LLMRouter
 from app.llm.routing import ROUTING_ENV_VAR, LLMTarget, RetryPolicy, RoutingConfig
 
 
-def _read_float(env: Mapping[str, str], name: str, fallback: float) -> float:
+def _read_float(env: Mapping[str, str], name: str, fallback: float | None) -> float | None:
     try:
         return float(str(env.get(name) or "").strip())
     except (TypeError, ValueError):
@@ -127,7 +127,8 @@ def request_defaults_from_env(env: Mapping[str, str] | None = None, **overrides:
             "LLM_REQUEST_TIMEOUT_SECONDS",
             _read_float(source, "NVIDIA_REQUEST_TIMEOUT_SECONDS", 360.0),
         ),
-        total_timeout_seconds=_read_float(source, "LLM_TOTAL_TIMEOUT_SECONDS", 900.0),
+        # Unset: derived from the per-request timeout (ChatRequest.deadline_seconds).
+        total_timeout_seconds=_read_float(source, "LLM_TOTAL_TIMEOUT_SECONDS", None),
         reasoning=ReasoningPolicy(
             enabled=thinking,
             effort="high" if thinking else "none",

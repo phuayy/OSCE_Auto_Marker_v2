@@ -17,7 +17,6 @@ import time
 import uuid
 from pathlib import Path
 
-import pytest
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT_DIR / "scripts" / "backup_database.py"
@@ -235,3 +234,126 @@ def test_postgres_backup_missing_binary_exits_2(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "pg_dump" in result.stderr
+
+
+def _backup_of(env: dict[str, str], tmp_path: Path) -> Path:
+    result = _run(env, "--dest", str(tmp_path / "backups"))
+    assert result.returncode == 0, result.stderr
+    return Path(json.loads(result.stdout.strip().splitlines()[-1])["path"])
+
+
+def _restore(env: dict[str, str], backup: Path) -> subprocess.CompletedProcess:
+    return _run(env, "--restore", str(backup), "--confirm", "--force")
+
+
+def test_restore_refuses_a_zero_byte_backup_and_leaves_the_live_database(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    db_path = _db_path(env)
+    _migrate(db_path)
+    _insert_marker_row(db_path, "live")
+    empty = tmp_path / "empty.sqlite3"
+    empty.write_bytes(b"")
+
+    result = _restore(env, empty)
+
+    assert result.returncode == 2
+    assert "empty" in result.stderr.lower()
+    assert _session_names(db_path) == ["live"]
+    assert not list(db_path.parent.glob("*pre-restore*"))
+
+
+def test_restore_refuses_a_corrupt_backup(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    db_path = _db_path(env)
+    _migrate(db_path)
+    _insert_marker_row(db_path, "live")
+    corrupt = tmp_path / "corrupt.sqlite3"
+    corrupt.write_bytes(b"this is not a sqlite database" * 200)
+
+    result = _restore(env, corrupt)
+
+    assert result.returncode == 2
+    assert _session_names(db_path) == ["live"]
+
+
+def test_restore_refuses_a_sqlite_file_without_an_alembic_revision(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    db_path = _db_path(env)
+    _migrate(db_path)
+    _insert_marker_row(db_path, "live")
+    foreign = tmp_path / "foreign.sqlite3"
+    conn = sqlite3.connect(str(foreign))
+    conn.execute("CREATE TABLE unrelated (x INTEGER)")
+    conn.execute("INSERT INTO unrelated VALUES (1)")
+    conn.commit()
+    conn.close()
+
+    result = _restore(env, foreign)
+
+    assert result.returncode == 2
+    assert "alembic" in result.stderr.lower()
+    assert _session_names(db_path) == ["live"]
+
+
+def test_restore_keeps_and_reports_a_safety_copy_of_the_current_database(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    db_path = _db_path(env)
+    _migrate(db_path)
+    _insert_marker_row(db_path, "original")
+    backup = _backup_of(env, tmp_path)
+    _insert_marker_row(db_path, "added-after-backup")
+    # Leave an uncheckpointed WAL behind, as a live API would.
+    holder = sqlite3.connect(str(db_path))
+    holder.execute("PRAGMA journal_mode=WAL")
+    holder.execute("PRAGMA wal_autocheckpoint=0")
+    holder.execute("UPDATE sessions SET name = 'wal-only' WHERE name = 'added-after-backup'")
+    holder.commit()
+
+    result = _restore(env, backup)
+    holder.close()
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    safety = Path(payload["safetyCopy"])
+    assert safety.exists()
+    assert set(_session_names(safety)) == {"original", "wal-only"}
+    assert _session_names(db_path) == ["original"]
+    assert not Path(str(db_path) + "-wal").exists()
+    assert not Path(str(db_path) + "-shm").exists()
+
+
+def test_restore_into_a_missing_live_database_works_without_a_safety_copy(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    db_path = _db_path(env)
+    _migrate(db_path)
+    _insert_marker_row(db_path, "original")
+    backup = _backup_of(env, tmp_path)
+    db_path.unlink()
+
+    result = _restore(env, backup)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["safetyCopy"] is None
+    assert _session_names(db_path) == ["original"]
+
+
+def test_restore_keeps_only_the_newest_three_safety_copies_of_this_database(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    db_path = _db_path(env)
+    _migrate(db_path)
+    backup = _backup_of(env, tmp_path)
+    other = db_path.parent / "other.sqlite3.pre-restore-20200101T000000Z.sqlite3"
+    other.write_bytes(b"other database's copy")
+
+    made: list[Path] = []
+    for _ in range(4):
+        result = _restore(env, backup)
+        assert result.returncode == 0, result.stderr
+        made.append(Path(json.loads(result.stdout.strip().splitlines()[-1])["safetyCopy"]))
+        time.sleep(1.1)  # timestamps have one-second resolution
+
+    remaining = sorted(db_path.parent.glob(f"{db_path.name}.pre-restore-*.sqlite3"))
+    assert remaining == sorted(made[1:])
+    assert not made[0].exists()
+    assert other.exists()

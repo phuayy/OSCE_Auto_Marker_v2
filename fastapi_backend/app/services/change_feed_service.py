@@ -38,14 +38,21 @@ class ChangeFeedService:
       browser's SSE stream, which is what lets the frontend stop polling.
 
     On SQLite there is no NOTIFY, so :meth:`token` reads the counters directly
-    and subscribers are driven by an internal watch loop. Behaviour is identical;
-    only latency and the per-request cost differ.
+    and subscribers are driven by an internal watch loop that keeps its own
+    "last published" snapshot, so the counters token() refreshes per request never
+    hide a change from it. Behaviour is identical; only latency and the
+    per-request cost differ.
     """
 
     def __init__(self, database: OrmDatabase, *, poll_interval_seconds: float = 2.0) -> None:
         self.database = database
         self.poll_interval_seconds = poll_interval_seconds
+        # What cache tokens read: refreshed by every request-path token() call.
         self._versions: dict[str, int] = {table: 0 for table in TRACKED_TABLES}
+        # What the watch loop last announced. Kept apart from ``_versions`` on
+        # purpose: token() advances that one on every request, so diffing against
+        # it would find every change already "seen" and publish nothing.
+        self._published: dict[str, int] = dict(self._versions)
         self._push_active = False
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
@@ -63,6 +70,7 @@ class ChangeFeedService:
         is True only when the Postgres LISTEN/NOTIFY path is available."""
         self._stopping.clear()
         await self._read_versions_from_db()
+        self._published = dict(self._versions)
         if push_enabled and self._dsn():
             self._task = asyncio.create_task(self._listen_loop(), name="change-feed-listen")
         else:
@@ -107,7 +115,11 @@ class ChangeFeedService:
         """True when changes are pushed by the database rather than polled for."""
         return self._push_active
 
-    async def _read_versions_from_db(self) -> None:
+    async def _read_versions_from_db(self) -> dict[str, int] | None:
+        """Refresh the cache counters from the database and return what was read.
+
+        ``None`` means the read failed and the last known counters stand.
+        """
         try:
             async with self.database.session() as db:
                 rows = (
@@ -115,12 +127,14 @@ class ChangeFeedService:
                         select(TableVersionRecord.table_name, TableVersionRecord.version)
                     )
                 ).all()
-            for table_name, version in rows:
-                self._versions[str(table_name)] = int(version or 0)
         except Exception:
             # A read failure must not break the request path — callers fall back
             # to the last known versions, which at worst forces a cache rebuild.
             logger.warning("Could not read table versions; using last known snapshot.", exc_info=True)
+            return None
+        fresh = {str(table_name): int(version or 0) for table_name, version in rows}
+        self._versions.update(fresh)
+        return fresh
 
     # -- subscribers -------------------------------------------------------
 
@@ -233,6 +247,7 @@ class ChangeFeedService:
             import psycopg
         except Exception:
             logger.warning("psycopg unavailable; falling back to polled change tracking.")
+            self._published = dict(self._versions)
             await self._watch_loop()
             return
 
@@ -300,10 +315,16 @@ class ChangeFeedService:
                 return
             except asyncio.TimeoutError:
                 pass
-            previous = dict(self._versions)
-            await self._read_versions_from_db()
-            for table, version in self._versions.items():
-                if previous.get(table, 0) != version:
+            fresh = await self._read_versions_from_db()
+            if fresh is None:
+                continue
+            # Diff against what this loop last announced, not against the cache
+            # counters a request may have refreshed since the previous tick. A
+            # table that moved several times between ticks publishes once, with
+            # its latest version.
+            for table, version in fresh.items():
+                if self._published.get(table, 0) != version:
+                    self._published[table] = version
                     self._publish({"type": "change", "table": table, "version": version})
 
     # -- SSE ---------------------------------------------------------------

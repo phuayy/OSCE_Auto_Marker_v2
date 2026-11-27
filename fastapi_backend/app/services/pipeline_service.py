@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from app.core.artifacts import artifact_metadata, read_artifact_payload
-from app.core.exceptions import AppError, EmptyTranscriptError
+from app.core.exceptions import AppError, EmptyTranscriptError, is_retryable_failure
 from app.core.json_utils import extract_json_object, write_json_file
 from app.core.logging_utils import log_context
 from app.core.utils import exception_message, runtime_seconds, utc_now_iso
@@ -35,7 +35,7 @@ from app.pipeline.transcription.base import TranscriptionResult
 from app.pipeline.transcription.registry import EngineDependencies
 from app.services.assessment_service import AssessmentService
 from app.services.event_service import EventService
-from app.services.media_preparation import prepare_session_media
+from app.services.media_preparation import MediaPreparationOutcome, prepare_session_media
 from app.services.preferences_service import PreferencesService
 from app.services.session_service import SessionMutator, SessionService
 from app.services.transcription_router import TranscriptionRouter
@@ -228,7 +228,25 @@ class PipelineService:
         """The ``prepare_media`` job: what the browser needs to show this
         session's video (see app.services.media_preparation)."""
         session = await self.sessions.read(session_id)
-        await prepare_session_media(self.media, session, self._commit)
+        name = str(session.get("name") or session_id)
+        outcome = await prepare_session_media(self.media, session, self._commit)
+        if self.notifications is None:
+            return
+        if outcome is MediaPreparationOutcome.COPY_WRITTEN:
+            await self.notifications.emit(
+                NotificationType.MEDIA_READY,
+                "Video ready to watch",
+                f'"{name}": a playable copy of the recording is ready.',
+                session_id=session_id,
+            )
+        elif outcome is MediaPreparationOutcome.FAILED:
+            await self.notifications.emit(
+                NotificationType.MEDIA_FAILED,
+                "Video could not be converted",
+                f'"{name}": the server could not make a playable copy. '
+                "The split and scoring are unaffected; open the session to try again.",
+                session_id=session_id,
+            )
 
     @staticmethod
     def _has_cached_transcript_artifact(session: dict[str, Any]) -> bool:
@@ -953,8 +971,21 @@ class PipelineService:
             if isinstance(error, Exception)
         ]
         if errors:
-            messages = "; ".join(str(error) or type(error).__name__ for error in errors)
-            raise RuntimeError(f"Post-transcription scoring failed: {messages}") from errors[0]
+            # The queue decides whether to retry from the exception it sees, so
+            # the branch's own error is raised, not a wrapper: a missing-input
+            # 422 in one branch must not become a retryable RuntimeError. When
+            # both fail, a permanent failure decides (re-running cannot fix it);
+            # the other is logged so its cause is not lost.
+            decisive = next((error for error in errors if not is_retryable_failure(error)), errors[0])
+            for other in errors:
+                if other is not decisive:
+                    logger.warning(
+                        "Second scoring branch also failed: %s",
+                        exception_message(other, "Scoring branch failed."),
+                        exc_info=other,
+                        extra=log_context(str(session.get("id")), "scoring_branches"),
+                    )
+            raise decisive
 
         return {
             OutputKey.AUDIO_PROFESSIONALISM: communication_result.get(OutputKey.AUDIO_PROFESSIONALISM),

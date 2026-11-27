@@ -277,7 +277,7 @@ def test_panel_artifacts_round_trip_through_the_public_session(tmp_path: Path) -
 
     result = asyncio.run(pipeline.run_content_marking(build_session(tmp_path), panel_plan()))
 
-    public = SessionService.public_session({"id": "s1", "files": {}, "outputs": {"scores": result}})
+    public = SessionService(None, None).public_session({"id": "s1", "files": {}, "outputs": {"scores": result}})
     panel_artifacts = public["outputs"]["scores"]["panelArtifacts"]
     assert panel_artifacts["markers"]["gemini__gemini-pro"]["url"] == "/media/scores/panel/s1/gemini__gemini-pro.json"
     assert panel_artifacts["adjudication"]["url"] == "/media/scores/panel/s1/adjudication.json"

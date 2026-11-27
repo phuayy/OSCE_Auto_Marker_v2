@@ -12,7 +12,7 @@ from app.core.process import CommandRunner
 from app.core.rate_limit import FixedWindowRateLimiter
 from app.core.resources import ResourceLease
 from app.core.single_instance import SingleInstanceLock
-from app.core.tasks import BackgroundTaskRegistry
+from app.core.tasks import BackgroundTaskRegistry, periodic_loop
 from app.core.versioned_cache import VersionedCache
 from app.database.change_tracking import verify_change_tracking
 from app.database.migration_runner import run_database_migrations
@@ -47,6 +47,7 @@ from app.services.change_feed_service import ChangeFeedService
 from app.services.notification_service import NotificationService
 from app.services.webhook_dispatcher import WebhookDispatcher
 from app.services.async_upload_service import AsyncUploadService
+from app.services.upload_batches import UploadBatchAllowances
 from app.services.artifact_service import ArtifactService
 from app.services.auth_service import AuthService
 from app.services.clip_service import ClipService
@@ -57,6 +58,7 @@ from app.services.pipeline_service import PipelineService
 from app.services.prompt_registry_service import PromptRegistryService
 from app.services.rubric_asset_service import RubricAssetService
 from app.services.rubric_service import RubricService
+from app.services.session_bulk_service import SessionBulkService
 from app.services.session_maintenance_service import SessionMaintenanceService
 from app.services.session_service import SessionService
 from app.storage import ObjectStorage, create_storage_service
@@ -124,8 +126,11 @@ class AppContainer:
     custom_providers: CustomProviderService
     videos: VideoRepository
     session_maintenance: SessionMaintenanceService
+    session_bulk: SessionBulkService
     login_rate_limiter: FixedWindowRateLimiter
     expensive_operation_rate_limiter: FixedWindowRateLimiter
+    # Batch-upload allowances, in process like the limiters above.
+    upload_batches: UploadBatchAllowances
     # Accounts: the store, the per-request cached view AuthService verifies
     # against, the administration service, and the mail backend invitations
     # and resets go out through.
@@ -243,13 +248,16 @@ class AppContainer:
             # pinned at waiting_for_upload) once their TTL has elapsed. Frees
             # leaked bytes and clears dead session cards.
             await self.async_uploads.recover_expired_uploads()
+        await self.jobs.startup(dispatch_queued=dispatch_queued_jobs, recover_interrupted=recover_interrupted_jobs)
+        if api and self.settings.session_video_retention_days > 0:
             # One sweep at boot regardless of the periodic interval below, so a
             # deployment that was stopped for a while (or is enabling this for
             # the first time against old data) does not wait for the first
-            # timer tick to start honouring the retention window.
-            if self.settings.session_video_retention_days > 0:
-                await self.session_maintenance.run_video_retention_sweep()
-        await self.jobs.startup(dispatch_queued=dispatch_queued_jobs, recover_interrupted=recover_interrupted_jobs)
+            # timer tick to start honouring the retention window. After job
+            # recovery and orphan reconciliation: until then a session a
+            # restart interrupted still says `processing` with no job row, and
+            # the sweep must see the statuses recovery settles.
+            await self.session_maintenance.run_video_retention_sweep()
         # Weights are fetched after the process is otherwise ready, never
         # before: a deployment must serve requests while a multi-gigabyte
         # checkpoint downloads, and the download is optional for correctness.
@@ -278,8 +286,23 @@ class AppContainer:
             # owns session lifecycle recovery is the one that should own this
             # too, rather than a Hatchet worker racing it against the same rows.
             self.background.spawn(
-                self.session_maintenance.video_retention_sweep_loop(),
+                periodic_loop(
+                    self.settings.session_retention_sweep_interval_seconds,
+                    self.session_maintenance.run_video_retention_sweep,
+                    description="Video-retention sweep",
+                ),
                 name="session-video-retention",
+            )
+        if api and self.settings.upload_expiry_sweep_interval_seconds > 0:
+            # The startup sweep above only reclaims what expired while the API
+            # was down; this is what frees an upload abandoned on a running one.
+            self.background.spawn(
+                periodic_loop(
+                    self.settings.upload_expiry_sweep_interval_seconds,
+                    self.async_uploads.recover_expired_uploads,
+                    description="Expired-upload sweep",
+                ),
+                name="upload-expiry-sweep",
             )
         if api and self.idle_shutdown.enabled:
             # API only: it is the process that sees the requests, and the one
@@ -298,6 +321,8 @@ class AppContainer:
         # Before the change feed stops and the engine is disposed: in-flight
         # webhook deliveries still need to write their delivery-log rows.
         await self.notifications.drain()
+        # Account mail (reset links, password-changed notices) in flight.
+        await self.user_admin.drain()
         await self.changes.stop()
         await self.orm_database.shutdown()
         if self._instance_lock is not None:
@@ -333,13 +358,14 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         lambda table, _version: read_cache.invalidate_tables((table,))
     )
     session_repository = SessionRepository(orm_database, legacy_sessions_dir=active_settings.paths.sessions_dir)
+    storage = create_storage_service(active_settings)
     sessions = SessionService(
         active_settings,
         session_repository,
         cache=read_cache,
         changes=changes,
+        playback_url=storage.playback_url,
     )
-    storage = create_storage_service(active_settings)
     job_repository = JobRepository(orm_database, active_settings.paths.jobs_dir)
     jobs = JobQueueService(
         active_settings,
@@ -478,6 +504,7 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         activity=activity,
         jobs=job_repository,
         sessions=session_repository,
+        uploads=async_uploads.repository,
         boot_stage=boot_stage,
     )
     return AppContainer(
@@ -512,9 +539,15 @@ def create_container(settings: Settings | None = None, *, mailer: EmailSender | 
         custom_providers=custom_providers,
         videos=videos,
         session_maintenance=session_maintenance,
+        session_bulk=SessionBulkService(sessions, session_maintenance),
         login_rate_limiter=login_rate_limiter,
         expensive_operation_rate_limiter=FixedWindowRateLimiter(
             max_attempts=active_settings.rate_limit_rerun_per_hour, window_seconds=3600,
+        ),
+        upload_batches=UploadBatchAllowances(
+            max_size=active_settings.max_upload_batch_size,
+            ttl_seconds=active_settings.upload_batch_ttl_seconds,
+            max_open_per_user=active_settings.max_open_upload_batches_per_user,
         ),
         users=users,
         user_directory=user_directory,

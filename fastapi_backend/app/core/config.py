@@ -386,6 +386,12 @@ class Settings:
     login_rate_limit_window_seconds: int = read_int_env("LOGIN_RATE_LIMIT_WINDOW_SECONDS", 60)
     rate_limit_rerun_per_hour: int = read_int_env("RATE_LIMIT_RERUN_PER_HOUR", 10)
     max_concurrent_uploads_per_user: int = read_int_env("MAX_CONCURRENT_UPLOADS_PER_USER", 3)
+    # Batch upload (POST /api/uploads/batches): one hourly-budget charge buys a
+    # bounded number of initiates, so an exam day's recordings are not each
+    # charged. In-process like the rate limiters, hence the short TTL.
+    max_upload_batch_size: int = read_int_env("MAX_UPLOAD_BATCH_SIZE", 50)
+    upload_batch_ttl_seconds: int = read_int_env("UPLOAD_BATCH_TTL_SECONDS", 6 * 60 * 60)
+    max_open_upload_batches_per_user: int = read_int_env("MAX_OPEN_UPLOAD_BATCHES_PER_USER", 2)
     cors_allow_origins: tuple[str, ...] = read_csv_env("CORS_ALLOW_ORIGINS", ("*",))
     # Every JSON endpoint (login, settings, session mutations, ...) carries at
     # most a few kilobytes; the one route built for megabyte-sized bodies
@@ -458,6 +464,13 @@ class Settings:
     job_queue_backend: str = os.getenv("JOB_QUEUE_BACKEND", "local").strip().lower() or "local"
     local_job_auto_start: bool = read_bool_env("LOCAL_JOB_AUTO_START", True)
     job_worker_concurrency: int = read_int_env("JOB_WORKER_CONCURRENCY", 2)
+    # Local backend only: slots of the separate lane the prepare_media job runs
+    # in, so preparing a video for the browser never waits behind a scoring run
+    # (and never takes one of its slots). Below 1 is read as 1.
+    media_job_concurrency: int = read_int_env("MEDIA_JOB_CONCURRENCY", 1)
+    # A transcode's progress is a session write each time, and every session
+    # write wakes the change feed: at most one per this many seconds.
+    media_progress_write_interval_seconds: float = read_float_env("MEDIA_PROGRESS_WRITE_INTERVAL_SECONDS", 5.0)
     # Token revocation, the login/token rate limiters and the per-upload part
     # lock are all in-process state (see app/core/single_instance.py) — a
     # second API instance sharing this storage root would silently not share
@@ -524,6 +537,12 @@ class Settings:
     session_retention_sweep_interval_seconds: int = read_int_env(
         "SESSION_RETENTION_SWEEP_INTERVAL_SECONDS", 6 * 60 * 60
     )
+
+    # How often abandoned uploads (parts on disk, session pinned at
+    # waiting_for_upload, TTL elapsed) are reclaimed after the sweep startup
+    # always runs. Without a timer a long-running API leaks every abandoned
+    # multi-GB part set until its next restart. 0 disables the periodic timer.
+    upload_expiry_sweep_interval_seconds: float = read_float_env("UPLOAD_EXPIRY_SWEEP_INTERVAL_SECONDS", 60 * 60)
 
     # --- On-demand hosting ------------------------------------------------
     # For a VM that is switched on by the start gate (deploy/gcp/gate) and
@@ -1044,6 +1063,16 @@ class Settings:
                     f"{variable} is not a safe ffmpeg filter chain and is passed to ffmpeg as "
                     f"written: {error}"
                 )
+        total_timeout = read_float_env("LLM_TOTAL_TIMEOUT_SECONDS", 0.0)
+        request_timeout = read_float_env(
+            "LLM_REQUEST_TIMEOUT_SECONDS", read_float_env("NVIDIA_REQUEST_TIMEOUT_SECONDS", 360.0)
+        )
+        if 0 < total_timeout < request_timeout:
+            warnings.append(
+                f"LLM_TOTAL_TIMEOUT_SECONDS ({total_timeout:g}) is below the per-request timeout "
+                f"({request_timeout:g}); every call is cut at the total, so the per-request value "
+                "is unreachable and a fallback gets no time. Raise the total or unset it to derive it."
+            )
         if "*" in self.cors_allow_origins:
             warnings.append(
                 "CORS_ALLOW_ORIGINS allows any origin ('*'); set explicit origins "

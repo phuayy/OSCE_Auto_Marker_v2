@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchSessionPages } from '../src/lib/sessionPages.js';
+import { fetchSessionPages, createRequestSequence } from '../src/lib/sessionPages.js';
 
 test('refreshes all loaded pages and deduplicates boundary rows', async () => {
   const urls = [];
@@ -40,4 +40,29 @@ test('failed later pages reject without returning a partial list', async () => {
     if (requests++) throw new Error('offline');
     return { sessions: [{ id: 'a' }], nextCursor: 'next' };
   }, 2), /offline/);
+});
+
+test('filter params ride every root page but never a child lookup', async () => {
+  const urls = [];
+  const pages = [{ sessions: [{ id: 'a' }], nextCursor: 'c1' }, { sessions: [{ id: 'b' }], nextCursor: null }];
+  await fetchSessionPages(async (url) => { urls.push(url); return pages.shift(); }, 2, () => true, null, [['q', 'Ünï'], ['status', 'failed'], ['status', 'queued']]);
+  for (const url of urls) {
+    const params = new URL(url, 'http://localhost').searchParams;
+    assert.equal(params.get('q'), 'Ünï');
+    assert.deepEqual(params.getAll('status'), ['failed', 'queued']);
+    assert.equal(params.get('rootsOnly'), 'true');
+  }
+  const child = [];
+  await fetchSessionPages(async (url) => { child.push(url); return { sessions: [], nextCursor: null }; }, 1, () => true, 'p', [['status', 'failed']]);
+  assert.equal(new URL(child[0], 'http://localhost').searchParams.has('status'), false);
+});
+
+test('a later request retires every earlier one', () => {
+  const sequence = createRequestSequence();
+  const unfiltered = sequence.issue();
+  const filtered = sequence.issue();
+  assert.equal(unfiltered(), false);
+  assert.equal(filtered(), true);
+  sequence.invalidate();
+  assert.equal(filtered(), false);
 });
