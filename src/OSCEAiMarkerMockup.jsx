@@ -74,6 +74,7 @@ import OccupancyPresetGlyph from '@/components/OccupancyPresetGlyph.jsx';
 import CorporaManager from './CorporaManager.jsx';
 import { NotificationBell, NotificationFeed } from '@/notifications.jsx';
 import { describeClipExportOutcome } from '@/lib/clipExportOutcome';
+import { hasPendingMedia } from '@/lib/mediaWatch';
 import { MEDIA_POLL_INTERVAL_MS, describeVideoMedia, effectiveVideoDuration, mergeSessionFiles } from '@/lib/videoMedia';
 import { canMutateSession } from '@/lib/authz';
 import {
@@ -637,29 +638,47 @@ export default function OSCEAiMarkerMockup({
 
   // The prepare_media job (poster, duration, playable copy) writes files.video
   // while the workspace is open. Re-read only the files, so nothing the user
-  // is editing — the timeline is seeded from outputs.videoClips — is replaced.
+  // is editing — the timeline is seeded from outputs.videoClips — is replaced
+  // (refreshOpenSession, which replaces the document, is never used here).
+  // Push plus floor: the change feed triggers the read, the interval is the
+  // floor under it, and coalescing keeps the two from overlapping. A read that
+  // began before refreshOpenSession adopted a fresher document is dropped
+  // (mediaReadsRef), so a late files-only merge cannot regress its files.
+  const mediaReadsRef = useRef(null);
+  if (!mediaReadsRef.current) mediaReadsRef.current = createRequestSequence();
+  const refreshMediaFilesRef = useRef(null);
+  const isWatchingMedia = Boolean(showWorkspace && session?.id && videoMedia.preparing);
+  const watchedSessionId = session?.id || null;
   useEffect(() => {
-    if (!showWorkspace || !session?.id || !videoMedia.preparing) {
+    if (!isWatchingMedia) {
       return undefined;
     }
     let cancelled = false;
-    const sessionId = session.id;
+    const sessionId = watchedSessionId;
 
-    async function pollMediaPreparation() {
+    const refreshMediaFiles = coalesceAsync(async () => {
+      const isCurrent = mediaReadsRef.current.issue();
       try {
         const body = await apiJson(`/api/sessions/${sessionId}`);
-        if (!cancelled) setSession((previous) => mergeSessionFiles(previous, body?.session));
+        if (!cancelled && isCurrent()) setSession((previous) => mergeSessionFiles(previous, body?.session));
       } catch {
-        // Transient: the next tick retries.
+        // Transient: the next change or tick retries.
       }
-    }
+    });
+    refreshMediaFilesRef.current = refreshMediaFiles;
 
-    const intervalId = window.setInterval(pollMediaPreparation, MEDIA_POLL_INTERVAL_MS);
+    const intervalId = window.setInterval(refreshMediaFiles, MEDIA_POLL_INTERVAL_MS);
+    refreshMediaFiles();
     return () => {
       cancelled = true;
+      refreshMediaFilesRef.current = null;
       window.clearInterval(intervalId);
     };
-  }, [showWorkspace, session?.id, videoMedia.preparing]);
+  }, [isWatchingMedia, watchedSessionId]);
+
+  useChangeStream(() => {
+    refreshMediaFilesRef.current?.();
+  }, ['sessions']);
 
   async function requestMediaPreparation() {
     const sessionId = session?.id;
@@ -873,7 +892,8 @@ export default function OSCEAiMarkerMockup({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, ['sessions', 'jobs']);
 
-  // Heartbeat floor for in-flight work. See IN_FLIGHT_HEARTBEAT_MS: the change
+  // Heartbeat floor for in-flight work — a session still converting its video
+  // counts too, though its status is terminal. See IN_FLIGHT_HEARTBEAT_MS: the change
   // stream is the primary signal, but it can only announce writes, and a
   // session can legitimately go minutes without one (auto-crop's person
   // detection, a long transcription). Recovery must not depend on the same
@@ -884,7 +904,7 @@ export default function OSCEAiMarkerMockup({
       // longer says whether anything is in flight: keep the floor under the
       // change stream for as long as the filter might be hiding one.
       couldHideInFlight(sessionFilter) ||
-      sessionIndex.some((entry) => IN_FLIGHT_STATUSES.has(String(entry?.status))),
+      sessionIndex.some((entry) => IN_FLIGHT_STATUSES.has(String(entry?.status)) || hasPendingMedia(entry)),
     [sessionIndex, sessionFilter],
   );
 
@@ -1103,6 +1123,8 @@ export default function OSCEAiMarkerMockup({
       if (!fresh || String(fresh.id) !== String(sessionId)) {
         return null;
       }
+      // A files-only read still in flight is older than this document.
+      mediaReadsRef.current?.invalidate();
       setSession((previous) => (previous?.id === sessionId ? fresh : previous));
       return fresh;
     } catch {

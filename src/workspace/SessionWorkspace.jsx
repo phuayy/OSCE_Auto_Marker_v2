@@ -12,11 +12,12 @@
 // everything only this view uses: the results model derived from the score
 // sheets, the player and download handlers, and the three effects that are
 // meaningless with no player mounted.
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { ensureStreamTicket, resolveMediaUrl } from '@/auth';
 import { ApiError, ERROR_KIND, apiJson } from '@/lib/apiFetch';
 import { describeMediaError } from '@/lib/mediaError';
+import { PLAYABLE_COPY_READY_MESSAGE, describeMediaArrival } from '@/lib/mediaWatch';
 import { describePreparationPanel } from '@/lib/videoMedia';
 import { SessionStatus } from '@/lib/enums';
 import { CLIP_ASSESSMENTS_ANCHOR_ID } from '@/lib/anchors';
@@ -49,6 +50,7 @@ import { SessionStatusBadge } from '@/components/SessionStatusBadge.jsx';
 import { AudioProfessionalismSkeleton, CohortSummarySkeleton, LoadingRegion } from '@/components/skeletons.jsx';
 import {
   Brain,
+  CheckCircle2,
   ClipboardCheck,
   Clock3,
   Download,
@@ -232,6 +234,10 @@ export default function SessionWorkspace({
   const serverVideoUrl = session?.files?.video?.playback?.url || session?.files?.video?.url;
   const videoPurgedAt = session?.files?.video?.purgedAt || null;
   useEffect(() => {
+    // A new source always starts clean: the old one's "cannot play" alert says
+    // nothing about it, and only a /media/ URL goes through the ticket below
+    // (a signed storage URL has no ticket to clear it).
+    setMediaState({ error: null });
     if (!serverVideoUrl?.startsWith('/media/')) return;
     let active = true;
     ensureStreamTicket().then(
@@ -240,6 +246,22 @@ export default function SessionWorkspace({
     );
     return () => { active = false; };
   }, [serverVideoUrl]);
+
+  // The playable copy landing while the user is elsewhere on the page (the
+  // timeline, usually) changes nothing they can see but the player's source,
+  // so say so next to the player. The watch only ever merges `files`, so the
+  // transition is read between successive documents of the same session.
+  const previousSessionRef = useRef(null);
+  const [copyReadyDismissed, setCopyReadyDismissed] = useState(true);
+  useEffect(() => {
+    const arrival = describeMediaArrival(previousSessionRef.current, session);
+    previousSessionRef.current = session;
+    if (arrival?.kind === 'ready') setCopyReadyDismissed(false);
+  }, [session]);
+  const copyReadyId = session?.id || null;
+  useEffect(() => {
+    setCopyReadyDismissed(true);
+  }, [copyReadyId]);
 
   // The clip timeline and Export clips need the video's length. The player's
   // loadedmetadata used to be the only source, so a recording the browser
@@ -726,6 +748,7 @@ export default function SessionWorkspace({
                             });
                             if (message) setMediaState({ error: new ApiError(message, { kind: ERROR_KIND.CLIENT }) });
                           }}
+                          onPlay={() => setCopyReadyDismissed(true)}
                           onTimeUpdate={handleVideoTimeUpdate}
                           className="aspect-video w-full rounded-2xl border border-slate-200/90 bg-black shadow-inner"
                           src={currentVideoUrl}
@@ -743,6 +766,19 @@ export default function SessionWorkspace({
                         </video>
                         {mediaState.error ? (
                           <p role="alert" className="text-sm text-rose-600">{mediaState.error.message}</p>
+                        ) : null}
+                        {!copyReadyDismissed ? (
+                          <div
+                            role="status"
+                            aria-live="polite"
+                            className="flex flex-wrap items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800"
+                          >
+                            <CheckCircle2 aria-hidden="true" className="h-4 w-4 shrink-0" />
+                            <span className="min-w-0 flex-1">{PLAYABLE_COPY_READY_MESSAGE}</span>
+                            <Button size="sm" variant="outline" onClick={() => setCopyReadyDismissed(true)}>
+                              Dismiss
+                            </Button>
+                          </div>
                         ) : null}
                         {preparation.show && (preparation.note || offerPreparation) ? (
                           <div
