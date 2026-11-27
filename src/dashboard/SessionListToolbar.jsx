@@ -71,7 +71,7 @@ export function SessionListToolbar({
           aria-label="Search sessions by name"
           placeholder="Search sessions by name"
           autoComplete="off"
-          className="h-9 w-full rounded-md border border-slate-300 bg-white pl-9 pr-9 text-sm text-slate-800 placeholder:text-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500"
+          className="session-search h-9 w-full rounded-md border border-slate-300 bg-white pl-9 pr-9 text-sm text-slate-800 placeholder:text-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500"
         />
         {text ? (
           <button

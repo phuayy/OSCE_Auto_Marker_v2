@@ -81,3 +81,10 @@ body {
   backdrop-filter: blur(10px);
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
+
+/* The search box draws its own clear button; hide the browser's second one. */
+.session-search::-webkit-search-cancel-button,
+.session-search::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+}
