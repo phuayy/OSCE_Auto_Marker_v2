@@ -13,9 +13,11 @@
 
 import { MediaPreparationStage, MediaPreparationStatus } from './enums.js';
 
-// How often the open workspace re-reads the session while the job runs. The
-// poster and the duration land within seconds; the copy takes minutes.
-export const MEDIA_POLL_INTERVAL_MS = 4000;
+// The floor under the open workspace's media watch. The change feed announces
+// every write the job makes and is the primary signal; this interval only
+// guarantees a re-read when the feed is silent or has dropped (the same
+// push-plus-floor shape as the session index's heartbeat).
+export const MEDIA_POLL_INTERVAL_MS = 10000;
 
 const PENDING = new Set([MediaPreparationStatus.QUEUED, MediaPreparationStatus.RUNNING]);
 
@@ -179,8 +181,11 @@ export function describeMediaState(entry) {
 }
 
 /** Shallow-merge freshly read `files` into the open session, keeping
- *  everything else the workspace holds (and its object identities). */
+ *  everything else the workspace holds (and its object identities) — and the
+ *  session itself when the files did not change, so a watch that fires on every
+ *  write does not re-render the workspace for nothing. */
 export function mergeSessionFiles(current, fresh) {
   if (!current || !fresh || current.id !== fresh.id || !fresh.files) return current;
+  if (JSON.stringify(current.files) === JSON.stringify(fresh.files)) return current;
   return { ...current, files: fresh.files };
 }

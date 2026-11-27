@@ -1075,6 +1075,8 @@ already `ready`, a purged source, a cancelled run and the restart/exhausted
 abandon paths raise nothing — an exam day of playable uploads must not be a
 notification each.
 
+**The open workspace watches its own video's conversion, push plus floor.** While `describeVideoMedia(session).preparing`, the dashboard reads the session once at once, again on every change-feed `sessions` event and on a `MEDIA_POLL_INTERVAL_MS` (10 s) floor, through one coalesced, files-only read (`mergeSessionFiles`; never `refreshOpenSession`, which replaces the document the timeline editor and the clip-export watch own). A read issued before `refreshOpenSession` adopted a fresher document is dropped. The workspace turns the transition into a cue with `describeMediaArrival` ([lib/mediaWatch.js](src/lib/mediaWatch.js)): a dismissible `role="status"` "The playable copy is ready…" beside the player (a failure is worded by the preparation panel), and a new player source always clears the old "cannot play" alert. The dashboard's heartbeat floor also counts a card whose projection says `hasPendingMedia`, though its status is terminal.
+
 **`prepare_media` has its own lane, progress and a retry.** Task types belong to
 a `JobLane` (`JobTaskSpec.lane`): `main` (`JOB_WORKER_CONCURRENCY` slots) or
 `media` (`MEDIA_JOB_CONCURRENCY`), one semaphore each in the local backend, so a
