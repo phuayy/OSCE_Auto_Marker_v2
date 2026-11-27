@@ -18,6 +18,8 @@ const EVENT_LABELS = {
   'split.ready': 'Split ready for review',
   'clips.ready': 'Clips ready',
   'session.failed': 'Processing failed',
+  'media.ready': 'Video ready to watch',
+  'media.failed': 'Video could not be converted',
 };
 
 function eventLabel(type) {

@@ -35,7 +35,7 @@ from app.pipeline.transcription.base import TranscriptionResult
 from app.pipeline.transcription.registry import EngineDependencies
 from app.services.assessment_service import AssessmentService
 from app.services.event_service import EventService
-from app.services.media_preparation import prepare_session_media
+from app.services.media_preparation import MediaPreparationOutcome, prepare_session_media
 from app.services.preferences_service import PreferencesService
 from app.services.session_service import SessionMutator, SessionService
 from app.services.transcription_router import TranscriptionRouter
@@ -228,7 +228,25 @@ class PipelineService:
         """The ``prepare_media`` job: what the browser needs to show this
         session's video (see app.services.media_preparation)."""
         session = await self.sessions.read(session_id)
-        await prepare_session_media(self.media, session, self._commit)
+        name = str(session.get("name") or session_id)
+        outcome = await prepare_session_media(self.media, session, self._commit)
+        if self.notifications is None:
+            return
+        if outcome is MediaPreparationOutcome.COPY_WRITTEN:
+            await self.notifications.emit(
+                NotificationType.MEDIA_READY,
+                "Video ready to watch",
+                f'"{name}": a playable copy of the recording is ready.',
+                session_id=session_id,
+            )
+        elif outcome is MediaPreparationOutcome.FAILED:
+            await self.notifications.emit(
+                NotificationType.MEDIA_FAILED,
+                "Video could not be converted",
+                f'"{name}": the server could not make a playable copy. '
+                "The split and scoring are unaffected; open the session to try again.",
+                session_id=session_id,
+            )
 
     @staticmethod
     def _has_cached_transcript_artifact(session: dict[str, Any]) -> bool:
